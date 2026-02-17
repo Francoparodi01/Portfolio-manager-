@@ -283,6 +283,11 @@ class CocosScraper:
             wait.until(lambda d: "capital-portfolio" in d.current_url)
 
             logger.info("[OK] Login exitoso con MFA")
+
+            # Navegar explícitamente al portfolio
+            self.driver.get("https://app.cocos.capital/capital-portfolio")
+            time.sleep(2)
+
             self.logged_in = True
 
             if self.telegram_enabled:
