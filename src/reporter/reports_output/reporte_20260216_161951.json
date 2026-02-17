@@ -1,0 +1,160 @@
+{
+  "metadata": {
+    "fecha_generacion": "2026-02-16T16:19:51.604926",
+    "periodo": "semanal",
+    "version": "2.0"
+  },
+  "resumen_ejecutivo": {
+    "puntos_clave": [
+      {
+        "titulo": "Portfolio en estado regular",
+        "detalle": "Score de salud: 66/100",
+        "tipo": "info"
+      },
+      {
+        "titulo": "Pérdida semanal: -0.30%",
+        "detalle": "Valor actual: $100,000.00",
+        "tipo": "negativo"
+      },
+      {
+        "titulo": "Riesgo controlado",
+        "detalle": "Volatilidad: 0.00% anual",
+        "tipo": "positivo"
+      }
+    ],
+    "valor_actual": 100000.0,
+    "cambio_semanal_pct": -0.29910269192421285
+  },
+  "estado_patrimonio": {
+    "total_value": 100000.0,
+    "timestamp": "2026-02-16T16:19:51.610019",
+    "positions": [
+      {
+        "ticker": "AAA",
+        "value": 50000
+      },
+      {
+        "ticker": "BBB",
+        "value": 30000
+      },
+      {
+        "ticker": "CCC",
+        "value": 20000
+      }
+    ]
+  },
+  "metricas_riesgo": {
+    "window_days": 90,
+    "data_points": 90,
+    "volatility": 0.009810475762838878,
+    "max_drawdown": -4.260411680229775,
+    "sharpe_ratio": -1256.2778799105474,
+    "var_95": -0.04986536649402406,
+    "calculated_at": "2026-02-16T16:19:51.612791"
+  },
+  "metricas_performance": {
+    "window_days": 90,
+    "annual_return": 4.449999999999998,
+    "calculated_at": "2026-02-16T16:19:51.613172"
+  },
+  "concentracion": {
+    "top_holdings": [
+      {
+        "ticker": "AAA",
+        "value": 50000
+      },
+      {
+        "ticker": "BBB",
+        "value": 30000
+      },
+      {
+        "ticker": "CCC",
+        "value": 20000
+      }
+    ]
+  },
+  "proyecciones": {
+    "current_value": 100000.0,
+    "analysis_period_days": 90,
+    "trend_slope_daily": -50.00000000000005,
+    "trend_confidence": 0.9999999999999996,
+    "mean_daily_return": -0.0004890747496925808,
+    "std_daily_return": 6.180018836118655e-06,
+    "scenarios": {
+      "4_semanas": {
+        "mejor_caso": {
+          "valor": 98673.7537321876,
+          "cambio_pct": -1.3262462678123994,
+          "cambio_absoluto": -1326.2462678123993,
+          "probabilidad": "2.5%"
+        },
+        "optimista": {
+          "valor": 98656.67245604229,
+          "cambio_pct": -1.343327543957712,
+          "cambio_absoluto": -1343.327543957712,
+          "probabilidad": "16%"
+        },
+        "base": {
+          "valor": 98600.0,
+          "cambio_pct": -1.4000000000000001,
+          "cambio_absoluto": -1400.0,
+          "probabilidad": "50%"
+        },
+        "pesimista": {
+          "valor": 98622.51845728158,
+          "cambio_pct": -1.3774815427184222,
+          "cambio_absoluto": -1377.4815427184221,
+          "probabilidad": "16%"
+        },
+        "estres": {
+          "valor": 98605.44573374957,
+          "cambio_pct": -1.3945542662504302,
+          "cambio_absoluto": -1394.5542662504304,
+          "probabilidad": "2.5%"
+        }
+      },
+      "12_semanas": {
+        "mejor_caso": {
+          "valor": 96073.79579412563,
+          "cambio_pct": -3.926204205874368,
+          "cambio_absoluto": -3926.204205874368,
+          "probabilidad": "2.5%"
+        },
+        "optimista": {
+          "valor": 96023.91082750128,
+          "cambio_pct": -3.976089172498716,
+          "cambio_absoluto": -3976.089172498716,
+          "probabilidad": "16%"
+        },
+        "base": {
+          "valor": 95799.99999999999,
+          "cambio_pct": -4.200000000000015,
+          "cambio_absoluto": -4200.000000000015,
+          "probabilidad": "50%"
+        },
+        "pesimista": {
+          "valor": 95924.21766288139,
+          "cambio_pct": -4.07578233711861,
+          "cambio_absoluto": -4075.7823371186096,
+          "probabilidad": "16%"
+        },
+        "estres": {
+          "valor": 95874.40943894631,
+          "cambio_pct": -4.125590561053687,
+          "cambio_absoluto": -4125.5905610536865,
+          "probabilidad": "2.5%"
+        }
+      }
+    }
+  },
+  "salud_portfolio": {
+    "score_total": 66.0,
+    "clasificacion": "regular"
+  },
+  "alertas": {
+    "alertas": []
+  },
+  "recomendaciones": {
+    "recomendaciones": []
+  }
+}

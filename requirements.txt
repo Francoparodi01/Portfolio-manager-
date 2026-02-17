@@ -1,0 +1,77 @@
+# ============================================================================
+# COPILOTO INTELIGENTE DE INVERSIONES - REQUIREMENTS
+# Arquitectura: Collector → TimescaleDB → Analyzer → Reporter
+# ============================================================================
+
+# ============================================================================
+# CORE - Base del sistema
+# ============================================================================
+python-dotenv>=1.0.0              # Variables de entorno y configuración
+
+# ============================================================================
+# DATA LAYER - Base de datos y ORM
+# ============================================================================
+sqlalchemy>=2.0.0                 # ORM para PostgreSQL/TimescaleDB
+psycopg2-binary>=2.9.9            # Driver PostgreSQL (binario, más fácil install)
+alembic>=1.13.0                   # Migraciones de DB
+
+# ============================================================================
+# WEB SCRAPING - Recolección de datos
+# ============================================================================
+selenium>=4.15.0                  # Web scraping de Cocos
+webdriver-manager>=4.0.1          # Gestión automática de ChromeDriver
+
+# ============================================================================
+# DATA ANALYSIS - Análisis y métricas
+# ============================================================================
+pandas>=2.1.0                     # Manipulación de datos y series temporales
+numpy>=1.24.0                     # Cálculos numéricos
+scipy>=1.11.0                     # Estadística avanzada (regresión, proyecciones)
+
+# ============================================================================
+# REPORTING - Exportación y reportes
+# ============================================================================
+openpyxl>=3.1.2                   # Excel (lectura/escritura xlsx)
+xlsxwriter>=3.1.9                 # Excel (escritura optimizada)
+jinja2>=3.1.2                     # Templates para reportes HTML/TXT
+
+# ============================================================================
+# OPCIONAL - API de Cocos (si decides usarla en el futuro)
+# ============================================================================
+# pycocos>=0.2.12                 # API no oficial de Cocos Capital
+# pyotp>=2.9.0                    # TOTP para 2FA (si tienes seed)
+# requests>=2.31.0                # HTTP requests
+# simplejson>=3.19.0              # JSON parsing
+
+# ============================================================================
+# SCHEDULING - Automatización (solo si NO usas Docker)
+# ============================================================================
+schedule>=1.2.0                   # Scheduler Python (alternativa a cron/Ofelia)
+
+# ============================================================================
+# TESTING - Tests y calidad
+# ============================================================================
+pytest>=7.4.0                     # Framework de testing
+pytest-cov>=4.1.0                 # Cobertura de tests
+pytest-mock>=3.12.0               # Mocking para tests
+faker>=20.0.0                     # Datos fake para tests
+
+# ============================================================================
+# DEVELOPMENT - Herramientas de desarrollo
+# ============================================================================
+black>=23.12.0                    # Code formatter
+flake8>=6.1.0                     # Linter
+mypy>=1.7.0                       # Type checking
+ipython>=8.18.0                   # REPL mejorado para debugging
+
+# ============================================================================
+# LOGGING & MONITORING
+# ============================================================================
+colorlog>=6.8.0                   # Logs con colores en consola
+python-json-logger>=2.0.7         # Logs estructurados en JSON
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+python-dateutil>=2.8.2            # Parsing de fechas
+pytz>=2023.3                      # Timezones
