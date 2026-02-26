@@ -20,17 +20,9 @@ class RiskMetricsCalculator:
     
     def __init__(self, repository):
         self.repo = repository
-    
-    def calculate_all(self, window_days: int = 90) -> Dict:
-        """
-        Calcula todas las métricas de riesgo
+
         
-        Args:
-            window_days: Ventana de análisis
-            
-        Returns:
-            Dict con métricas calculadas
-        """
+    def calculate_all(self, window_days: int = 90) -> Dict:
         logger.info(f"Calculando métricas de riesgo (ventana: {window_days} días)...")
         
         history = self.repo.get_portfolio_history(days=window_days)
@@ -42,11 +34,17 @@ class RiskMetricsCalculator:
         df = pd.DataFrame(history)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.sort_values('timestamp')
-        df['returns'] = df['total_value'].pct_change()
-        
+
+        # Filtrar solo cierre 17:00
+        df_daily = df[df['timestamp'].dt.hour == 17].copy()
+
+        if len(df_daily) < 10:
+            logger.warning("Datos diarios insuficientes")
+            return self._empty_metrics()
+
         metrics = {
             'window_days': window_days,
-            'data_points': len(df),
+            'data_points': len(df_daily),
             'volatility': self._calculate_volatility(df),
             'max_drawdown': self._calculate_max_drawdown(df),
             'sharpe_ratio': self._calculate_sharpe(df),
@@ -54,69 +52,66 @@ class RiskMetricsCalculator:
             'calculated_at': datetime.utcnow().isoformat()
         }
         
-        logger.info(f"Métricas calculadas: Vol={metrics['volatility']:.2f}%, DD={metrics['max_drawdown']:.2f}%")
-        
+        logger.info(
+            f"Métricas calculadas: "
+            f"Vol={metrics['volatility']:.4f}%, "
+            f"DD={metrics['max_drawdown']:.4f}%"
+        )
+
         return metrics
     
+
+
+    def _prepare_daily_returns(self, df: pd.DataFrame) -> pd.Series:
+        # Usar solo cierre (17:00)
+        df = df[df['timestamp'].dt.hour == 17].copy()
+        df = df.sort_values('timestamp')
+
+        df['returns'] = df['total_value'].pct_change()
+        return df['returns'].dropna()
+
+
     def _calculate_volatility(self, df: pd.DataFrame) -> float:
-        """
-        Volatilidad anualizada
-        
-        Formula: σ_daily * sqrt(252)
-        """
-        daily_std = df['returns'].std()
-        annual_vol = daily_std * np.sqrt(252) * 100  # Porcentaje
+        returns = self._prepare_daily_returns(df)
+
+        if len(returns) < 10:
+            return 0.0
+
+        daily_std = returns.std()
+        annual_vol = daily_std * np.sqrt(252) * 100
         return float(annual_vol)
-    
-    def _calculate_max_drawdown(self, df: pd.DataFrame) -> float:
-        """
-        Maximum Drawdown
-        
-        Formula: (Trough - Peak) / Peak
-        """
-        df['cummax'] = df['total_value'].cummax()
-        df['drawdown'] = (df['total_value'] - df['cummax']) / df['cummax'] * 100
-        max_dd = df['drawdown'].min()
-        return float(max_dd)
-    
+
+
     def _calculate_sharpe(self, df: pd.DataFrame, risk_free_rate: float = 0.0) -> float:
-        """
-        Sharpe Ratio (anualizado)
-        
-        Formula: (R_portfolio - R_f) / σ_portfolio
-        Asume rf = 0 para simplificar
-        """
-        mean_return = df['returns'].mean()
-        std_return = df['returns'].std()
-        
+        returns = self._prepare_daily_returns(df)
+
+        if len(returns) < 10:
+            return 0.0
+
+        mean_return = returns.mean()
+        std_return = returns.std()
+
         if std_return == 0:
             return 0.0
-        
+
         sharpe = (mean_return - risk_free_rate / 252) / std_return * np.sqrt(252)
         return float(sharpe)
-    
+
+
     def _calculate_var(self, df: pd.DataFrame, confidence: float = 0.95) -> float:
-        """
-        Value at Risk (VaR)
-        
-        Args:
-            confidence: Nivel de confianza (0.95 = 95%)
-            
-        Returns:
-            Pérdida máxima esperada con X% confianza (valor negativo)
-        """
-        returns = df['returns'].dropna()
+        returns = self._prepare_daily_returns(df)
+
+        if len(returns) < 10:
+            return 0.0
+
         var = np.percentile(returns, (1 - confidence) * 100) * 100
         return float(var)
     
-    def _empty_metrics(self) -> Dict:
-        """Retorna métricas vacías"""
-        return {
-            'window_days': 0,
-            'data_points': 0,
-            'volatility': 0.0,
-            'max_drawdown': 0.0,
-            'sharpe_ratio': 0.0,
-            'var_95': 0.0,
-            'calculated_at': datetime.utcnow().isoformat()
-        }
+    def _calculate_max_drawdown(self, df: pd.DataFrame) -> float:
+        df = df[df['timestamp'].dt.hour == 17].copy()
+        df = df.sort_values('timestamp')
+
+        df['cummax'] = df['total_value'].cummax()
+        df['drawdown'] = (df['total_value'] - df['cummax']) / df['cummax'] * 100
+
+        return float(df['drawdown'].min())

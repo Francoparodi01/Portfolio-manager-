@@ -33,22 +33,27 @@ class CocosScraper:
         self.telegram_enabled = bool(telegram_bot_token and telegram_chat_id)
     
     def setup_driver(self):
-        """Configura Chrome"""
         try:
             options = Options()
-            
-            if self.headless:
-                options.add_argument('--headless')
-            
+
+            # SIEMPRE headless en Docker
+            options.add_argument('--headless=new')
             options.add_argument('--no-sandbox')
             options.add_argument('--disable-dev-shm-usage')
-            options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-            
-            logger.info("Instalando ChromeDriver...")
+            options.add_argument('--disable-gpu')
+            options.add_argument('--window-size=1920,1080')
+
+            options.add_argument(
+                "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            )
+
+            logger.info("Iniciando Chrome en modo headless...")
+
             service = Service(ChromeDriverManager().install())
             self.driver = webdriver.Chrome(service=service, options=options)
-            logger.info("[OK] Chrome inicializado")
-            
+
+            logger.info("[OK] Chrome inicializado en Docker")
+
         except Exception as e:
             logger.error(f"[ERROR] Error setup: {e}")
             raise
@@ -273,27 +278,64 @@ class CocosScraper:
                 logger.error("Estructura de MFA no reconocida")
                 return False
 
-            # ===== SUBMIT MFA =====
+                        # ===== SUBMIT MFA =====
             submit_button = wait.until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit'], button"))
             )
             submit_button.click()
 
-            # ===== CONFIRMAR LOGIN =====
-            wait.until(lambda d: "capital-portfolio" in d.current_url)
+            logger.info("MFA enviado, esperando validación...")
 
-            logger.info("[OK] Login exitoso con MFA")
+            # Esperar pequeño delay para cookies / redirect
+            time.sleep(3)
 
-            # Navegar explícitamente al portfolio
+            # Intentar esperar que desaparezcan inputs MFA (no romper si falla)
+            try:
+                wait.until(
+                    EC.invisibility_of_element_located(
+                        (By.CSS_SELECTOR, "input[type='tel'], input[inputmode='numeric']")
+                    )
+                )
+            except Exception:
+                logger.warning("Inputs MFA no desaparecieron explícitamente, continuando...")
+
+            current_url = self.driver.current_url
+            logger.info(f"URL post-MFA: {current_url}")
+
+            # Si sigue en login o en pantalla MFA → fallo
+            if "login" in current_url:
+                logger.error("Seguimos en login. MFA probablemente rechazado.")
+                return False
+
+            # Forzar navegación al portfolio
             self.driver.get("https://app.cocos.capital/capital-portfolio")
+
+            try:
+                wait.until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+            except Exception:
+                logger.error("No cargó body del portfolio.")
+                return False
+
             time.sleep(2)
+
+            final_url = self.driver.current_url
+            logger.info(f"URL final: {final_url}")
+
+            if "capital-portfolio" not in final_url:
+                logger.error("No se pudo acceder al portfolio.")
+                return False
 
             self.logged_in = True
 
             if self.telegram_enabled:
                 self.send_telegram_message("✅ Login exitoso con MFA")
 
+            logger.info("[OK] Login confirmado")
+
             return True
+
 
         except Exception as e:
             logger.error(f"Error en login_with_telegram_mfa: {e}", exc_info=True)
@@ -360,7 +402,7 @@ class CocosScraper:
                     # Método 1: Extraer directamente con RegEx todo junto
                     # Patrón: CVX\nChevron\n23\n$16.730,00\n$384.790,00\n43,52%
                     
-                    pattern = r'(CVX|GOOGL|TSLA|NVDA|AAPL|MSFT)\n([A-Za-z]+)\n(\d+)\n\$\s*([0-9.,]+)\n\$\s*([0-9.,]+)\n([0-9]+,[0-9]+)%'
+                    pattern = r'([A-Z\.]{1,6})\n([A-Za-z .&\-]+)\n(\d+)\n\$\s*([0-9.,]+)\n\$\s*([0-9.,]+)\n([0-9]+,[0-9]+)%'
                     
                     matches = re.findall(pattern, full_text)
                     

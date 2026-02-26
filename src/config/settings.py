@@ -83,4 +83,7 @@ HEADLESS_BROWSER = True
 RAW_DATA_PATH = "data/raw"
 
 # URL conexión PostgreSQL (Timescale)
-DATABASE_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/copiloto_inversiones"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://postgres:postgres@timescaledb:5432/cocos_inversiones"
+)

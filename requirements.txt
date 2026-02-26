@@ -75,3 +75,6 @@ python-json-logger>=2.0.7         # Logs estructurados en JSON
 # ============================================================================
 python-dateutil>=2.8.2            # Parsing de fechas
 pytz>=2023.3                      # Timezones
+
+
+arch

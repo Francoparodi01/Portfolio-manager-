@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg15
@@ -14,6 +12,21 @@ services:
     ports:
       - "5432:5432"
     restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: cocos_scheduler
+    depends_on:
+      - timescaledb
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@timescaledb:5432/cocos_inversiones
+    volumes:
+      - ../:/app
+    restart: always
 
 volumes:
   timescale_data:
