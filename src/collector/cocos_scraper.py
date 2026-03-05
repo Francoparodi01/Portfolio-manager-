@@ -708,6 +708,13 @@ class CocosCapitalScraper:
 
     @timed("scraper.market")
     async def scrape_market(self, market_type: str) -> list[MarketAsset]:
+        """
+        Scraping del mercado de Cocos Capital.
+
+        FIX (Mar 2026): La página de mercado carga vacía y requiere que el usuario
+        seleccione el tipo desde el dropdown "Seleccione un..." para que aparezca la
+        tabla. El scraper ahora simula ese click antes de esperar los datos.
+        """
         assert market_type in ("ACCIONES", "CEDEARS")
 
         await self.login()
@@ -719,63 +726,163 @@ class CocosCapitalScraper:
         )
         asset_type = AssetType.ACCION if market_type == "ACCIONES" else AssetType.CEDEAR
 
+        # Texto que aparece en el dropdown para cada tipo
+        dropdown_label = "Acciones" if market_type == "ACCIONES" else "CEDEARs"
+
         try:
             await self._page.goto(url, wait_until="domcontentloaded", timeout=60_000)
 
-            # 🔥 esperar a que el texto del mercado exista (NO el header)
+            # Esperar que el header de mercado esté visible (dropdown "Seleccione un...")
+            await self._page.wait_for_selector(
+                "button:has-text('Seleccione un'), [class*='dropdown'], [class*='select'], [class*='filter']",
+                state="visible",
+                timeout=30_000,
+            )
+            await asyncio.sleep(1.0)  # React hydration
+
+            # ── Interactuar con el dropdown para cargar la tabla ──────────────
+            await self._select_market_dropdown(market_type, dropdown_label)
+
+            # Esperar que aparezcan datos reales en la tabla
             await self._page.wait_for_function(
                 """
                 () => {
-                    const t = document.body.innerText
+                    const t = document.body.innerText;
                     return (
-                        t.includes("YPF") ||
+                        t.includes("YPF")  ||
                         t.includes("GGAL") ||
                         t.includes("PAMP") ||
-                        t.includes("Último Precio")
+                        t.includes("CVX")  ||
+                        t.includes("NVDA") ||
+                        t.includes("AAPL") ||
+                        t.includes("MSFT") ||
+                        t.includes("Último") ||
+                        t.includes("Precio")
                     )
                 }
                 """,
-                timeout=45_000,
+                timeout=30_000,
             )
+            logger.info(f"Tabla de {market_type} cargada")
 
-            # 🔥 forzar render de grid virtual
-            for _ in range(8):
+            # Scroll para forzar render de grid virtual
+            for _ in range(10):
                 await self._page.mouse.wheel(0, 2500)
                 await asyncio.sleep(0.35)
+            # Volver al inicio para capturar desde la primera fila
+            await self._page.evaluate("window.scrollTo(0, 0)")
+            await asyncio.sleep(0.5)
 
             assets = await self._parse_market_dom(asset_type)
 
             if not assets:
                 await self._screenshot(f"market_{market_type}_empty")
-                raise ValueError(f"0 activos scrapeados para {market_type}")
+                logger.error(f"0 activos scrapeados para {market_type} — se omite")
+                return []
 
             logger.info(f"Market {market_type}: {len(assets)} activos")
             return assets
 
-        except Exception:
+        except Exception as e:
             await self._screenshot(f"market_{market_type}_error")
-            raise
+            logger.error(f"scrape_market({market_type}) falló: {e} — retornando []")
+            return []
+
+    async def _select_market_dropdown(self, market_type: str, label: str):
+        """
+        Abre el dropdown "Seleccione un..." y elige el tipo de mercado.
+        Prueba múltiples estrategias en cascada.
+        """
+        logger.info(f"Seleccionando mercado: {label}")
+
+        # Estrategia 1: click en el botón del dropdown por texto
+        try:
+            btn = await self._page.query_selector(
+                "button:has-text('Seleccione un'), button:has-text('Seleccioná')"
+            )
+            if btn:
+                await btn.click()
+                await asyncio.sleep(0.8)
+                # Buscar la opción en el menú desplegado
+                option = await self._page.query_selector(
+                    f"[role='option']:has-text('{label}'), "
+                    f"li:has-text('{label}'), "
+                    f"div[class*='option']:has-text('{label}'), "
+                    f"span:has-text('{label}')"
+                )
+                if option:
+                    await option.click()
+                    await asyncio.sleep(1.5)
+                    logger.info(f"Dropdown: opción '{label}' seleccionada (estrategia 1)")
+                    return
+        except Exception as e:
+            logger.debug(f"Estrategia 1 dropdown falló: {e}")
+
+        # Estrategia 2: buscar el select nativo
+        try:
+            select = await self._page.query_selector("select")
+            if select:
+                await select.select_option(label=label)
+                await asyncio.sleep(1.5)
+                logger.info(f"Select nativo: '{label}' seleccionado (estrategia 2)")
+                return
+        except Exception as e:
+            logger.debug(f"Estrategia 2 select nativo falló: {e}")
+
+        # Estrategia 3: click directo en cualquier elemento que contenga el texto
+        try:
+            # Buscar por texto exacto en cualquier elemento clickeable
+            await self._page.click(
+                f"text='{label}'",
+                timeout=5_000,
+            )
+            await asyncio.sleep(1.5)
+            logger.info(f"Click por texto: '{label}' (estrategia 3)")
+            return
+        except Exception as e:
+            logger.debug(f"Estrategia 3 click por texto falló: {e}")
+
+        # Estrategia 4: simular la URL con query param si Cocos lo soporta
+        # Algunos brokers exponen filtros via ?type=acciones o ?category=cedears
+        try:
+            current_url = self._page.url
+            suffix = "ACCIONES" if market_type == "ACCIONES" else "CEDEARS"
+            if suffix not in current_url.lower():
+                new_url = f"{current_url}?category={suffix}"
+                await self._page.goto(new_url, wait_until="domcontentloaded", timeout=30_000)
+                await asyncio.sleep(2)
+                logger.info(f"Estrategia 4: navegado a {new_url}")
+        except Exception as e:
+            logger.debug(f"Estrategia 4 URL param falló: {e}")
+
+        logger.warning(f"Todas las estrategias de dropdown intentadas para {label}")
 
     async def _parse_market_dom(self, asset_type: "AssetType") -> list["MarketAsset"]:
         """
         Parser robusto para tabla virtualizada de Cocos.
+        FIX: no esperar header hardcodeado — puede no existir.
         """
-
         import re
         assets: list[MarketAsset] = []
         seen: set[str] = set()
 
-        # 🔥 esperar header de la tabla (MUY IMPORTANTE)
-        await self._page.wait_for_selector(".markets-table-header", timeout=30_000)
+        # Header opcional — no bloquear si no existe
+        try:
+            await self._page.wait_for_selector(
+                ".markets-table-header, [class*='tableHeader'], [class*='table-header']",
+                timeout=5_000,
+            )
+        except Exception:
+            logger.debug("Header de tabla no encontrado — continuando")
 
-        # 🔥 scroll para forzar render
+        # Scroll para forzar render del grid virtual
         for _ in range(6):
             await self._page.mouse.wheel(0, 2000)
             await asyncio.sleep(0.4)
 
-        # 🔥 ahora sí buscar filas reales
+        # Buscar filas con múltiples selectores
         rows = await self._page.query_selector_all(
-            "[class*='row'], [class*='instrument'], [role='row']"
+            "[class*='row'], [class*='instrument'], [class*='asset'], [role='row'], tr"
         )
 
         logger.info(f"Market rows detectadas: {len(rows)}")

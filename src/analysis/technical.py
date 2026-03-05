@@ -45,6 +45,7 @@ class Signal:
     ticker: str
     signal: str           # "BUY" | "SELL" | "HOLD"
     strength: float       # 0.0 – 1.0
+    score_raw: float      # score sin clasificar (-9 a +9) para la sintesis
     reasons: list[str]    # razones legibles
     price_usd: float
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -55,7 +56,7 @@ class Signal:
         reasons_txt = "\n".join(f"  • {r}" for r in self.reasons)
         return (
             f"{icon} <b>{self.ticker}</b> — <b>{self.signal}</b>\n"
-            f"Precio: <b>${self.price_usd:.2f}</b>  |  Fuerza: [{strength_bar}] {self.strength:.0%}\n"
+            f"Precio: <b>${self.price_usd:.2f}</b>  |  Fuerza: {strength_bar} {self.strength:.0%}\n"
             f"{reasons_txt}"
         )
 
@@ -336,6 +337,7 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
         ticker=ind.ticker,
         signal=direction,
         strength=round(strength, 3),
+        score_raw=round(score, 4),
         reasons=reasons,
         price_usd=ind.close,
     )

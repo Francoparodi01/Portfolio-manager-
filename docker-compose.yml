@@ -74,6 +74,8 @@ services:
     volumes:
       - screenshots:/app/screenshots
       - logs:/app/logs
+      - ./src:/app/src
+      - ./scripts:/app/scripts
 
     deploy:
       resources:

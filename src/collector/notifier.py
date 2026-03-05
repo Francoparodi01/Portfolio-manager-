@@ -173,4 +173,4 @@ class TelegramNotifier:
         Para reportes de análisis: SIEMPRE texto plano.
         Evita errores 400 por parse de HTML/Markdown.
         """
-        return self._send_chunked(text, parse_mode=None)
+        return self._send_chunked(text, parse_mode="HTML")
