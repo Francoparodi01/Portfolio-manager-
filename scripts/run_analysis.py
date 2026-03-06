@@ -22,6 +22,7 @@ from src.analysis.macro     import fetch_macro, score_macro_for_ticker, get_macr
 from src.analysis.sentiment import fetch_sentiment
 from src.analysis.risk      import build_portfolio_risk_report
 from src.analysis.synthesis import SynthesisResult, LayerScore, build_full_report
+from src.analysis.optimizer import run_optimizer
 
 import requests
 import numpy as np
@@ -116,7 +117,7 @@ Capas:
 - Tecnico (30%): {tech_layer.raw_score:+.2f} — {'; '.join(technical_reasons[:3]) or 'N/A'}
 - Macro (30%): {macro_layer.raw_score:+.2f} — {'; '.join(macro_reasons[:3]) or 'N/A'}
 - Riesgo (25%): vol={risk_position.get('volatility_annual',0):.0%}, sharpe={risk_position.get('sharpe',0):.2f}
-- Sentiment (15%): {sent_layer.raw_score:+.2f if sent_layer else 'N/A'}
+- Sentiment (15%): {f"{sent_layer.raw_score:+.2f}" if sent_layer else "N/A"}
 
 Macro: WTI ${macro_dict.get('wti','?')} ({macro_dict.get('wti_chg',0):+.1f}%), VIX {macro_dict.get('vix','?')} ({macro_dict.get('vix_chg',0):+.1f}%), DXY {macro_dict.get('dxy','?')}, SP500 {macro_dict.get('sp500_chg',0):+.1f}%
 
@@ -130,11 +131,18 @@ Responde en 3 oraciones en español:
 2. El factor mas importante que el modelo puede subestimar.
 3. Accion concreta recomendada."""
 
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            logger.warning(f"ANTHROPIC_API_KEY no configurada — LLM omitido para {result.ticker}")
+            return result
+
         resp = requests.post(
             ANTHROPIC_API,
             json={"model": CLAUDE_MODEL, "max_tokens": 300,
                   "messages": [{"role": "user", "content": prompt}]},
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json",
+                     "x-api-key": api_key,
+                     "anthropic-version": "2023-06-01"},
             timeout=30,
         )
         if resp.status_code == 200:
@@ -174,7 +182,7 @@ async def get_portfolio_data(cfg):
         await db.close()
 
 
-async def main(tickers_override, period, no_telegram, no_llm, no_sentiment):
+async def main(tickers_override, period, no_telegram, no_llm, no_sentiment, no_optimizer=False):
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
 
@@ -266,7 +274,41 @@ async def main(tickers_override, period, no_telegram, no_llm, no_sentiment):
 
         results.append(result)
 
-    # 7. Consola
+    # 7. Portfolio Optimizer
+    rebalance_report = None
+    if not no_optimizer and results:
+        logger.info("Ejecutando Portfolio Optimizer...")
+        # Leer market assets de la DB si están disponibles
+        market_assets = []
+        try:
+            db2 = PortfolioDatabase(cfg.database.url)
+            await db2.connect()
+            market_assets = await db2.get_latest_market_prices() if hasattr(db2, 'get_latest_market_prices') else []
+            await db2.close()
+        except Exception as e:
+            logger.warning(f"No se pudieron leer precios de mercado: {e}")
+
+        rebalance_report = run_optimizer(
+            current_positions=positions,
+            portfolio_value_ars=total_ars,
+            cash_ars=cash_ars,
+            macro_regime=macro_regime,
+            vix=macro_snap.vix,
+            synthesis_results=results,
+            market_assets=market_assets,
+        )
+        if rebalance_report:
+            opt = rebalance_report.optimization
+            print(f"\n{'─'*70}")
+            print(f"  OPTIMIZER [{opt.method}] — {opt.method_reason}")
+            print(f"  Ret={opt.expected_return_annual:.1%}  Vol={opt.expected_vol_annual:.1%}  Sharpe={opt.sharpe_ratio:.2f}  Trades={rebalance_report.n_trades}")
+            for t in rebalance_report.trades:
+                if t.action != "MANTENER":
+                    print(f"  {t.action:8s}  {t.ticker:6s}  {t.weight_current:.1%} → {t.weight_optimal:.1%}  ({t.delta:+.1%})  ${t.amount_ars:,.0f} ARS")
+    else:
+        logger.info("Optimizer omitido (--no-optimizer)")
+
+    # 8. Consola
     print("\n" + "=" * 70)
     for r in results:
         icon = {"BUY":"🟢🟢","ACCUMULATE":"🟢","HOLD":"🟡","REDUCE":"🔴","SELL":"🔴🔴"}.get(r.decision,"⚪")
@@ -289,7 +331,7 @@ async def main(tickers_override, period, no_telegram, no_llm, no_sentiment):
     # 8. Telegram
     if not no_telegram and cfg.scraper.telegram_enabled:
         logger.info("Enviando a Telegram...")
-        report = build_full_report(results, macro_snap, total_ars, portfolio_risk)
+        report = build_full_report(results, macro_snap, total_ars, portfolio_risk, rebalance_report)
         notifier.send_raw(report)
         logger.info("Reporte enviado")
     else:
@@ -303,5 +345,6 @@ if __name__ == "__main__":
     p.add_argument("--no-telegram",  action="store_true")
     p.add_argument("--no-llm",       action="store_true")
     p.add_argument("--no-sentiment", action="store_true")
+    p.add_argument("--no-optimizer", action="store_true")
     args = p.parse_args()
-    asyncio.run(main(args.tickers, args.period, args.no_telegram, args.no_llm, args.no_sentiment))
+    asyncio.run(main(args.tickers, args.period, args.no_telegram, args.no_llm, args.no_sentiment, args.no_optimizer))
