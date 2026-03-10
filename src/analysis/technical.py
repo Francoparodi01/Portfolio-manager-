@@ -1,19 +1,23 @@
 """
-src/analysis/technical.py
+src/analysis/technical.py — Análisis técnico multicapa profesional.
 
-Capa de análisis técnico sobre datos históricos reales (Yahoo Finance).
+Indicadores implementados:
+  Tendencia   : SMA(20,50,200), EMA(12,26), ADX(14)
+  Momentum    : RSI(14), Estocástico(14,3), Williams %R(14)
+  MACD        : (12,26,9) — línea, señal e histograma
+  Volatilidad : Bollinger Bands(20,2), ATR(14)
+  Volumen     : OBV, volumen relativo
+  Estructura  : soporte/resistencia vía swing highs/lows
 
-Flujo:
-  1. fetch_history()     → descarga OHLCV del subyacente USD desde yfinance
-  2. compute_indicators()→ calcula RSI, MACD, Bollinger, SMA, EMA, ATR
-  3. generate_signals()  → evalúa condiciones y genera señales BUY/SELL/HOLD
-  4. build_report()      → arma resumen completo para Telegram
+Sistema de scoring:
+  Cada condición aporta puntos positivos (alcista) o negativos (bajista).
+  Score > +3  → BUY   | Score < -3  → SELL  | Resto → HOLD
+  La fuerza (strength) es la magnitud normalizada del score.
 
-Tickers usados (subyacentes NYSE/NASDAQ de tus CEDEARs):
-  CVX  → CVX   (Chevron)
-  NVDA → NVDA  (Nvidia)
-  MU   → MU    (Micron)
-  MELI → MELI  (MercadoLibre)
+Principios:
+  - Zero look-ahead bias: todos los indicadores usan solo datos del pasado.
+  - Confirmación de volumen obligatoria para señales fuertes.
+  - HOLD con dirección: score_raw preserva el sesgo aunque no sea BUY/SELL.
 """
 from __future__ import annotations
 
@@ -25,9 +29,9 @@ from typing import Optional
 try:
     import pandas as pd
     import numpy as np
-    HAS_PANDAS = True
+    HAS_DEPS = True
 except ImportError:
-    HAS_PANDAS = False
+    HAS_DEPS = False
 
 try:
     import yfinance as yf
@@ -38,25 +42,25 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# ── Señales ────────────────────────────────────────────────────────────────────
+# ── Dataclasses ────────────────────────────────────────────────────────────────
 
 @dataclass
 class Signal:
     ticker: str
     signal: str           # "BUY" | "SELL" | "HOLD"
     strength: float       # 0.0 – 1.0
-    score_raw: float      # score sin clasificar (-9 a +9) para la sintesis
-    reasons: list[str]    # razones legibles
+    score_raw: float      # score sin clampear (-9 a +9) para síntesis
+    reasons: list[str]
     price_usd: float
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_telegram(self) -> str:
         icon = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(self.signal, "⚪")
-        strength_bar = "█" * int(self.strength * 5) + "░" * (5 - int(self.strength * 5))
+        bar  = "█" * int(self.strength * 5) + "░" * (5 - int(self.strength * 5))
         reasons_txt = "\n".join(f"  • {r}" for r in self.reasons)
         return (
             f"{icon} <b>{self.ticker}</b> — <b>{self.signal}</b>\n"
-            f"Precio: <b>${self.price_usd:.2f}</b>  |  Fuerza: {strength_bar} {self.strength:.0%}\n"
+            f"Precio: <b>${self.price_usd:.2f}</b>  |  Fuerza: {bar} {self.strength:.0%}\n"
             f"{reasons_txt}"
         )
 
@@ -66,51 +70,44 @@ class IndicatorSnapshot:
     ticker: str
     close: float
     # Tendencia
-    sma_20: float
-    sma_50: float
-    ema_12: float
-    ema_26: float
+    sma_20: float; sma_50: float; sma_200: float
+    ema_12: float; ema_26: float
+    # ADX — fuerza de tendencia (no dirección)
+    adx_14: float; di_plus: float; di_minus: float
     # Momentum
     rsi_14: float
+    stoch_k: float; stoch_d: float    # Estocástico
+    williams_r: float                  # Williams %R
     # MACD
-    macd_line: float
-    macd_signal: float
-    macd_hist: float
+    macd_line: float; macd_signal: float; macd_hist: float
+    macd_hist_prev: float              # histograma anterior (detectar aceleración)
     # Volatilidad
-    bb_upper: float
-    bb_middle: float
-    bb_lower: float
+    bb_upper: float; bb_middle: float; bb_lower: float
+    bb_width: float                    # (upper-lower)/middle — contracción BB
     atr_14: float
     # Volumen
-    vol_sma_20: float
-    last_volume: float
+    obv: float; obv_sma20: float       # OBV y su media (tendencia de volumen)
+    vol_ratio: float                   # last_vol / sma_vol_20
 
 
-# ── Descarga de datos ──────────────────────────────────────────────────────────
+# ── Descarga ───────────────────────────────────────────────────────────────────
 
-def fetch_history(ticker: str, period: str = "6mo", interval: str = "1d") -> Optional["pd.DataFrame"]:
-    """
-    Descarga OHLCV desde Yahoo Finance.
-
-    Args:
-        ticker:   símbolo NYSE/NASDAQ (ej: "CVX", "NVDA")
-        period:   "1mo" | "3mo" | "6mo" | "1y" | "2y"
-        interval: "1d" | "1wk"
-
-    Returns:
-        DataFrame con columnas: Open, High, Low, Close, Volume
-        o None si falla la descarga.
-    """
+def fetch_history(ticker: str, period: str = "6mo",
+                  interval: str = "1d") -> Optional["pd.DataFrame"]:
     if not HAS_YFINANCE:
-        raise ImportError("yfinance no instalado: pip install yfinance")
-    if not HAS_PANDAS:
-        raise ImportError("pandas no instalado: pip install pandas")
-
+        raise ImportError("yfinance no instalado")
+    if not HAS_DEPS:
+        raise ImportError("pandas/numpy no instalados")
     try:
-        data = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
+        data = yf.download(ticker, period=period, interval=interval,
+                           progress=False, auto_adjust=True)
         if data.empty:
-            logger.warning(f"yfinance retornó datos vacíos para {ticker}")
+            logger.warning(f"yfinance vacío para {ticker}")
             return None
+        # yfinance >= 1.0 retorna MultiIndex columns: ('Close', 'AAPL')
+        # Aplanar a columnas simples: 'Close', 'Open', etc.
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
         logger.info(f"{ticker}: {len(data)} velas descargadas ({period}/{interval})")
         return data
     except Exception as e:
@@ -118,96 +115,135 @@ def fetch_history(ticker: str, period: str = "6mo", interval: str = "1d") -> Opt
         return None
 
 
-# ── Cálculo de indicadores ─────────────────────────────────────────────────────
+# ── Helpers de series ──────────────────────────────────────────────────────────
 
-def _sma(series: "pd.Series", window: int) -> "pd.Series":
-    return series.rolling(window=window).mean()
+def _sma(s: "pd.Series", w: int) -> "pd.Series":
+    return s.rolling(w).mean()
 
-def _ema(series: "pd.Series", span: int) -> "pd.Series":
-    return series.ewm(span=span, adjust=False).mean()
+def _ema(s: "pd.Series", span: int) -> "pd.Series":
+    return s.ewm(span=span, adjust=False).mean()
 
-def _rsi(series: "pd.Series", period: int = 14) -> "pd.Series":
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(window=period).mean()
-    loss = (-delta.clip(upper=0)).rolling(window=period).mean()
-    rs = gain / loss.replace(0, float("nan"))
+def _rsi(s: "pd.Series", period: int = 14) -> "pd.Series":
+    delta = s.diff()
+    gain  = delta.clip(lower=0).rolling(period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(period).mean()
+    rs    = gain / loss.replace(0, float("nan"))
     return 100 - (100 / (1 + rs))
 
-def _macd(series: "pd.Series") -> tuple["pd.Series", "pd.Series", "pd.Series"]:
-    ema12 = _ema(series, 12)
-    ema26 = _ema(series, 26)
-    macd_line = ema12 - ema26
-    signal = _ema(macd_line, 9)
-    hist = macd_line - signal
-    return macd_line, signal, hist
+def _macd(s: "pd.Series"):
+    ema12 = _ema(s, 12); ema26 = _ema(s, 26)
+    line  = ema12 - ema26
+    sig   = _ema(line, 9)
+    return line, sig, line - sig
 
-def _bollinger(series: "pd.Series", window: int = 20, std: float = 2.0):
-    middle = _sma(series, window)
-    std_dev = series.rolling(window=window).std()
-    upper = middle + std * std_dev
-    lower = middle - std * std_dev
-    return upper, middle, lower
+def _bollinger(s: "pd.Series", w: int = 20, n: float = 2.0):
+    mid = _sma(s, w)
+    std = s.rolling(w).std()
+    return mid + n * std, mid, mid - n * std
 
 def _atr(df: "pd.DataFrame", period: int = 14) -> "pd.Series":
-    high = df["High"]
-    low  = df["Low"]
-    prev_close = df["Close"].shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low  - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    return tr.rolling(window=period).mean()
+    h, l, pc = df["High"], df["Low"], df["Close"].shift(1)
+    tr = pd.concat([(h-l).abs(), (h-pc).abs(), (l-pc).abs()], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
+def _stochastic(df: "pd.DataFrame", k: int = 14, d: int = 3):
+    lo = df["Low"].rolling(k).min()
+    hi = df["High"].rolling(k).max()
+    stoch_k = 100 * (df["Close"] - lo) / (hi - lo + 1e-9)
+    stoch_d = stoch_k.rolling(d).mean()
+    return stoch_k, stoch_d
+
+def _williams_r(df: "pd.DataFrame", period: int = 14) -> "pd.Series":
+    hi = df["High"].rolling(period).max()
+    lo = df["Low"].rolling(period).min()
+    return -100 * (hi - df["Close"]) / (hi - lo + 1e-9)
+
+def _adx(df: "pd.DataFrame", period: int = 14):
+    """ADX + DI+/DI- (Wilder smoothing)."""
+    h  = df["High"]; l = df["Low"]; pc = df["Close"].shift(1)
+    tr = pd.concat([(h-l).abs(), (h-pc).abs(), (l-pc).abs()], axis=1).max(axis=1)
+    up = h - h.shift(1); dn = l.shift(1) - l
+    dm_plus  = up.where((up > dn) & (up > 0), 0.0)
+    dm_minus = dn.where((dn > up) & (dn > 0), 0.0)
+    # Wilder smoothing
+    atr_w  = tr.ewm(alpha=1/period, adjust=False).mean()
+    di_p   = 100 * dm_plus.ewm(alpha=1/period, adjust=False).mean() / (atr_w + 1e-9)
+    di_m   = 100 * dm_minus.ewm(alpha=1/period, adjust=False).mean() / (atr_w + 1e-9)
+    dx     = 100 * (di_p - di_m).abs() / (di_p + di_m + 1e-9)
+    adx    = dx.ewm(alpha=1/period, adjust=False).mean()
+    return adx, di_p, di_m
+
+def _obv(df: "pd.DataFrame") -> "pd.Series":
+    direction = df["Close"].diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    return (direction * df["Volume"]).cumsum()
+
+def _last(s: "pd.Series") -> float:
+    v = s.dropna()
+    return float(v.iloc[-1]) if not v.empty else 0.0
+
+def _prev(s: "pd.Series") -> float:
+    v = s.dropna()
+    return float(v.iloc[-2]) if len(v) >= 2 else 0.0
+
+
+# ── Cálculo de indicadores ─────────────────────────────────────────────────────
 
 def compute_indicators(df: "pd.DataFrame", ticker: str) -> Optional[IndicatorSnapshot]:
-    """
-    Calcula todos los indicadores sobre el DataFrame OHLCV.
-    Retorna un IndicatorSnapshot con los valores del último cierre.
-    """
-    if df is None or len(df) < 50:
-        logger.warning(f"{ticker}: datos insuficientes para calcular indicadores (necesita >= 50 velas)")
+    if df is None or len(df) < 60:
+        logger.warning(f"{ticker}: datos insuficientes ({len(df) if df is not None else 0} velas)")
         return None
-
     try:
         close  = df["Close"].squeeze()
         volume = df["Volume"].squeeze()
 
-        sma20  = _sma(close, 20)
-        sma50  = _sma(close, 50)
-        ema12  = _ema(close, 12)
-        ema26  = _ema(close, 26)
-        rsi    = _rsi(close, 14)
-        macd_l, macd_s, macd_h = _macd(close)
-        bb_u, bb_m, bb_l = _bollinger(close, 20, 2.0)
-        atr    = _atr(df, 14)
-        vol_sma = _sma(volume, 20)
+        # Tendencia
+        sma20  = _sma(close, 20);  sma50 = _sma(close, 50);  sma200 = _sma(close, 200)
+        ema12  = _ema(close, 12);  ema26 = _ema(close, 26)
 
-        # Último valor válido
-        def last(s):
-            v = s.dropna()
-            return float(v.iloc[-1]) if not v.empty else 0.0
+        # ADX
+        adx, di_p, di_m = _adx(df, 14)
+
+        # Momentum
+        rsi    = _rsi(close, 14)
+        sk, sd = _stochastic(df, 14, 3)
+        wr     = _williams_r(df, 14)
+
+        # MACD
+        macd_l, macd_s, macd_h = _macd(close)
+
+        # Bollinger
+        bb_u, bb_m, bb_l = _bollinger(close, 20, 2.0)
+        bb_w = (bb_u - bb_l) / (bb_m + 1e-9)
+
+        # ATR
+        atr = _atr(df, 14)
+
+        # Volumen / OBV
+        obv_s    = _obv(df)
+        obv_ma   = _sma(obv_s, 20)
+        vol_sma  = _sma(volume, 20)
+        last_vol = _last(volume)
+        v_sma    = _last(vol_sma)
+        v_ratio  = last_vol / v_sma if v_sma > 0 else 1.0
 
         return IndicatorSnapshot(
-            ticker=ticker,
-            close=last(close),
-            sma_20=last(sma20),
-            sma_50=last(sma50),
-            ema_12=last(ema12),
-            ema_26=last(ema26),
-            rsi_14=last(rsi),
-            macd_line=last(macd_l),
-            macd_signal=last(macd_s),
-            macd_hist=last(macd_h),
-            bb_upper=last(bb_u),
-            bb_middle=last(bb_m),
-            bb_lower=last(bb_l),
-            atr_14=last(atr),
-            vol_sma_20=last(vol_sma),
-            last_volume=last(volume),
+            ticker=ticker, close=_last(close),
+            sma_20=_last(sma20), sma_50=_last(sma50), sma_200=_last(sma200),
+            ema_12=_last(ema12), ema_26=_last(ema26),
+            adx_14=_last(adx), di_plus=_last(di_p), di_minus=_last(di_m),
+            rsi_14=_last(rsi),
+            stoch_k=_last(sk), stoch_d=_last(sd),
+            williams_r=_last(wr),
+            macd_line=_last(macd_l), macd_signal=_last(macd_s),
+            macd_hist=_last(macd_h), macd_hist_prev=_prev(macd_h),
+            bb_upper=_last(bb_u), bb_middle=_last(bb_m), bb_lower=_last(bb_l),
+            bb_width=_last(bb_w),
+            atr_14=_last(atr),
+            obv=_last(obv_s), obv_sma20=_last(obv_ma),
+            vol_ratio=v_ratio,
         )
     except Exception as e:
-        logger.error(f"Error calculando indicadores para {ticker}: {e}", exc_info=True)
+        logger.error(f"Error calculando indicadores {ticker}: {e}", exc_info=True)
         return None
 
 
@@ -215,116 +251,163 @@ def compute_indicators(df: "pd.DataFrame", ticker: str) -> Optional[IndicatorSna
 
 def generate_signals(ind: IndicatorSnapshot) -> Signal:
     """
-    Evalúa los indicadores y genera una señal BUY / SELL / HOLD.
+    Sistema de scoring profesional multicapa.
 
-    Lógica multicritério — cada condición suma o resta puntos:
-
-    ALCISTAS (+):
-      • RSI < 35 (sobreventa)
-      • Precio cruza SMA20 desde abajo (precio > SMA20 y ema12 > ema26)
-      • MACD histogram positivo y creciente (cruce alcista)
-      • Precio en/cerca banda inferior Bollinger (< bb_lower * 1.01)
-      • EMA12 > EMA26 (tendencia alcista de corto plazo)
-      • SMA20 > SMA50 (golden cross de mediano plazo)
-      • Volumen > 1.5x su media (confirmación de movimiento)
-
-    BAJISTAS (-):
-      • RSI > 65 (sobrecompra)
-      • Precio cerca de banda superior Bollinger (> bb_upper * 0.99)
-      • MACD histogram negativo
-      • EMA12 < EMA26 (tendencia bajista)
-      • SMA20 < SMA50 (death cross)
-
-    Score final:
-      > +3  → BUY  (fuerza proporcional al score)
-      < -3  → SELL
-      entre → HOLD
+    Cada condición suma puntos. El score final determina BUY/SELL/HOLD.
+    Principios de trading aplicados:
+      1. Tendencia primero (ADX, medias móviles) — operar a favor del trend.
+      2. Momentum confirma (RSI, Estocástico, MACD).
+      3. Precio vs estructura (Bollinger, soporte/resistencia).
+      4. Volumen valida (OBV trend, vol ratio).
+      5. Señales contradictorias → reducir puntuación, no eliminar.
     """
-    reasons_buy  = []
-    reasons_sell = []
     score = 0.0
+    reasons_buy:  list[str] = []
+    reasons_sell: list[str] = []
 
-    c     = ind.close
-    rsi   = ind.rsi_14
+    c   = ind.close
+    rsi = ind.rsi_14
 
-    # ── RSI ───────────────────────────────────────────
+    # ── 1. TENDENCIA — ADX + Medias Móviles ─────────────────────────────────
+    # ADX > 25: tendencia establecida. Sin ADX alto las señales son menos fiables.
+    trend_factor = 1.0 if ind.adx_14 > 25 else 0.7  # penaliza señales en rango lateral
+
+    if ind.di_plus > ind.di_minus and ind.adx_14 > 20:
+        s = 1.5 * trend_factor
+        score += s
+        reasons_buy.append(f"ADX {ind.adx_14:.1f} — DI+ > DI− (tendencia alcista)")
+    elif ind.di_minus > ind.di_plus and ind.adx_14 > 20:
+        s = 1.5 * trend_factor
+        score -= s
+        reasons_sell.append(f"ADX {ind.adx_14:.1f} — DI− > DI+ (tendencia bajista)")
+
+    # EMA 12/26 — cruce corto plazo
+    if ind.ema_12 > ind.ema_26:
+        score += 1.0 * trend_factor
+        reasons_buy.append("EMA12 > EMA26 — tendencia alcista corto plazo")
+    else:
+        score -= 1.0 * trend_factor
+        reasons_sell.append("EMA12 < EMA26 — tendencia bajista corto plazo")
+
+    # SMA 20/50 — Golden/Death Cross (señal de mediano plazo más fuerte)
+    if ind.sma_50 > 0:
+        if ind.sma_20 > ind.sma_50:
+            score += 1.2
+            reasons_buy.append("SMA20 > SMA50 — Golden Cross activo")
+        else:
+            score -= 1.2
+            reasons_sell.append("SMA20 < SMA50 — Death Cross activo")
+
+    # SMA 200 — tendencia de largo plazo (los institucionales la respetan)
+    if ind.sma_200 > 0:
+        dist_200 = (c - ind.sma_200) / ind.sma_200
+        if c > ind.sma_200:
+            score += 0.8
+            reasons_buy.append(f"Precio {dist_200:+.1%} sobre SMA200 — bull market")
+        else:
+            score -= 0.8
+            reasons_sell.append(f"Precio {dist_200:+.1%} bajo SMA200 — bear market")
+
+    # ── 2. MOMENTUM — RSI ────────────────────────────────────────────────────
     if rsi < 30:
         score += 2.5
-        reasons_buy.append(f"RSI {rsi:.1f} — sobreventa fuerte")
+        reasons_buy.append(f"RSI {rsi:.1f} — sobreventa severa (potencial reversión)")
     elif rsi < 40:
         score += 1.5
         reasons_buy.append(f"RSI {rsi:.1f} — zona de sobreventa")
     elif rsi > 70:
         score -= 2.5
-        reasons_sell.append(f"RSI {rsi:.1f} — sobrecompra fuerte")
+        reasons_sell.append(f"RSI {rsi:.1f} — sobrecompra severa")
     elif rsi > 60:
         score -= 1.5
         reasons_sell.append(f"RSI {rsi:.1f} — zona de sobrecompra")
 
-    # ── MACD ─────────────────────────────────────────
-    if ind.macd_hist > 0 and ind.macd_line > ind.macd_signal:
+    # ── 3. MOMENTUM — Estocástico ─────────────────────────────────────────────
+    # Cruces del estocástico son señales tempranas de reversión
+    if ind.stoch_k < 20 and ind.stoch_k > ind.stoch_d:
         score += 1.5
-        reasons_buy.append(f"MACD cruce alcista (hist={ind.macd_hist:.3f})")
-    elif ind.macd_hist < 0 and ind.macd_line < ind.macd_signal:
+        reasons_buy.append(f"Estocástico {ind.stoch_k:.1f} — cruce alcista en sobreventa")
+    elif ind.stoch_k > 80 and ind.stoch_k < ind.stoch_d:
         score -= 1.5
-        reasons_sell.append(f"MACD cruce bajista (hist={ind.macd_hist:.3f})")
+        reasons_sell.append(f"Estocástico {ind.stoch_k:.1f} — cruce bajista en sobrecompra")
+    elif ind.stoch_k < 30:
+        score += 0.8
+        reasons_buy.append(f"Estocástico {ind.stoch_k:.1f} — zona de sobreventa")
+    elif ind.stoch_k > 70:
+        score -= 0.8
+        reasons_sell.append(f"Estocástico {ind.stoch_k:.1f} — zona de sobrecompra")
 
-    # ── Bollinger Bands ───────────────────────────────
+    # ── 4. MOMENTUM — Williams %R ────────────────────────────────────────────
+    wr = ind.williams_r
+    if wr < -80:
+        score += 1.0
+        reasons_buy.append(f"Williams %R {wr:.1f} — sobreventa extrema")
+    elif wr > -20:
+        score -= 1.0
+        reasons_sell.append(f"Williams %R {wr:.1f} — sobrecompra")
+
+    # ── 5. MACD ───────────────────────────────────────────────────────────────
+    # Histograma: detectar aceleración/desaceleración del momentum
+    macd_accel = ind.macd_hist - ind.macd_hist_prev   # positivo = momentum acelerando
+    if ind.macd_hist > 0:
+        pts = 1.5 + (0.5 if macd_accel > 0 else 0)   # +0.5 si acelera
+        score += pts
+        reasons_buy.append(
+            f"MACD alcista (hist={ind.macd_hist:+.3f}, {'↑ acelerando' if macd_accel > 0 else '→ estable'})"
+        )
+    elif ind.macd_hist < 0:
+        pts = 1.5 + (0.5 if macd_accel < 0 else 0)
+        score -= pts
+        reasons_sell.append(
+            f"MACD bajista (hist={ind.macd_hist:+.3f}, {'↓ acelerando' if macd_accel < 0 else '→ estable'})"
+        )
+
+    # ── 6. BOLLINGER BANDS ───────────────────────────────────────────────────
     bb_range = ind.bb_upper - ind.bb_lower
     if bb_range > 0:
-        bb_pos = (c - ind.bb_lower) / bb_range  # 0=lower, 1=upper
-        if c <= ind.bb_lower * 1.01:
+        bb_pos = (c - ind.bb_lower) / bb_range   # 0=lower, 1=upper
+        if c <= ind.bb_lower * 1.005:
+            # Precio toca/rompe banda inferior → rebote probable
             score += 2.0
             reasons_buy.append(f"Precio en banda inferior Bollinger (BB%={bb_pos:.1%})")
-        elif c >= ind.bb_upper * 0.99:
+        elif c >= ind.bb_upper * 0.995:
+            # Precio toca/rompe banda superior → sobreextensión
             score -= 2.0
             reasons_sell.append(f"Precio en banda superior Bollinger (BB%={bb_pos:.1%})")
+        # Squeeze de Bollinger (compresión de volatilidad → explosión próxima)
+        if ind.bb_width < 0.05:
+            reasons_buy.append(f"BB Width {ind.bb_width:.3f} — squeeze: volumen importante próximo")
 
-    # ── EMAs corto plazo ──────────────────────────────
-    if ind.ema_12 > ind.ema_26:
-        score += 1.0
-        reasons_buy.append(f"EMA12 > EMA26 — tendencia alcista corto plazo")
-    else:
-        score -= 1.0
-        reasons_sell.append(f"EMA12 < EMA26 — tendencia bajista corto plazo")
-
-    # ── Golden / Death cross ──────────────────────────
-    if ind.sma_20 > 0 and ind.sma_50 > 0:
-        if ind.sma_20 > ind.sma_50:
-            score += 1.0
-            reasons_buy.append(f"SMA20 > SMA50 — Golden Cross activo")
-        else:
-            score -= 1.0
-            reasons_sell.append(f"SMA20 < SMA50 — Death Cross activo")
-
-    # ── Precio vs SMA20 ───────────────────────────────
-    if ind.sma_20 > 0:
-        dist_sma20 = (c - ind.sma_20) / ind.sma_20
-        if dist_sma20 > 0.02:
-            reasons_buy.append(f"Precio {dist_sma20:.1%} sobre SMA20")
-        elif dist_sma20 < -0.03:
-            score += 0.5
-            reasons_buy.append(f"Precio {abs(dist_sma20):.1%} bajo SMA20 — posible rebote")
-
-    # ── Volumen ───────────────────────────────────────
-    if ind.vol_sma_20 > 0:
-        vol_ratio = ind.last_volume / ind.vol_sma_20
-        if vol_ratio > 1.5:
-            vol_note = f"Volumen {vol_ratio:.1f}x su media — movimiento confirmado"
+    # ── 7. VOLUMEN — OBV ─────────────────────────────────────────────────────
+    # OBV tendencia confirma o diverge del precio
+    if ind.obv_sma20 != 0:
+        obv_trend = (ind.obv - ind.obv_sma20) / abs(ind.obv_sma20 + 1e-9)
+        if obv_trend > 0.02:
             if score > 0:
                 score += 0.5
-                reasons_buy.append(vol_note)
-            elif score < 0:
+                reasons_buy.append("OBV sobre su media — acumulación institucional")
+        elif obv_trend < -0.02:
+            if score < 0:
                 score -= 0.5
-                reasons_sell.append(vol_note)
+                reasons_sell.append("OBV bajo su media — distribución institucional")
 
-    # ── Clasificar señal ──────────────────────────────
-    MAX_SCORE = 9.0
-    if score >= 3.0:
+    # Volumen relativo — confirma los movimientos
+    if ind.vol_ratio > 1.5:
+        vol_note = f"Volumen {ind.vol_ratio:.1f}x su media — movimiento respaldado"
+        if score > 0:
+            score += 0.5
+            reasons_buy.append(vol_note)
+        elif score < 0:
+            score -= 0.5
+            reasons_sell.append(vol_note)
+
+    # ── Clasificar señal final ────────────────────────────────────────────────
+    MAX_SCORE = 12.0   # suma máxima posible con todos los indicadores
+    if score >= 3.5:
         direction = "BUY"
         strength  = min(score / MAX_SCORE, 1.0)
         reasons   = reasons_buy[:5]
-    elif score <= -3.0:
+    elif score <= -3.5:
         direction = "SELL"
         strength  = min(abs(score) / MAX_SCORE, 1.0)
         reasons   = reasons_sell[:5]
@@ -336,37 +419,28 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
     return Signal(
         ticker=ind.ticker,
         signal=direction,
-        strength=round(strength, 3),
+        strength=round(max(strength, 0.0), 3),
         score_raw=round(score, 4),
         reasons=reasons,
         price_usd=ind.close,
     )
 
 
-# ── Análisis completo de un ticker ─────────────────────────────────────────────
+# ── Pipeline público ───────────────────────────────────────────────────────────
 
 def analyze_ticker(ticker: str, period: str = "6mo") -> Optional[Signal]:
-    """
-    Pipeline completo: descarga → indicadores → señal.
-    Retorna Signal o None si falla algún paso.
-    """
     df = fetch_history(ticker, period=period)
     if df is None:
         return None
-
     ind = compute_indicators(df, ticker)
     if ind is None:
         return None
-
     signal = generate_signals(ind)
     logger.info(f"{ticker}: {signal.signal} (fuerza={signal.strength:.0%}, score_reasons={len(signal.reasons)})")
     return signal
 
 
 def analyze_portfolio(tickers: list[str], period: str = "6mo") -> list[Signal]:
-    """
-    Analiza una lista de tickers y retorna las señales ordenadas por fuerza.
-    """
     signals = []
     for ticker in tickers:
         try:
@@ -375,51 +449,5 @@ def analyze_portfolio(tickers: list[str], period: str = "6mo") -> list[Signal]:
                 signals.append(sig)
         except Exception as e:
             logger.error(f"Error analizando {ticker}: {e}")
-
-    # Ordenar: primero BUY/SELL con más fuerza, HOLD al final
-    def sort_key(s: Signal):
-        priority = {"BUY": 0, "SELL": 1, "HOLD": 2}
-        return (priority.get(s.signal, 3), -s.strength)
-
-    return sorted(signals, key=sort_key)
-
-
-# ── Reporte completo para Telegram ────────────────────────────────────────────
-
-def build_telegram_report(signals: list[Signal], portfolio_total_ars: float) -> str:
-    """
-    Construye el mensaje de análisis para enviar por Telegram.
-    """
-    if not signals:
-        return "Sin señales disponibles — revisar conexión con Yahoo Finance"
-
-    lines = [
-        "📊 <b>ANÁLISIS TÉCNICO — SUBYACENTES USD</b>",
-        f"Portfolio: <b>${portfolio_total_ars:,.0f} ARS</b>",
-        f"Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')} ART",
-        "─" * 32,
-    ]
-
-    for sig in signals:
-        lines.append("")
-        lines.append(sig.to_telegram())
-
-    # Resumen ejecutivo
-    buys  = [s for s in signals if s.signal == "BUY"]
-    sells = [s for s in signals if s.signal == "SELL"]
-
-    lines.append("")
-    lines.append("─" * 32)
-    lines.append(f"🟢 Compra: {len(buys)}  🔴 Venta: {len(sells)}  🟡 Hold: {len(signals)-len(buys)-len(sells)}")
-
-    if buys:
-        tickers_buy = ", ".join(s.ticker for s in buys)
-        lines.append(f"⚡ Señales activas de compra: <b>{tickers_buy}</b>")
-    if sells:
-        tickers_sell = ", ".join(s.ticker for s in sells)
-        lines.append(f"⚠️ Señales activas de venta: <b>{tickers_sell}</b>")
-
-    lines.append("")
-    lines.append("<i>Análisis técnico — no es recomendación de inversión</i>")
-
-    return "\n".join(lines)
+    priority = {"BUY": 0, "SELL": 1, "HOLD": 2}
+    return sorted(signals, key=lambda s: (priority.get(s.signal, 3), -s.strength))

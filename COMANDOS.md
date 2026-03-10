@@ -33,6 +33,15 @@ docker compose run --rm scraper python scripts/run_once.py --full
 
 ---
 
+## Telegram Bot
+```bash
+
+# Reiniciar bot de telegram 
+docker compose restart telegram_bot
+
+```
+
+
 ## Analisis cuantitativo multicapa
 ```bash
 # Pipeline completo (posiciones del ultimo snapshot)

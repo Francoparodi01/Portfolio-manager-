@@ -1,13 +1,9 @@
-"""
-src/collector/data/models.py
-Modelos de dominio: PortfolioSnapshot, Position, MarketAsset.
-Inmutables (frozen dataclasses). Sin dependencias de ORM.
-"""
+"""src/collector/data/models.py — Modelos de dominio del portfolio."""
 from __future__ import annotations
+
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
 from enum import Enum
 from typing import Optional
 
@@ -17,98 +13,80 @@ def utcnow() -> datetime:
 
 
 class AssetType(str, Enum):
-    ACCION = "ACCION"
-    CEDEAR = "CEDEAR"
-    BONO = "BONO"
-    FCI = "FCI"
-    CASH = "CASH"
-    UNKNOWN = "UNKNOWN"
+    CEDEAR   = "CEDEAR"
+    ACCION   = "ACCION"
+    BONO     = "BONO"
+    FCI      = "FCI"
+    DOLAR    = "DOLAR"
+    UNKNOWN  = "UNKNOWN"
 
 
 class Currency(str, Enum):
     ARS = "ARS"
     USD = "USD"
-    USD_MEP = "USD_MEP"
+    MEP = "MEP"
 
 
-@dataclass(frozen=True)
+@dataclass
 class Position:
     ticker: str
     asset_type: AssetType
     currency: Currency
-    quantity: Decimal
-    avg_cost: Decimal
-    current_price: Decimal
-    market_value: Decimal
-    unrealized_pnl: Decimal
-    unrealized_pnl_pct: Decimal
+    quantity: float
+    avg_cost: float
+    current_price: float
+    market_value: float
+    unrealized_pnl: float
+    unrealized_pnl_pct: float
+    weight_in_portfolio: Optional[float] = None
     sector: Optional[str] = None
-    weight_in_portfolio: Optional[Decimal] = None
 
-    def __post_init__(self):
-        if not self.ticker:
-            raise ValueError("ticker no puede ser vacío")
-        if self.quantity < 0:
-            raise ValueError(f"quantity negativa para {self.ticker}")
-        if self.current_price < 0:
-            raise ValueError(f"current_price negativo para {self.ticker}")
+    def to_dict(self) -> dict:
+        return {
+            "ticker": self.ticker,
+            "asset_type": self.asset_type.value,
+            "currency": self.currency.value,
+            "quantity": float(self.quantity),
+            "avg_cost": float(self.avg_cost),
+            "current_price": float(self.current_price),
+            "market_value": float(self.market_value),
+            "unrealized_pnl": float(self.unrealized_pnl),
+            "unrealized_pnl_pct": float(self.unrealized_pnl_pct),
+            "weight_in_portfolio": float(self.weight_in_portfolio) if self.weight_in_portfolio is not None else None,
+            "sector": self.sector,
+        }
 
 
-@dataclass(frozen=True)
+@dataclass
 class PortfolioSnapshot:
     scraped_at: datetime
-    positions: tuple[Position, ...]
-    total_value_ars: Decimal
-    cash_ars: Decimal
+    positions: list[Position]
+    total_value_ars: float
+    cash_ars: float
     confidence_score: float
-    dom_hash: str = ""
-    raw_html_hash: str = ""
+    dom_hash: str
+    raw_html_hash: str
     snapshot_id: uuid.UUID = field(default_factory=uuid.uuid4)
-
-    def validate(self) -> list[str]:
-        errors = []
-        if not self.positions:
-            errors.append("Sin posiciones")
-        if self.total_value_ars < 0:
-            errors.append("total_value_ars negativo")
-        if not (0.0 <= self.confidence_score <= 1.0):
-            errors.append(f"confidence_score fuera de rango: {self.confidence_score}")
-        return errors
 
     def to_dict(self) -> dict:
         return {
             "snapshot_id": str(self.snapshot_id),
             "scraped_at": self.scraped_at.isoformat(),
-            "total_value_ars": str(self.total_value_ars),
-            "cash_ars": str(self.cash_ars),
-            "confidence_score": self.confidence_score,
-            "positions_count": len(self.positions),
-            "positions": [
-                {
-                    "ticker": p.ticker,
-                    "asset_type": p.asset_type.value,
-                    "currency": p.currency.value,
-                    "quantity": str(p.quantity),
-                    "avg_cost": str(p.avg_cost),
-                    "current_price": str(p.current_price),
-                    "market_value": str(p.market_value),
-                    "unrealized_pnl": str(p.unrealized_pnl),
-                    "unrealized_pnl_pct": str(p.unrealized_pnl_pct),
-                    "sector": p.sector,
-                    "weight_in_portfolio": str(p.weight_in_portfolio) if p.weight_in_portfolio else None,
-                }
-                for p in self.positions
-            ],
+            "total_value_ars": float(self.total_value_ars),
+            "cash_ars": float(self.cash_ars),
+            "confidence_score": float(self.confidence_score),
+            "dom_hash": self.dom_hash,
+            "raw_html_hash": self.raw_html_hash,
+            "positions": [p.to_dict() for p in self.positions],
         }
 
 
-@dataclass(frozen=True)
+@dataclass
 class MarketAsset:
     ticker: str
-    name: str
     asset_type: AssetType
     currency: Currency
-    last_price: Decimal
-    scraped_at: datetime
-    change_pct_1d: Optional[Decimal] = None
-    volume: Optional[Decimal] = None
+    last_price: float
+    change_pct_1d: Optional[float] = None
+    volume: Optional[float] = None
+    scraped_at: datetime = field(default_factory=utcnow)

@@ -1,64 +1,67 @@
 """
 src/analysis/optimizer.py
-Portfolio Optimizer — 3 métodos + selección automática por régimen macro.
+Portfolio Optimizer — Black-Litterman + fallback numpy puro.
 
-Métodos:
-  MAX_SHARPE   → maximiza retorno ajustado por riesgo
-  MIN_VARIANCE → minimiza volatilidad total (defensivo)
-  RISK_PARITY  → igual contribución de riesgo por activo (crisis)
-
-Selección automática:
-  risk_on  + VIX < 25 → MAX_SHARPE
-  neutral  + VIX < 25 → MAX_SHARPE
-  risk_off + VIX < 25 → MIN_VARIANCE
-  VIX 25-35           → MIN_VARIANCE
-  VIX > 35            → RISK_PARITY
-
-Constraints:
-  w_min = 2%   por activo incluido
-  w_max = 40%  por activo
-  sum   = 100%
-  threshold rebalance = 3% (configurable)
+ARQUITECTURA NUEVA: Risk engine en SERIE antes del optimizer.
+  1. _get_risk_gate_state() evalúa el estado global de risk
+  2. El optimizer SOLO corre dentro del espacio permitido por el gate:
+       NORMAL   → optimizer opera sin restricciones adicionales
+       CAUTIOUS → STEP_MAX reducido 50%, solo se permiten reducciones de posiciones
+                  con score negativo. No se permiten nuevas compras.
+       BLOCKED  → no hay rebalanceo. Solo se ejecutan stops (drawdown crítico).
+  3. El RebalanceReport expone risk_gate_state y risk_gate_reason para el reporte.
 """
 from __future__ import annotations
+
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
+
+from .macro import MacroSnapshot, score_macro_for_ticker
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ── Parámetros ────────────────────────────────────────────────────────────────
-W_MIN           = 0.02   # mínimo 2% por activo
-W_MAX           = 0.40   # máximo 40% por activo
-REBALANCE_THRESH = 0.03  # ignorar deltas < 3%
-RF_ANNUAL       = 0.05   # tasa libre de riesgo (aprox USD)
-MIN_HISTORY_DAYS = 60    # excluir activos con menos datos
-HISTORY_PERIOD  = "1y"   # ventana para el optimizer
+# ── Parámetros globales ───────────────────────────────────────────────────────
+W_MIN            = 0.02
+W_MAX            = 0.40
+REBALANCE_THRESH = 0.10
+RF_ANNUAL        = 0.05
+RISK_AVERSION    = 2.5
+TAU              = 0.05
+MIN_HISTORY_DAYS = 60
+HISTORY_PERIOD   = "1y"
+
+# Risk gate — umbrales para cambiar estado
+VIX_CAUTIOUS = 28    # antes era 25 para MIN_VARIANCE — ahora modifica comportamiento
+VIX_BLOCKED  = 38    # antes era 35 para RISK_PARITY — ahora bloquea
+DD_CAUTIOUS  = -0.12 # drawdown > 12%: modo cauteloso
+DD_BLOCKED   = -0.22 # drawdown > 22%: bloqueado
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
 
 @dataclass
 class OptimizationResult:
-    method: str                      # "MAX_SHARPE" | "MIN_VARIANCE" | "RISK_PARITY"
-    method_reason: str               # por qué se eligió este método
-    weights: dict[str, float]        # ticker → peso óptimo (suma = 1)
-    expected_return_annual: float    # retorno anual esperado
-    expected_vol_annual: float       # volatilidad anual esperada
+    method: str
+    method_reason: str
+    weights: dict[str, float]
+    expected_return_annual: float
+    expected_vol_annual: float
     sharpe_ratio: float
     n_assets: int
+    views_used: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class RebalanceTrade:
     ticker: str
-    weight_current: float   # peso actual en el portfolio
-    weight_optimal: float   # peso sugerido por el optimizer
-    delta: float            # weight_optimal - weight_current
-    action: str             # "COMPRAR" | "REDUCIR" | "VENDER" | "MANTENER" | "NUEVO"
-    amount_ars: float       # monto absoluto en ARS
+    weight_current: float
+    weight_optimal: float
+    delta: float
+    action: str
+    amount_ars: float
 
 
 @dataclass
@@ -67,26 +70,26 @@ class RebalanceReport:
     trades: list[RebalanceTrade]
     total_sells_ars: float
     total_buys_ars: float
-    net_cash_needed: float    # >0 = necesita cash extra, <0 = genera cash
+    net_cash_needed: float
     n_trades: int
     portfolio_value_ars: float
     threshold_used: float
+    # Nuevos campos del risk gate
+    risk_gate_state: str = "NORMAL"   # NORMAL | CAUTIOUS | BLOCKED
+    risk_gate_reason: str = ""
 
     def to_telegram(self) -> str:
         method_icons = {
-            "MAX_SHARPE":   "📈",
-            "MIN_VARIANCE": "🛡️",
-            "RISK_PARITY":  "⚖️",
+            "BLACK_LITTERMAN": "🧠", "MAX_SHARPE": "📈",
+            "MIN_VARIANCE": "🛡️", "RISK_PARITY": "⚖️",
         }
         action_icons = {
-            "COMPRAR": "🟢 COMPRAR",
-            "NUEVO":   "🟢 NUEVO",
-            "REDUCIR": "🔴 REDUCIR",
-            "VENDER":  "🔴 VENDER",
-            "MANTENER":"🟡 MANTENER",
+            "COMPRAR": "🟢 COMPRAR", "NUEVO": "🟢 NUEVO",
+            "REDUCIR": "🔴 REDUCIR", "VENDER": "🔴 VENDER",
+            "MANTENER": "🟡 MANTENER",
         }
-
-        opt = self.optimization
+        gate_icons = {"NORMAL": "✅", "CAUTIOUS": "🟡", "BLOCKED": "🔴"}
+        opt  = self.optimization
         icon = method_icons.get(opt.method, "📊")
 
         lines = [
@@ -94,241 +97,378 @@ class RebalanceReport:
             f"{icon} <b>PORTFOLIO OPTIMIZER</b>",
             f"   Método: <b>{opt.method}</b>",
             f"   Motivo: <i>{opt.method_reason}</i>",
+            f"   {gate_icons.get(self.risk_gate_state, '⚪')} Risk gate: "
+            f"<b>{self.risk_gate_state}</b>"
+            + (f" — <i>{self.risk_gate_reason}</i>" if self.risk_gate_reason else ""),
             f"   Portfolio: <b>${self.portfolio_value_ars:,.0f} ARS</b>",
-            f"   Retorno esperado: {opt.expected_return_annual:.1%}  "
+            f"   Ret esperado: {opt.expected_return_annual:.1%}  "
             f"Vol: {opt.expected_vol_annual:.1%}  Sharpe: {opt.sharpe_ratio:.2f}",
-            "",
-            "<b>Rebalanceo sugerido:</b>",
         ]
 
-        # Tabla de trades
+        if opt.views_used:
+            views_str = "  ".join(
+                f"{t}:{v:+.2f}" for t, v in sorted(opt.views_used.items())
+            )
+            lines.append(f"   Views: <code>{views_str}</code>")
+
+        lines.append("")
+        lines.append("<b>Rebalanceo sugerido:</b>")
+
         for t in sorted(self.trades, key=lambda x: x.delta):
             if t.action == "MANTENER":
                 continue
-            delta_str = f"{t.delta:+.1%}"
-            monto_str = f"${abs(t.amount_ars):,.0f}"
             lines.append(
                 f"  {action_icons.get(t.action, t.action):15s} "
                 f"<b>{t.ticker:6s}</b> "
                 f"{t.weight_current:.1%} → {t.weight_optimal:.1%} "
-                f"({delta_str})  {monto_str} ARS"
+                f"({t.delta:+.1%})  <code>${abs(t.amount_ars):,.0f}</code> ARS"
             )
 
-        # Mantener (al final, sin monto)
         mantener = [t.ticker for t in self.trades if t.action == "MANTENER"]
         if mantener:
             lines.append(f"  🟡 MANTENER: {', '.join(mantener)}")
 
         lines += [
             "",
-            f"   💰 Ventas estimadas:  <b>${self.total_sells_ars:,.0f} ARS</b>",
-            f"   🛒 Compras estimadas: <b>${self.total_buys_ars:,.0f} ARS</b>",
+            f"   💰 Ventas:  <b>${self.total_sells_ars:,.0f} ARS</b>",
+            f"   🛒 Compras: <b>${self.total_buys_ars:,.0f} ARS</b>",
         ]
-        if self.net_cash_needed > 5000:
-            lines.append(f"   ⚠️ Cash adicional necesario: ${self.net_cash_needed:,.0f} ARS")
-        elif self.net_cash_needed < -5000:
+        if self.net_cash_needed > 5_000:
+            lines.append(f"   ⚠️ Cash adicional: ${self.net_cash_needed:,.0f} ARS")
+        elif self.net_cash_needed < -5_000:
             lines.append(f"   ✅ Cash generado: ${abs(self.net_cash_needed):,.0f} ARS")
 
         return "\n".join(lines)
 
 
+# ── Risk Gate — evaluación en serie ANTES del optimizer ──────────────────────
+
+def _get_risk_gate_state(
+    vix: Optional[float],
+    portfolio_drawdown: float,
+    macro_regime: dict,
+) -> tuple[str, str]:
+    """
+    Devuelve (state, reason) donde state ∈ {NORMAL, CAUTIOUS, BLOCKED}.
+
+    Este es el árbitro. El optimizer NO corre hasta que este gate define el espacio.
+    BLOCKED: solo stops, no rebalanceo.
+    CAUTIOUS: solo reducciones de posiciones negativas, no nuevas compras.
+    NORMAL: optimizer opera libremente.
+    """
+    vix_val = vix or 20.0
+    dd = portfolio_drawdown
+
+    if vix_val > VIX_BLOCKED or dd <= DD_BLOCKED:
+        reason_parts = []
+        if vix_val > VIX_BLOCKED:
+            reason_parts.append(f"VIX {vix_val:.0f} > {VIX_BLOCKED}")
+        if dd <= DD_BLOCKED:
+            reason_parts.append(f"drawdown {dd:.1%}")
+        return "BLOCKED", " + ".join(reason_parts)
+
+    if vix_val > VIX_CAUTIOUS or dd <= DD_CAUTIOUS or macro_regime.get("market") == "risk_off":
+        reason_parts = []
+        if vix_val > VIX_CAUTIOUS:
+            reason_parts.append(f"VIX {vix_val:.0f} > {VIX_CAUTIOUS}")
+        if dd <= DD_CAUTIOUS:
+            reason_parts.append(f"drawdown {dd:.1%}")
+        if macro_regime.get("market") == "risk_off":
+            reason_parts.append("régimen risk_off")
+        return "CAUTIOUS", " + ".join(reason_parts)
+
+    return "NORMAL", ""
+
+
+def _apply_risk_gate_to_trades(
+    trades: list[RebalanceTrade],
+    gate_state: str,
+    score_map: dict[str, float],
+) -> list[RebalanceTrade]:
+    """
+    Filtra los trades según el estado del risk gate.
+    CAUTIOUS: bloquea compras de activos con score >= 0 (solo deja reducir negativos)
+    BLOCKED: bloquea todo excepto los stops más urgentes (delta < -0.15)
+    """
+    if gate_state == "NORMAL":
+        return trades
+
+    filtered = []
+    blocked_count = 0
+
+    for t in trades:
+        if t.action == "MANTENER":
+            filtered.append(t)
+            continue
+
+        score = score_map.get(t.ticker, 0.0)
+
+        if gate_state == "BLOCKED":
+            # Solo dejar pasar stops urgentes
+            if t.action in ("VENDER", "REDUCIR") and t.delta < -0.15:
+                filtered.append(t)
+            else:
+                logger.info(f"  Gate BLOCKED: {t.action} {t.ticker} bloqueado")
+                blocked_count += 1
+                filtered.append(RebalanceTrade(
+                    ticker=t.ticker, weight_current=t.weight_current,
+                    weight_optimal=t.weight_current, delta=0.0,
+                    action="MANTENER", amount_ars=0.0,
+                ))
+
+        elif gate_state == "CAUTIOUS":
+            # Bloquear compras cuando score es negativo o señal débil
+            # (score >= -0.05 con convicción baja se trata como "sin señal")
+            should_block = t.action in ("COMPRAR", "NUEVO") and score > -0.10
+            if should_block:
+                logger.info(
+                    f"  Gate CAUTIOUS: {t.action} {t.ticker} bloqueado "
+                    f"(score={score:+.2f}, {t.weight_current:.1%}→{t.weight_optimal:.1%})"
+                )
+                blocked_count += 1
+                filtered.append(RebalanceTrade(
+                    ticker=t.ticker, weight_current=t.weight_current,
+                    weight_optimal=t.weight_current, delta=0.0,
+                    action="MANTENER", amount_ars=0.0,
+                ))
+            else:
+                filtered.append(t)
+
+    if blocked_count:
+        logger.info(f"Risk gate {gate_state}: {blocked_count} trade(s) bloqueados")
+
+    return filtered
+
+
 # ── Carga de datos ────────────────────────────────────────────────────────────
 
-def _fetch_returns(tickers: list[str]) -> "pd.DataFrame":
-    """Descarga 1 año de retornos diarios para todos los tickers."""
+def _fetch_returns(tickers: list[str]):
     try:
         import pandas as pd
         from src.analysis.technical import fetch_history
 
         data = {}
-        excluded = []
         for ticker in tickers:
             df = fetch_history(ticker, period=HISTORY_PERIOD)
             if df is None or "Close" not in df.columns:
-                excluded.append(ticker)
                 continue
             prices = df["Close"].squeeze()
             if len(prices) < MIN_HISTORY_DAYS:
-                excluded.append(ticker)
-                logger.warning(f"Optimizer: {ticker} excluido (solo {len(prices)} días)")
+                logger.warning(f"Optimizer: {ticker} excluido ({len(prices)} días)")
                 continue
             data[ticker] = prices.pct_change().dropna()
 
-        if excluded:
-            logger.warning(f"Optimizer: excluidos por datos insuficientes: {excluded}")
-
         if not data:
+            import pandas as pd
             return pd.DataFrame()
 
+        import pandas as pd
         returns = pd.DataFrame(data).dropna(how="all").fillna(0)
         return returns
-
     except Exception as e:
         logger.error(f"Error descargando retornos: {e}")
         import pandas as pd
         return pd.DataFrame()
 
 
-# ── Utilidades de portfolio ───────────────────────────────────────────────────
+# ── Utilidades ────────────────────────────────────────────────────────────────
 
-def _portfolio_stats(weights: np.ndarray, mu: np.ndarray, cov: np.ndarray, rf: float = RF_ANNUAL):
-    """Retorno esperado, volatilidad y Sharpe anualizado."""
-    ret = float(np.dot(weights, mu))
-    vol = float(np.sqrt(weights @ cov @ weights))
-    sharpe = (ret - rf) / vol if vol > 0 else 0.0
+def _portfolio_stats(weights, mu, cov):
+    w = np.array(weights)
+    ret = float(w @ mu)
+    vol = float(np.sqrt(w @ cov @ w))
+    sharpe = (ret - RF_ANNUAL) / vol if vol > 1e-10 else 0.0
     return ret, vol, sharpe
 
 
-def _apply_constraints(weights: np.ndarray, tickers: list[str]) -> np.ndarray:
-    """Clipea pesos a [W_MIN, W_MAX] y renormaliza."""
-    w = np.clip(weights, W_MIN, W_MAX)
-    total = w.sum()
-    return w / total if total > 0 else w
+def _project_simplex_bounds(w: np.ndarray, w_min: float = W_MIN,
+                             w_max_arr: np.ndarray = None) -> np.ndarray:
+    n = len(w)
+    wmax = w_max_arr if w_max_arr is not None else np.full(n, W_MAX)
+    w = np.clip(w, w_min, wmax)
+    for _ in range(300):
+        diff = w.sum() - 1.0
+        if abs(diff) < 1e-10:
+            break
+        if diff > 0:
+            red = w - w_min
+            tot = red.sum()
+            if tot > 1e-10:
+                w -= red * (diff / tot)
+        else:
+            aum = wmax - w
+            tot = aum.sum()
+            if tot > 1e-10:
+                w += aum * (-diff / tot)
+        w = np.clip(w, w_min, wmax)
+    return w
 
 
-# ── Optimizadores ─────────────────────────────────────────────────────────────
+def _dynamic_w_max(
+    score: float,
+    w_current: float,
+    gate_state: str,
+    conviction: float = 0.5,
+) -> float:
+    """
+    W_MAX con doble clamp: por score Y por convicción.
 
-def _optimize_max_sharpe(mu: np.ndarray, cov: np.ndarray, tickers: list[str]) -> np.ndarray:
-    """Maximiza el Sharpe ratio usando scipy."""
-    from scipy.optimize import minimize
+    Regla principal (score):
+      score > 0.15  → W_MAX normal (o reducido si gate=CAUTIOUS)
+      score > 0.0   → 35% (o 26% si CAUTIOUS)
+      score > -0.15 → max(w_current, 25%) — no aumentar si conviction < 50%
+      score > -0.40 → w_current * 0.7 — reducción suave forzada
+      score ≤ -0.40 → W_MIN — salida forzada
 
+    Clamp adicional por conviction baja:
+      Si conviction < 0.40 Y score < 0: no aumentar sobre w_current.
+      Esto evita que MIN_VARIANCE compre fuerte en activos con señal débil/negativa.
+    """
+    base_max = W_MAX if gate_state == "NORMAL" else W_MAX * 0.75
+
+    if score > 0.15:
+        cap = base_max
+    elif score > 0.0:
+        cap = min(0.35, base_max)
+    elif score > -0.15:
+        # Señal negativa débil: no aumentar si conviction baja
+        if conviction < 0.40:
+            cap = min(w_current, 0.25)   # congelar en peso actual o menos
+        else:
+            cap = min(0.25, base_max)
+    elif score > -0.40:
+        cap = max(w_current * 0.7, W_MIN * 2)  # reducción suave forzada
+    else:
+        cap = W_MIN  # salida forzada
+
+    return round(float(cap), 4)
+
+
+# ── Black-Litterman ───────────────────────────────────────────────────────────
+
+def _optimize_black_litterman(returns, universe, score_map, tau=TAU,
+                               risk_aversion=RISK_AVERSION, w_max_arr=None):
+    try:
+        from pypfopt import BlackLittermanModel, EfficientFrontier, risk_models, expected_returns
+
+        mu_hist = expected_returns.mean_historical_return(
+            returns, returns_data=True, compounding=True, frequency=252)
+        cov_bl = risk_models.CovarianceShrinkage(
+            returns, returns_data=True, frequency=252).ledoit_wolf()
+
+        viewdict = {}
+        view_conf = {}
+        for ticker in universe:
+            score = score_map.get(ticker, 0.0)
+            viewdict[ticker] = RF_ANNUAL + score * 0.55
+            view_conf[ticker] = min(0.35 + abs(score) * 0.85, 0.95)
+
+        bl = BlackLittermanModel(
+            cov_matrix=cov_bl, pi="market",
+            absolute_views=viewdict,
+            view_confidences=list(view_conf.values()),
+            tau=tau, risk_aversion=risk_aversion,
+        )
+        bl_returns = bl.bl_returns()
+        bl_cov = bl.bl_cov()
+
+        ef = EfficientFrontier(bl_returns, bl_cov, weight_bounds=(W_MIN, W_MAX))
+        if w_max_arr is not None:
+            ef.weight_bounds = list(zip([W_MIN] * len(universe), w_max_arr.tolist()))
+        ef.max_sharpe(risk_free_rate=RF_ANNUAL)
+        cleaned = ef.clean_weights()
+
+        weights = np.array([cleaned.get(t, W_MIN) for t in universe])
+        weights = np.clip(weights, W_MIN, w_max_arr if w_max_arr is not None else np.full(len(universe), W_MAX))
+        weights /= weights.sum()
+        logger.info(f"BL weights: { {t: f'{v:.1%}' for t, v in zip(universe, weights)} }")
+        return weights
+    except Exception as e:
+        logger.warning(f"Black-Litterman falló ({e}) — usando fallback")
+        mu = returns.mean().values * 252
+        cov = returns.cov().values * 252
+        return _optimize_max_sharpe_np(mu, cov, universe, w_max_arr)
+
+
+# ── Optimizadores numpy (fallback) ────────────────────────────────────────────
+
+def _optimize_max_sharpe_np(mu, cov, tickers, w_max_arr=None):
     n = len(tickers)
-    rf = RF_ANNUAL / 252  # diario
-
-    def neg_sharpe(w):
-        ret = np.dot(w, mu)
-        vol = np.sqrt(w @ cov @ w)
-        return -(ret - rf * 252) / (vol * np.sqrt(252)) if vol > 1e-10 else 0.0
-
-    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1}]
-    bounds = [(W_MIN, W_MAX)] * n
-    w0 = np.ones(n) / n
-
-    result = minimize(neg_sharpe, w0, method="SLSQP",
-                      bounds=bounds, constraints=constraints,
-                      options={"maxiter": 1000, "ftol": 1e-9})
-
-    if result.success:
-        return _apply_constraints(result.x, tickers)
-    logger.warning("Max Sharpe no convergió — usando equal weight")
-    return np.ones(n) / n
+    wmax = w_max_arr if w_max_arr is not None else np.full(n, W_MAX)
+    w = np.clip(np.ones(n) / n, W_MIN, wmax); w /= w.sum()
+    best_w, best_sr, lr = w.copy(), -np.inf, 0.01
+    for i in range(6000):
+        sigma = np.sqrt(max(w @ cov @ w, 1e-12))
+        sr = (float(w @ mu) - RF_ANNUAL) / sigma
+        grad = (mu - sr * (cov @ w) / sigma) / sigma
+        w = _project_simplex_bounds(w + lr * grad, w_max_arr=wmax)
+        if i % 1000 == 999: lr *= 0.7
+        sr_new = (float(w @ mu) - RF_ANNUAL) / max(np.sqrt(w @ cov @ w), 1e-12)
+        if sr_new > best_sr: best_sr, best_w = sr_new, w.copy()
+    return best_w
 
 
-def _optimize_min_variance(mu: np.ndarray, cov: np.ndarray, tickers: list[str]) -> np.ndarray:
-    """Minimiza la varianza del portfolio."""
-    from scipy.optimize import minimize
-
+def _optimize_min_variance_np(mu, cov, tickers, w_max_arr=None):
     n = len(tickers)
-
-    def portfolio_variance(w):
-        return float(w @ cov @ w)
-
-    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1}]
-    bounds = [(W_MIN, W_MAX)] * n
-    w0 = np.ones(n) / n
-
-    result = minimize(portfolio_variance, w0, method="SLSQP",
-                      bounds=bounds, constraints=constraints,
-                      options={"maxiter": 1000, "ftol": 1e-12})
-
-    if result.success:
-        return _apply_constraints(result.x, tickers)
-    logger.warning("Min Variance no convergió — usando equal weight")
-    return np.ones(n) / n
+    wmax = w_max_arr if w_max_arr is not None else np.full(n, W_MAX)
+    w = np.clip(np.ones(n) / n, W_MIN, wmax); w /= w.sum()
+    best_w, best_var, lr = w.copy(), np.inf, 0.005
+    for i in range(6000):
+        w = _project_simplex_bounds(w - lr * 2.0 * (cov @ w), w_max_arr=wmax)
+        if i % 1000 == 999: lr *= 0.8
+        v = float(w @ cov @ w)
+        if v < best_var: best_var, best_w = v, w.copy()
+    return best_w
 
 
-def _optimize_risk_parity(mu: np.ndarray, cov: np.ndarray, tickers: list[str]) -> np.ndarray:
-    """Risk Parity: igual contribución de riesgo por activo."""
-    from scipy.optimize import minimize
-
+def _optimize_risk_parity_np(mu, cov, tickers, w_max_arr=None):
     n = len(tickers)
-    target_rc = np.ones(n) / n  # contribución objetivo = 1/n
-
-    def risk_parity_objective(w):
+    wmax = w_max_arr if w_max_arr is not None else np.full(n, W_MAX)
+    w = np.clip(np.ones(n) / n, W_MIN, wmax); w /= w.sum()
+    target = np.ones(n) / n
+    best_w, best_obj, lr = w.copy(), np.inf, 0.005
+    for i in range(10000):
         w = np.maximum(w, 1e-8)
-        sigma = np.sqrt(w @ cov @ w)
-        mrc = cov @ w / sigma          # marginal risk contribution
-        rc  = w * mrc / sigma          # risk contribution relativa
-        return float(np.sum((rc - target_rc) ** 2))
-
-    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1}]
-    bounds = [(W_MIN, W_MAX)] * n
-    w0 = np.ones(n) / n
-
-    result = minimize(risk_parity_objective, w0, method="SLSQP",
-                      bounds=bounds, constraints=constraints,
-                      options={"maxiter": 2000, "ftol": 1e-10})
-
-    if result.success:
-        return _apply_constraints(result.x, tickers)
-    logger.warning("Risk Parity no convergió — usando equal weight")
-    return np.ones(n) / n
+        sigma = max(np.sqrt(w @ cov @ w), 1e-12)
+        mrc = cov @ w / sigma; rc = w * mrc / sigma
+        w = _project_simplex_bounds(w - lr * 2.0 * (rc - target) * mrc / sigma, w_max_arr=wmax)
+        if i % 2000 == 1999: lr *= 0.8
+        obj = float(np.sum((rc - target) ** 2))
+        if obj < best_obj: best_obj, best_w = obj, w.copy()
+    return best_w
 
 
-# ── Selección de método ───────────────────────────────────────────────────────
+# ── Selección de método (ahora informativa — no controla comportamiento) ──────
 
-def _select_method(macro_regime: dict, vix: Optional[float]) -> tuple[str, str]:
+def _select_method(macro_regime: dict, vix: Optional[float],
+                   gate_state: str) -> tuple[str, str]:
     """
-    Selecciona el método óptimo según régimen macro y VIX.
-    Retorna (method, reason).
+    Con el risk gate en serie, _select_method es solo una elección de
+    función objetivo — ya no necesita cambiar el comportamiento global
+    porque el gate ya definió el espacio de acción permitido.
     """
-    market  = macro_regime.get("market", "neutral")
     vix_val = vix or 20.0
+    market = macro_regime.get("market", "neutral")
 
-    if vix_val > 35:
-        return "RISK_PARITY", f"VIX extremo ({vix_val:.0f}) — máxima diversificación"
-    if vix_val > 25:
-        return "MIN_VARIANCE", f"VIX elevado ({vix_val:.0f}) — modo defensivo"
-    if market == "risk_off":
-        return "MIN_VARIANCE", f"Régimen risk_off — preservar capital"
-    if market == "risk_on":
-        return "MAX_SHARPE", f"Régimen risk_on — maximizar retorno ajustado"
-    return "MAX_SHARPE", f"Régimen neutral — maximizar Sharpe"
+    if gate_state == "CAUTIOUS" or vix_val > 25:
+        return "MIN_VARIANCE", f"gate={gate_state}, VIX {vix_val:.0f} — minimizar volatilidad"
+    if market in ("risk_off",):
+        return "BLACK_LITTERMAN", f"risk_off + VIX {vix_val:.0f} — BL conservador (tau bajo)"
+    return "BLACK_LITTERMAN", f"Régimen {market} — BL con views del pipeline"
 
 
-# ── Filtro de universo ────────────────────────────────────────────────────────
+# ── Universo ──────────────────────────────────────────────────────────────────
 
-def _build_universe(
-    current_positions: list[dict],
-    synthesis_results: list,          # list[SynthesisResult]
-    market_assets: list[dict],        # activos scrapeados de Cocos
-) -> list[str]:
-    """
-    Construye el universo de activos para el optimizer.
-
-    Incluye:
-      1. Posiciones actuales (siempre, para calcular delta de salida)
-      2. Activos del mercado scrapeado con score synthesis > -0.15
-         (no SELL/REDUCE confirmados)
-
-    Excluye:
-      - Activos sin ticker USD claro
-      - Duplicados
-    """
+def _build_universe(current_positions, synthesis_results, market_assets) -> list[str]:
     universe = set()
-
-    # Posiciones actuales — siempre incluidas
     for pos in current_positions:
         t = pos.get("ticker", "").strip().upper()
-        if t:
+        market_value = float(pos.get("market_value", 0) or 0)
+        if t and market_value > 0:
             universe.add(t)
-
-    # Scores del pipeline (solo los no-negativos)
-    score_map = {r.ticker: r.final_score for r in synthesis_results}
-    for ticker, score in score_map.items():
-        if score > -0.15:
-            universe.add(ticker)
-
-    # Activos de mercado scrapeados — solo CEDEARs con ticker reconocible
-    # Los CEDEARs de Cocos tienen el ticker del subyacente USD directamente
-    for asset in market_assets:
-        ticker = asset.get("ticker", "").strip().upper()
-        if ticker and len(ticker) <= 5 and ticker.isalpha():
-            # Filtrar por score si ya fue analizado
-            if ticker in score_map and score_map[ticker] <= -0.15:
-                continue
-            universe.add(ticker)
-
+    if not universe:
+        for r in synthesis_results:
+            universe.add(r.ticker)
     logger.info(f"Universo optimizer: {len(universe)} activos — {sorted(universe)}")
     return sorted(universe)
 
@@ -344,87 +484,120 @@ def run_optimizer(
     synthesis_results: list,
     market_assets: list[dict],
     threshold: float = REBALANCE_THRESH,
+    portfolio_drawdown: float = 0.0,
 ) -> Optional[RebalanceReport]:
-    """
-    Pipeline completo del optimizer.
-
-    Args:
-        current_positions: posiciones actuales con 'ticker' y 'market_value'
-        portfolio_value_ars: valor total del portfolio en ARS
-        cash_ars: cash disponible en ARS
-        macro_regime: dict del get_macro_regime()
-        vix: VIX actual
-        synthesis_results: list[SynthesisResult] del pipeline de scoring
-        market_assets: activos scrapeados del mercado (CEDEARs + Acciones)
-        threshold: delta mínimo para ejecutar un trade (default 3%)
-
-    Returns:
-        RebalanceReport o None si falla
-    """
     try:
         import pandas as pd
 
-        # 1. Universo
+        # ── PASO 0: Risk gate — define el espacio antes de cualquier optimización ──
+        gate_state, gate_reason = _get_risk_gate_state(vix, portfolio_drawdown, macro_regime)
+        logger.info(f"Risk gate: {gate_state}" + (f" ({gate_reason})" if gate_reason else ""))
+
+        if gate_state == "BLOCKED":
+            logger.warning("Risk gate BLOCKED — optimizer no corre, solo stops")
+            # Construir reporte vacío con el gate explicado
+            empty_opt = OptimizationResult(
+                method="BLOCKED", method_reason=gate_reason,
+                weights={}, expected_return_annual=0.0,
+                expected_vol_annual=0.0, sharpe_ratio=0.0, n_assets=0,
+            )
+            # Solo mantener todo
+            trades = []
+            for pos in current_positions:
+                t = pos.get("ticker", "")
+                w = float(pos.get("market_value", 0) or 0) / portfolio_value_ars if portfolio_value_ars > 0 else 0
+                trades.append(RebalanceTrade(
+                    ticker=t, weight_current=round(w, 4), weight_optimal=round(w, 4),
+                    delta=0.0, action="MANTENER", amount_ars=0.0,
+                ))
+            return RebalanceReport(
+                optimization=empty_opt, trades=trades,
+                total_sells_ars=0.0, total_buys_ars=0.0,
+                net_cash_needed=0.0, n_trades=0,
+                portfolio_value_ars=portfolio_value_ars, threshold_used=threshold,
+                risk_gate_state=gate_state, risk_gate_reason=gate_reason,
+            )
+
+        # ── PASO 1: Universo ──────────────────────────────────────────────────
         universe = _build_universe(current_positions, synthesis_results, market_assets)
         if len(universe) < 2:
-            logger.warning("Optimizer: universo insuficiente (<2 activos)")
+            logger.warning("Optimizer: universo insuficiente")
             return None
 
-        # 2. Retornos históricos
+        # ── PASO 2: Retornos históricos ───────────────────────────────────────
         returns = _fetch_returns(universe)
         if returns.empty or len(returns.columns) < 2:
-            logger.warning("Optimizer: no hay suficientes datos históricos")
+            logger.warning("Optimizer: datos históricos insuficientes")
             return None
-
-        # Recalcular universe con los que sí tienen datos
         universe = list(returns.columns)
         n = len(universe)
 
-        # 3. Parámetros estadísticos
-        mu  = returns.mean().values          # retorno diario medio
-        cov = returns.cov().values * 252     # covarianza anualizada
-        mu_annual = mu * 252                 # retorno anual
+        # ── PASO 3: Estadísticas base ─────────────────────────────────────────
+        mu_daily = returns.mean().values
+        cov = returns.cov().values * 252
+        mu_ann = mu_daily * 252
 
-        # 4. Seleccionar método
-        method, reason = _select_method(macro_regime, vix)
+        # ── PASO 4: Scores y pesos actuales ──────────────────────────────────
+        score_map = {r.ticker: r.final_score for r in synthesis_results}
+        current_w_map: dict[str, float] = {}
+        for pos in current_positions:
+            t = pos.get("ticker", "").upper()
+            mv = float(pos.get("market_value", 0) or 0)
+            current_w_map[t] = mv / portfolio_value_ars if portfolio_value_ars > 0 else 0.0
 
-        # 5. Optimizar
-        if method == "MAX_SHARPE":
-            raw_weights = _optimize_max_sharpe(mu_annual, cov, universe)
+        # ── PASO 5: W_MAX dinámico respetando gate + conviction ──────────────
+        # conviction_map: conviction por ticker del pipeline de síntesis
+        conviction_map = {r.ticker: getattr(r, 'conviction', r.confidence)
+                          for r in synthesis_results}
+        w_max_arr = np.array([
+            _dynamic_w_max(
+                score_map.get(t, 0.0),
+                current_w_map.get(t, 0.0),
+                gate_state,
+                conviction=conviction_map.get(t, 0.5),
+            )
+            for t in universe
+        ])
+        logger.info(f"W_MAX ({gate_state}): { {t: f'{v:.0%}' for t, v in zip(universe, w_max_arr)} }")
+
+        # ── PASO 6: Seleccionar método y optimizar ────────────────────────────
+        method, reason = _select_method(macro_regime, vix, gate_state)
+
+        if method == "BLACK_LITTERMAN":
+            tau = TAU * 0.5 if macro_regime.get("market") == "risk_off" else TAU
+            raw_weights = _optimize_black_litterman(
+                returns, universe, score_map, tau=tau,
+                risk_aversion=RISK_AVERSION, w_max_arr=w_max_arr,
+            )
         elif method == "MIN_VARIANCE":
-            raw_weights = _optimize_min_variance(mu_annual, cov, universe)
+            raw_weights = _optimize_min_variance_np(mu_ann, cov, universe, w_max_arr)
+        elif method == "RISK_PARITY":
+            raw_weights = _optimize_risk_parity_np(mu_ann, cov, universe, w_max_arr)
         else:
-            raw_weights = _optimize_risk_parity(mu_annual, cov, universe)
+            raw_weights = _optimize_max_sharpe_np(mu_ann, cov, universe, w_max_arr)
 
         weights_optimal = dict(zip(universe, raw_weights))
 
-        # 6. Stats del portfolio óptimo
+        # ── PASO 7: Stats del portfolio óptimo ───────────────────────────────
         w_arr = np.array([weights_optimal[t] for t in universe])
-        exp_ret, exp_vol, sharpe = _portfolio_stats(w_arr, mu_annual, cov)
+        exp_ret, exp_vol, sharpe = _portfolio_stats(w_arr, mu_ann, cov)
 
         opt_result = OptimizationResult(
-            method=method,
-            method_reason=reason,
+            method=method, method_reason=reason,
             weights=weights_optimal,
             expected_return_annual=round(exp_ret, 4),
             expected_vol_annual=round(exp_vol, 4),
             sharpe_ratio=round(sharpe, 3),
             n_assets=n,
+            views_used={t: round(score_map[t], 3) for t in universe if t in score_map},
         )
 
-        # 7. Pesos actuales
-        current_weights: dict[str, float] = {}
-        for pos in current_positions:
-            t  = pos.get("ticker", "").upper()
-            mv = float(pos.get("market_value", 0) or 0)
-            current_weights[t] = mv / portfolio_value_ars if portfolio_value_ars > 0 else 0.0
+        # ── PASO 8: Calcular trades ───────────────────────────────────────────
+        all_tickers = sorted(set(list(weights_optimal.keys()) + list(current_w_map.keys())))
+        raw_trades: list[RebalanceTrade] = []
 
-        # 8. Calcular trades
-        all_tickers = set(list(weights_optimal.keys()) + list(current_weights.keys()))
-        trades: list[RebalanceTrade] = []
-
-        for ticker in sorted(all_tickers):
-            w_cur = current_weights.get(ticker, 0.0)
+        for ticker in all_tickers:
+            w_cur = current_w_map.get(ticker, 0.0)
             w_opt = weights_optimal.get(ticker, 0.0)
             delta = w_opt - w_cur
             amount_ars = abs(delta) * portfolio_value_ars
@@ -438,39 +611,84 @@ def run_optimizer(
             else:
                 action = "VENDER"
 
-            trades.append(RebalanceTrade(
-                ticker=ticker,
-                weight_current=round(w_cur, 4),
-                weight_optimal=round(w_opt, 4),
-                delta=round(delta, 4),
-                action=action,
-                amount_ars=round(amount_ars, 0),
+            raw_trades.append(RebalanceTrade(
+                ticker=ticker, weight_current=round(w_cur, 4),
+                weight_optimal=round(w_opt, 4), delta=round(delta, 4),
+                action=action, amount_ars=round(amount_ars, 0),
             ))
 
-        # 9. Resumen financiero
-        sells = sum(t.amount_ars for t in trades if t.action in ("VENDER", "REDUCIR"))
-        buys  = sum(t.amount_ars for t in trades if t.action in ("COMPRAR", "NUEVO"))
-        cash_total = cash_ars + sells
-        net_cash_needed = buys - cash_total
+        # ── PASO 9: Aplicar filtro del risk gate sobre los trades ─────────────
+        trades = _apply_risk_gate_to_trades(raw_trades, gate_state, score_map)
 
+        # ── PASO 10: Resumen financiero ───────────────────────────────────────
+        sells    = sum(t.amount_ars for t in trades if t.action in ("VENDER", "REDUCIR"))
+        buys     = sum(t.amount_ars for t in trades if t.action in ("COMPRAR", "NUEVO"))
+        # net_cash_needed > 0: hay que poner plata adicional de afuera
+        # net_cash_needed < 0: las ventas generan cash sobrante (autofinanciado)
+        net      = buys - (cash_ars + sells)
         n_trades = sum(1 for t in trades if t.action != "MANTENER")
+        logger.info(
+            f"  Cash flow: ventas ${sells:,.0f} + cash ${cash_ars:,.0f} = "
+            f"${sells+cash_ars:,.0f} disponible | compras ${buys:,.0f} | "
+            f"net {'necesita' if net > 0 else 'genera'} ${abs(net):,.0f} ARS"
+        )
 
         logger.info(
-            f"Optimizer [{method}]: {n_trades} trades — "
-            f"ventas ${sells:,.0f} compras ${buys:,.0f} net ${net_cash_needed:,.0f} ARS"
+            f"Optimizer [{method}] gate={gate_state}: {n_trades} trades — "
+            f"ventas ${sells:,.0f}  compras ${buys:,.0f}  net ${net:,.0f} ARS"
         )
 
         return RebalanceReport(
-            optimization=opt_result,
-            trades=trades,
+            optimization=opt_result, trades=trades,
             total_sells_ars=round(sells, 0),
             total_buys_ars=round(buys, 0),
-            net_cash_needed=round(net_cash_needed, 0),
+            net_cash_needed=round(net, 0),
             n_trades=n_trades,
             portfolio_value_ars=portfolio_value_ars,
             threshold_used=threshold,
+            risk_gate_state=gate_state,
+            risk_gate_reason=gate_reason,
         )
 
     except Exception as e:
         logger.error(f"Optimizer falló: {e}", exc_info=True)
         return None
+
+
+# ── Sugerencia de cash sobrante ───────────────────────────────────────────────
+
+def suggest_cash_deployment(
+    cash_sobrante: float,
+    synthesis_results: list,
+    market_assets: list[dict],
+    snap: MacroSnapshot,
+    max_suggestions: int = 3,
+) -> list[dict]:
+    if cash_sobrante < 10_000:
+        return []
+
+    candidates = []
+    seen = set()
+
+    for asset in market_assets:
+        ticker = asset.get("ticker", "").strip().upper()
+        if ticker in seen or ticker in {"CVX", "NVDA", "MU", "MELI", "CASH_ARS"}:
+            continue
+        seen.add(ticker)
+
+        macro_score, _ = score_macro_for_ticker(ticker, snap)
+        synth_score = next(
+            (r.final_score for r in synthesis_results if r.ticker.upper() == ticker), 0.0
+        )
+        combined = macro_score * 0.6 + synth_score * 0.4
+
+        if combined > 0.20:
+            amount = round(cash_sobrante * 0.33, 0)
+            candidates.append({
+                "ticker": ticker,
+                "combined_score": round(combined, 3),
+                "suggested_amount_ars": int(amount),
+                "reason": "mejor macro + synthesis",
+            })
+
+    return sorted(candidates, key=lambda x: x["combined_score"], reverse=True)[:max_suggestions]

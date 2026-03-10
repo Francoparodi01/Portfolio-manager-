@@ -1,75 +1,63 @@
-"""
-src/core/config.py
-Configuración centralizada desde .env
-"""
+"""src/core/config.py — Configuración centralizada desde variables de entorno."""
 from __future__ import annotations
 import os
 from dataclasses import dataclass, field
-from functools import lru_cache
-from dotenv import load_dotenv
 
-load_dotenv()
 
-def _env(key: str, default: str = "") -> str:
-    return os.environ.get(key, default)
-
-def _env_bool(key: str, default: bool = False) -> bool:
-    return _env(key, str(default)).lower() in ("1", "true", "yes")
-
-def _env_int(key: str, default: int = 0) -> int:
-    try:
-        return int(_env(key, str(default)))
-    except ValueError:
-        return default
-
-def _env_float(key: str, default: float = 0.0) -> float:
-    try:
-        return float(_env(key, str(default)))
-    except ValueError:
-        return default
-
-@dataclass(frozen=True)
+@dataclass
 class ScraperConfig:
-    username: str = field(default_factory=lambda: _env("COCOS_USERNAME"))
-    password: str = field(default_factory=lambda: _env("COCOS_PASSWORD"))
-    login_url: str = field(default_factory=lambda: _env("COCOS_LOGIN_URL", "https://app.cocos.capital/login"))
-    portfolio_url: str = field(default_factory=lambda: _env("COCOS_PORTFOLIO_URL", "https://app.cocos.capital/capital-portfolio"))
-    market_acciones_url: str = field(default_factory=lambda: _env("COCOS_MARKET_ACCIONES_URL", "https://app.cocos.capital/market/ACCIONES"))
-    market_cedears_url: str = field(default_factory=lambda: _env("COCOS_MARKET_CEDEARS_URL", "https://app.cocos.capital/market/CEDEARS"))
-    headless: bool = field(default_factory=lambda: _env_bool("HEADLESS", True))
-    retry_attempts: int = field(default_factory=lambda: _env_int("RETRY_ATTEMPTS", 3))
-    retry_backoff_s: int = field(default_factory=lambda: _env_int("RETRY_BACKOFF_S", 5))
-    timeout_ms: int = field(default_factory=lambda: _env_int("TIMEOUT_MS", 60000))
-    min_confidence_score: float = field(default_factory=lambda: _env_float("MIN_CONFIDENCE_SCORE", 0.6))
-    dom_hash_tolerance: float = field(default_factory=lambda: _env_float("DOM_HASH_TOLERANCE", 0.85))
-    cache_ttl_seconds: int = field(default_factory=lambda: _env_int("CACHE_TTL_SECONDS", 300))
-    screenshot_on_failure: bool = field(default_factory=lambda: _env_bool("SCREENSHOT_ON_FAILURE", True))
-    screenshot_dir: str = field(default_factory=lambda: _env("SCREENSHOT_DIR", "./screenshots"))
-    telegram_bot_token: str = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN"))
-    telegram_chat_id: str = field(default_factory=lambda: _env("TELEGRAM_CHAT_ID"))
-    telegram_mfa_timeout: int = field(default_factory=lambda: _env_int("TELEGRAM_MFA_TIMEOUT", 120))
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_enabled: bool = False
+    headless: bool = True
+    retry_attempts: int = 3
+    retry_backoff_s: int = 5
+    timeout_ms: int = 60000
+    screenshot_on_failure: bool = True
+    screenshot_dir: str = "/app/screenshots"
+    mfa_timeout: int = 120
 
-    @property
-    def telegram_enabled(self) -> bool:
-        return bool(self.telegram_bot_token and self.telegram_chat_id)
 
-    def validate(self) -> list[str]:
-        errors = []
-        if not self.username:
-            errors.append("COCOS_USERNAME no configurado")
-        if not self.password:
-            errors.append("COCOS_PASSWORD no configurado")
-        return errors
-
-@dataclass(frozen=True)
+@dataclass
 class DatabaseConfig:
-    url: str = field(default_factory=lambda: _env("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/portfolio"))
+    url: str = ""
 
-@dataclass(frozen=True)
+
+@dataclass
 class AppConfig:
     scraper: ScraperConfig = field(default_factory=ScraperConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
 
-@lru_cache(maxsize=1)
+
+_config: AppConfig | None = None
+
+
 def get_config() -> AppConfig:
-    return AppConfig()
+    global _config
+    if _config is not None:
+        return _config
+
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id   = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+    _config = AppConfig(
+        scraper=ScraperConfig(
+            telegram_bot_token=bot_token,
+            telegram_chat_id=chat_id,
+            telegram_enabled=bool(bot_token and chat_id),
+            headless=os.environ.get("HEADLESS", "true").lower() == "true",
+            retry_attempts=int(os.environ.get("RETRY_ATTEMPTS", "3")),
+            retry_backoff_s=int(os.environ.get("RETRY_BACKOFF_S", "5")),
+            timeout_ms=int(os.environ.get("TIMEOUT_MS", "60000")),
+            screenshot_on_failure=os.environ.get("SCREENSHOT_ON_FAILURE", "true").lower() == "true",
+            screenshot_dir=os.environ.get("SCREENSHOT_DIR", "/app/screenshots"),
+            mfa_timeout=int(os.environ.get("TELEGRAM_MFA_TIMEOUT", "120")),
+        ),
+        database=DatabaseConfig(
+            url=os.environ.get(
+                "DATABASE_URL",
+                "postgresql+asyncpg://portfolio:portfolio_secret@db:5432/portfolio",
+            )
+        ),
+    )
+    return _config

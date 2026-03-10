@@ -48,7 +48,12 @@ class PortfolioRisk:
     sizing_multiplier: float = 1.0
     positions: list = field(default_factory=list)
 
-    def to_telegram(self) -> str:
+    def to_telegram(self, opt_weights: dict = None) -> str:
+        """
+        opt_weights: dict ticker→weight_optimal del RebalanceReport.
+        Si se pasa, el 'target' que se muestra es el del optimizer (fuente de verdad).
+        El Risk Engine solo muestra métricas (vol, sharpe, drawdown).
+        """
         dd_icon = "🟢" if self.drawdown_status == "OK" else "🟡" if self.drawdown_status == "WARN" else "🔴"
         lines = [
             "━" * 35,
@@ -58,18 +63,45 @@ class PortfolioRisk:
         ]
         if self.vix_level:
             lines.append(f"   • VIX: {self.vix_level:.1f} → sizing ×{self.sizing_multiplier:.2f}")
-        lines += ["", "<b>Position sizing por activo:</b>"]
+
+        # Si tenemos pesos del optimizer, el target es el del optimizer
+        using_optimizer = bool(opt_weights)
+        header = "<b>Position sizing por activo:</b>" if not using_optimizer else \
+                 "<b>Métricas de riesgo por activo:</b>"
+        lines += ["", header]
+
         for p in self.positions:
-            action_icon = {"AUMENTAR": "📈", "REDUCIR": "📉", "MANTENER": "➡️"}.get(p["action"], "•")
-            delta = p["suggested_pct_adj"] - p["current_pct"]
-            delta_str = f"({delta:+.1%})" if abs(delta) > 0.02 else ""
-            lines.append(
-                f"  {action_icon} <b>{p['ticker']}</b>  "
-                f"actual {p['current_pct']:.1%} → sugerido <b>{p['suggested_pct_adj']:.1%}</b> {delta_str}  "
-                f"vol={p['volatility_annual']:.0%}  sharpe={p['sharpe']:.2f}"
-            )
+            ticker = p["ticker"]
+            cur = p["current_pct"]
+
+            if using_optimizer and ticker in opt_weights:
+                # Usar peso del optimizer como target
+                target = opt_weights[ticker]
+                delta  = target - cur
+                delta_str = f"({delta:+.1%})" if abs(delta) > 0.02 else ""
+                action_icon = "📈" if delta > 0.02 else "📉" if delta < -0.02 else "➡️"
+                lines.append(
+                    f"  {action_icon} <b>{ticker}</b>  "
+                    f"actual {cur:.1%} → target <b>{target:.1%}</b> {delta_str}  "
+                    f"vol={p['volatility_annual']:.0%}  sharpe={p['sharpe']:.2f}"
+                )
+            else:
+                # Sin optimizer: mostrar suggested_pct_adj como antes
+                target = p["suggested_pct_adj"]
+                delta  = target - cur
+                delta_str = f"({delta:+.1%})" if abs(delta) > 0.02 else ""
+                action_icon = {"AUMENTAR": "📈", "REDUCIR": "📉", "MANTENER": "➡️"}.get(p["action"], "•")
+                lines.append(
+                    f"  {action_icon} <b>{ticker}</b>  "
+                    f"actual {cur:.1%} → sugerido <b>{target:.1%}</b> {delta_str}  "
+                    f"vol={p['volatility_annual']:.0%}  sharpe={p['sharpe']:.2f}"
+                )
             for w in p.get("warnings", []):
                 lines.append(f"    ⚠️ {w}")
+
+        if using_optimizer:
+            lines.append("   <i>↑ target = optimizer · métricas = risk engine</i>")
+
         return "\n".join(lines)
 
 
