@@ -425,7 +425,7 @@ def _extract_cash_metrics(rebalance_report, cash_ars: float,
     buys  = _get(rebalance_report, "total_buys_ars",  _get(rebalance_report, "total_buy_ars",  None))
     if sells is not None and buys is not None:
         s = float(sells); b = float(buys)
-        return s, b, float(cash_ars) + s - b
+        return s, b, max(0.0, float(cash_ars) + s - b)
 
     # Fallback: reconstruir desde trades
     s = b = 0.0
@@ -770,6 +770,19 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>CONTEXTO DE MERCADO</b>")
     h.append(" | ".join(macro_parts))
+    ccl_v      = getattr(macro_snap, "ccl",         None)
+    mep_v      = getattr(macro_snap, "mep",         None)
+    reservas_v = getattr(macro_snap, "reservas",    None)
+    riesgo_v   = getattr(macro_snap, "riesgo_pais", None)
+    arg_parts  = []
+    if ccl_v:      arg_parts.append(f"CCL ${ccl_v:,.0f}")
+    if mep_v:      arg_parts.append(f"MEP ${mep_v:,.0f}")
+    if reservas_v: arg_parts.append(f"Reservas ${reservas_v:,.0f}M")
+    if riesgo_v:
+        rp_icon = "🔴" if riesgo_v > 1000 else "🟡" if riesgo_v > 600 else "🟢"
+        arg_parts.append(f"Riesgo País {rp_icon} {riesgo_v} pb")
+    if arg_parts:
+        h.append("🇦🇷 " + " | ".join(arg_parts))
     h.append(f"Gate actual: <b>{escape(risk_gate)}</b>")
     h.append("")
 
@@ -781,8 +794,19 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     ret     = float(_get(opt, "expected_return_annual", 0.0) or 0.0)
     vol     = float(_get(opt, "expected_vol_annual",    0.0) or 0.0)
     sharpe  = float(_get(opt, "sharpe_ratio",           0.0) or 0.0)
-    h.append(f"Método: <b>{method}</b> | Objetivo: {obj_str}")
-    h.append(f"Ret esperado: <b>{ret:.1%}</b> | Vol: {vol:.1%} | Sharpe: <b>{sharpe:.2f}</b>")
+    h.append(f"Método: <b>{method}</b> | {obj_str}")
+    if 0 < ret < 2.0:
+        h.append(f"Ret esperado: <b>{ret:.1%}</b> | Vol: {vol:.1%} | Sharpe: <b>{sharpe:.2f}</b>")
+    else:
+        h.append(f"Vol estimada: {vol:.1%} | Sharpe: <b>{sharpe:.2f}</b>")
+    if trade_map:
+        h.append("<b>Pesos objetivo:</b>")
+        for ticker_t in sorted(current_w.keys()):
+            cw_t  = current_w.get(ticker_t, 0.0)
+            tw_t  = _target_weight(ticker_t, cw_t, trade_map)
+            delta_t = tw_t - cw_t
+            arrow_t = "📈" if delta_t > 0.03 else "📉" if delta_t < -0.03 else "➡️"
+            h.append(f"  {arrow_t} <b>{ticker_t}</b>: {cw_t:.1%} → <b>{tw_t:.1%}</b>  ({delta_t:+.1%})")
     h.append("")
 
     # Radar externo

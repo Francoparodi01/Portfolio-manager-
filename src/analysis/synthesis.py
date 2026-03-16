@@ -133,7 +133,8 @@ def _compute_conviction(layers: list[LayerScore], final: float) -> float:
 
 def blend_scores(ticker: str, technical_signal: str, technical_strength: float,
                  macro_score: float, risk_position: dict, sentiment_score: float,
-                 technical_score_raw: float = 0.0) -> SynthesisResult:
+                 technical_score_raw: float = 0.0,
+                 skip_sentiment: bool = False) -> SynthesisResult:
     """
     Combina las 4 capas en un score final y toma la decisión.
 
@@ -170,10 +171,19 @@ def blend_scores(ticker: str, technical_signal: str, technical_strength: float,
     ))
 
     # ── Sentiment ──────────────────────────────────────────────────────────────
-    layers.append(LayerScore(
-        "sentiment", sentiment_score, LAYER_WEIGHTS["sentiment"],
-        sentiment_score * LAYER_WEIGHTS["sentiment"]
-    ))
+    # Si se omite, redistribuir su peso entre técnico y macro
+    if not skip_sentiment:
+        layers.append(LayerScore(
+            "sentiment", sentiment_score, LAYER_WEIGHTS["sentiment"],
+            sentiment_score * LAYER_WEIGHTS["sentiment"]
+        ))
+    else:
+        # Redistribuir 15% → 7.5% técnico + 7.5% macro (ya sumado arriba)
+        extra = LAYER_WEIGHTS["sentiment"] / 2.0
+        layers[0] = LayerScore("technical", layers[0].score, layers[0].weight + extra,
+                               layers[0].score * (layers[0].weight + extra))
+        layers[1] = LayerScore("macro",     layers[1].score, layers[1].weight + extra,
+                               layers[1].score * (layers[1].weight + extra))
 
     # ── Score final ────────────────────────────────────────────────────────────
     final = float(np.clip(sum(l.weighted for l in layers), -1.0, 1.0))

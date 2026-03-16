@@ -68,6 +68,14 @@ class PortfolioSnapshot:
     raw_html_hash: str
     snapshot_id: uuid.UUID = field(default_factory=uuid.uuid4)
 
+    def validate(self) -> list[str]:
+        errors = []
+        if float(self.total_value_ars) <= 0:
+            errors.append("total_value_ars <= 0")
+        if not self.positions:
+            errors.append("sin posiciones")
+        return errors
+
     def to_dict(self) -> dict:
         return {
             "snapshot_id": str(self.snapshot_id),
@@ -84,6 +92,7 @@ class PortfolioSnapshot:
 @dataclass
 class MarketAsset:
     ticker: str
+    name: str
     asset_type: AssetType
     currency: Currency
     last_price: float

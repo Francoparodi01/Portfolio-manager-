@@ -2,9 +2,13 @@
 
 ## Setup inicial (una sola vez)
 ```bash
-# 1. 
+# 1. Configurar variables de entorno (incluyendo REDIS_URL de Redis Cloud)
+cp .env.example .env
+# Editar .env y agregar:
+# REDIS_URL=redis://default:<PASSWORD>@redis-12619.c278.us-east-1-4.ec2.cloud.redislabs.com:12619
+
 # 2. Rebuild Docker con nuevas dependencias
-docker compose build --no-cache scraper
+docker compose build --no-cache
 
 # 3. Levantar todo
 docker compose up -d
@@ -12,6 +16,26 @@ docker compose up -d
 # 4. Verificar que el scheduler arranco bien
 docker compose logs -f scraper
 # Debe aparecer: "Scheduler activo: 10:30 ART | 17:00 ART"
+```
+
+---
+
+## Probar conexión a Redis Cloud
+```bash
+# Verifica que el bot puede conectarse a Redis Cloud
+docker compose run --rm telegram_bot python3 -c "
+import asyncio, os
+import redis.asyncio as redis
+
+async def test():
+    r = redis.from_url(os.environ['REDIS_URL'], decode_responses=True)
+    await r.set('test', 'hola')
+    val = await r.get('test')
+    print('Conexión Redis OK:', val)
+    await r.delete('test')
+
+asyncio.run(test())
+"
 ```
 
 ---
@@ -35,14 +59,16 @@ docker compose run --rm scraper python scripts/run_once.py --full
 
 ## Telegram Bot
 ```bash
-
-# Reiniciar bot de telegram 
+# Reiniciar bot de telegram
 docker compose restart telegram_bot
 
+# Ver logs del bot en vivo
+docker compose logs -f telegram_bot
 ```
 
+---
 
-## Analisis cuantitativo multicapa
+## Análisis cuantitativo multicapa
 ```bash
 # Pipeline completo (posiciones del ultimo snapshot)
 docker compose run --rm scraper python scripts/run_analysis.py
@@ -98,7 +124,7 @@ SELECT payload FROM raw_snapshots ORDER BY scraped_at DESC LIMIT 1;
 
 ---
 
-## Scheduler (automatico)
+## Scheduler (automático)
 ```bash
 # Levantar scheduler en background (corre 10:30 y 17:00 ART automaticamente)
 docker compose up -d
@@ -121,7 +147,7 @@ docker compose restart scraper
 ## Mantenimiento
 ```bash
 # Rebuild completo (despues de cambiar codigo)
-docker compose build --no-cache scraper
+docker compose build --no-cache
 docker compose up -d
 
 # Ver estado de los contenedores
@@ -136,8 +162,25 @@ docker exec cocos_db pg_dump -U portfolio portfolio > backup_$(date +%Y%m%d).sql
 
 ---
 
-## Frecuencia de ejecucion automatica
-| Horario | Accion |
-|---------|--------|
-| 10:30 ART | Scrape portfolio → guarda DB → notifica Telegram |
+## Frecuencia de ejecución automática
+| Horario   | Acción                                                                 |
+|-----------|------------------------------------------------------------------------|
+| 10:30 ART | Scrape portfolio → guarda DB → notifica Telegram                       |
 | 17:00 ART | Scrape portfolio + mercado + pipeline cuantitativo completo → Telegram |
+
+---
+
+## Arquitectura Redis (MFA flow)
+```
+Usuario Telegram
+     │ envía código 6 dígitos
+     ▼
+telegram_bot  ──LPUSH mfa:<chat_id>──►  Redis Cloud
+                                              │
+                                         BLPOP (event-driven)
+                                              │
+                                              ▼
+                                          scraper  →  ingresa código en Cocos
+```
+Redis Cloud: `redis-12619.c278.us-east-1-4.ec2.cloud.redislabs.com:12619`
+Variable de entorno: `REDIS_URL` en `.env`

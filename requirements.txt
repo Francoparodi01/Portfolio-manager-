@@ -1,41 +1,41 @@
-# ── Core ──────────────────────────────────────────────────────────────────────
-python-dotenv==1.0.1
-pydantic>=2.0,<3.0
+# ── Browser automation ────────────────────────────────────
+playwright>=1.40
 
-# ── DB ────────────────────────────────────────────────────────────────────────
-asyncpg==0.29.0
-psycopg2-binary==2.9.9
+# ── Telegram ──────────────────────────────────────────────
+python-telegram-bot>=20.0
 
-# ── HTTP / API ────────────────────────────────────────────────────────────────
-requests==2.31.0
-aiohttp==3.9.5
+# ── Redis (asyncio client incluido en el paquete) ─────────
+redis>=5.0
 
-# ── Data science ──────────────────────────────────────────────────────────────
-numpy==1.26.4
-pandas==2.2.2
-scipy==1.13.1
-scikit-learn==1.4.2
+# ── Base de datos ─────────────────────────────────────────
+asyncpg>=0.29
 
-# ── Finanzas / datos de mercado ───────────────────────────────────────────────
-yfinance>=1.2.0
+# ── HTTP sync (notifier, TelegramMFA.send) ────────────────
+requests>=2.31
 
-# ── Portfolio optimization ────────────────────────────────────────────────────
-# PyPortfolioOpt: Black-Litterman, Efficient Frontier
-# Instalación: pip install pyportfolioopt
-# (opcional — el sistema tiene fallback numpy puro si no está disponible)
-PyPortfolioOpt==1.5.5
+# ── HTTP async ────────────────────────────────────────────
+aiohttp>=3.9
 
-# ── Telegram Bot ──────────────────────────────────────────────────────────────
-python-telegram-bot==21.3
+# ── Variables de entorno ──────────────────────────────────
+python-dotenv>=1.0
 
-# ── Encriptación de credenciales ──────────────────────────────────────────────
-cryptography==42.0.8
+# ── Criptografía (credentials.py — Fernet) ───────────────
+cryptography>=42.0
 
-# ── Scraper web ───────────────────────────────────────────────────────────────
-playwright==1.44.0
+# ── Análisis de datos ─────────────────────────────────────
+pandas>=2.1
+numpy>=1.26
+yfinance>=0.2
 
-curl_cffi>=0.7
+# ── Análisis técnico ──────────────────────────────────────
+ta>=0.11              # RSI, MACD, Bollinger, ADX, OBV
 
-selenium==4.14.0 
+# ── Optimización de portfolio ─────────────────────────────
+scipy>=1.12
 
-webdriver-manager>=4.0.1
+# ── Scheduler ─────────────────────────────────────────────
+apscheduler>=3.10
+
+# ── Utilidades ────────────────────────────────────────────
+python-dateutil>=2.9
+pytz>=2024.1

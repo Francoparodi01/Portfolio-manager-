@@ -1,140 +1,49 @@
 services:
 
-  # ── TimescaleDB ──────────────────────────────────────────────────────────────
   db:
     image: timescale/timescaledb:latest-pg16
     container_name: cocos_db
-    restart: unless-stopped
-
+    restart: always
     environment:
-      POSTGRES_USER:     ${POSTGRES_USER:-portfolio}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-portfolio_secret}
-      POSTGRES_DB:       ${POSTGRES_DB:-portfolio}
-
+      POSTGRES_USER: portfolio
+      POSTGRES_PASSWORD: portfolio_secret
+      POSTGRES_DB: portfolio
+    ports:
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-
-    ports:
-      - "127.0.0.1:5432:5432"
-
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-portfolio} -d ${POSTGRES_DB:-portfolio}"]
+      test: ["CMD-SHELL", "pg_isready -U portfolio -d portfolio"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 30s
 
-    networks:
-      - cocos_net
-
-
-  # ── Scraper + Análisis ───────────────────────────────────────────────────────
   scraper:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     container_name: cocos_scraper
-    restart: unless-stopped
-
-    env_file:
-      - .env
-
+    restart: always
     depends_on:
       db:
         condition: service_healthy
-
-    environment:
-      COCOS_USERNAME:    ${COCOS_USERNAME}
-      COCOS_PASSWORD:    ${COCOS_PASSWORD}
-      DATABASE_URL:      postgresql+asyncpg://${POSTGRES_USER:-portfolio}:${POSTGRES_PASSWORD:-portfolio_secret}@db:5432/${POSTGRES_DB:-portfolio}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_CHAT_ID:   ${TELEGRAM_CHAT_ID:-}
-      OLLAMA_URL:          http://host.docker.internal:11434
-      HEADLESS:            ${HEADLESS:-true}
-      RETRY_ATTEMPTS:      ${RETRY_ATTEMPTS:-3}
-      RETRY_BACKOFF_S:     ${RETRY_BACKOFF_S:-5}
-      TIMEOUT_MS:          ${TIMEOUT_MS:-60000}
-      SCREENSHOT_ON_FAILURE: ${SCREENSHOT_ON_FAILURE:-true}
-      SCREENSHOT_DIR:      /app/screenshots
-      TELEGRAM_MFA_TIMEOUT: ${TELEGRAM_MFA_TIMEOUT:-120}
-
-    volumes:
-      - screenshots:/app/screenshots
-      - logs:/app/logs
-      - ./src:/app/src
-      - ./scripts:/app/scripts
-
-    deploy:
-      resources:
-        limits:
-          memory: 1g
-        reservations:
-          memory: 256m
-
-    networks:
-      - cocos_net
-
-
-  # ── Telegram Bot ─────────────────────────────────────────────────────────────
-  telegram_bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: cocos_telegram_bot
-    restart: unless-stopped
-
     env_file:
       - .env
-
-    depends_on:
-      db:
-        condition: service_healthy
-
-    environment:
-      DATABASE_URL:       postgresql+asyncpg://${POSTGRES_USER:-portfolio}:${POSTGRES_PASSWORD:-portfolio_secret}@db:5432/${POSTGRES_DB:-portfolio}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TELEGRAM_CHAT_ID:   ${TELEGRAM_CHAT_ID}
-      ALLOWED_CHAT_IDS:   ${ALLOWED_CHAT_IDS:-${TELEGRAM_CHAT_ID}}
-      OLLAMA_URL:          http://host.docker.internal:11434
-      SECRETS_DIR:         /app/secrets
-
     volumes:
-      - ./src:/app/src
-      - ./scripts:/app/scripts
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
       - secrets_data:/app/secrets
 
-    command: ["python", "scripts/telegram_bot.py"]
-
-    networks:
-      - cocos_net
-
-
-  # ── Ollama (LLM local) ───────────────────────────────────────────────────────
-  # NOTA: Ollama corre en Windows nativo (host), no como servicio Docker.
-  # Este servicio es opcional — solo si querés correr Ollama dentro de Docker.
-  # Si Ollama ya está corriendo en Windows, comentar este servicio completo.
-  #
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   container_name: cocos_ollama
-  #   restart: unless-stopped
-  #   ports:
-  #     - "11434:11434"
-  #   volumes:
-  #     - ollama_data:/root/.ollama
-  #   networks:
-  #     - cocos_net
-
+  telegram_bot:
+    build: .
+    container_name: cocos_telegram_bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - secrets_data:/app/secrets
+    command: ["python", "-m", "scripts.telegram_bot"]
 
 volumes:
   postgres_data:
-  screenshots:
-  logs:
   secrets_data:
-  # ollama_data:   # descomentar si usás Ollama en Docker
-
-
-networks:
-  cocos_net:
-    driver: bridge

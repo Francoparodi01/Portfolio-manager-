@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -9,6 +10,7 @@ class ScraperConfig:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_enabled: bool = False
+    telegram_mfa_timeout: int = 120
     headless: bool = True
     retry_attempts: int = 3
     retry_backoff_s: int = 5
@@ -16,6 +18,26 @@ class ScraperConfig:
     screenshot_on_failure: bool = True
     screenshot_dir: str = "/app/screenshots"
     mfa_timeout: int = 120
+    cache_ttl_seconds: int = 300
+    min_confidence_score: float = 0.5
+    dom_hash_tolerance: float = 0.7
+
+    # Credenciales Cocos
+    username: str = ""
+    password: str = ""
+
+    # URLs
+    portfolio_url: str = "https://app.cocos.capital/capital-portfolio"
+    market_acciones_url: str = "https://app.cocos.capital/market/acciones"
+    market_cedears_url: str = "https://app.cocos.capital/market/cedears"
+
+    def validate(self) -> list[str]:
+        errors = []
+        if not self.username:
+            errors.append("COCOS_USERNAME no configurado")
+        if not self.password:
+            errors.append("COCOS_PASSWORD no configurado")
+        return errors
 
 
 @dataclass
@@ -29,7 +51,7 @@ class AppConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
 
 
-_config: AppConfig | None = None
+_config: Optional[AppConfig] = None
 
 
 def get_config() -> AppConfig:
@@ -45,6 +67,7 @@ def get_config() -> AppConfig:
             telegram_bot_token=bot_token,
             telegram_chat_id=chat_id,
             telegram_enabled=bool(bot_token and chat_id),
+            telegram_mfa_timeout=int(os.environ.get("TELEGRAM_MFA_TIMEOUT", "120")),
             headless=os.environ.get("HEADLESS", "true").lower() == "true",
             retry_attempts=int(os.environ.get("RETRY_ATTEMPTS", "3")),
             retry_backoff_s=int(os.environ.get("RETRY_BACKOFF_S", "5")),
@@ -52,6 +75,17 @@ def get_config() -> AppConfig:
             screenshot_on_failure=os.environ.get("SCREENSHOT_ON_FAILURE", "true").lower() == "true",
             screenshot_dir=os.environ.get("SCREENSHOT_DIR", "/app/screenshots"),
             mfa_timeout=int(os.environ.get("TELEGRAM_MFA_TIMEOUT", "120")),
+            username=(
+                os.environ.get("COCOS_USERNAME")
+                or os.environ.get("COCOS_EMAIL")
+                or os.environ.get("COCOS_USER")
+                or ""
+            ).strip(),
+            password=(
+                os.environ.get("COCOS_PASSWORD")
+                or os.environ.get("COCOS_PASS")
+                or ""
+            ).strip(),
         ),
         database=DatabaseConfig(
             url=os.environ.get(

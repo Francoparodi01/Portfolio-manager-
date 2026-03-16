@@ -81,6 +81,14 @@ CREATE TABLE IF NOT EXISTS decision_log (
     was_correct       BOOLEAN
 );
 
+CREATE TABLE IF NOT EXISTS raw_snapshots (
+    snapshot_id UUID NOT NULL,
+    scraped_at TIMESTAMPTZ NOT NULL,
+    payload JSONB NOT NULL
+);
+
+SELECT create_hypertable('raw_snapshots', 'scraped_at', if_not_exists => TRUE);
+
 CREATE INDEX IF NOT EXISTS idx_positions_ticker       ON positions(ticker, scraped_at DESC);
 CREATE INDEX IF NOT EXISTS idx_market_prices_ticker   ON market_prices(ticker, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_decision_log_ticker    ON decision_log(ticker);
