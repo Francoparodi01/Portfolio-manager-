@@ -571,42 +571,59 @@ def _suggest_sizing(candidate: OpportunityCandidate,
                      portfolio_total_ars: float,
                      existing_allocations: dict[str, float]) -> float:
     """
-    Sugiere tamaño de posición considerando:
-    - Convicción del candidato
-    - Volatilidad del activo
-    - Cuánto ya tenemos en el mismo sector
+    Capital allocation dinámico — no 3% fijo.
+    Formula: base × conviction_mult × score_mult × asym_mult × sector_penalty
+
+    Base: derivada del score — señales más fuertes merecen más capital.
     """
-    base = 0.05  # 5% base
+    score      = candidate.final_score
+    conviction = candidate.conviction
+    asym_r     = candidate.asymmetry.asymmetry_ratio if candidate.asymmetry else 1.0
 
-    # Ajuste por convicción
-    if candidate.conviction >= 0.70:
-        base = 0.08
-    elif candidate.conviction >= 0.50:
-        base = 0.06
+    # Base dinámica según score (no fijo)
+    # score=0.10 → 3% | score=0.20 → 5% | score=0.30 → 7% | score=0.40+ → 9%
+    base = float(np.clip(score * 25.0, 2.0, 9.0)) / 100.0
+
+    # Multiplicador por convicción — señal de baja convicción se penaliza fuerte
+    if conviction >= 0.70:
+        conv_mult = 1.30
+    elif conviction >= 0.55:
+        conv_mult = 1.10
+    elif conviction >= 0.40:
+        conv_mult = 1.00
+    elif conviction >= 0.25:
+        conv_mult = 0.75
     else:
-        base = 0.04
+        conv_mult = 0.50   # convicción muy baja → tamaño mínimo
 
-    # Ajuste por score
-    if candidate.final_score >= 0.25:
-        base *= 1.3
-    elif candidate.final_score < 0.15:
-        base *= 0.7
+    # Multiplicador por asimetría R/R
+    if asym_r >= 4.0:
+        asym_mult = 1.35
+    elif asym_r >= 3.0:
+        asym_mult = 1.20
+    elif asym_r >= 2.0:
+        asym_mult = 1.05
+    elif asym_r >= 1.2:
+        asym_mult = 1.00
+    else:
+        asym_mult = 0.70   # asimetría pobre → penalizar tamaño
 
-    # Reducir si ya tenemos mucho en activos similares
+    # Penalización sectorial
     sector_exposure = sum(
         v for t, v in existing_allocations.items()
         if t in candidate.competes_with
     )
     if sector_exposure > 0.30:
-        base *= 0.50  # ya tenemos mucho en el sector
-    elif sector_exposure > 0.15:
-        base *= 0.75
+        sector_penalty = 0.40
+    elif sector_exposure > 0.20:
+        sector_penalty = 0.65
+    elif sector_exposure > 0.10:
+        sector_penalty = 0.85
+    else:
+        sector_penalty = 1.00
 
-    # Ajuste por asimetría
-    if candidate.asymmetry and candidate.asymmetry.asymmetry_ratio >= 3.0:
-        base *= 1.20
-
-    return round(float(np.clip(base, 0.02, 0.15)), 4)
+    final = base * conv_mult * asym_mult * sector_penalty
+    return round(float(np.clip(final, 0.02, 0.15)), 4)
 
 
 # ─── Pipeline principal ───────────────────────────────────────────────────────
@@ -620,6 +637,9 @@ def run_opportunity_analysis(
     no_sentiment:       bool = False,
     portfolio_scores:   dict[str, float] = None,  # {ticker: final_score} del pipeline
     max_candidates:     int = 10,
+    min_score:          float = 0.0,   # filtrar por score mínimo
+    min_rr:             float = 0.0,   # filtrar por R/R mínimo
+    exclude_portfolio:  bool = True,   # excluir tickers del portfolio (default True)
 ) -> OpportunityReport:
     """
     Pipeline completo de análisis de oportunidades.
@@ -777,12 +797,33 @@ def run_opportunity_analysis(
 
         candidates.append(cand)
 
-    # ── Ranking final ─────────────────────────────────────────────────────────
-    # Ordenar: COMPRABLE_AHORA primero, luego por score × conviction × asymmetry
+    # ── Filtros post-scoring ──────────────────────────────────────────────────
+    if min_score > 0:
+        before = len(candidates)
+        candidates = [c for c in candidates if c.final_score >= min_score]
+        logger.info(f"Filtro min_score={min_score}: {before} → {len(candidates)}")
+
+    if min_rr > 0:
+        before = len(candidates)
+        candidates = [c for c in candidates
+                      if c.asymmetry and c.asymmetry.risk_reward >= min_rr]
+        logger.info(f"Filtro min_rr={min_rr}: {before} → {len(candidates)}")
+
+    # ── Ranking final con edge vs portfolio ────────────────────────────────────
+    # Edge = qué tan superior es este candidato vs el mejor score del portfolio actual
+    best_portfolio_score = max(portfolio_scores.values()) if portfolio_scores else 0.0
+
     def _rank_key(c: OpportunityCandidate) -> float:
-        priority = {"COMPRABLE_AHORA": 3, "EN_VIGILANCIA": 2, "DESCARTAR": 1}.get(c.status, 0)
+        priority   = {"COMPRABLE_AHORA": 3, "EN_VIGILANCIA": 2, "DESCARTAR": 1}.get(c.status, 0)
         asym_bonus = (c.asymmetry.asymmetry_ratio / 3.0) if c.asymmetry else 0.0
-        return priority * 10 + c.final_score * c.conviction * (1 + asym_bonus)
+        rr_bonus   = (c.asymmetry.risk_reward / 3.0)     if c.asymmetry else 0.0
+        # Edge vs portfolio: cuánto supera al mejor ticker en cartera
+        edge       = max(0.0, c.final_score - best_portfolio_score)
+        return priority * 10 + c.final_score * c.conviction * (1 + asym_bonus + rr_bonus) + edge * 2
+
+    # Adjuntar edge_score como atributo para el render
+    for c in candidates:
+        c._edge_vs_portfolio = round(c.final_score - best_portfolio_score, 4)
 
     candidates.sort(key=_rank_key, reverse=True)
     candidates = candidates[:max_candidates]
@@ -855,7 +896,9 @@ def render_opportunity_report(report: OpportunityReport,
             asym_icons = {"EXCELENTE": "🟢🟢", "BUENA": "🟢", "MODERADA": "🟡", "POBRE": "🔴"}
             asym_icon  = asym_icons.get(c.asymmetry_label, "⚪")
 
-            h.append(f"<b>━━ {c.ticker} ━━</b>")
+            edge = getattr(c, "_edge_vs_portfolio", None)
+            edge_str = f"  Edge: <b>{edge:+.3f}</b> vs cartera" if edge is not None else ""
+            h.append(f"<b>━━ {c.ticker} ━━</b>{edge_str}")
             h.append(
                 f"Score: <code>{c.final_score:+.3f}</code> | "
                 f"Conv: <b>{round(c.conviction * 100)}%</b> [{_bar(c.conviction)}] | "

@@ -39,3 +39,7 @@ apscheduler>=3.10
 # ── Utilidades ────────────────────────────────────────────
 python-dateutil>=2.9
 pytz>=2024.1
+
+
+asyncpg
+

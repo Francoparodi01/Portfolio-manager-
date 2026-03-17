@@ -92,11 +92,10 @@ SELECTORS = {
 class TelegramMFA:
     """
     Maneja el flujo MFA via Telegram.
-    Manda un mensaje pidiendo el código y espera via Redis BLPOP (event-driven).
-    El bot publica el código con LPUSH mfa:<chat_id> cuando el usuario lo envía.
+    Manda un mensaje pidiendo el código y hace polling hasta recibirlo.
     """
 
-    def __init__(self, bot_token: str, chat_id: str, timeout: int = 120):
+    def __init__(self, bot_token: str, chat_id: str, timeout: int = 180):
         self._token = bot_token
         self._chat_id = chat_id
         self._timeout = timeout
@@ -115,11 +114,19 @@ class TelegramMFA:
             return False
 
     async def wait_for_code(self) -> Optional[str]:
+        """
+        Espera el código MFA via Redis BLPOP (event-driven).
+
+        El bot de Telegram hace LPUSH mfa:<chat_id> cuando el usuario manda
+        los 6 dígitos. Acá esperamos con BLPOP en un loop de intervalos cortos
+        (10s) en lugar de un único BLPOP largo — mucho más robusto a drops de
+        conexión con Redis Cloud.
+        """
         from src.core.redis_client import client as redis_client
 
         key = f"mfa:{self._chat_id}"
 
-        # Limpiar cualquier código residual de intentos anteriores
+        # Limpiar código residual de intentos anteriores
         await redis_client.delete(key)
 
         self.send(
@@ -128,24 +135,37 @@ class TelegramMFA:
             f"Tenés <b>{self._timeout // 60} minutos</b>."
         )
 
-        logger.info(f"Esperando código MFA en Redis key={key} (timeout: {self._timeout}s)...")
+        logger.info(f"Esperando código MFA en Redis key={key} (timeout={self._timeout}s)...")
 
-        # BLPOP bloquea hasta que el bot haga LPUSH o se agote el timeout
-        result = await redis_client.blpop(key, timeout=self._timeout)
+        import time as _time
+        deadline = _time.monotonic() + self._timeout
+        interval = 10  # BLPOP en intervalos cortos — robusto a drops de conexión
 
-        if result is None:
-            logger.error("Timeout esperando código MFA")
-            self.send("⏱️ Timeout — no se recibió código a tiempo.")
-            return None
+        while _time.monotonic() < deadline:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                break
+            wait = min(interval, remaining)
 
-        _, code = result
+            try:
+                result = await redis_client.blpop(key, timeout=int(wait) or 1)
+            except Exception as e:
+                logger.warning(f"Redis blpop error (reintentando): {e}")
+                await asyncio.sleep(1)
+                continue
 
-        if not re.fullmatch(r"\d{6}", code):
-            logger.error(f"Código MFA inválido recibido: {code!r}")
-            return None
+            if result is not None:
+                _, code = result
+                if re.fullmatch(r"\d{6}", code):
+                    logger.info(f"Código MFA recibido: {code}")
+                    return code
+                else:
+                    logger.warning(f"Código inválido recibido: {code!r} — ignorado")
+                    # seguir esperando
 
-        logger.info(f"Código MFA recibido: {code}")
-        return code
+        logger.error("Timeout esperando código MFA")
+        self.send("⏱️ Timeout — no se recibió código a tiempo.")
+        return None
 
 
 # ── Cache ─────────────────────────────────────────────────
@@ -375,7 +395,7 @@ class CocosCapitalScraper:
                     "no están configurados en el .env"
                 )
 
-            # Pedir código al usuario por Telegram (async Redis blpop)
+            # Pedir código al usuario por Telegram (async Redis BLPOP)
             mfa_code = await self._telegram.wait_for_code()
 
             if not mfa_code:
@@ -985,8 +1005,3 @@ class CocosCapitalScraper:
             except Exception:
                 continue
         return None
-
-    
-
-
-  

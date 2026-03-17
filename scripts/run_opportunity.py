@@ -97,6 +97,9 @@ async def main(
     no_telegram:        bool,
     no_sentiment:       bool,
     max_candidates:     int,
+    min_score:          float = 0.0,
+    min_rr:             float = 0.0,
+    exclude_portfolio:  bool = True,
 ):
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
@@ -119,9 +122,13 @@ async def main(
         universe = COCOS_UNIVERSE_DEFAULT
         logger.info(f"Universo Cocos default: {len(universe)} tickers")
 
-    # Excluir lo que ya tenemos en cartera
-    universe_filtered = [t for t in universe if t.upper() not in set(portfolio_tickers)]
-    logger.info(f"Universo final: {len(universe_filtered)} tickers (excluidos {len(portfolio_tickers)} de cartera)")
+    # Excluir lo que ya tenemos en cartera (por defecto siempre, a menos que --include-portfolio)
+    if exclude_portfolio:
+        universe_filtered = [t for t in universe if t.upper() not in set(portfolio_tickers)]
+        logger.info(f"Universo final: {len(universe_filtered)} tickers (excluidos {len(portfolio_tickers)} de cartera)")
+    else:
+        universe_filtered = universe
+        logger.info(f"Universo final: {len(universe_filtered)} tickers (portfolio incluido)")
 
     # ── 3. Macro ───────────────────────────────────────────────────────────────
     logger.info("Descargando macro...")
@@ -140,6 +147,9 @@ async def main(
         no_sentiment        = no_sentiment,
         portfolio_scores    = portfolio_scores,
         max_candidates      = max_candidates,
+        min_score           = min_score,
+        min_rr              = min_rr,
+        exclude_portfolio   = exclude_portfolio,
     )
 
     # ── 5. Render ──────────────────────────────────────────────────────────────
@@ -165,14 +175,28 @@ if __name__ == "__main__":
                    help="No enviar a Telegram")
     p.add_argument("--no-sentiment", action="store_true",
                    help="Omitir análisis de noticias RSS (más rápido)")
-    p.add_argument("--max",          type=int, default=8, dest="max_candidates",
+    p.add_argument("--max",              type=int,   default=8,   dest="max_candidates",
                    help="Máximo de candidatos en el reporte (default: 8)")
+    p.add_argument("--top",              type=int,   default=0,
+                   help="Alias de --max: devolver solo los N mejores setups")
+    p.add_argument("--min-score",        type=float, default=0.0, dest="min_score",
+                   help="Score mínimo para aparecer en el reporte (ej: 0.15)")
+    p.add_argument("--min-rr",           type=float, default=0.0, dest="min_rr",
+                   help="R/R mínimo para aparecer en el reporte (ej: 1.5)")
+    p.add_argument("--include-portfolio",action="store_true",
+                   help="Incluir tickers del portfolio en el análisis (default: excluidos)")
     args = p.parse_args()
+
+    # --top es alias de --max
+    max_c = args.top if args.top > 0 else args.max_candidates
 
     asyncio.run(main(
         universe_override  = args.universe,
         period             = args.period,
         no_telegram        = args.no_telegram,
         no_sentiment       = args.no_sentiment,
-        max_candidates     = args.max_candidates,
+        max_candidates     = max_c,
+        min_score          = args.min_score,
+        min_rr             = args.min_rr,
+        exclude_portfolio  = not args.include_portfolio,
     ))
