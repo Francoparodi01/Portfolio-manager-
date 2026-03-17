@@ -18,25 +18,6 @@ docker compose logs -f scraper
 # Debe aparecer: "Scheduler activo: 10:30 ART | 17:00 ART"
 ```
 
----
-
-## Probar conexión a Redis Cloud
-```bash
-# Verifica que el bot puede conectarse a Redis Cloud
-docker compose run --rm telegram_bot python3 -c "
-import asyncio, os
-import redis.asyncio as redis
-
-async def test():
-    r = redis.from_url(os.environ['REDIS_URL'], decode_responses=True)
-    await r.set('test', 'hola')
-    val = await r.get('test')
-    print('Conexión Redis OK:', val)
-    await r.delete('test')
-
-asyncio.run(test())
-"
-```
 
 ---
 
