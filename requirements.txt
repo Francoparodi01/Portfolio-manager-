@@ -1,45 +1,41 @@
 # ── Browser automation ────────────────────────────────────
-playwright>=1.40
+playwright>=1.42,<2.0
 
 # ── Telegram ──────────────────────────────────────────────
-python-telegram-bot>=20.0
+python-telegram-bot>=20.7,<21.0
 
-# ── Redis (asyncio client incluido en el paquete) ─────────
-redis>=5.0
+# ── Redis (async client incluido) ─────────────────────────
+redis>=5.0,<6.0
 
 # ── Base de datos ─────────────────────────────────────────
-asyncpg>=0.29
+asyncpg>=0.29,<1.0
 
-# ── HTTP sync (notifier, TelegramMFA.send) ────────────────
-requests>=2.31
+# ── HTTP sync ─────────────────────────────────────────────
+requests>=2.31,<3.0
 
 # ── HTTP async ────────────────────────────────────────────
-aiohttp>=3.9
+aiohttp>=3.9,<4.0
 
 # ── Variables de entorno ──────────────────────────────────
-python-dotenv>=1.0
+python-dotenv>=1.0,<2.0
 
-# ── Criptografía (credentials.py — Fernet) ───────────────
-cryptography>=42.0
+# ── Criptografía ──────────────────────────────────────────
+cryptography>=42.0,<44.0
 
 # ── Análisis de datos ─────────────────────────────────────
-pandas>=2.1
-numpy>=1.26
-yfinance>=0.2
+pandas>=2.2,<3.0
+numpy>=1.26,<2.0
+yfinance>=0.2.40,<1.0
 
 # ── Análisis técnico ──────────────────────────────────────
-ta>=0.11              # RSI, MACD, Bollinger, ADX, OBV
+ta>=0.11,<1.0
 
 # ── Optimización de portfolio ─────────────────────────────
-scipy>=1.12
+scipy>=1.12,<2.0
 
 # ── Scheduler ─────────────────────────────────────────────
-apscheduler>=3.10
+apscheduler>=3.10,<4.0
 
 # ── Utilidades ────────────────────────────────────────────
-python-dateutil>=2.9
-pytz>=2024.1
-
-
-asyncpg
-
+python-dateutil>=2.9,<3.0
+pytz>=2024.1,<2026.0

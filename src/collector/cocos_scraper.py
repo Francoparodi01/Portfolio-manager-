@@ -115,18 +115,13 @@ class TelegramMFA:
 
     async def wait_for_code(self) -> Optional[str]:
         """
-        Espera el código MFA via Redis BLPOP (event-driven).
-
-        El bot de Telegram hace LPUSH mfa:<chat_id> cuando el usuario manda
-        los 6 dígitos. Acá esperamos con BLPOP en un loop de intervalos cortos
-        (10s) en lugar de un único BLPOP largo — mucho más robusto a drops de
-        conexión con Redis Cloud.
+        Espera el código MFA via Redis BLPOP (event-driven, sin archivos).
+        El bot hace LPUSH mfa:<chat_id> cuando el usuario manda los 6 dígitos.
+        Usa loop de 10s para ser robusto a drops de conexión con Redis Cloud.
         """
         from src.core.redis_client import client as redis_client
 
         key = f"mfa:{self._chat_id}"
-
-        # Limpiar código residual de intentos anteriores
         await redis_client.delete(key)
 
         self.send(
@@ -135,20 +130,17 @@ class TelegramMFA:
             f"Tenés <b>{self._timeout // 60} minutos</b>."
         )
 
-        logger.info(f"Esperando código MFA en Redis key={key} (timeout={self._timeout}s)...")
+        logger.info(f"Esperando MFA en Redis key={key} (timeout={self._timeout}s)...")
 
         import time as _time
         deadline = _time.monotonic() + self._timeout
-        interval = 10  # BLPOP en intervalos cortos — robusto a drops de conexión
 
         while _time.monotonic() < deadline:
             remaining = deadline - _time.monotonic()
             if remaining <= 0:
                 break
-            wait = min(interval, remaining)
-
             try:
-                result = await redis_client.blpop(key, timeout=int(wait) or 1)
+                result = await redis_client.blpop(key, timeout=int(min(10, remaining)) or 1)
             except Exception as e:
                 logger.warning(f"Redis blpop error (reintentando): {e}")
                 await asyncio.sleep(1)
@@ -159,9 +151,7 @@ class TelegramMFA:
                 if re.fullmatch(r"\d{6}", code):
                     logger.info(f"Código MFA recibido: {code}")
                     return code
-                else:
-                    logger.warning(f"Código inválido recibido: {code!r} — ignorado")
-                    # seguir esperando
+                logger.warning(f"Código inválido: {code!r} — ignorado, seguir esperando")
 
         logger.error("Timeout esperando código MFA")
         self.send("⏱️ Timeout — no se recibió código a tiempo.")
@@ -722,10 +712,8 @@ class CocosCapitalScraper:
     async def scrape_market(self, market_type: str) -> list[MarketAsset]:
         """
         Scraping del mercado de Cocos Capital.
-
-        FIX (Mar 2026): La página de mercado carga vacía y requiere que el usuario
-        seleccione el tipo desde el dropdown "Seleccione un..." para que aparezca la
-        tabla. El scraper ahora simula ese click antes de esperar los datos.
+        La URL /market/ACCIONES y /market/CEDEARS carga la tabla directamente.
+        No requiere interacción con dropdown.
         """
         assert market_type in ("ACCIONES", "CEDEARS")
 
@@ -738,50 +726,41 @@ class CocosCapitalScraper:
         )
         asset_type = AssetType.ACCION if market_type == "ACCIONES" else AssetType.CEDEAR
 
-        # Texto que aparece en el dropdown para cada tipo
-        dropdown_label = "Acciones" if market_type == "ACCIONES" else "CEDEARs"
-
         try:
+            logger.info(f"Navegando a mercado {market_type}: {url}")
             await self._page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            await asyncio.sleep(2.0)
 
-            # Esperar que el header de mercado esté visible (dropdown "Seleccione un...")
-            await self._page.wait_for_selector(
-                "button:has-text('Seleccione un'), [class*='dropdown'], [class*='select'], [class*='filter']",
-                state="visible",
-                timeout=30_000,
-            )
-            await asyncio.sleep(1.0)  # React hydration
+            # Esperar que aparezca al menos un ticker conocido
+            try:
+                await self._page.wait_for_function(
+                    """
+                    () => {
+                        const t = document.body.innerText;
+                        return (
+                            t.includes("AAPL") || t.includes("NVDA") ||
+                            t.includes("CVX")  || t.includes("MSFT") ||
+                            t.includes("YPF")  || t.includes("GGAL") ||
+                            t.includes("AMZN") || t.includes("Especie")
+                        );
+                    }
+                    """,
+                    timeout=20_000,
+                )
+                logger.info(f"Tabla {market_type} cargada")
+            except Exception:
+                logger.warning(f"Timeout esperando tabla — intentando parsear igual")
 
-            # ── Interactuar con el dropdown para cargar la tabla ──────────────
-            await self._select_market_dropdown(market_type, dropdown_label)
+            # Scroll completo para forzar render de filas virtualizadas
+            prev_height = 0
+            for _ in range(20):
+                await self._page.mouse.wheel(0, 3000)
+                await asyncio.sleep(0.3)
+                height = await self._page.evaluate("document.body.scrollHeight")
+                if height == prev_height:
+                    break
+                prev_height = height
 
-            # Esperar que aparezcan datos reales en la tabla
-            await self._page.wait_for_function(
-                """
-                () => {
-                    const t = document.body.innerText;
-                    return (
-                        t.includes("YPF")  ||
-                        t.includes("GGAL") ||
-                        t.includes("PAMP") ||
-                        t.includes("CVX")  ||
-                        t.includes("NVDA") ||
-                        t.includes("AAPL") ||
-                        t.includes("MSFT") ||
-                        t.includes("Último") ||
-                        t.includes("Precio")
-                    )
-                }
-                """,
-                timeout=30_000,
-            )
-            logger.info(f"Tabla de {market_type} cargada")
-
-            # Scroll para forzar render de grid virtual
-            for _ in range(10):
-                await self._page.mouse.wheel(0, 2500)
-                await asyncio.sleep(0.35)
-            # Volver al inicio para capturar desde la primera fila
             await self._page.evaluate("window.scrollTo(0, 0)")
             await asyncio.sleep(0.5)
 
@@ -789,7 +768,7 @@ class CocosCapitalScraper:
 
             if not assets:
                 await self._screenshot(f"market_{market_type}_empty")
-                logger.error(f"0 activos scrapeados para {market_type} — se omite")
+                logger.error(f"0 activos scrapeados para {market_type}")
                 return []
 
             logger.info(f"Market {market_type}: {len(assets)} activos")
@@ -797,161 +776,124 @@ class CocosCapitalScraper:
 
         except Exception as e:
             await self._screenshot(f"market_{market_type}_error")
-            logger.error(f"scrape_market({market_type}) falló: {e} — retornando []")
+            logger.error(f"scrape_market({market_type}) falló: {e}")
             return []
-
-    async def _select_market_dropdown(self, market_type: str, label: str):
-        """
-        Abre el dropdown "Seleccione un..." y elige el tipo de mercado.
-        Prueba múltiples estrategias en cascada.
-        """
-        logger.info(f"Seleccionando mercado: {label}")
-
-        # Estrategia 1: click en el botón del dropdown por texto
-        try:
-            btn = await self._page.query_selector(
-                "button:has-text('Seleccione un'), button:has-text('Seleccioná')"
-            )
-            if btn:
-                await btn.click()
-                await asyncio.sleep(0.8)
-                # Buscar la opción en el menú desplegado
-                option = await self._page.query_selector(
-                    f"[role='option']:has-text('{label}'), "
-                    f"li:has-text('{label}'), "
-                    f"div[class*='option']:has-text('{label}'), "
-                    f"span:has-text('{label}')"
-                )
-                if option:
-                    await option.click()
-                    await asyncio.sleep(1.5)
-                    logger.info(f"Dropdown: opción '{label}' seleccionada (estrategia 1)")
-                    return
-        except Exception as e:
-            logger.debug(f"Estrategia 1 dropdown falló: {e}")
-
-        # Estrategia 2: buscar el select nativo
-        try:
-            select = await self._page.query_selector("select")
-            if select:
-                await select.select_option(label=label)
-                await asyncio.sleep(1.5)
-                logger.info(f"Select nativo: '{label}' seleccionado (estrategia 2)")
-                return
-        except Exception as e:
-            logger.debug(f"Estrategia 2 select nativo falló: {e}")
-
-        # Estrategia 3: click directo en cualquier elemento que contenga el texto
-        try:
-            # Buscar por texto exacto en cualquier elemento clickeable
-            await self._page.click(
-                f"text='{label}'",
-                timeout=5_000,
-            )
-            await asyncio.sleep(1.5)
-            logger.info(f"Click por texto: '{label}' (estrategia 3)")
-            return
-        except Exception as e:
-            logger.debug(f"Estrategia 3 click por texto falló: {e}")
-
-        # Estrategia 4: simular la URL con query param si Cocos lo soporta
-        # Algunos brokers exponen filtros via ?type=acciones o ?category=cedears
-        try:
-            current_url = self._page.url
-            suffix = "ACCIONES" if market_type == "ACCIONES" else "CEDEARS"
-            if suffix not in current_url.lower():
-                new_url = f"{current_url}?category={suffix}"
-                await self._page.goto(new_url, wait_until="domcontentloaded", timeout=30_000)
-                await asyncio.sleep(2)
-                logger.info(f"Estrategia 4: navegado a {new_url}")
-        except Exception as e:
-            logger.debug(f"Estrategia 4 URL param falló: {e}")
-
-        logger.warning(f"Todas las estrategias de dropdown intentadas para {label}")
 
     async def _parse_market_dom(self, asset_type: "AssetType") -> list["MarketAsset"]:
         """
-        Parser robusto para tabla virtualizada de Cocos.
-        FIX: no esperar header hardcodeado — puede no existir.
+        Parser para la tabla de mercado de Cocos Capital.
+        Estructura real (Mar 2026): Especie | Último Precio | Var% | CC | PC | PV | CV
         """
-        import re
+        import re as _re
         assets: list[MarketAsset] = []
         seen: set[str] = set()
 
-        # Header opcional — no bloquear si no existe
-        try:
-            await self._page.wait_for_selector(
-                ".markets-table-header, [class*='tableHeader'], [class*='table-header']",
-                timeout=5_000,
-            )
-        except Exception:
-            logger.debug("Header de tabla no encontrado — continuando")
+        # Scroll adicional para capturar filas virtualizadas
+        for _ in range(8):
+            await self._page.mouse.wheel(0, 2500)
+            await asyncio.sleep(0.35)
+        await self._page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(0.3)
 
-        # Scroll para forzar render del grid virtual
-        for _ in range(6):
-            await self._page.mouse.wheel(0, 2000)
-            await asyncio.sleep(0.4)
-
-        # Buscar filas con múltiples selectores
-        rows = await self._page.query_selector_all(
-            "[class*='row'], [class*='instrument'], [class*='asset'], [role='row'], tr"
-        )
-
-        logger.info(f"Market rows detectadas: {len(rows)}")
-
-        for row in rows:
+        # Intentar con selectores de fila
+        rows = []
+        for sel in ["tr", "[class*=\'tableRow\']", "[class*=\'row\']", "[class*=\'instrument\']"]:
             try:
-                text = (await row.inner_text()).strip()
-                if not text:
-                    continue
-
-                lines = [l.strip() for l in text.split("\n") if l.strip()]
-                if len(lines) < 3:
-                    continue
-
-                ticker_raw = lines[0]
-                ticker = normalize_ticker(ticker_raw)
-
-                price = None
-                change = Decimal("0")
-
-                for l in lines:
-                    if price is None:
-                        m_price = re.search(r"([\d\.]+,\d{2})", l)
-                        if m_price:
-                            price = parse_decimal(m_price.group(1))
-
-                    m_change = re.search(r"([+\-]?\d+,\d+)%", l)
-                    if m_change:
-                        change = parse_decimal(m_change.group(1)) or Decimal("0")
-
-                if not ticker or ticker in seen:
-                    continue
-
-                if not price or price <= 0:
-                    continue
-
-                seen.add(ticker)
-
-                assets.append(
-                    MarketAsset(
-                        ticker=ticker,
-                        name=ticker,
-                        asset_type=asset_type,
-                        currency=Currency.ARS,
-                        last_price=price,
-                        change_pct_1d=change,
-                        volume=None,
-                        scraped_at=utcnow(),
-                    )
-                )
-
+                rows = await self._page.query_selector_all(sel)
+                if len(rows) > 5:
+                    logger.info(f"Parser: {len(rows)} filas con selector '{sel}'")
+                    break
             except Exception:
                 continue
 
+        if len(rows) > 5:
+            for row in rows:
+                try:
+                    text = (await row.inner_text()).strip()
+                    if not text or len(text) < 3:
+                        continue
+                    lines = [l.strip() for l in text.split("\n") if l.strip()]
+                    if len(lines) < 2:
+                        continue
+
+                    ticker = None
+                    price = None
+                    change = Decimal("0")
+
+                    for line in lines:
+                        if ticker is None:
+                            word = line.split()[0] if line.split() else ""
+                            if _re.fullmatch(r"[A-Z][A-Z0-9\.]{1,5}", word):
+                                ticker = normalize_ticker(word)
+                        if price is None:
+                            m = _re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2})", line)
+                            if m:
+                                price = parse_decimal(m.group(1))
+                        m_chg = _re.search(r"([+\-]?\d+,\d+)\s*%", line)
+                        if m_chg:
+                            change = parse_decimal(m_chg.group(1)) or Decimal("0")
+
+                    if not ticker or ticker in seen:
+                        continue
+                    if ticker in ("ESPECIE", "TICKER", "ULTIMO"):
+                        continue
+                    if not price or price <= 0:
+                        continue
+
+                    seen.add(ticker)
+                    assets.append(MarketAsset(
+                        ticker=ticker, name=ticker,
+                        asset_type=asset_type, currency=Currency.ARS,
+                        last_price=price, change_pct_1d=change,
+                        volume=None, scraped_at=utcnow(),
+                    ))
+                except Exception:
+                    continue
+
+        # Fallback: parsear innerText completo si el parser de filas falla
+        if len(assets) < 3:
+            logger.warning(f"Pocas filas ({len(assets)}) — usando fallback de texto")
+            assets = await self._parse_market_text_fallback(asset_type)
+
         logger.info(f"Parser market → {len(assets)} activos")
         return assets
-    
+
+    async def _parse_market_text_fallback(self, asset_type: "AssetType") -> list["MarketAsset"]:
+        """Fallback: extrae tickers y precios del innerText completo."""
+        import re as _re
+        assets: list[MarketAsset] = []
+        seen: set[str] = set()
+        try:
+            text = await self._page.inner_text("body")
+            lines = [l.strip() for l in text.split("\n") if l.strip()]
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                if _re.fullmatch(r"[A-Z][A-Z0-9\.]{1,5}", line):
+                    ticker = normalize_ticker(line)
+                    if ticker not in seen:
+                        price = None
+                        change = Decimal("0")
+                        for j in range(i + 1, min(i + 8, len(lines))):
+                            m = _re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2})", lines[j])
+                            if m and price is None:
+                                price = parse_decimal(m.group(1))
+                            m_chg = _re.search(r"([+\-]?\d+,\d+)\s*%", lines[j])
+                            if m_chg:
+                                change = parse_decimal(m_chg.group(1)) or Decimal("0")
+                        if price and price > 0:
+                            seen.add(ticker)
+                            assets.append(MarketAsset(
+                                ticker=ticker, name=ticker,
+                                asset_type=asset_type, currency=Currency.ARS,
+                                last_price=price, change_pct_1d=change,
+                                volume=None, scraped_at=utcnow(),
+                            ))
+                i += 1
+        except Exception as e:
+            logger.error(f"Fallback text parser: {e}")
+        logger.info(f"Fallback parser → {len(assets)} activos")
+        return assets
 
     async def save_market_prices(self, assets: list[MarketAsset]) -> int:
         if not assets:

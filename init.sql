@@ -47,14 +47,6 @@ CREATE TABLE IF NOT EXISTS market_prices (
 
 SELECT create_hypertable('market_prices', 'ts', if_not_exists => TRUE);
 
-CREATE TABLE IF NOT EXISTS raw_snapshots (
-    snapshot_id UUID        NOT NULL REFERENCES portfolio_snapshots(snapshot_id) ON DELETE CASCADE,
-    scraped_at  TIMESTAMPTZ NOT NULL,
-    payload     JSONB       NOT NULL
-);
-
-SELECT create_hypertable('raw_snapshots', 'scraped_at', if_not_exists => TRUE);
-
 CREATE TABLE IF NOT EXISTS bot_users (
     chat_id      BIGINT PRIMARY KEY,
     cocos_user   TEXT,
@@ -81,10 +73,11 @@ CREATE TABLE IF NOT EXISTS decision_log (
     was_correct       BOOLEAN
 );
 
+
 CREATE TABLE IF NOT EXISTS raw_snapshots (
-    snapshot_id UUID NOT NULL,
-    scraped_at TIMESTAMPTZ NOT NULL,
-    payload JSONB NOT NULL
+    snapshot_id UUID        NOT NULL REFERENCES portfolio_snapshots(snapshot_id) ON DELETE CASCADE,
+    scraped_at  TIMESTAMPTZ NOT NULL,
+    payload     JSONB       NOT NULL
 );
 
 SELECT create_hypertable('raw_snapshots', 'scraped_at', if_not_exists => TRUE);
