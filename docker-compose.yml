@@ -29,9 +29,9 @@ services:
     env_file:
       - .env
     volumes:
-      - ./logs:/app/logs
-      - ./screenshots:/app/screenshots
-      - secrets_data:/app/secrets
+    - ./logs:/app/logs
+    - ./screenshots:/app/screenshots
+    - secrets_data:/app/secrets
 
   telegram_bot:
     build: .

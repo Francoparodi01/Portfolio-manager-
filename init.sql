@@ -86,3 +86,21 @@ CREATE INDEX IF NOT EXISTS idx_positions_ticker       ON positions(ticker, scrap
 CREATE INDEX IF NOT EXISTS idx_market_prices_ticker   ON market_prices(ticker, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_decision_log_ticker    ON decision_log(ticker);
 CREATE INDEX IF NOT EXISTS idx_decision_log_decided   ON decision_log(decided_at DESC);
+
+
+ALTER TABLE decision_log
+    ADD COLUMN IF NOT EXISTS size_pct       FLOAT,   -- % del portfolio asignado (ej: 0.12 = 12%)
+    ADD COLUMN IF NOT EXISTS stop_loss_pct  FLOAT,   -- stop loss relativo al entry (ej: -0.08)
+    ADD COLUMN IF NOT EXISTS target_pct     FLOAT,   -- target relativo al entry   (ej: +0.16)
+    ADD COLUMN IF NOT EXISTS horizon_days   INTEGER, -- horizonte sugerido en días
+    ADD COLUMN IF NOT EXISTS rr_ratio       FLOAT;   -- risk/reward ratio calculado
+ 
+-- Índice para performance queries
+CREATE INDEX IF NOT EXISTS idx_decision_log_outcome
+    ON decision_log(decided_at DESC)
+    WHERE outcome_5d IS NOT NULL;
+ 
+CREATE INDEX IF NOT EXISTS idx_decision_log_pending
+    ON decision_log(decided_at)
+    WHERE outcome_5d IS NULL;
+ 

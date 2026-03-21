@@ -49,20 +49,21 @@ def only_allowed(func):
 def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Portfolio",       callback_data="portfolio"),
-            InlineKeyboardButton("🧠 Análisis",        callback_data="analisis"),
+            InlineKeyboardButton("📊 Portfolio", callback_data="portfolio"),
+            InlineKeyboardButton("🧠 Análisis", callback_data="analisis"),
         ],
         [
-            InlineKeyboardButton("🔄 Scrape manual",   callback_data="scrape"),
-            InlineKeyboardButton("🖥️ Estado",          callback_data="status"),
+            InlineKeyboardButton("🔄 Scrape manual", callback_data="scrape"),
+            InlineKeyboardButton("🖥️ Estado", callback_data="status"),
         ],
         [
             InlineKeyboardButton("⚡ Análisis rápido", callback_data="analisis_rapido"),
-            InlineKeyboardButton("🔭 Oportunidades",   callback_data="oportunidades"),
+            InlineKeyboardButton("🔭 Oportunidades", callback_data="oportunidades"),
         ],
         [
-            InlineKeyboardButton("❓ Ayuda",           callback_data="ayuda"),
-        ],
+           InlineKeyboardButton("📈 Performance", callback_data="performance"),
+           InlineKeyboardButton("❓ Ayuda", callback_data="ayuda"),
+       ],
     ])
 
 
@@ -93,6 +94,7 @@ async def _action_status(message: Message) -> None:
     except Exception as e:
         lines.append(f"❌ DB — {e}")
     await msg.edit_text("\n".join(lines), parse_mode="HTML")
+    await message.reply_text("¿Qué querés hacer?", reply_markup=_main_keyboard())
 
 
 async def _action_portfolio(message: Message) -> None:
@@ -133,9 +135,11 @@ async def _action_portfolio(message: Message) -> None:
                 f"     x{qty:.0f} @ ${price:,.2f}"
             )
         await msg.edit_text("\n".join(lines), parse_mode="HTML")
+        await message.reply_text("¿Qué querés hacer?", reply_markup=_main_keyboard())
     except Exception as e:
         logger.error(f"_action_portfolio: {e}", exc_info=True)
         await msg.edit_text(f"❌ Error: {e}")
+        await message.reply_text("¿Qué querés hacer?", reply_markup=_main_keyboard())
 
 
 async def _run_subprocess(message: Message, cmd: list[str],
@@ -157,11 +161,14 @@ async def _run_subprocess(message: Message, cmd: list[str],
         await msg.delete()
         for i in range(0, len(report), 3500):
             await message.reply_text(report[i:i + 3500], parse_mode="HTML")
+        await message.reply_text("¿Qué querés hacer?", reply_markup=_main_keyboard())
     except asyncio.TimeoutError:
         await msg.edit_text(f"⏱️ Timeout ({timeout//60} min). Revisá los logs.")
+        await message.reply_text("¿Qué querés hacer?", reply_markup=_main_keyboard())
     except Exception as e:
         logger.error(f"subprocess error: {e}", exc_info=True)
         await msg.edit_text(f"❌ Error: {e}")
+        await message.reply_text("¿Qué querés hacer?", reply_markup=_main_keyboard())
 
 
 async def _action_analisis(message: Message, rapido: bool = False) -> None:
@@ -183,14 +190,19 @@ async def _action_scrape(message: Message) -> None:
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
         if proc.returncode == 0:
-            await msg.edit_text("✅ Scrape completado. Usá /portfolio para ver el resultado.")
+            await msg.delete()
+            # Mostrar portfolio actualizado directamente
+            await _action_portfolio(message)
         else:
             err = stderr.decode("utf-8", errors="replace")[-800:]
             await msg.edit_text(f"❌ Scrape falló.\n<code>{err}</code>", parse_mode="HTML")
+            await message.reply_text("¿Qué querés hacer?", reply_markup=_main_keyboard())
     except asyncio.TimeoutError:
         await msg.edit_text("⏱️ Timeout (3 min). Revisá los logs.")
+        await message.reply_text("¿Qué querés hacer?", reply_markup=_main_keyboard())
     except Exception as e:
         await msg.edit_text(f"❌ Error: {e}")
+        await message.reply_text("¿Qué querés hacer?", reply_markup=_main_keyboard())
 
 
 async def _action_oportunidades(message: Message) -> None:
@@ -198,6 +210,15 @@ async def _action_oportunidades(message: Message) -> None:
         message,
         ["python", "scripts/run_opportunity.py", "--no-telegram"],
         "🔭 Analizando radar de oportunidades...\n(2-3 min)",
+    )
+
+
+async def _action_performance(message: Message) -> None:
+    await _run_subprocess(
+        message,
+        ["python", "scripts/run_performance.py", "--no-telegram"],
+        "📈 Calculando performance del sistema...",
+        timeout=120,
     )
 
 
@@ -222,6 +243,7 @@ async def cmd_ayuda(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/scrape          — scrape manual del portfolio\n"
         "/oportunidades   — radar de nuevas acciones\n"
         "/status          — estado del sistema\n"
+        "/performance   — win rate, EV y últimas decisiones\n"
         "/ayuda           — esta lista\n\n"
         "<b>MFA:</b> cuando el sistema pida código, mandá los 6 dígitos.",
         parse_mode="HTML",
@@ -252,6 +274,9 @@ async def cmd_scrape(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_oportunidades(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _action_oportunidades(update.message)
 
+@only_allowed
+async def cmd_performance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _action_performance(update.message)
 
 # ── Callback inline — usa query.message directamente ─────────────────────────
 
@@ -269,6 +294,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         "analisis_rapido": lambda: _action_analisis(message, rapido=True),
         "scrape":          lambda: _action_scrape(message),
         "oportunidades":   lambda: _action_oportunidades(message),
+        "performance": lambda: _action_performance(message),
         "ayuda": lambda: message.reply_text(
             "📋 Comandos: /start /portfolio /analisis /analisis_rapido "
             "/scrape /oportunidades /status /ayuda",
@@ -317,6 +343,7 @@ def main() -> None:
     app.add_handler(CommandHandler("analisis_rapido",  cmd_analisis_rapido))
     app.add_handler(CommandHandler("scrape",           cmd_scrape))
     app.add_handler(CommandHandler("oportunidades",    cmd_oportunidades))
+    app.add_handler(CommandHandler("performance", cmd_performance))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("Bot iniciado — esperando mensajes...")

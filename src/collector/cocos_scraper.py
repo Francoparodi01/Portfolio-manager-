@@ -3,11 +3,9 @@ collector/cocos_scraper.py
 Scraper profesional para Cocos Capital.
 Reemplaza implementación Selenium anterior.
 
-MFA Flow (Telegram):
-  1. Login con email + password
-  2. Si Cocos pide MFA → manda mensaje a Telegram al usuario
-  3. El usuario reenvía el código de 6 dígitos al bot
-  4. El scraper lo lee por polling y lo ingresa automáticamente
+MFA Flow (prioridad):
+  1. TOTP automático: si COCOS_TOTP_SECRET está en .env → genera el código sin intervención humana
+  2. Telegram manual: si no hay secret → pide el código al usuario por Telegram (fallback)
 """
 
 from __future__ import annotations
@@ -16,6 +14,11 @@ import asyncio
 import os
 import re
 import time
+try:
+    import pyotp
+    HAS_PYOTP = True
+except ImportError:
+    HAS_PYOTP = False
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -379,14 +382,30 @@ class CocosCapitalScraper:
             # ── MFA requerido ──────────────────────
             logger.info(f"MFA requerido. URL actual: {self._page.url}")
 
-            if not self._telegram:
-                raise RuntimeError(
-                    "Cocos pide MFA pero TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID "
-                    "no están configurados en el .env"
-                )
+            # ── TOTP automático (si hay secret configurado) ──────────────
+            totp_secret = getattr(self._cfg, "totp_secret", None) or os.environ.get("COCOS_TOTP_SECRET", "")
+            if totp_secret and HAS_PYOTP:
+                try:
+                    mfa_code = pyotp.TOTP(totp_secret).now()
+                    logger.info(f"TOTP generado automáticamente: {mfa_code}")
+                    if self._telegram:
+                        self._telegram.send(f"🔐 TOTP generado automáticamente: <code>{mfa_code}</code>")
+                except Exception as e:
+                    logger.warning(f"TOTP falló ({e}), fallback a Telegram manual")
+                    mfa_code = None
+            elif totp_secret and not HAS_PYOTP:
+                logger.warning("COCOS_TOTP_SECRET configurado pero pyotp no instalado. Fallback a Telegram.")
+                mfa_code = None
+            else:
+                mfa_code = None
 
-            # Pedir código al usuario por Telegram (async Redis BLPOP)
-            mfa_code = await self._telegram.wait_for_code()
+            # ── Fallback: pedir código manualmente por Telegram ──────────────
+            if not mfa_code:
+                if not self._telegram:
+                    raise RuntimeError(
+                        "Cocos pide MFA pero no hay TOTP secret ni Telegram configurado"
+                    )
+                mfa_code = await self._telegram.wait_for_code()
 
             if not mfa_code:
                 raise RuntimeError("No se recibió código MFA a tiempo")

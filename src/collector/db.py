@@ -300,3 +300,295 @@ class PortfolioDatabase:
     async def get_pool(self):
         """Expone el pool para decision_memory.py."""
         return self._pool
+
+  # ── Decision Engine ───────────────────────────────────────────────────────
+ 
+    async def save_decision(self, decision) -> Optional[int]:
+        """
+        Guarda una DecisionOutput en decision_log.
+        Retorna el id generado, o None si falla.
+ 
+        Parámetro 'decision': instancia de DecisionOutput de decision_engine.py
+        """
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        if not decision.is_actionable():
+            return None  # No guardamos HOLDs
+ 
+        import json as _json
+        try:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO decision_log (
+                        decided_at, ticker, decision, final_score, confidence,
+                        layers, price_at_decision, vix_at_decision, regime,
+                        size_pct, stop_loss_pct, target_pct, horizon_days, rr_ratio
+                    ) VALUES (
+                        $1, $2, $3, $4, $5,
+                        $6::jsonb, $7, $8, $9,
+                        $10, $11, $12, $13, $14
+                    )
+                    RETURNING id
+                    """,
+                    decision.decided_at,
+                    decision.ticker.upper(),
+                    decision.direction,
+                    float(decision.score),
+                    float(decision.conviction),
+                    _json.dumps(decision.to_dict()),
+                    decision.entry_price,
+                    decision.vix,
+                    decision.regime,
+                    float(decision.size_pct),
+                    float(decision.stop_loss_pct),
+                    float(decision.target_pct),
+                    int(decision.horizon_days),
+                    float(decision.rr_ratio),
+                )
+            decision_id = row["id"]
+            logger.info(f"Decisión guardada: id={decision_id} {decision.direction} {decision.ticker}")
+            return decision_id
+        except Exception as e:
+            logger.error(f"save_decision: {e}", exc_info=True)
+            return None
+ 
+    async def update_outcomes(self, lookback_days: int = 30) -> int:
+        """
+        Busca decisiones sin outcome donde han pasado ≥5 días y llena
+        outcome_5d, outcome_10d, outcome_20d y was_correct usando yfinance.
+ 
+        Retorna la cantidad de registros actualizados.
+        """
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+ 
+        try:
+            import yfinance as yf
+            from datetime import datetime, timedelta
+            import asyncio
+ 
+            cutoff = datetime.utcnow() - timedelta(days=5)
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, ticker, price_at_decision, decided_at, decision
+                    FROM decision_log
+                    WHERE outcome_5d IS NULL
+                      AND decided_at <= $1
+                      AND decision != 'HOLD'
+                    ORDER BY decided_at DESC
+                    LIMIT 200
+                    """,
+                    cutoff,
+                )
+ 
+            if not rows:
+                logger.info("update_outcomes: sin decisiones pendientes")
+                return 0
+ 
+            updated = 0
+            now = datetime.utcnow()
+ 
+            for row in rows:
+                ticker     = str(row["ticker"]).upper()
+                entry      = row["price_at_decision"]
+                decided_at = row["decided_at"]
+                direction  = str(row["decision"]).upper()
+ 
+                if not entry or float(entry) <= 0:
+                    continue
+ 
+                try:
+                    df = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda t=ticker, d=decided_at: yf.download(
+                            t, start=d.strftime("%Y-%m-%d"),
+                            progress=False, auto_adjust=True,
+                        )["Close"].squeeze()
+                    )
+                    if df is None or df.empty:
+                        continue
+                except Exception as e:
+                    logger.debug(f"update_outcomes yfinance {ticker}: {e}")
+                    continue
+ 
+                entry_f = float(entry)
+                outcomes = {}
+                for horizon, col in [(5, "outcome_5d"), (10, "outcome_10d"), (20, "outcome_20d")]:
+                    target_date = decided_at + timedelta(days=horizon)
+                    if target_date > now:
+                        continue
+                    # Buscar el precio más cercano a la fecha objetivo
+                    try:
+                        idx = df.index.searchsorted(target_date, side="left")
+                        if idx >= len(df):
+                            idx = len(df) - 1
+                        price_at_horizon = float(df.iloc[idx])
+                        pct_change = (price_at_horizon - entry_f) / entry_f
+                        outcomes[col] = pct_change
+                    except Exception:
+                        continue
+ 
+                if not outcomes:
+                    continue
+ 
+                # was_correct: el movimiento va en la dirección esperada
+                primary = outcomes.get("outcome_5d", outcomes.get("outcome_10d"))
+                was_correct = None
+                if primary is not None:
+                    if direction == "BUY":
+                        was_correct = primary > 0
+                    elif direction == "SELL":
+                        was_correct = primary < 0
+ 
+                try:
+                    async with self._pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            UPDATE decision_log SET
+                                outcome_5d        = COALESCE($2, outcome_5d),
+                                outcome_10d       = COALESCE($3, outcome_10d),
+                                outcome_20d       = COALESCE($4, outcome_20d),
+                                was_correct       = COALESCE($5, was_correct),
+                                outcome_filled_at = NOW()
+                            WHERE id = $1
+                            """,
+                            row["id"],
+                            outcomes.get("outcome_5d"),
+                            outcomes.get("outcome_10d"),
+                            outcomes.get("outcome_20d"),
+                            was_correct,
+                        )
+                    updated += 1
+                    logger.debug(f"outcome actualizado: {ticker} id={row['id']} {outcomes}")
+                except Exception as e:
+                    logger.warning(f"update_outcomes write error {ticker}: {e}")
+ 
+            logger.info(f"update_outcomes: {updated}/{len(rows)} decisiones actualizadas")
+            return updated
+ 
+        except ImportError:
+            logger.error("update_outcomes requiere yfinance: pip install yfinance")
+            return 0
+        except Exception as e:
+            logger.error(f"update_outcomes: {e}", exc_info=True)
+            return 0
+ 
+    async def get_performance_stats(self, lookback_days: int = 90) -> dict:
+        """
+        Calcula win rate, avg_win, avg_loss, EV y métricas por horizonte.
+        Solo cuenta decisiones donde el outcome ya fue llenado.
+ 
+        Retorna dict con todas las métricas necesarias para /performance.
+        """
+        if not self._pool:
+            return {}
+ 
+        from datetime import datetime, timedelta
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+ 
+        async with self._pool.acquire() as conn:
+            # Métricas globales (horizonte 5d como primario)
+            global_row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*)                                        AS total_trades,
+                    COUNT(*) FILTER (WHERE was_correct = TRUE)      AS winners,
+                    COUNT(*) FILTER (WHERE was_correct = FALSE)     AS losers,
+                    AVG(outcome_5d)                                 AS avg_return_5d,
+                    AVG(outcome_5d) FILTER (WHERE outcome_5d > 0)   AS avg_win_5d,
+                    AVG(outcome_5d) FILTER (WHERE outcome_5d <= 0)  AS avg_loss_5d,
+                    AVG(outcome_10d)                                AS avg_return_10d,
+                    AVG(outcome_20d)                                AS avg_return_20d,
+                    MAX(outcome_5d)                                 AS best_trade,
+                    MIN(outcome_5d)                                 AS worst_trade,
+                    STDDEV(outcome_5d)                              AS std_5d
+                FROM decision_log
+                WHERE decided_at >= $1
+                  AND outcome_5d IS NOT NULL
+                  AND decision != 'HOLD'
+                """,
+                cutoff,
+            )
+ 
+            # Por ticker (top performers y losers)
+            ticker_rows = await conn.fetch(
+                """
+                SELECT
+                    ticker,
+                    COUNT(*)                    AS trades,
+                    AVG(outcome_5d)             AS avg_return,
+                    COUNT(*) FILTER (WHERE was_correct = TRUE)  AS wins,
+                    decision
+                FROM decision_log
+                WHERE decided_at >= $1
+                  AND outcome_5d IS NOT NULL
+                  AND decision != 'HOLD'
+                GROUP BY ticker, decision
+                ORDER BY avg_return DESC
+                LIMIT 10
+                """,
+                cutoff,
+            )
+ 
+            # Pendientes de outcome (decisiones recientes sin resultado aún)
+            pending_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM decision_log
+                WHERE outcome_5d IS NULL
+                  AND decision != 'HOLD'
+                  AND decided_at >= $1
+                """,
+                cutoff,
+            )
+ 
+            # Últimas 5 decisiones (con o sin outcome)
+            recent_rows = await conn.fetch(
+                """
+                SELECT ticker, decision, final_score, confidence,
+                       outcome_5d, was_correct, decided_at,
+                       size_pct, stop_loss_pct, target_pct
+                FROM decision_log
+                WHERE decision != 'HOLD'
+                ORDER BY decided_at DESC
+                LIMIT 5
+                """,
+            )
+ 
+        g = dict(global_row) if global_row else {}
+ 
+        total   = int(g.get("total_trades") or 0)
+        winners = int(g.get("winners") or 0)
+        losers  = int(g.get("losers") or 0)
+ 
+        win_rate  = winners / total if total > 0 else None
+        loss_rate = losers  / total if total > 0 else None
+ 
+        avg_win  = float(g["avg_win_5d"])  if g.get("avg_win_5d")  else None
+        avg_loss = float(g["avg_loss_5d"]) if g.get("avg_loss_5d") else None
+ 
+        # EV = (win_rate * avg_win) - (loss_rate * avg_loss)
+        ev = None
+        if win_rate is not None and avg_win is not None and avg_loss is not None:
+            ev = (win_rate * avg_win) - ((1 - win_rate) * abs(avg_loss))
+ 
+        return {
+            "total_trades":    total,
+            "winners":         winners,
+            "losers":          losers,
+            "pending":         int(pending_count or 0),
+            "win_rate":        win_rate,
+            "avg_win_5d":      avg_win,
+            "avg_loss_5d":     avg_loss,
+            "avg_return_5d":   float(g["avg_return_5d"])  if g.get("avg_return_5d")  else None,
+            "avg_return_10d":  float(g["avg_return_10d"]) if g.get("avg_return_10d") else None,
+            "avg_return_20d":  float(g["avg_return_20d"]) if g.get("avg_return_20d") else None,
+            "best_trade":      float(g["best_trade"])     if g.get("best_trade")      else None,
+            "worst_trade":     float(g["worst_trade"])    if g.get("worst_trade")     else None,
+            "ev":              ev,
+            "lookback_days":   lookback_days,
+            "ticker_stats":    [dict(r) for r in ticker_rows],
+            "recent":          [dict(r) for r in recent_rows],
+        }

@@ -42,6 +42,7 @@ from src.analysis.sentiment import fetch_sentiment
 from src.analysis.risk import build_portfolio_risk_report
 from src.analysis.synthesis import SynthesisResult, LayerScore, blend_scores, synthesize_with_llm_local
 from src.analysis.optimizer import run_optimizer
+from src.analysis.decision_engine import make_decisions_from_results
 
 import numpy as np
 from html import escape
@@ -1000,6 +1001,28 @@ async def main(tickers_override: list[str], period: str,
             # El LLM es SOLO display — no modifica score ni decisión
 
         results.append(result)
+
+
+    # ── 6.5 Decision Engine — decisiones forzadas ─────────────────────────────
+    logger.info("Generando decisiones forzadas...")
+    decisions = make_decisions_from_results(results, macro_snap, macro_regime)
+    actionable = [d for d in decisions if d.is_actionable()]
+    logger.info(f"Decisiones: {len(actionable)} accionables de {len(decisions)}")
+ 
+    # Guardar en DB (async, no bloquea el pipeline si falla)
+    if actionable:
+        try:
+            db_dec = PortfolioDatabase(cfg.database.url)
+            await db_dec.connect()
+            saved_ids = []
+            for dec in actionable:
+                dec_id = await db_dec.save_decision(dec)
+                if dec_id:
+                    saved_ids.append(dec_id)
+            await db_dec.close()
+            logger.info(f"Decisiones guardadas en DB: ids={saved_ids}")
+        except Exception as e:
+            logger.warning(f"No se pudieron guardar decisiones en DB (no crítico): {e}")
 
     # ── 7. Universo Cocos ──────────────────────────────────────────────────────
     universe_results = []
