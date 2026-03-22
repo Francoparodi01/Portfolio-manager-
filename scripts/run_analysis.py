@@ -42,8 +42,8 @@ from src.analysis.sentiment import fetch_sentiment
 from src.analysis.risk import build_portfolio_risk_report
 from src.analysis.synthesis import SynthesisResult, LayerScore, blend_scores, synthesize_with_llm_local
 from src.analysis.optimizer import run_optimizer
-from src.analysis.decision_engine import make_decisions_from_results
 
+import json as _json
 import numpy as np
 from html import escape
 from datetime import datetime, timedelta
@@ -91,7 +91,6 @@ def _bar(x: float) -> str:
 
 
 def _rankdata(values: np.ndarray) -> np.ndarray:
-    """Ranking con promedio para empates (similar a scipy.stats.rankdata)."""
     arr = np.asarray(values, dtype=float)
     n = arr.size
     if n == 0:
@@ -99,16 +98,14 @@ def _rankdata(values: np.ndarray) -> np.ndarray:
     order = np.argsort(arr, kind="mergesort")
     sorted_vals = arr[order]
     ranks_sorted = np.zeros(n, dtype=float)
-
     i = 0
     while i < n:
         j = i
         while j + 1 < n and sorted_vals[j + 1] == sorted_vals[i]:
             j += 1
-        avg_rank = (i + j + 2) / 2.0  # ranks 1..n
+        avg_rank = (i + j + 2) / 2.0
         ranks_sorted[i:j + 1] = avg_rank
         i = j + 1
-
     ranks = np.empty(n, dtype=float)
     ranks[order] = ranks_sorted
     return ranks
@@ -133,28 +130,17 @@ def _ic_label(ic: float | None) -> str:
     if ic is None:
         return "SIN DATOS"
     a = abs(ic)
-    if a >= 0.10:
-        return "FUERTE"
-    if a >= 0.05:
-        return "MODERADO"
-    if a >= 0.02:
-        return "DÉBIL"
+    if a >= 0.10: return "FUERTE"
+    if a >= 0.05: return "MODERADO"
+    if a >= 0.02: return "DÉBIL"
     return "NULO"
 
 
 async def _compute_information_coefficient(cfg, tickers: list[str], lookback_days: int = 180) -> dict:
-    """
-    Calcula IC histórico usando decision_log:
-      IC (Pearson) y Rank IC (Spearman) entre final_score y outcome_{5d,10d,20d}.
-    """
     db = PortfolioDatabase(cfg.database.url)
     cutoff = datetime.now() - timedelta(days=lookback_days)
     horizons = ("5d", "10d", "20d")
-    metrics = {
-        "lookback_days": lookback_days,
-        "by_horizon": {},
-        "has_data": False,
-    }
+    metrics = {"lookback_days": lookback_days, "by_horizon": {}, "has_data": False}
 
     try:
         await db.connect()
@@ -173,16 +159,14 @@ async def _compute_information_coefficient(cfg, tickers: list[str], lookback_day
                       AND ticker = ANY($2::text[])
                       AND decision != 'HOLD'
                     """,
-                    cutoff,
-                    ticker_filter,
+                    cutoff, ticker_filter,
                 )
             else:
                 rows = await conn.fetch(
                     """
                     SELECT ticker, final_score, outcome_5d, outcome_10d, outcome_20d
                     FROM decision_log
-                    WHERE decided_at >= $1
-                      AND decision != 'HOLD'
+                    WHERE decided_at >= $1 AND decision != 'HOLD'
                     """,
                     cutoff,
                 )
@@ -196,30 +180,26 @@ async def _compute_information_coefficient(cfg, tickers: list[str], lookback_day
                 out = r[k]
                 if score is None or out is None:
                     continue
-                score = float(score)
-                out = float(out)
+                score = float(score); out = float(out)
                 if not np.isfinite(score) or not np.isfinite(out):
                     continue
-                xs.append(score)
-                ys.append(out)
+                xs.append(score); ys.append(out)
                 covered.add(str(r["ticker"]).upper())
 
-            pearson = _safe_corr(xs, ys)
-            rank_ic = _safe_corr(_rankdata(np.asarray(xs)), _rankdata(np.asarray(ys))) if len(xs) >= 5 else None
+            pearson  = _safe_corr(xs, ys)
+            rank_ic  = _safe_corr(_rankdata(np.asarray(xs)), _rankdata(np.asarray(ys))) if len(xs) >= 5 else None
             metrics["by_horizon"][hz] = {
-                "ic": pearson,
-                "rank_ic": rank_ic,
-                "n_obs": len(xs),
-                "n_tickers": len(covered),
+                "ic": pearson, "rank_ic": rank_ic,
+                "n_obs": len(xs), "n_tickers": len(covered),
                 "quality": _ic_label(pearson),
             }
 
         primary = metrics["by_horizon"].get("5d", {})
-        metrics["primary_horizon"] = "5d"
-        metrics["primary_ic"] = primary.get("ic")
-        metrics["primary_rank_ic"] = primary.get("rank_ic")
-        metrics["primary_n_obs"] = primary.get("n_obs", 0)
-        metrics["has_data"] = any((v.get("n_obs", 0) >= 5) for v in metrics["by_horizon"].values())
+        metrics["primary_horizon"]  = "5d"
+        metrics["primary_ic"]       = primary.get("ic")
+        metrics["primary_rank_ic"]  = primary.get("rank_ic")
+        metrics["primary_n_obs"]    = primary.get("n_obs", 0)
+        metrics["has_data"]         = any((v.get("n_obs", 0) >= 5) for v in metrics["by_horizon"].values())
         return metrics
     except Exception as e:
         logger.warning(f"IC: no se pudo calcular ({e})")
@@ -251,11 +231,11 @@ def _component_reason(result) -> tuple[str, str]:
     sent  = _layer_weighted(result, "sentiment")
 
     positives, negatives = [], []
-    if tech  > 0.02: positives.append("técnico")
+    if tech  > 0.02:  positives.append("técnico")
     elif tech  < -0.02: negatives.append("técnico")
-    if macro > 0.02: positives.append("macro")
+    if macro > 0.02:  positives.append("macro")
     elif macro < -0.02: negatives.append("macro")
-    if sent  > 0.02: positives.append("sentiment")
+    if sent  > 0.02:  positives.append("sentiment")
     elif sent  < -0.02: negatives.append("sentiment")
 
     if positives and negatives:
@@ -270,12 +250,9 @@ def _component_reason(result) -> tuple[str, str]:
     mags = {"technical": abs(tech), "macro": abs(macro), "sentiment": abs(sent)}
     top  = max(mags, key=mags.get)
     top_val = {"technical": tech, "macro": macro, "sentiment": sent}[top]
-    if top_val > 0.02:
-        motivo = f"{top} favorable"
-    elif top_val < -0.02:
-        motivo = f"{top} en contra"
-    else:
-        motivo = "sin ventaja clara"
+    if top_val > 0.02:   motivo = f"{top} favorable"
+    elif top_val < -0.02: motivo = f"{top} en contra"
+    else:                 motivo = "sin ventaja clara"
     return lectura, motivo
 
 
@@ -289,11 +266,6 @@ def _current_weights(positions: list[dict], total_ars: float) -> dict[str, float
 
 
 def _extract_trade_maps(rebalance_report) -> tuple[dict, set]:
-    """
-    Retorna (trade_map, blocked_buys).
-    trade_map[ticker] = RebalanceTrade obj
-    blocked_buys = set de tickers con compra bloqueada por el gate
-    """
     trade_map    = {}
     blocked_buys = set()
     if not rebalance_report:
@@ -321,14 +293,9 @@ def _extract_trade_maps(rebalance_report) -> tuple[dict, set]:
 
 
 def _target_weight(ticker: str, current_w: float, trade_map: dict) -> float:
-    """
-    Lee el peso objetivo desde el trade del optimizer.
-    FIX: busca 'weight_optimal' PRIMERO (campo real de RebalanceTrade).
-    """
     tr = trade_map.get(ticker)
     if not tr:
         return current_w
-    # Campo real del optimizer (RebalanceTrade.weight_optimal)
     for key in ("weight_optimal", "target_weight", "new_weight", "after_weight",
                 "weight_after", "to_weight"):
         val = _get(tr, key, None)
@@ -362,8 +329,7 @@ def _action_label(score: float, current_w: float,
 
 def _normalize_conviction(x) -> float:
     try:
-        if x is None:
-            return 0.0
+        if x is None: return 0.0
         x = float(x)
         return max(0.0, min(1.0, x / 100.0 if x > 1.0 else x))
     except Exception:
@@ -397,13 +363,8 @@ def _extract_position_size(result, portfolio_risk, ticker: str) -> float:
 
 
 def _extract_risk_gate(rebalance_report) -> str:
-    """
-    FIX: busca 'risk_gate_state' PRIMERO (campo real de RebalanceReport).
-    """
     for path in [
-        ("risk_gate_state",),
-        ("risk_gate",),
-        ("gate",),
+        ("risk_gate_state",), ("risk_gate",), ("gate",),
         ("optimization", "risk_gate_state"),
         ("optimization", "risk_gate"),
         ("optimization", "gate"),
@@ -421,14 +382,12 @@ def _extract_risk_gate(rebalance_report) -> str:
 def _extract_cash_metrics(rebalance_report, cash_ars: float,
                            trade_map: dict, current_w: dict,
                            total_ars: float) -> tuple[float, float, float]:
-    # Intentar desde campos directos del RebalanceReport
     sells = _get(rebalance_report, "total_sells_ars", _get(rebalance_report, "total_sell_ars", None))
     buys  = _get(rebalance_report, "total_buys_ars",  _get(rebalance_report, "total_buy_ars",  None))
     if sells is not None and buys is not None:
         s = float(sells); b = float(buys)
         return s, b, max(0.0, float(cash_ars) + s - b)
 
-    # Fallback: reconstruir desde trades
     s = b = 0.0
     for ticker, tr in trade_map.items():
         action = str(_get(tr, "action", "") or "").upper()
@@ -453,20 +412,143 @@ def _extract_cash_metrics(rebalance_report, cash_ars: float,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SAVE OPTIMIZER TRADES — traduce deltas de peso a BUY/SELL ejecutables
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _save_optimizer_trades(
+    cfg,
+    rebalance_report,
+    current_w: dict,
+    positions: list,
+    results: list,
+    macro_snap,
+    macro_regime,
+    total_ars: float,
+) -> list[int]:
+    """
+    Traduce los trades del optimizer (delta de pesos) en decisiones BUY/SELL
+    y las guarda en decision_log.
+
+      delta > +3%  → BUY  (size_pct = delta)
+      delta < -3%  → SELL (size_pct = abs(delta))
+      |delta| <= 3% → skip (MANTENER)
+    """
+    from src.analysis.decision_engine import _normalize_regime, STOP_NORMAL, TARGET_RR, HORIZON_MED
+
+    MIN_DELTA    = 0.03
+    regime       = _normalize_regime(macro_regime)
+    vix          = getattr(macro_snap, "vix", None)
+    is_defensive = regime in ("RISK_OFF", "DEFENSIVE", "BLOCKED", "CAUTIOUS")
+
+    if vix and float(vix) > 25:
+        stop = STOP_NORMAL * 1.25
+    elif is_defensive:
+        stop = -0.05
+    else:
+        stop = STOP_NORMAL  # -0.08
+
+    # Score y precio por ticker desde synthesis
+    score_map = {
+        str(getattr(r, "ticker", "")).upper(): {
+            "score":      float(getattr(r, "final_score", 0.0) or 0.0),
+            "conviction": min(1.0, float(getattr(r, "conviction",
+                           getattr(r, "confidence", 0.5)) or 0.5)),
+        }
+        for r in (results or [])
+    }
+    price_map = {
+        str(p.get("ticker", "")).upper(): float(p.get("current_price", 0) or 0)
+        for p in (positions or [])
+    }
+
+    trades_to_save = []
+    trade_map, _ = _extract_trade_maps(rebalance_report)
+
+    for ticker, tr in trade_map.items():
+        ticker = ticker.upper()
+        cw     = float(current_w.get(ticker, 0.0))
+        tw     = _target_weight(ticker, cw, trade_map)
+        delta  = tw - cw
+
+        if abs(delta) < MIN_DELTA:
+            continue
+
+        direction  = "BUY" if delta > 0 else "SELL"
+        size_pct   = abs(delta)
+        sm         = score_map.get(ticker, {})
+        score      = sm.get("score", 0.0)
+        conv       = sm.get("conviction", 0.5)
+        price      = price_map.get(ticker)
+        stop_pct   = stop if direction == "BUY" else abs(stop)
+        target_pct = abs(stop) * TARGET_RR * (1 if direction == "BUY" else -1)
+        rr         = abs(target_pct) / abs(stop_pct) if stop_pct else TARGET_RR
+
+        trades_to_save.append({
+            "ticker":        ticker,
+            "direction":     direction,
+            "score":         score,
+            "conviction":    conv,
+            "size_pct":      size_pct,
+            "price":         float(price) if price else None,
+            "stop_loss_pct": stop_pct if direction == "BUY" else -abs(stop_pct),
+            "target_pct":    target_pct,
+            "rr_ratio":      rr,
+            "regime":        regime,
+            "vix":           float(vix) if vix else None,
+            "decided_at":    datetime.utcnow(),
+        })
+
+    if not trades_to_save:
+        logger.info("_save_optimizer_trades: sin deltas >= 3%")
+        return []
+
+    saved_ids = []
+    try:
+        db = PortfolioDatabase(cfg.database.url)
+        await db.connect()
+        pool = await db.get_pool()
+        async with pool.acquire() as conn:
+            for t in trades_to_save:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO decision_log (
+                        decided_at, ticker, decision, final_score, confidence,
+                        layers, price_at_decision, vix_at_decision, regime,
+                        size_pct, stop_loss_pct, target_pct, horizon_days, rr_ratio
+                    ) VALUES (
+                        $1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14
+                    ) RETURNING id
+                    """,
+                    t["decided_at"], t["ticker"], t["direction"],
+                    t["score"], t["conviction"],
+                    _json.dumps({"source": "optimizer", "delta_pct": t["size_pct"]}),
+                    t["price"], t["vix"], t["regime"],
+                    t["size_pct"], t["stop_loss_pct"], t["target_pct"],
+                    HORIZON_MED, t["rr_ratio"],
+                )
+                saved_ids.append(row["id"])
+                logger.info(
+                    f"Trade guardado: id={row['id']} {t['direction']} {t['ticker']} "
+                    f"size={t['size_pct']:.1%} stop={t['stop_loss_pct']:+.1%} "
+                    f"target={t['target_pct']:+.1%}"
+                )
+        await db.close()
+    except Exception as e:
+        logger.error(f"_save_optimizer_trades error: {e}", exc_info=True)
+
+    return saved_ids
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # RENDER PRINCIPAL — HTML para Telegram
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _compute_rotation_plan(sells_ars: float, radar: list, rows: list,
                             gate: str, total_ars: float) -> list[dict]:
-    """
-    Dado un monto de ventas disponible, calcula cómo reasignarlo.
-    Retorna lista de {ticker, ars, pct, is_external, score} o [] si el gate bloquea.
-    """
     if sells_ars < 5_000 or gate in ("CAUTIOUS", "BLOCKED") or total_ars <= 0:
         return []
 
     candidates = []
-    # Radar externo (compras fuertes/débiles)
     for x in radar:
         if x["decision"] in ("COMPRA FUERTE", "COMPRA DÉBIL"):
             priority = 0 if x["decision"] == "COMPRA FUERTE" else 1
@@ -475,7 +557,6 @@ def _compute_rotation_plan(sells_ars: float, radar: list, rows: list,
                 "conviction": x["conviction"], "priority": priority,
                 "is_external": True,
             })
-    # Posiciones internas con AUMENTAR
     for row in rows:
         if row["action"] == "AUMENTAR":
             candidates.append({
@@ -490,7 +571,6 @@ def _compute_rotation_plan(sells_ars: float, radar: list, rows: list,
     candidates.sort(key=lambda x: (x["priority"], -x["conviction"] * max(x["score"], 0.01)))
     candidates = candidates[:4]
 
-    # Límite por posición: 15% del portfolio, máximo 50% del cash disponible por pick
     max_per = min(total_ars * 0.15, sells_ars * 0.50)
     weights = [max(c["conviction"] * max(c["score"], 0.03), 0.01) for c in candidates]
     total_w = sum(weights) or 1.0
@@ -512,21 +592,12 @@ def _compute_rotation_plan(sells_ars: float, radar: list, rows: list,
 def render_report(results, macro_snap, total_ars: float, cash_ars: float,
                   portfolio_risk, rebalance_report, positions: list,
                   universe_results: list, ic_metrics: dict | None = None) -> str:
-    """
-    Genera el reporte semanal completo en HTML para Telegram.
 
-    Fixes:
-      - IC solo se muestra cuando hay datos reales (≥5 observaciones)
-      - AUMENTAR/NO AUMENTAR es consistente con el gate activo
-      - Plan de rotación muestra ARS concretos cuando hay ventas
-      - Radar externo muestra monto sugerido en ARS
-    """
     current_w    = _current_weights(positions, total_ars)
     trade_map, blocked_buys = _extract_trade_maps(rebalance_report)
     risk_gate    = _extract_risk_gate(rebalance_report)
     gate_blocks  = risk_gate in {"CAUTIOUS", "BLOCKED"}
 
-    # ── Preparar filas por activo ──────────────────────────────────────────────
     rows = []
     for r in results or []:
         ticker     = str(getattr(r, "ticker", "")).upper()
@@ -536,7 +607,6 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
         tw         = _target_weight(ticker, cw, trade_map)
         delta      = tw - cw
 
-        # FIX: si gate bloquea compras, AUMENTAR pasa a NO AUMENTAR
         is_blocked = ticker in blocked_buys or (gate_blocks and delta >= 0.03)
         action, emoji = _action_label(score, cw, tw, is_blocked)
         lectura, motivo = _component_reason(r)
@@ -568,7 +638,6 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     reductions = [x for x in rows if x["action"] in {"SALIR", "RECORTAR"}]
     adds       = [x for x in rows if x["action"] == "AUMENTAR"]
 
-    # ── Radar externo ─────────────────────────────────────────────────────────
     owned = {str(p.get("ticker", "")).upper() for p in positions or []}
     radar = []
     for r in universe_results or []:
@@ -594,19 +663,16 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     radar.sort(key=lambda x: (x["tier"], -x["conviction"], -x["score"], x["ticker"]))
     radar = radar[:5]
 
-    # ── Cash metrics ──────────────────────────────────────────────────────────
     total_sell, total_buy, cash_after = _extract_cash_metrics(
         rebalance_report, cash_ars, trade_map, current_w, total_ars
     )
 
-    # ── Plan de rotación ──────────────────────────────────────────────────────
     rotation_plan = _compute_rotation_plan(
         sells_ars=total_sell, radar=radar, rows=rows,
         gate=risk_gate, total_ars=float(total_ars),
     )
     rotation_leftover = total_sell - sum(p["ars"] for p in rotation_plan)
 
-    # ── Resumen ejecutivo ─────────────────────────────────────────────────────
     has_buys = any(x["decision"] in {"COMPRA FUERTE", "COMPRA DÉBIL"} for x in radar)
     summary = []
     if risk_gate == "BLOCKED":
@@ -627,17 +693,16 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     else:
         summary.append("Prioridad: mantener posiciones y esperar confirmación de señal.")
 
-    # ── Acción principal ──────────────────────────────────────────────────────
     if reductions:
         m = reductions[0]
-        ars_label = f" ({_money_ars(abs(m['delta_ars']))})" if abs(m['delta_ars']) > 1000 else ""
+        ars_label  = f" ({_money_ars(abs(m['delta_ars']))})" if abs(m['delta_ars']) > 1000 else ""
         main_title = f"{m['emoji']} <b>{m['action']} {m['ticker']}{ars_label}</b>"
         main_l1    = f"Peso actual: <b>{_pct(m['current_w'])}</b> → objetivo: <b>{_pct(m['target_w'])}</b>"
         main_l2    = f"Motivo: {escape(m['motivo'])}"
         main_l3    = f"Lectura: {escape(m['lectura'])}"
     elif adds:
         m = adds[0]
-        ars_label = f" ({_money_ars(abs(m['delta_ars']))})" if abs(m['delta_ars']) > 1000 else ""
+        ars_label  = f" ({_money_ars(abs(m['delta_ars']))})" if abs(m['delta_ars']) > 1000 else ""
         main_title = f"{m['emoji']} <b>{m['action']} {m['ticker']}{ars_label}</b>"
         main_l1    = f"Peso actual: <b>{_pct(m['current_w'])}</b> → objetivo: <b>{_pct(m['target_w'])}</b>"
         main_l2    = f"Motivo: {escape(m['motivo'])}"
@@ -648,7 +713,6 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
         main_l2    = "El gate de riesgo prioriza la preservación de capital."
         main_l3    = "Esperar señal más fuerte o mejora del régimen macro."
 
-    # ── Macro lines ───────────────────────────────────────────────────────────
     macro_parts = []
     for attr, fmt in [("wti", "WTI ${:.1f}"), ("brent", "Brent ${:.1f}"),
                       ("dxy", "DXY {:.1f}"), ("vix", "VIX {:.1f}"), ("sp500", "SP500 {:,.0f}"),
@@ -660,27 +724,19 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     if tnx is not None:
         macro_parts.append(f"10Y {float(tnx):.2f}%")
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────
     opt = _get(rebalance_report, "optimization", rebalance_report)
 
-    # ════════════════════════════════════════════
-    # RENDER
-    # ════════════════════════════════════════════
     h = []
-
-    # Header
     h.append("🧠 <b>ANÁLISIS SEMANAL — SISTEMA CUANTITATIVO</b>")
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} ART")
     h.append(f"💼 Portfolio: <b>{_money_ars(total_ars)}</b>")
     h.append("")
 
-    # Resumen ejecutivo
     h.append("<b>RESUMEN EJECUTIVO</b>")
     h.extend(summary)
     h.append("")
 
-    # IC — solo se muestra cuando hay datos reales
     ic_data = ic_metrics or {}
     if ic_data.get("has_data"):
         h.append("<b>INFORMATION COEFFICIENT (IC)</b>")
@@ -689,8 +745,8 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
             v = by_h.get(hz, {})
             n_obs = int(v.get("n_obs", 0) or 0)
             n_tk  = int(v.get("n_tickers", 0) or 0)
-            ic = v.get("ic", None)
-            ric = v.get("rank_ic", None)
+            ic    = v.get("ic", None)
+            ric   = v.get("rank_ic", None)
             if ic is None or n_obs < 5:
                 continue
             q = v.get("quality", "NULO")
@@ -701,7 +757,6 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
         h.append("IC > 0 indica poder predictivo direccional.")
         h.append("")
 
-    # Acción principal
     h.append("<b>ACCIÓN PRINCIPAL</b>")
     h.append(main_title)
     h.append(f"   {main_l1}")
@@ -709,7 +764,6 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     h.append(f"   {main_l3}")
     h.append("")
 
-    # Resultado financiero
     h.append("💵 <b>Resultado esperado</b>")
     h.append(f"   Ventas: <b>{_money_ars(total_sell)}</b>")
     if gate_blocks and total_sell > 0:
@@ -719,7 +773,6 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     h.append(f"   Cash luego del ajuste: <b>{_money_ars(cash_after)}</b>")
     h.append("")
 
-    # Plan de rotación — solo si hay ventas y gate permite
     if rotation_plan:
         h.append("📋 <b>PLAN DE ROTACIÓN</b>")
         step = 1
@@ -741,13 +794,11 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
             h.append(f"   Candidatos cuando mejore el régimen: <b>{picks}</b>")
         h.append("")
 
-    # Estado por activo
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>CARTERA ACTUAL</b>")
     h.append("")
     for row in rows:
         c = row["conviction"]
-        # Mostrar monto ARS delta cuando es relevante
         ars_str = ""
         if row["action"] in ("RECORTAR", "SALIR") and abs(row["delta_ars"]) > 1000:
             ars_str = f" → -{_money_ars(abs(row['delta_ars']))}"
@@ -767,7 +818,6 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
         )
         h.append("")
 
-    # Contexto de mercado
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>CONTEXTO DE MERCADO</b>")
     h.append(" | ".join(macro_parts))
@@ -787,7 +837,6 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     h.append(f"Gate actual: <b>{escape(risk_gate)}</b>")
     h.append("")
 
-    # Optimizer
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>OPTIMIZER</b>")
     method  = escape(str(_get(opt, "method", "N/A")))
@@ -803,14 +852,13 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
     if trade_map:
         h.append("<b>Pesos objetivo:</b>")
         for ticker_t in sorted(current_w.keys()):
-            cw_t  = current_w.get(ticker_t, 0.0)
-            tw_t  = _target_weight(ticker_t, cw_t, trade_map)
+            cw_t    = current_w.get(ticker_t, 0.0)
+            tw_t    = _target_weight(ticker_t, cw_t, trade_map)
             delta_t = tw_t - cw_t
             arrow_t = "📈" if delta_t > 0.03 else "📉" if delta_t < -0.03 else "➡️"
             h.append(f"  {arrow_t} <b>{ticker_t}</b>: {cw_t:.1%} → <b>{tw_t:.1%}</b>  ({delta_t:+.1%})")
     h.append("")
 
-    # Radar externo
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>RADAR EXTERNO</b>")
     if not radar:
@@ -820,7 +868,6 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
         else:
             h.append("Esperar señales técnicas más definidas para actuar.")
     else:
-        # Estimar cuánto asignar a cada radar pick si hay cash disponible
         available = cash_after if not gate_blocks else 0.0
         radar_alloc: dict[str, float] = {}
         if available > 5_000:
@@ -840,31 +887,21 @@ def render_report(results, macro_snap, total_ars: float, cash_ars: float,
             for x in strong:
                 alloc_str = f" → sugerido: <b>{_money_ars(radar_alloc[x['ticker']])}</b>" \
                             if x["ticker"] in radar_alloc else ""
-                h.append(
-                    f"   <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code> | "
-                    f"conv. {round(x['conviction']*100)}%{alloc_str}"
-                )
+                h.append(f"   <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code> | conv. {round(x['conviction']*100)}%{alloc_str}")
                 h.append(f"   └ {escape(x['lectura'])}")
         if weak:
             h.append("<b>🟢 Compras débiles / tácticas</b>")
             for x in weak:
                 alloc_str = f" → sugerido: <b>{_money_ars(radar_alloc[x['ticker']])}</b>" \
                             if x["ticker"] in radar_alloc else ""
-                h.append(
-                    f"   <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code> | "
-                    f"conv. {round(x['conviction']*100)}%{alloc_str}"
-                )
+                h.append(f"   <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code> | conv. {round(x['conviction']*100)}%{alloc_str}")
                 h.append(f"   └ {escape(x['lectura'])}")
         if watch:
             h.append("<b>👁 En observación</b>")
             for x in watch:
-                h.append(
-                    f"   <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code> | "
-                    f"{escape(x['lectura'])}"
-                )
+                h.append(f"   <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code> | {escape(x['lectura'])}")
     h.append("")
 
-    # Veredicto final
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>VEREDICTO FINAL</b>")
     if rotation_plan:
@@ -998,31 +1035,11 @@ async def main(tickers_override: list[str], period: str,
                 portfolio_context={"total_ars": total_ars, "cash_ars": cash_ars,
                                    "regime": macro_regime},
             )
-            # El LLM es SOLO display — no modifica score ni decisión
 
         results.append(result)
 
-
-    # ── 6.5 Decision Engine — decisiones forzadas ─────────────────────────────
-    logger.info("Generando decisiones forzadas...")
-    decisions = make_decisions_from_results(results, macro_snap, macro_regime)
-    actionable = [d for d in decisions if d.is_actionable()]
-    logger.info(f"Decisiones: {len(actionable)} accionables de {len(decisions)}")
- 
-    # Guardar en DB (async, no bloquea el pipeline si falla)
-    if actionable:
-        try:
-            db_dec = PortfolioDatabase(cfg.database.url)
-            await db_dec.connect()
-            saved_ids = []
-            for dec in actionable:
-                dec_id = await db_dec.save_decision(dec)
-                if dec_id:
-                    saved_ids.append(dec_id)
-            await db_dec.close()
-            logger.info(f"Decisiones guardadas en DB: ids={saved_ids}")
-        except Exception as e:
-            logger.warning(f"No se pudieron guardar decisiones en DB (no crítico): {e}")
+    # ── 6.5 — trades se guardan en step 8.5 post-optimizer ───────────────────
+    logger.info("Síntesis completada — trades se registran post-optimizer.")
 
     # ── 7. Universo Cocos ──────────────────────────────────────────────────────
     universe_results = []
@@ -1030,7 +1047,7 @@ async def main(tickers_override: list[str], period: str,
     try:
         db_u = PortfolioDatabase(cfg.database.url)
         await db_u.connect()
-        cocos_universe = await db_u.get_cocos_universe()   # aplica YFINANCE_BLACKLIST
+        cocos_universe = await db_u.get_cocos_universe()
         await db_u.close()
 
         owned_set        = {t.upper() for t in tickers}
@@ -1046,7 +1063,6 @@ async def main(tickers_override: list[str], period: str,
             u_tech_signals = analyze_portfolio(universe_tickers, period=period)
             u_tech_map     = {s.ticker: s for s in u_tech_signals}
 
-            # Sentiment solo para los que tienen señal técnica BUY clara
             u_sent_map = {}
             if not no_sentiment:
                 strong_tech = [s.ticker for s in u_tech_signals
@@ -1097,7 +1113,6 @@ async def main(tickers_override: list[str], period: str,
         )
         if rebalance_report:
             opt = rebalance_report.optimization
-            # Este bloque va a stderr (logger), no a stdout
             logger.info(
                 f"Optimizer [{opt.method}] gate={rebalance_report.risk_gate_state}: "
                 f"{rebalance_report.n_trades} trades — "
@@ -1107,17 +1122,37 @@ async def main(tickers_override: list[str], period: str,
     else:
         logger.info("Optimizer omitido")
 
-    # ── 9.5 Information Coefficient (histórico) ──────────────────────────────
+    # ── 8.5 Guardar trades del optimizer en decision_log ──────────────────────
+    if rebalance_report and total_ars > 0:
+        logger.info("Guardando trades del optimizer en decision_log...")
+        try:
+            saved = await _save_optimizer_trades(
+                cfg              = cfg,
+                rebalance_report = rebalance_report,
+                current_w        = _current_weights(positions, total_ars),
+                positions        = positions,
+                results          = results,
+                macro_snap       = macro_snap,
+                macro_regime     = macro_regime,
+                total_ars        = total_ars,
+            )
+            logger.info(f"Trades guardados en DB: ids={saved}")
+        except Exception as e:
+            logger.warning(f"No se pudieron guardar trades (no crítico): {e}")
+    else:
+        logger.info("Step 8.5: sin optimizer o portfolio vacío — skip")
+
+    # ── 9. Information Coefficient (histórico) ────────────────────────────────
     ic_metrics = await _compute_information_coefficient(cfg, tickers=tickers, lookback_days=180)
-    p_h = ic_metrics.get("primary_horizon", "5d")
+    p_h  = ic_metrics.get("primary_horizon", "5d")
     p_ic = ic_metrics.get("primary_ic", None)
-    p_n = int(ic_metrics.get("primary_n_obs", 0) or 0)
+    p_n  = int(ic_metrics.get("primary_n_obs", 0) or 0)
     if p_ic is None:
         logger.info(f"IC {p_h}: sin datos suficientes (n={p_n})")
     else:
         logger.info(f"IC {p_h}: {p_ic:+.3f} (n={p_n})")
 
-    # ── 10. Render → stdout ────────────────────────────────────────────────────
+    # ── 10. Render → stdout ───────────────────────────────────────────────────
     report = render_report(
         results=results,
         macro_snap=macro_snap,

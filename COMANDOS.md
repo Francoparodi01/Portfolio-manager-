@@ -5,20 +5,21 @@
 
 ## Bot de Telegram
 
-Todos los comandos están disponibles tanto como slash-commands como desde el menú de botones inline que aparece al ejecutar `/start`.
+Todos los comandos están disponibles tanto como slash-commands como desde el menú de botones inline que aparece al ejecutar `/start`. Después de cada respuesta, el bot muestra el menú automáticamente.
 
 | Comando | Descripción |
 |---------|-------------|
 | `/start` | Abre el menú principal con botones inline |
-| `/portfolio` | Muestra el último snapshot: total, cash, posiciones con P&L y peso |
-| `/analisis` | Ejecuta el pipeline cuantitativo completo (~2-3 min) |
+| `/portfolio` | Último snapshot: total, cash, posiciones con P&L y peso |
+| `/analisis` | Pipeline cuantitativo completo (~2-3 min) |
 | `/analisis_rapido` | Pipeline sin LLM ni sentiment (~30-60 seg) |
-| `/scrape` | Scrape manual inmediato del portfolio en Cocos Capital |
-| `/oportunidades` | Ejecuta el radar de oportunidades externas (~2-3 min) |
+| `/scrape` | Scrape manual del portfolio — muestra posiciones al terminar |
+| `/oportunidades` | Radar de oportunidades externas (~2-3 min) |
+| `/performance` | Win rate, EV y últimas decisiones del sistema |
 | `/status` | Verifica conectividad de Redis Cloud y base de datos |
 | `/ayuda` | Lista completa de comandos |
 
-> Para enviar el código MFA, simplemente mandá los 6 dígitos como mensaje de texto cuando el sistema los solicite.
+> **MFA**: el sistema genera el código automáticamente via TOTP (si `COCOS_TOTP_SECRET` está en el `.env`). No se requiere intervención manual.
 
 ---
 
@@ -28,17 +29,17 @@ Todos los comandos están disponibles tanto como slash-commands como desde el me
 
 ```bash
 docker compose run --rm scraper python scripts/run_once.py
+docker compose run --rm scraper python scripts/run_once.py --full
 docker compose run --rm scraper python scripts/run_once.py --no-db
 docker compose run --rm scraper python scripts/run_once.py --json output.json
-docker compose run --rm scraper python scripts/run_once.py --full
 ```
 
 | Flag | Efecto |
 |------|--------|
-| (sin flags) | Login + scrape portfolio + guardar en DB + notificar Telegram |
+| (sin flags) | Login + scrape portfolio + guardar en DB |
+| `--full` | Portfolio + precios de mercado (acciones + CEDEARs) |
 | `--no-db` | Scrape sin guardar en base de datos |
 | `--json FILE` | Exportar snapshot completo como JSON |
-| `--full` | Portfolio + precios de mercado (acciones + CEDEARs) |
 | `--no-telegram` | No enviar notificaciones Telegram |
 
 ---
@@ -49,8 +50,6 @@ docker compose run --rm scraper python scripts/run_once.py --full
 
 ```bash
 docker compose run --rm scraper python scripts/run_analysis.py
-docker compose run --rm scraper python scripts/run_analysis.py --no-llm
-docker compose run --rm scraper python scripts/run_analysis.py --no-sentiment
 docker compose run --rm scraper python scripts/run_analysis.py --no-llm --no-sentiment
 docker compose run --rm scraper python scripts/run_analysis.py --no-telegram
 docker compose run --rm scraper python scripts/run_analysis.py --tickers CVX NVDA
@@ -74,12 +73,8 @@ docker compose run --rm scraper python scripts/run_analysis.py --period 1y
 
 ```bash
 docker compose run --rm scraper python scripts/run_opportunity.py
-docker compose run --rm scraper python scripts/run_opportunity.py --no-sentiment
-docker compose run --rm scraper python scripts/run_opportunity.py --top 5
-docker compose run --rm scraper python scripts/run_opportunity.py --min-score 0.15
-docker compose run --rm scraper python scripts/run_opportunity.py --min-rr 1.5
-docker compose run --rm scraper python scripts/run_opportunity.py --universe AVGO TSM MSFT AMD INTC
-docker compose run --rm scraper python scripts/run_opportunity.py --top 5 --min-score 0.15 --min-rr 1.5 --no-sentiment
+docker compose run --rm scraper python scripts/run_opportunity.py --top 5 --min-score 0.15 --min-rr 1.5
+docker compose run --rm scraper python scripts/run_opportunity.py --universe AVGO TSM MSFT AMD
 docker compose run --rm scraper python scripts/run_opportunity.py --include-portfolio
 ```
 
@@ -96,6 +91,36 @@ docker compose run --rm scraper python scripts/run_opportunity.py --include-port
 
 ---
 
+## CLI — Performance del sistema
+
+### run_performance.py
+
+```bash
+docker compose run --rm scraper python scripts/run_performance.py
+docker compose run --rm scraper python scripts/run_performance.py --days 60
+docker compose run --rm scraper python scripts/run_performance.py --no-telegram
+```
+
+| Flag | Efecto |
+|------|--------|
+| `--days N` | Lookback en días (default: 90) |
+| `--no-telegram` | Solo consola |
+
+---
+
+## CLI — Outcomes de decisiones
+
+### update_outcomes.py
+
+Rellena `outcome_5d / 10d / 20d` y `was_correct` para decisiones pasadas usando yfinance. Correr una vez por día idealmente.
+
+```bash
+docker compose run --rm scraper python scripts/update_outcomes.py
+docker compose run --rm scraper python scripts/update_outcomes.py --days 60
+```
+
+---
+
 ## CLI — Base de datos
 
 ```bash
@@ -103,45 +128,31 @@ docker compose run --rm scraper python scripts/run_opportunity.py --include-port
 docker exec -it cocos_db psql -U portfolio -d portfolio
 ```
 
-```sql
--- Últimos snapshots
-SELECT snapshot_id, scraped_at, total_value_ars, cash_ars, confidence_score
-FROM portfolio_snapshots ORDER BY scraped_at DESC LIMIT 10;
-
--- Posiciones del último snapshot
-SELECT ticker, quantity, current_price, market_value, unrealized_pnl_pct
-FROM positions WHERE scraped_at = (SELECT MAX(scraped_at) FROM positions)
-ORDER BY market_value DESC;
-
--- Score promedio histórico por ticker
-SELECT ticker, AVG(final_score) as avg_score, COUNT(*) as n
-FROM decision_log GROUP BY ticker ORDER BY avg_score DESC;
-
--- Win rate real por ticker
-SELECT ticker, was_correct, COUNT(*)
-FROM decision_log WHERE outcome_filled_at IS NOT NULL
-GROUP BY ticker, was_correct;
-
--- JSON completo del último snapshot
-SELECT payload FROM raw_snapshots ORDER BY scraped_at DESC LIMIT 1;
-```
-
 ---
 
 ## Docker — Operaciones
 
 ```bash
-# Setup
+# Setup completo
 docker compose build --no-cache
 docker compose up -d
 docker compose ps
+
+# Rebuild de un solo servicio (después de cambiar código)
+docker compose build scraper
+docker compose build telegram_bot
+docker compose up -d telegram_bot
+
+# Verificar que el código nuevo quedó en la imagen
+docker compose run --rm scraper grep -c "TOTP generado" src/collector/cocos_scraper.py
+docker compose exec telegram_bot grep -c "action_portfolio" scripts/telegram_bot.py
 
 # Logs
 docker compose logs -f scraper
 docker compose logs -f telegram_bot
 docker compose logs --tail=100 scraper
 
-# Restart
+# Restart / apagar
 docker compose restart telegram_bot
 docker compose restart scraper
 docker compose down
@@ -150,22 +161,35 @@ docker compose down
 docker exec cocos_db pg_dump -U portfolio portfolio > backup_$(date +%Y%m%d).sql
 ```
 
-### Test Redis Cloud
+
+---
+
+## Git — Flujo de trabajo
 
 ```bash
-docker compose run --rm telegram_bot python3 -c "
-import asyncio, os
-import redis.asyncio as redis
+# Ver en qué rama estás
+git branch
 
-async def test():
-    r = redis.from_url(os.environ['REDIS_URL'], decode_responses=True)
-    await r.set('test', 'ok')
-    print('Redis OK:', await r.get('test'))
-    await r.delete('test')
+# Crear rama de desarrollo (una sola vez)
+git checkout -b dev
+git push origin dev
 
-asyncio.run(test())
-"
+# Flujo diario — siempre desarrollar en dev
+git checkout dev
+git add .
+git commit -m "feat: descripción del cambio"
+git push origin dev
+
+# Cuando está probado, mergear a main
+git checkout main
+git merge dev
+git push origin main
+
+# Volver a dev para seguir trabajando
+git checkout dev
 ```
+
+> **Regla**: `main` = lo que está corriendo en producción. Nunca commiteás directo a `main`. Todo pasa primero por `dev`.
 
 ---
 
@@ -174,6 +198,15 @@ asyncio.run(test())
 | Horario (ART) | Acción |
 |---------------|--------|
 | 10:30 | Scrape portfolio → guarda DB → notifica Telegram |
-| 17:00 | Scrape portfolio + mercado + pipeline cuantitativo completo → Telegram |
+| 17:00 | Scrape portfolio + mercado completo → Telegram |
 
-> Verificar con `docker compose logs -f scraper` — debe aparecer: `"Scheduler activo: 10:30 ART | 17:00 ART"`
+```bash
+# Verificar que el scheduler está activo
+docker compose logs -f scraper | grep "Scheduler activo"
+```
+
+---
+
+## TOTP — MFA automático
+
+El sistema genera el código de 6 dígitos automáticamente si `COCOS_TOTP_SECRET` está configurado en el `.env`. No se requiere intervención manual.

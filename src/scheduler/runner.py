@@ -27,6 +27,7 @@ from src.core.logger import get_logger
 from src.collector.cocos_scraper import CocosCapitalScraper
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
+from src.collector.db import PortfolioDatabase as _PDB
 
 logger = get_logger(__name__)
 
@@ -149,6 +150,24 @@ async def run_full(run_type: str = "FULL") -> dict:
     return result
 
 
+
+
+async def run_update_outcomes() -> None:
+    """Job diario: rellena outcome_5d/10d/20d y was_correct en decision_log."""
+    cfg = get_config()
+    db  = _PDB(cfg.database.url)
+    try:
+        await db.connect()
+        updated = await db.update_outcomes(lookback_days=60)
+        logger.info(f"update_outcomes: {updated} decisiones actualizadas")
+    except Exception as e:
+        logger.error(f"update_outcomes falló: {e}", exc_info=True)
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
+
 async def _scheduler_main():
     """
     Corre el scheduler DENTRO de un event loop activo.
@@ -182,8 +201,18 @@ async def _scheduler_main():
         replace_existing=True,
     )
 
+    # 21:30 ART — actualizar outcomes de decisiones pasadas
+    scheduler.add_job(
+        run_update_outcomes,
+        CronTrigger(hour=21, minute=30, timezone=TIMEZONE),
+        id="update_outcomes_daily",
+        name="Update Outcomes 21:30 ART",
+        misfire_grace_time=600,
+        replace_existing=True,
+    )
+
     scheduler.start()
-    logger.info("Scheduler activo — jobs: 10:30 (portfolio) y 17:00 (portfolio + mercado) ART")
+    logger.info("Scheduler activo — jobs: 10:30 (portfolio) | 17:00 (portfolio + mercado) | 21:30 (update outcomes) ART")
 
     # Esperar señal de shutdown
     stop_event = asyncio.Event()
