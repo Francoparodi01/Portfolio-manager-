@@ -18,6 +18,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
 
   scraper:
     build: .
@@ -29,9 +34,14 @@ services:
     env_file:
       - .env
     volumes:
-    - ./logs:/app/logs
-    - ./screenshots:/app/screenshots
-    - secrets_data:/app/secrets
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
+      - secrets_data:/app/secrets
+    deploy:
+      resources:
+        limits:
+          cpus: "2.5"
+          memory: 3G
 
   telegram_bot:
     build: .
@@ -43,6 +53,11 @@ services:
       - ./logs:/app/logs
       - secrets_data:/app/secrets
     command: ["python", "-m", "scripts.telegram_bot"]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
 volumes:
   postgres_data:

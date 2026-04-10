@@ -145,6 +145,30 @@ def render_performance_report(stats: dict) -> str:
                 f"score <code>{score:+.3f}</code> → {res}"
             )
 
+    # Equity curve
+    curve = stats.get("equity_curve", [])
+    if curve and len(curve) >= 2:
+        eq_start  = stats.get("equity_start", 100.0)
+        eq_end    = stats.get("equity_end", 100.0)
+        eq_ret    = stats.get("equity_return", 0.0)
+        eq_dd     = stats.get("equity_max_drawdown", 0.0)
+        eq_icon   = "📈" if eq_ret >= 0 else "📉"
+        lines += [
+            "",
+            "<b>EQUITY CURVE</b>",
+            f"   Inicio: 100 → Actual: <b>{eq_end:.1f}</b>",
+            f"   Retorno acumulado: <b>{eq_ret:+.1%}</b> {eq_icon}",
+            f"   Max drawdown: <b>{eq_dd:.1%}</b>",
+            "",
+            "   Últimos movimientos:",
+        ]
+        for p in curve[-5:]:
+            icon = "✅" if p.get("correct") else "❌"
+            lines.append(
+                f"   {icon} {p['date']} <b>{p['ticker']}</b> "
+                f"<code>{p['outcome']:+.1%}</code> → equity {p['equity']:.1f}"
+            )
+
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -171,7 +195,7 @@ async def main(lookback_days: int, no_telegram: bool) -> None:
 
         # Luego calcular stats
         logger.info("Calculando performance...")
-        stats  = await db.get_performance_stats(lookback_days=lookback_days)
+        stats  = await db.get_performance_stats_v2(lookback_days=lookback_days)
         report = render_performance_report(stats)
 
         print(report)

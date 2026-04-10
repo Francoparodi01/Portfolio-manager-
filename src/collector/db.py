@@ -6,6 +6,7 @@ Tablas: portfolio_snapshots, positions, market_prices, raw_snapshots,
 """
 from __future__ import annotations
 
+from datetime import timezone
 import json
 import logging
 import uuid
@@ -20,16 +21,20 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # ── Tickers que yfinance no puede descargar con el símbolo de Cocos ───────────
-# Razones: delisted, renombrados, locales sin ADR, o símbolo diferente en NYSE.
 YFINANCE_BLACKLIST: set[str] = {
-    "BRKB",              # yfinance requiere BRK-B
-    "COME", "CRES",      # acciones locales ARG sin ADR liquid
-    "DESP",              # delisted NYSE
-    "IRSA",              # local ARG (NYSE ticker es IRS)
-    "PAMP", "TECO2", "TGSU2", "TXAR", "TXR",  # locales ARG
-    "VALE3",             # brasileña — NYSE es VALE
-    "YPFD",              # local ARG — NYSE es YPF
+    "BRKB",
+    "COME", "CRES",
+    "DESP",
+    "IRSA",
+    "PAMP", "TECO2", "TGSU2", "TXAR", "TXR",
+    "VALE3",
+    "YPFD",
 }
+
+# ── Guardia anti-ARS ──────────────────────────────────────────────────────────
+# Precios USD del universo Cocos nunca superan $5000.
+# Si price_at_decision > este umbral, fue guardado en ARS por error.
+MAX_PRICE_USD = 5_000.0
 
 
 SCHEMA_SQL = """
@@ -109,16 +114,6 @@ CREATE TABLE IF NOT EXISTS decision_log (
 
 
 class PortfolioDatabase:
-    """
-    Acceso a TimescaleDB via asyncpg.
-
-    Uso:
-        db = PortfolioDatabase(dsn)
-        await db.connect()
-        await db.save_snapshot(snapshot)
-        await db.close()
-    """
-
     def __init__(self, dsn: str):
         self._dsn  = dsn.replace("postgresql+asyncpg://", "postgresql://")
         self._pool: Optional[asyncpg.Pool] = None
@@ -135,7 +130,6 @@ class PortfolioDatabase:
             logger.info("Conexion a base de datos cerrada")
 
     async def init_schema(self):
-        """Crea tablas e índices si no existen. Idempotente."""
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
         statements = [s.strip() for s in SCHEMA_SQL.split(";") if s.strip()]
@@ -145,7 +139,6 @@ class PortfolioDatabase:
                     await conn.execute(stmt)
                 except Exception as e:
                     logger.debug(f"Schema stmt ignorado: {e!r}")
-        # Hypertables TimescaleDB
         for table, col in [("positions", "scraped_at"),
                             ("market_prices", "ts"),
                             ("raw_snapshots", "scraped_at")]:
@@ -156,7 +149,6 @@ class PortfolioDatabase:
                     )
             except Exception as e:
                 logger.debug(f"Hypertable {table} ignorado: {e!r}")
-        # Índices
         for sql in [
             "CREATE INDEX IF NOT EXISTS idx_positions_ticker ON positions(ticker, scraped_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_market_prices_ticker ON market_prices(ticker, ts DESC)",
@@ -249,21 +241,35 @@ class PortfolioDatabase:
             return json.loads(row["payload"]) if row else None
 
     async def get_portfolio_history(self, limit: int = 60) -> list[dict]:
+        """
+        Retorna snapshots con posiciones incluidas, leídos desde raw_snapshots.
+
+        FIX vs versión original: la versión anterior leía solo
+        total_value_ars/cash_ars de portfolio_snapshots y no incluía positions.
+        weekly_summary.py necesita positions para comparar semanas, así que
+        ahora se lee el payload completo desde raw_snapshots.
+        """
+        if not self._pool:
+            return []
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT scraped_at, total_value_ars, cash_ars
-                FROM portfolio_snapshots
-                ORDER BY scraped_at ASC LIMIT $1
-                """, limit,
+                SELECT payload
+                FROM raw_snapshots
+                ORDER BY scraped_at ASC
+                LIMIT $1
+                """,
+                limit,
             )
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            try:
+                result.append(json.loads(r["payload"]))
+            except Exception as e:
+                logger.debug(f"get_portfolio_history: payload inválido — {e}")
+        return result
 
     async def get_latest_market_prices(self) -> list[dict]:
-        """
-        Último precio registrado por ticker.
-        Retorna lista de dicts: {ticker, asset_type, currency, last_price, change_pct_1d, ts}
-        """
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
@@ -278,14 +284,6 @@ class PortfolioDatabase:
         return [dict(r) for r in rows]
 
     async def get_cocos_universe(self) -> list[str]:
-        """
-        Retorna los tickers únicos disponibles en market_prices,
-        excluyendo los de YFINANCE_BLACKLIST (tickers que yfinance no puede descargar).
-
-        PRINCIPIO DE DISEÑO: el universo de análisis = exactamente los tickers
-        scrapeados de Cocos Capital. yfinance provee históricos pero el universo
-        lo define Cocos, no yfinance. Esta función es la fuente de verdad.
-        """
         prices = await self.get_latest_market_prices()
         tickers = sorted({
             row["ticker"].upper()
@@ -295,26 +293,187 @@ class PortfolioDatabase:
         logger.info(f"Universo Cocos: {len(tickers)} tickers disponibles")
         return tickers
 
-    # ── Decision log ──────────────────────────────────────────────────────────
+    # ── Deduplicación ─────────────────────────────────────────────────────────
+
+    async def has_recent_decision(self, ticker: str, direction: str,
+                                   hours: int = 20) -> bool:
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT 1 FROM decision_log
+                WHERE ticker    = $1
+                  AND decision  = $2
+                  AND decided_at > NOW() - ($3 || ' hours')::INTERVAL
+                LIMIT 1
+                """,
+                ticker.upper(), direction.upper(), str(hours),
+            )
+        return row is not None
+
+    # ── Cierre de trades ──────────────────────────────────────────────────────
+
+    async def close_expired_trades(self, lookback_days: int = 30) -> int:
+        if not self._pool:
+            return 0
+
+        from datetime import datetime, timedelta
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, ticker, decision, decided_at,
+                       outcome_5d, outcome_10d, outcome_20d,
+                       stop_loss_pct, target_pct, horizon_days,
+                       was_correct
+                FROM decision_log
+                WHERE decided_at >= $1
+                  AND outcome_5d IS NOT NULL
+                  AND was_correct IS NULL
+                  AND decision IN ('BUY', 'SELL')
+                """,
+                cutoff,
+            )
+
+        if not rows:
+            return 0
+
+        updated = 0
+        now = datetime.utcnow()
+
+        for r in rows:
+            outcome   = float(r["outcome_5d"] or 0.0)
+            stop      = float(r["stop_loss_pct"] or -0.08)
+            target    = float(r["target_pct"]    or  0.16)
+            direction = str(r["decision"]).upper()
+            decided   = r["decided_at"]
+            horizon   = int(r["horizon_days"] or 10)
+
+            if direction == "SELL":
+                outcome = -outcome
+                stop    = abs(stop)
+                target  = abs(target)
+
+            if outcome >= target:
+                was_correct = True
+            elif outcome <= -abs(stop):
+                was_correct = False
+            elif (now - decided).days >= horizon:
+                was_correct = outcome > 0
+            else:
+                continue
+
+            try:
+                async with self._pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE decision_log SET was_correct = $1 WHERE id = $2",
+                        was_correct, r["id"],
+                    )
+                updated += 1
+                logger.debug(
+                    f"Trade cerrado: id={r['id']} {direction} {r['ticker']} "
+                    f"outcome={outcome:+.1%} correct={was_correct}"
+                )
+            except Exception as e:
+                logger.warning(f"close_expired_trades write error: {e}")
+
+        logger.info(f"close_expired_trades: {updated}/{len(rows)} trades cerrados")
+        return updated
+
+    # ── Equity curve ──────────────────────────────────────────────────────────
+
+    async def get_equity_curve(self, lookback_days: int = 90) -> list[dict]:
+        if not self._pool:
+            return []
+
+        from datetime import datetime, timedelta
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    DATE(decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires') AS trade_date,
+                    ticker,
+                    decision,
+                    outcome_5d,
+                    size_pct,
+                    was_correct
+                FROM decision_log
+                WHERE decided_at >= $1
+                  AND outcome_5d IS NOT NULL
+                  AND was_correct IS NOT NULL
+                  AND decision IN ('BUY', 'SELL')
+                ORDER BY decided_at ASC
+                """,
+                cutoff,
+            )
+
+        if not rows:
+            return []
+
+        equity  = 100.0
+        points  = []
+        n_total = 0
+
+        for r in rows:
+            outcome   = float(r["outcome_5d"] or 0.0)
+            size      = float(r["size_pct"]   or 0.05)
+            direction = str(r["decision"]).upper()
+
+            if direction == "SELL":
+                outcome = -outcome
+
+            equity  *= (1 + outcome * size)
+            n_total += 1
+
+            points.append({
+                "date":        str(r["trade_date"]),
+                "equity":      round(equity, 4),
+                "trade_count": n_total,
+                "ticker":      r["ticker"],
+                "outcome":     round(outcome, 4),
+                "correct":     r["was_correct"],
+            })
+
+        return points
+
+    async def get_performance_stats_v2(self, lookback_days: int = 90) -> dict:
+        await self.close_expired_trades(lookback_days=lookback_days)
+        stats = await self.get_performance_stats(lookback_days=lookback_days)
+        curve = await self.get_equity_curve(lookback_days=lookback_days)
+        stats["equity_curve"] = curve
+
+        if curve:
+            stats["equity_start"]  = curve[0]["equity"]
+            stats["equity_end"]    = curve[-1]["equity"]
+            stats["equity_return"] = (curve[-1]["equity"] / 100.0) - 1.0
+            peak = 100.0
+            max_dd = 0.0
+            for p in curve:
+                peak  = max(peak, p["equity"])
+                max_dd = min(max_dd, (p["equity"] - peak) / peak)
+            stats["equity_max_drawdown"] = max_dd
+        else:
+            stats["equity_start"] = stats["equity_end"] = 100.0
+            stats["equity_return"] = 0.0
+            stats["equity_max_drawdown"] = 0.0
+
+        return stats
 
     async def get_pool(self):
-        """Expone el pool para decision_memory.py."""
         return self._pool
 
-  # ── Decision Engine ───────────────────────────────────────────────────────
- 
+    # ── Decision Engine ───────────────────────────────────────────────────────
+
     async def save_decision(self, decision) -> Optional[int]:
-        """
-        Guarda una DecisionOutput en decision_log.
-        Retorna el id generado, o None si falla.
- 
-        Parámetro 'decision': instancia de DecisionOutput de decision_engine.py
-        """
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
         if not decision.is_actionable():
-            return None  # No guardamos HOLDs
- 
+            return None
+
         import json as _json
         try:
             async with self._pool.acquire() as conn:
@@ -352,22 +511,31 @@ class PortfolioDatabase:
         except Exception as e:
             logger.error(f"save_decision: {e}", exc_info=True)
             return None
- 
+
     async def update_outcomes(self, lookback_days: int = 30) -> int:
         """
-        Busca decisiones sin outcome donde han pasado ≥5 días y llena
-        outcome_5d, outcome_10d, outcome_20d y was_correct usando yfinance.
- 
-        Retorna la cantidad de registros actualizados.
+        Busca decisiones sin outcome donde han pasado >=5 días y llena
+        outcome_5d / outcome_10d / outcome_20d / was_correct usando yfinance.
+
+        GUARDIA ANTI-ARS
+        ────────────────
+        Si price_at_decision > MAX_PRICE_USD (5000) el precio fue guardado
+        en ARS por error (ej: CVX scrapeado de Cocos = ~$26.000 ARS).
+        Esos registros se skipean con warning y se loggea cuántos hay para
+        que el operador corra backfill_prices.py.
+
+        Sin esta guardia:
+          return = (price_USD_futuro - price_ARS_decision) / price_ARS_decision
+                 = (155 - 26.000) / 26.000 = -98.8%  ← outcome corrupto
         """
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
- 
+
         try:
             import yfinance as yf
             from datetime import datetime, timedelta
             import asyncio
- 
+
             cutoff = datetime.utcnow() - timedelta(days=5)
             async with self._pool.acquire() as conn:
                 rows = await conn.fetch(
@@ -382,23 +550,43 @@ class PortfolioDatabase:
                     """,
                     cutoff,
                 )
- 
+
             if not rows:
                 logger.info("update_outcomes: sin decisiones pendientes")
                 return 0
- 
-            updated = 0
-            now = datetime.utcnow()
- 
+
+            updated    = 0
+            skipped_ars = 0
+            now = datetime.now(timezone.utc)
+
             for row in rows:
                 ticker     = str(row["ticker"]).upper()
                 entry      = row["price_at_decision"]
                 decided_at = row["decided_at"]
                 direction  = str(row["decision"]).upper()
- 
+
+                # ── Precio ausente o inválido ─────────────────────────────────
                 if not entry or float(entry) <= 0:
+                    logger.debug(
+                        f"update_outcomes SKIP {ticker} id={row['id']}: "
+                        f"sin precio de entrada"
+                    )
                     continue
- 
+
+                entry_f = float(entry)
+
+                # ── GUARDIA ANTI-ARS ──────────────────────────────────────────
+                if entry_f > MAX_PRICE_USD:
+                    logger.warning(
+                        f"update_outcomes SKIP {ticker} id={row['id']}: "
+                        f"price_at_decision={entry_f:,.0f} parece ARS "
+                        f"(umbral USD={MAX_PRICE_USD:,.0f}). "
+                        f"Corregir con: python scripts/backfill_prices.py"
+                    )
+                    skipped_ars += 1
+                    continue
+
+                # ── Descarga histórico desde yfinance ─────────────────────────
                 try:
                     df = await asyncio.get_event_loop().run_in_executor(
                         None,
@@ -412,28 +600,25 @@ class PortfolioDatabase:
                 except Exception as e:
                     logger.debug(f"update_outcomes yfinance {ticker}: {e}")
                     continue
- 
-                entry_f = float(entry)
+
+                # ── Calcular outcomes — ambos precios en USD ──────────────────
                 outcomes = {}
                 for horizon, col in [(5, "outcome_5d"), (10, "outcome_10d"), (20, "outcome_20d")]:
-                    target_date = decided_at + timedelta(days=horizon)
+                    target_date = (decided_at + timedelta(days=horizon)).replace(tzinfo=None)
                     if target_date > now:
                         continue
-                    # Buscar el precio más cercano a la fecha objetivo
                     try:
                         idx = df.index.searchsorted(target_date, side="left")
                         if idx >= len(df):
                             idx = len(df) - 1
                         price_at_horizon = float(df.iloc[idx])
-                        pct_change = (price_at_horizon - entry_f) / entry_f
-                        outcomes[col] = pct_change
+                        outcomes[col] = (price_at_horizon - entry_f) / entry_f
                     except Exception:
                         continue
- 
+
                 if not outcomes:
                     continue
- 
-                # was_correct: el movimiento va en la dirección esperada
+
                 primary = outcomes.get("outcome_5d", outcomes.get("outcome_10d"))
                 was_correct = None
                 if primary is not None:
@@ -441,7 +626,7 @@ class PortfolioDatabase:
                         was_correct = primary > 0
                     elif direction == "SELL":
                         was_correct = primary < 0
- 
+
                 try:
                     async with self._pool.acquire() as conn:
                         await conn.execute(
@@ -461,35 +646,38 @@ class PortfolioDatabase:
                             was_correct,
                         )
                     updated += 1
-                    logger.debug(f"outcome actualizado: {ticker} id={row['id']} {outcomes}")
+                    logger.debug(
+                        f"outcome actualizado: {ticker} id={row['id']} {outcomes}"
+                    )
                 except Exception as e:
                     logger.warning(f"update_outcomes write error {ticker}: {e}")
- 
-            logger.info(f"update_outcomes: {updated}/{len(rows)} decisiones actualizadas")
+
+            if skipped_ars:
+                logger.warning(
+                    f"update_outcomes: {skipped_ars} registros skipeados por precio ARS. "
+                    f"Correr: python scripts/backfill_prices.py"
+                )
+            logger.info(
+                f"update_outcomes: {updated}/{len(rows)} decisiones actualizadas"
+                + (f" | {skipped_ars} con precio ARS pendiente" if skipped_ars else "")
+            )
             return updated
- 
+
         except ImportError:
             logger.error("update_outcomes requiere yfinance: pip install yfinance")
             return 0
         except Exception as e:
             logger.error(f"update_outcomes: {e}", exc_info=True)
             return 0
- 
+
     async def get_performance_stats(self, lookback_days: int = 90) -> dict:
-        """
-        Calcula win rate, avg_win, avg_loss, EV y métricas por horizonte.
-        Solo cuenta decisiones donde el outcome ya fue llenado.
- 
-        Retorna dict con todas las métricas necesarias para /performance.
-        """
         if not self._pool:
             return {}
- 
+
         from datetime import datetime, timedelta
         cutoff = datetime.utcnow() - timedelta(days=lookback_days)
- 
+
         async with self._pool.acquire() as conn:
-            # Métricas globales (horizonte 5d como primario)
             global_row = await conn.fetchrow(
                 """
                 SELECT
@@ -511,8 +699,7 @@ class PortfolioDatabase:
                 """,
                 cutoff,
             )
- 
-            # Por ticker (top performers y losers)
+
             ticker_rows = await conn.fetch(
                 """
                 SELECT
@@ -531,8 +718,7 @@ class PortfolioDatabase:
                 """,
                 cutoff,
             )
- 
-            # Pendientes de outcome (decisiones recientes sin resultado aún)
+
             pending_count = await conn.fetchval(
                 """
                 SELECT COUNT(*)
@@ -543,8 +729,7 @@ class PortfolioDatabase:
                 """,
                 cutoff,
             )
- 
-            # Últimas 5 decisiones (con o sin outcome)
+
             recent_rows = await conn.fetch(
                 """
                 SELECT ticker, decision, final_score, confidence,
@@ -556,24 +741,21 @@ class PortfolioDatabase:
                 LIMIT 5
                 """,
             )
- 
+
         g = dict(global_row) if global_row else {}
- 
+
         total   = int(g.get("total_trades") or 0)
         winners = int(g.get("winners") or 0)
         losers  = int(g.get("losers") or 0)
- 
-        win_rate  = winners / total if total > 0 else None
-        loss_rate = losers  / total if total > 0 else None
- 
+
+        win_rate = winners / total if total > 0 else None
         avg_win  = float(g["avg_win_5d"])  if g.get("avg_win_5d")  else None
         avg_loss = float(g["avg_loss_5d"]) if g.get("avg_loss_5d") else None
- 
-        # EV = (win_rate * avg_win) - (loss_rate * avg_loss)
+
         ev = None
         if win_rate is not None and avg_win is not None and avg_loss is not None:
             ev = (win_rate * avg_win) - ((1 - win_rate) * abs(avg_loss))
- 
+
         return {
             "total_trades":    total,
             "winners":         winners,

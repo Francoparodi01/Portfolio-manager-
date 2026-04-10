@@ -429,37 +429,75 @@ async def _save_optimizer_trades(
     Traduce los trades del optimizer (delta de pesos) en decisiones BUY/SELL
     y las guarda en decision_log.
 
-      delta > +3%  → BUY  (size_pct = delta)
-      delta < -3%  → SELL (size_pct = abs(delta))
-      |delta| <= 3% → skip (MANTENER)
+    Filtros (orden de aplicación):
+      |delta| < 3%          → skip (MANTENER, sin ruido)
+      |score| < 0.05        → skip (señal demasiado débil, evita falsos)
+      precio                → USD via yfinance (NO Cocos ARS)
+
+    Stops dinámicos (prioridad descendente):
+      VIX > 30              → stop = -5%   (mercado en pánico)
+      VIX > 25 / defensivo  → stop = -6%   (precaución)
+      vol ticker > 60%      → stop = -5%   (ticker muy volátil)
+      vol ticker > 40%      → stop = -7%
+      normal                → stop = STOP_NORMAL (-8%)
     """
+    import yfinance as yf
+    import pandas as _pd
     from src.analysis.decision_engine import _normalize_regime, STOP_NORMAL, TARGET_RR, HORIZON_MED
 
-    MIN_DELTA    = 0.03
-    regime       = _normalize_regime(macro_regime)
-    vix          = getattr(macro_snap, "vix", None)
-    is_defensive = regime in ("RISK_OFF", "DEFENSIVE", "BLOCKED", "CAUTIOUS")
+    MIN_DELTA     = 0.03
+    MIN_SCORE_ABS = 0.05   # señales por debajo de este umbral son ruido → HOLD
+    regime        = _normalize_regime(macro_regime)
+    vix           = getattr(macro_snap, "vix", None)
+    vix_f         = float(vix) if vix else 0.0
+    is_defensive  = regime in ("RISK_OFF", "DEFENSIVE", "BLOCKED", "CAUTIOUS")
 
-    if vix and float(vix) > 25:
-        stop = STOP_NORMAL * 1.25
-    elif is_defensive:
-        stop = -0.05
-    else:
-        stop = STOP_NORMAL  # -0.08
-
-    # Score y precio por ticker desde synthesis
+    # ── Score y conviction por ticker desde synthesis ─────────────────────────
     score_map = {
         str(getattr(r, "ticker", "")).upper(): {
             "score":      float(getattr(r, "final_score", 0.0) or 0.0),
             "conviction": min(1.0, float(getattr(r, "conviction",
                            getattr(r, "confidence", 0.5)) or 0.5)),
+            "vol_annual": float(
+                getattr(r, "volatility_annual", None) or
+                next((
+                    p.get("volatility_annual", 0.0)
+                    for p in (positions or [])
+                    if str(p.get("ticker", "")).upper() == str(getattr(r, "ticker", "")).upper()
+                ), 0.0) or 0.0
+            ),
         }
         for r in (results or [])
     }
-    price_map = {
-        str(p.get("ticker", "")).upper(): float(p.get("current_price", 0) or 0)
-        for p in (positions or [])
-    }
+
+    # ── FIX CRÍTICO: precio en USD via yfinance (NO Cocos ARS) ───────────────
+    _tickers_to_price = list(current_w.keys())
+    price_map: dict[str, float | None] = {}
+    if _tickers_to_price:
+        try:
+            _raw = yf.download(
+                _tickers_to_price, period="5d",
+                progress=False, auto_adjust=True,
+            )["Close"]
+            # yfinance devuelve Series si hay 1 ticker, DataFrame si hay varios
+            if isinstance(_raw, _pd.Series):
+                _raw = _raw.to_frame(name=_tickers_to_price[0])
+            for _t in _tickers_to_price:
+                _col = _raw.get(_t) if hasattr(_raw, "get") else (
+                    _raw[_t] if _t in _raw.columns else None
+                )
+                if _col is not None and not _col.dropna().empty:
+                    price_map[_t] = float(_col.dropna().iloc[-1])
+                else:
+                    price_map[_t] = None
+                    logger.warning(f"price_usd: sin datos para {_t}")
+        except Exception as _e:
+            logger.warning(f"yfinance bulk price fetch error: {_e}")
+            price_map = {t: None for t in _tickers_to_price}
+
+    logger.info(
+        f"price_map USD: { {k: f'${v:.2f}' if v else 'None' for k,v in price_map.items()} }"
+    )
 
     trades_to_save = []
     trade_map, _ = _extract_trade_maps(rebalance_report)
@@ -470,15 +508,39 @@ async def _save_optimizer_trades(
         tw     = _target_weight(ticker, cw, trade_map)
         delta  = tw - cw
 
+        # ── Filtro 1: delta mínimo ────────────────────────────────────────────
         if abs(delta) < MIN_DELTA:
             continue
 
-        direction  = "BUY" if delta > 0 else "SELL"
-        size_pct   = abs(delta)
-        sm         = score_map.get(ticker, {})
-        score      = sm.get("score", 0.0)
-        conv       = sm.get("conviction", 0.5)
-        price      = price_map.get(ticker)
+        direction = "BUY" if delta > 0 else "SELL"
+        size_pct  = abs(delta)
+        sm        = score_map.get(ticker, {})
+        score     = sm.get("score", 0.0)
+        conv      = sm.get("conviction", 0.5)
+        vol       = sm.get("vol_annual", 0.0)
+        price     = price_map.get(ticker)
+
+        # ── Filtro 2: señal demasiado débil → HOLD (evita operar ruido) ──────
+        if abs(score) < MIN_SCORE_ABS:
+            logger.info(
+                f"SKIP {direction} {ticker}: score {score:+.3f} es ruido "
+                f"(|score| < {MIN_SCORE_ABS})"
+            )
+            continue
+
+        # ── Stop dinámico por volatilidad del ticker ──────────────────────────
+        # Prioridad: 1) VIX alto  2) régimen defensivo  3) vol individual
+        if vix_f > 30:
+            stop = -0.05                        # VIX extremo → stop muy ajustado
+        elif vix_f > 25 or is_defensive:
+            stop = STOP_NORMAL * 1.25           # ≈ -0.06 si STOP_NORMAL=-0.08
+        elif vol > 0.60:
+            stop = -0.05                        # ticker muy volátil → proteger
+        elif vol > 0.40:
+            stop = -0.07
+        else:
+            stop = STOP_NORMAL                  # -0.08 (default)
+
         stop_pct   = stop if direction == "BUY" else abs(stop)
         target_pct = abs(stop) * TARGET_RR * (1 if direction == "BUY" else -1)
         rr         = abs(target_pct) / abs(stop_pct) if stop_pct else TARGET_RR
@@ -509,6 +571,22 @@ async def _save_optimizer_trades(
         pool = await db.get_pool()
         async with pool.acquire() as conn:
             for t in trades_to_save:
+                # Deduplicación: no guardar si ya existe un trade del mismo
+                # ticker+dirección en las últimas 20 horas
+                exists = await conn.fetchrow(
+                    """
+                    SELECT 1 FROM decision_log
+                    WHERE ticker   = $1
+                      AND decision = $2
+                      AND decided_at > NOW() - INTERVAL '20 hours'
+                    LIMIT 1
+                    """,
+                    t["ticker"], t["direction"],
+                )
+                if exists:
+                    logger.info(f"Dedup: {t['direction']} {t['ticker']} ya existe hoy — skip")
+                    continue
+
                 row = await conn.fetchrow(
                     """
                     INSERT INTO decision_log (

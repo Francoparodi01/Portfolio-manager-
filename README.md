@@ -1,102 +1,173 @@
 # COCOS COPILOT
-### Sistema Cuantitativo Multicapa para Portfolio de CEDEARs
+### Sistema Cuantitativo Multicapa para Gestión de Portfolio
 *Cocos Capital · Argentina · 2026*
 
 ---
 
-## ¿Qué es Cocos Copilot?
+## 🚀 ¿Por qué existe este proyecto?
 
-Cocos Copilot es un sistema autónomo de análisis y gestión de portfolio para CEDEARs en Cocos Capital. Combina scraping automatizado, análisis técnico profesional, contexto macro local e internacional, análisis de sentimiento de noticias, gestión de riesgo y optimización matemática de portfolio — todo integrado en un bot de Telegram.
+La mayoría de las herramientas de análisis financiero responden qué está pasando en el mercado, pero no qué hacer.
+
+Cocos Copilot nace para resolver ese problema.
+
+Es un sistema cuantitativo que no solo analiza, sino que:
+- Decide (BUY / SELL / HOLD)
+- Define cuánto operar (position sizing)
+- Define riesgo (stop loss / target)
+- Y mide si sus decisiones funcionan
+
+Todo de forma automática, trazable y basada en datos.
+
+---
+
+## 🧠 ¿Qué es Cocos Copilot?
+
+Cocos Copilot es un sistema autónomo de análisis y gestión de portfolio para CEDEARs en Cocos Capital. Integra scraping automatizado, análisis técnico, contexto macro, análisis de sentimiento, gestión de riesgo y optimización matemática en un único flujo operativo.
 
 El sistema responde tres preguntas fundamentales:
 
-- **¿Qué hago con lo que ya tengo?** → Portfolio Analyzer
-- **¿Qué debería incorporar?** → Opportunity Radar
-- **¿Adónde va el capital que se libera?** → Rotation Engine
+- **¿Qué hago con lo que ya tengo?** → Portfolio Analyzer  
+- **¿Qué debería incorporar?** → Opportunity Radar  
+- **¿Adónde va el capital que se libera?** → Rotation Engine  
 
-> El sistema es cuantitativo puro: las decisiones las toma el modelo matemático, no el LLM. El razonamiento del LLM es solo display explicativo.
+> El sistema es cuantitativo puro: las decisiones las toma el modelo matemático. El LLM se utiliza únicamente para explicación.
 
 ---
 
-## Características principales
+## 🎯 ¿Qué intenta lograr?
+
+Cocos Copilot busca construir un sistema cuantitativo capaz de gestionar un portfolio de inversión de forma autónoma, disciplinada y basada en evidencia.
+
+El proyecto parte de una limitación clara: la mayoría de los sistemas analizan el mercado, pero no traducen ese análisis en decisiones ejecutables y medibles.
+
+Este sistema cierra ese gap, transformando señales en acciones concretas:
+- Comprar, vender o mantener
+- Definir porcentaje del portfolio
+- Establecer condiciones de riesgo
+- Determinar horizonte temporal
+
+Cada decisión incluye:
+- Tamaño de posición  
+- Stop loss  
+- Target  
+- Criterios de invalidación  
+
+Pero el foco principal no es solo decidir, sino validar.
+
+Cada operación se registra junto con su contexto y luego se evalúa con métricas como:
+- **Information Coefficient (IC)** → capacidad predictiva  
+- **Expected Value (EV)** → expectativa matemática  
+- **Equity Curve** → evolución del capital  
+
+El objetivo final es determinar si el sistema tiene una ventaja estadística real (edge).
+
+---
+
+## 🧩 ¿Qué lo hace distinto?
+
+- No es un sistema de análisis → es un sistema de decisión  
+- Cada señal es ejecutable (no ambigua)  
+- Cada decisión se mide y se valida con datos reales  
+- Integra todo el flujo: datos → análisis → decisión → evaluación  
+- No depende de intuición, sino de evidencia empírica  
+
+---
+
+## ⚙️ ¿Cómo funciona? (alto nivel)
+
+El sistema está compuesto por tres pipelines principales:
+
+1. **Portfolio Analyzer**
+   - Analiza posiciones actuales
+   - Genera decisiones (BUY / SELL / HOLD)
+
+2. **Opportunity Radar**
+   - Detecta oportunidades externas
+   - Evalúa asimetría riesgo/retorno
+
+3. **Rotation Engine**
+   - Decide cómo redistribuir capital
+   - Prioriza entre posiciones actuales y nuevas oportunidades
+
+Todo el sistema corre sobre:
+- Scraping automatizado del portfolio
+- Análisis multicapa (técnico, macro, riesgo, sentiment)
+- Optimización matemática (Black-Litterman / Min Variance)
+- Persistencia en base de datos
+- Evaluación histórica de decisiones
+
+---
+
+## 🧱 Componentes principales
 
 ### Scraper automatizado
-Login en Cocos Capital con soporte MFA via Telegram. El código de verificación de 6 dígitos se envía por el bot y se comunica con el scraper a través de Redis Cloud, eliminando race conditions entre contenedores Docker.
+Login en Cocos Capital con soporte MFA. Comunicación scraper-bot vía Redis (event-driven, sin race conditions).
 
 ### Análisis técnico
-
-| Categoría | Indicadores |
-|-----------|-------------|
-| Tendencia | SMA(20,50,200), EMA(12,26), ADX(14), DI+/DI− |
-| Momentum | RSI(14), Estocástico(14,3), Williams %R(14) |
-| MACD | (12,26,9) — línea, señal, histograma, aceleración |
-| Volatilidad | Bollinger Bands(20,2), ATR(14), BB Width |
-| Volumen | OBV, OBV-SMA(20), Volumen relativo |
+Indicadores de tendencia, momentum, volatilidad y volumen:
+SMA, EMA, RSI, MACD, ADX, Bollinger Bands, OBV, ATR.
 
 ### Contexto macro
-Datos globales via yfinance: WTI, Brent, DXY, VIX, S&P 500, Merval, TNX. Datos de Argentina en tiempo real: CCL, MEP (dolarapi.com), Reservas BCRA, Riesgo País (argentinadatos.com). El sistema penaliza automáticamente el cash en ARS cuando el CCL supera ciertos umbrales.
+Datos globales (VIX, S&P500, petróleo, tasas) y variables locales (CCL, MEP, reservas, riesgo país).
 
 ### Risk Engine
-Sizing dinámico por posición usando Kelly fraccionario (33%) y target de volatilidad (40%). Tres estados operativos controlados por VIX y drawdown del portfolio:
-
-| Gate | Condición | Comportamiento |
-|------|-----------|----------------|
-| NORMAL | VIX < 28 y drawdown > −12% | Optimizer sin restricciones |
-| CAUTIOUS | VIX > 28 o drawdown > −12% | Solo reducciones, no compras nuevas |
-| BLOCKED | VIX > 38 o drawdown > −22% | Solo stops urgentes |
+Sizing dinámico con Kelly fraccionario y control por volatilidad. Sistema de gates:
+- NORMAL
+- CAUTIOUS
+- BLOCKED
 
 ### Portfolio Optimizer
-Black-Litterman con views del pipeline cuantitativo como fuente de señal. Fallback a Mínima Varianza con numpy puro si scipy no está disponible. El optimizer corre dentro del espacio permitido por el Risk Gate — nunca lo contradice.
+Modelo Black-Litterman con fallback a mínima varianza. Respetando siempre el Risk Gate.
 
 ### Opportunity Radar
-Screener de 80+ tickers del universo Cocos con tres capas: filtro de liquidez/tendencia/RS, scoring multicapa con métrica de asimetría upside/downside, y clasificación COMPRABLE_AHORA / EN_VIGILANCIA / DESCARTAR.
+Screener + scoring + análisis de asimetría → identifica oportunidades reales.
 
 ### Rotation Engine
-Decide adónde va el capital liberado de las ventas. Compara explícitamente aumentar posiciones existentes versus abrir candidatos nuevos del radar, considerando score relativo, asimetría y diversificación sectorial.
+Asigna capital entre posiciones actuales y nuevas oportunidades.
 
-### Decision Memory & IC
-Cada decisión se guarda en `decision_log` con el outcome real (retorno a 5, 10 y 20 días). El Information Coefficient (IC de Pearson y Rank IC) mide el poder predictivo histórico del sistema por horizonte temporal.
+### Decision Memory
+Registro de decisiones + cálculo de IC, EV y performance histórica.
 
 ---
 
-## Stack tecnológico
+## 🧰 Stack tecnológico
 
 | Componente | Tecnología |
 |------------|------------|
-| Orquestación | Docker Compose (Python 3.12-slim) |
-| Scraper | Playwright / Chromium (headless) |
-| Base de datos | TimescaleDB (PostgreSQL 16 + extensión time-series) |
-| MFA broker | Redis Cloud (LPUSH/BLPOP event-driven) |
-| Notificaciones | python-telegram-bot >= 20.0 |
-| Datos de mercado | yfinance, dolarapi.com, argentinadatos.com, BCRA API |
-| Análisis técnico | ta >= 0.11 (pandas/numpy) |
-| Optimización | scipy (Black-Litterman), numpy (Min-Variance) |
-| Scheduler | APScheduler (10:30 ART y 17:00 ART) |
-| LLM display | Claude claude-sonnet-4-20250514 via API (solo explicativo) |
+| Orquestación | Docker Compose |
+| Scraper | Playwright (Chromium headless) |
+| Base de datos | TimescaleDB (PostgreSQL) |
+| Comunicación | Redis (event-driven) |
+| Bot | python-telegram-bot |
+| Datos de mercado | yfinance + APIs locales |
+| Análisis | pandas / numpy / ta |
+| Optimización | scipy / numpy |
+| Scheduler | APScheduler |
 
 ---
 
-## Instalación rápida
+## ⚠️ Estado actual y desafíos
 
-1. Clonar o descomprimir el proyecto en una carpeta local
-2. Copiar `.env.example` → `.env` y completar las variables
-3. Agregar `REDIS_URL` con la URL de Redis Cloud
-4. `docker compose build --no-cache`
-5. `docker compose up -d`
-6. `docker compose logs -f scraper`
+El sistema se encuentra en fase de validación real.
 
-### Variables de entorno requeridas
+Actualmente existen desafíos en:
+- Definición de ejecución (parcial vs total)
+- Reglas claras de salida
+- Validación de ejecución real de órdenes
 
-| Variable | Descripción |
-|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Token del bot de Telegram |
-| `TELEGRAM_CHAT_ID` | Chat ID del usuario autorizado |
-| `COCOS_USERNAME` | Email de Cocos Capital |
-| `COCOS_PASSWORD` | Contraseña de Cocos Capital |
-| `DATABASE_URL` | `postgresql+asyncpg://portfolio:portfolio_secret@cocos_db:5432/portfolio` |
-| `REDIS_URL` | `redis://default:<PASSWORD>@redis-XXXX.redislabs.com:XXXX` |
-| `ANTHROPIC_API_KEY` | API key de Anthropic (opcional, solo para LLM display) |
+Estos puntos son clave para lograr un sistema completamente operativo y están en proceso de mejora.
 
 ---
 
-> ⚠️ Este sistema es una herramienta de análisis cuantitativo personal. No constituye asesoramiento financiero. Las decisiones de inversión son responsabilidad exclusiva del usuario.
+## 🚀 Instalación rápida
+
+```bash
+git clone <repo>
+cd cocos_copilot
+
+cp .env.example .env
+# completar variables
+
+docker compose build --no-cache
+docker compose up -d
+docker compose logs -f scraper
