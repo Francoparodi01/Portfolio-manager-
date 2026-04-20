@@ -152,7 +152,7 @@ docker compose logs -f scraper
 docker compose logs -f telegram_bot
 docker compose logs --tail=100 scraper
 
-# Restart / apagar
+# Restart / apagar  
 docker compose restart telegram_bot
 docker compose restart scraper
 docker compose down
