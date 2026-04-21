@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
 
   db:
@@ -58,6 +60,54 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
+
+  market_listener:
+    build: .
+    container_name: cocos_market_listener
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    command: ["python", "scripts/run_market_listener.py", "--poll-seconds", "90"]
+    volumes:
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
+      - secrets_data:/app/secrets
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  risk_guard:
+    build: .
+    container_name: cocos_risk_guard
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    command:
+      [
+        "python",
+        "scripts/run_risk_guard.py",
+        "--poll-seconds", "60",
+        "--warning-pct", "-0.04",
+        "--critical-pct", "-0.06",
+        "--stop-near-pct", "0.02",
+        "--dedup-minutes", "30"
+      ]
+    volumes:
+      - ./logs:/app/logs
+      - secrets_data:/app/secrets
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
 
 volumes:
   postgres_data:
