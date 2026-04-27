@@ -220,101 +220,56 @@ async def _action_portfolio(message: Message) -> None:
 
         db = PortfolioDatabase(get_config().database.url)
         await db.connect()
-        pool = await db.get_pool()
         snap = await db.get_latest_snapshot()
+        await db.close()
 
         if not snap:
-            await db.close()
             await msg.edit_text("⚠️ Sin snapshots. Corré un scrape primero.")
             await _reply_menu(message)
             return
 
-        positions = snap.get("positions", []) or []
-        tickers = [str(p.get("ticker", "")).upper() for p in positions if p.get("ticker")]
-
-        latest_prices: dict[str, float] = {}
-        if tickers:
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """
-                    SELECT DISTINCT ON (ticker)
-                        ticker,
-                        last_price,
-                        ts
-                    FROM market_prices
-                    WHERE ticker = ANY($1::text[])
-                      AND last_price IS NOT NULL
-                    ORDER BY ticker, ts DESC
-                    """,
-                    tickers,
-                )
-            latest_prices = {
-                str(r["ticker"]).upper(): float(r["last_price"])
-                for r in rows
-                if r["last_price"] is not None
-            }
-
-        await db.close()
-
         ts = snap.get("scraped_at", "—")[:16].replace("T", " ")
+        total = float(snap.get("total_value_ars", 0) or 0)
         cash = float(snap.get("cash_ars", 0) or 0)
+        positions = snap.get("positions", []) or []
 
-        enriched_positions = []
-        total_positions_value = 0.0
+        # Ordenar por valor de mercado descendente
+        sorted_pos = sorted(
+            positions,
+            key=lambda p: float(p.get("market_value", 0) or 0),
+            reverse=True,
+        )
 
-        for p in positions:
-            ticker = str(p.get("ticker", "?")).upper()
-            qty = float(p.get("quantity", 0) or 0)
-            avg_cost = float(p.get("avg_cost", 0) or 0)
-            snapshot_price = float(p.get("current_price", 0) or 0)
-
-            live_price = latest_prices.get(ticker, snapshot_price)
-            market_value = qty * live_price
-
-            unrealized_pnl = (live_price - avg_cost) * qty if avg_cost > 0 and qty > 0 else 0.0
-            unrealized_pnl_pct = ((live_price / avg_cost) - 1.0) * 100 if avg_cost > 0 else 0.0
-
-            enriched_positions.append({
-                **p,
-                "ticker": ticker,
-                "quantity": qty,
-                "avg_cost": avg_cost,
-                "current_price": live_price,
-                "market_value": market_value,
-                "unrealized_pnl": unrealized_pnl,
-                "unrealized_pnl_pct_display": unrealized_pnl_pct,
-                "has_live_price": ticker in latest_prices,
-            })
-            total_positions_value += market_value
-
-        total = total_positions_value + cash
+        total_inv = sum(float(p.get("market_value", 0) or 0) for p in sorted_pos)
 
         lines = [
-            f"📊 <b>Portfolio</b> — snapshot base {ts} UTC",
-            f"🟢 Precios intradía: <b>{len(latest_prices)}</b> ticker(s) actualizados\n",
-            f"💼 Total estimado: <b>${total:,.0f} ARS</b>",
-            f"💵 Cash: <b>${cash:,.0f} ARS</b>\n",
+            f"📊 <b>Portfolio</b> — snapshot real {ts} UTC\n",
+            f"💼 Total: <b>${total:,.0f} ARS</b>",
+            f"💵 Cash: <b>${cash:,.0f} ARS</b>",
+            f"📦 Posiciones: <b>{len(sorted_pos)}</b>\n",
             "<b>Posiciones:</b>",
         ]
 
-        enriched_positions.sort(key=lambda p: float(p.get("market_value", 0) or 0), reverse=True)
-
-        for p in enriched_positions:
-            ticker = p["ticker"]
+        for p in sorted_pos:
+            ticker = str(p.get("ticker", "?")).upper()
             mv = float(p.get("market_value", 0) or 0)
             qty = float(p.get("quantity", 0) or 0)
             price = float(p.get("current_price", 0) or 0)
-            pnl_p = float(p.get("unrealized_pnl_pct_display", 0) or 0)
-            pct = mv / total_positions_value * 100 if total_positions_value > 0 else 0
-            icon = "🟢" if pnl_p >= 0 else "🔴"
-            live_tag = "•live" if p.get("has_live_price") else "•snap"
+
+            pct = mv / total_inv * 100 if total_inv > 0 else 0
+            icon = "🟢" if mv >= 0 else "⚪"
 
             lines.append(
-                f"  {icon} <b>{ticker}</b>  {pct:.1f}%  ${mv:,.0f}  ({pnl_p:+.1f}%)  <i>{live_tag}</i>\n"
+                f"  {icon} <b>{ticker}</b>  {pct:.1f}%  ${mv:,.0f}\n"
                 f"     x{qty:.0f} @ ${price:,.2f}"
             )
 
+        lines.append(
+            "\n<i>Fuente: último snapshot real del portfolio en Cocos.</i>"
+        )
+
         await msg.edit_text("\n".join(lines), parse_mode="HTML")
+
     except Exception as e:
         logger.error("_action_portfolio: %s", e, exc_info=True)
         await msg.edit_text(f"❌ Error: {e}")

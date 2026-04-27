@@ -53,6 +53,8 @@ MARKET_CLOSE = time(hour=17, minute=0)
 MARKET_POLL_SECONDS = 90
 RISK_POLL_SECONDS = 60
 
+PORTFOLIO_REFRESH_SECONDS = 600  # 10 min
+
 WARNING_PCT = -0.04
 CRITICAL_PCT = -0.06
 STOP_NEAR_PCT = 0.02
@@ -320,6 +322,7 @@ class IntradayManager:
         )
         self._market_task: asyncio.Task | None = None
         self._risk_task: asyncio.Task | None = None
+        self._portfolio_task: asyncio.Task | None = None
         self._running = False
         self._last_alert_keys: dict[str, datetime] = {}
 
@@ -333,6 +336,7 @@ class IntradayManager:
             return
 
         self._running = True
+        self._portfolio_task = asyncio.create_task(self._portfolio_refresh_loop(),name="portfolio_refresh_loop",)
         self._market_task = asyncio.create_task(self._market_listener_loop(), name="market_listener_loop")
         self._risk_task = asyncio.create_task(self._risk_guard_loop(), name="risk_guard_loop")
         await _set_monitor_state("running")
@@ -346,9 +350,47 @@ class IntradayManager:
         except Exception as e:
             logger.warning("No se pudo enviar aviso de inicio de monitoreo: %s", e)
 
+    async def _portfolio_refresh_loop(self) -> None:
+        """
+        Refresca el snapshot real del portfolio durante la rueda.
+        No corre tan seguido como market listener para no castigar login/sesión.
+        """
+        while self._running:
+            now = _now_art()
+
+            if not _is_market_window(now):
+                await asyncio.sleep(30)
+                continue
+
+            if await _is_monitor_paused():
+                logger.info("Portfolio refresh: monitor pausado")
+                await asyncio.sleep(30)
+                continue
+
+            owner = f"portfolio_refresh:{int(datetime.now(tz=UTC).timestamp())}"
+            got_lock = await _acquire_scraper_lock(owner, ttl=300)
+            if not got_lock:
+                logger.info("Portfolio refresh: scraper lock ocupado, salteando iteración")
+                await asyncio.sleep(20)
+                continue
+
+            try:
+                logger.info("Portfolio refresh: iniciando snapshot intradía")
+                await run_scrape("INTRADAY_PORTFOLIO_REFRESH")
+                logger.info("Portfolio refresh: snapshot intradía guardado")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("Portfolio refresh falló (no crítico): %s", e, exc_info=True)
+            finally:
+                await _release_scraper_lock(owner)
+
+            await asyncio.sleep(PORTFOLIO_REFRESH_SECONDS)
+
     async def stop(self) -> None:
         self._running = False
-        tasks = [t for t in [self._market_task, self._risk_task] if t is not None]
+        tasks = [t for t in [self._market_task, self._risk_task, self._portfolio_task] if t is not None]
+        self._portfolio_task = None
         for task in tasks:
             task.cancel()
 
