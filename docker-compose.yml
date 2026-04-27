@@ -37,6 +37,8 @@ services:
       - ./logs:/app/logs
       - ./screenshots:/app/screenshots
       - secrets_data:/app/secrets
+    environment:
+      TZ: America/Argentina/Buenos_Aires
     deploy:
       resources:
         limits:
@@ -53,6 +55,8 @@ services:
       - ./logs:/app/logs
       - secrets_data:/app/secrets
     command: ["python", "-m", "scripts.telegram_bot"]
+    environment:
+      TZ: America/Argentina/Buenos_Aires
     deploy:
       resources:
         limits:

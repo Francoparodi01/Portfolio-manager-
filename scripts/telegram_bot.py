@@ -1,7 +1,7 @@
 """
 scripts/telegram_bot.py
------------------------
 Bot de Telegram para Cocos Copilot.
+Versión coordinada con el monitor intradía vía Redis.
 """
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.ext import (
@@ -27,16 +29,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 ALLOWED_CHAT_ID = int(os.environ["TELEGRAM_CHAT_ID"])
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-_BASE_DIR    = os.path.dirname(_SCRIPTS_DIR)
+_BASE_DIR = os.path.dirname(_SCRIPTS_DIR)
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
+UTC = timezone.utc
+ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
-# ── Utilidades ────────────────────────────────────────────────────────────────
+SCRAPER_LOCK_KEY = "cocos:lock:scraper"
+MONITOR_STATE_KEY = "cocos:monitor:state"
+MONITOR_PAUSED_UNTIL_KEY = "cocos:monitor:paused_until"
+MARKET_HEARTBEAT_KEY = "cocos:monitor:market:last_tick"
+RISK_HEARTBEAT_KEY = "cocos:monitor:risk:last_check"
+BOT_BUSY_KEY = "cocos:bot:busy"
+
 
 def _strip_html(text: str) -> str:
     return _HTML_TAG_RE.sub("", text)
@@ -45,23 +55,28 @@ def _strip_html(text: str) -> str:
 def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Portfolio",       callback_data="portfolio"),
-            InlineKeyboardButton("🧠 Análisis",        callback_data="analisis"),
+            InlineKeyboardButton("📊 Portfolio", callback_data="portfolio"),
+            InlineKeyboardButton("🧠 Análisis", callback_data="analisis"),
         ],
         [
-            InlineKeyboardButton("🔄 Scrape manual",   callback_data="scrape"),
-            InlineKeyboardButton("🖥️ Estado",          callback_data="status"),
+            InlineKeyboardButton("🔄 Scrape manual", callback_data="scrape"),
+            InlineKeyboardButton("🖥️ Estado", callback_data="status"),
         ],
         [
             InlineKeyboardButton("⚡ Análisis rápido", callback_data="analisis_rapido"),
-            InlineKeyboardButton("🔭 Oportunidades",   callback_data="oportunidades"),
+            InlineKeyboardButton("🔭 Oportunidades", callback_data="oportunidades"),
         ],
         [
-            InlineKeyboardButton("📈 Performance",     callback_data="performance"),
+            InlineKeyboardButton("📈 Performance", callback_data="performance"),
             InlineKeyboardButton("📅 Resumen semanal", callback_data="resumen_semanal"),
         ],
         [
-            InlineKeyboardButton("❓ Ayuda",           callback_data="ayuda"),
+            InlineKeyboardButton("🛰️ Monitor", callback_data="monitor"),
+            InlineKeyboardButton("⏸️ Pausar 15m", callback_data="monitor_pause_15"),
+        ],
+        [
+            InlineKeyboardButton("▶️ Reanudar", callback_data="monitor_resume"),
+            InlineKeyboardButton("❓ Ayuda", callback_data="ayuda"),
         ],
     ])
 
@@ -71,7 +86,6 @@ async def _reply_menu(message: Message, text: str = "¿Qué querés hacer?") -> 
 
 
 async def _send_html_chunk(message: Message, chunk: str) -> None:
-    """Envía un chunk con HTML; si el parser falla, lo reenvía sin tags."""
     try:
         await message.reply_text(chunk, parse_mode="HTML")
     except Exception:
@@ -91,10 +105,28 @@ def only_allowed(func):
     return wrapper
 
 
-# ── Acciones ──────────────────────────────────────────────────────────────────
+async def _redis_get_str(key: str) -> str | None:
+    value = await redis_client.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode()
+    return str(value)
+
+
+def _fmt_epoch_art(epoch_str: str | None) -> str:
+    if not epoch_str:
+        return "—"
+    try:
+        ts = int(epoch_str)
+        dt = datetime.fromtimestamp(ts, tz=UTC).astimezone(ART_TZ)
+        return dt.strftime("%d/%m %H:%M:%S ART")
+    except Exception:
+        return "—"
+
 
 async def _action_status(message: Message) -> None:
-    msg   = await message.reply_text("🔍 Verificando sistema...")
+    msg = await message.reply_text("🔍 Verificando sistema...")
     lines = ["🖥️ <b>Estado del sistema</b>\n"]
 
     try:
@@ -112,14 +144,71 @@ async def _action_status(message: Message) -> None:
         await db.close()
         if snap:
             ts = snap.get("scraped_at", "—")[:16].replace("T", " ")
-            n  = len(snap.get("positions", []))
+            n = len(snap.get("positions", []))
             lines.append(f"✅ DB — último snapshot: {ts} UTC ({n} posiciones)")
         else:
             lines.append("⚠️ DB — conectada pero sin snapshots")
     except Exception as e:
         lines.append(f"❌ DB — {e}")
 
+    try:
+        state = await _redis_get_str(MONITOR_STATE_KEY)
+        market_tick = await _redis_get_str(MARKET_HEARTBEAT_KEY)
+        risk_tick = await _redis_get_str(RISK_HEARTBEAT_KEY)
+        paused_until = await _redis_get_str(MONITOR_PAUSED_UNTIL_KEY)
+        lock_value = await _redis_get_str(SCRAPER_LOCK_KEY)
+
+        lines.append("")
+        lines.append("🛰️ <b>Monitor</b>")
+        lines.append(f"Estado: <b>{state or 'stopped'}</b>")
+        lines.append(f"Último market tick: <b>{_fmt_epoch_art(market_tick)}</b>")
+        lines.append(f"Último risk check: <b>{_fmt_epoch_art(risk_tick)}</b>")
+        lines.append(f"Pausado hasta: <b>{_fmt_epoch_art(paused_until)}</b>")
+        lines.append(f"Scraper lock: <b>{lock_value or 'libre'}</b>")
+    except Exception as e:
+        lines.append(f"⚠️ Monitor — error leyendo Redis: {e}")
+
     await msg.edit_text("\n".join(lines), parse_mode="HTML")
+    await _reply_menu(message)
+
+
+async def _action_monitor(message: Message) -> None:
+    msg = await message.reply_text("🛰️ Consultando monitor...")
+    try:
+        state = await _redis_get_str(MONITOR_STATE_KEY)
+        paused_until = await _redis_get_str(MONITOR_PAUSED_UNTIL_KEY)
+        market_tick = await _redis_get_str(MARKET_HEARTBEAT_KEY)
+        risk_tick = await _redis_get_str(RISK_HEARTBEAT_KEY)
+        scraper_lock = await _redis_get_str(SCRAPER_LOCK_KEY)
+        bot_busy = await _redis_get_str(BOT_BUSY_KEY)
+
+        lines = [
+            "🛰️ <b>Estado del monitor</b>\n",
+            f"Estado: <b>{state or 'stopped'}</b>",
+            f"Pausado hasta: <b>{_fmt_epoch_art(paused_until)}</b>",
+            f"Último market tick: <b>{_fmt_epoch_art(market_tick)}</b>",
+            f"Último risk check: <b>{_fmt_epoch_art(risk_tick)}</b>",
+            f"Scraper lock: <b>{scraper_lock or 'libre'}</b>",
+            f"Bot busy: <b>{bot_busy or '0'}</b>",
+        ]
+        await msg.edit_text("\n".join(lines), parse_mode="HTML")
+    except Exception as e:
+        await msg.edit_text(f"❌ Error monitor: {e}")
+    finally:
+        await _reply_menu(message)
+
+
+async def _action_monitor_pause(message: Message, minutes: int = 15) -> None:
+    now_ts = int(datetime.now(tz=UTC).timestamp())
+    paused_until = now_ts + minutes * 60
+    await redis_client.set(MONITOR_PAUSED_UNTIL_KEY, str(paused_until), ex=minutes * 60)
+    await message.reply_text(f"⏸️ Monitor pausado por {minutes} minutos.")
+    await _reply_menu(message)
+
+
+async def _action_monitor_resume(message: Message) -> None:
+    await redis_client.delete(MONITOR_PAUSED_UNTIL_KEY)
+    await message.reply_text("▶️ Monitor reanudado.")
     await _reply_menu(message)
 
 
@@ -128,40 +217,100 @@ async def _action_portfolio(message: Message) -> None:
     try:
         from src.core.config import get_config
         from src.collector.db import PortfolioDatabase
+
         db = PortfolioDatabase(get_config().database.url)
         await db.connect()
+        pool = await db.get_pool()
         snap = await db.get_latest_snapshot()
-        await db.close()
 
         if not snap:
+            await db.close()
             await msg.edit_text("⚠️ Sin snapshots. Corré un scrape primero.")
             await _reply_menu(message)
             return
 
-        ts        = snap.get("scraped_at", "—")[:16].replace("T", " ")
-        total     = float(snap.get("total_value_ars", 0) or 0)
-        cash      = float(snap.get("cash_ars", 0) or 0)
-        positions = snap.get("positions", [])
+        positions = snap.get("positions", []) or []
+        tickers = [str(p.get("ticker", "")).upper() for p in positions if p.get("ticker")]
+
+        latest_prices: dict[str, float] = {}
+        if tickers:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT ON (ticker)
+                        ticker,
+                        last_price,
+                        ts
+                    FROM market_prices
+                    WHERE ticker = ANY($1::text[])
+                      AND last_price IS NOT NULL
+                    ORDER BY ticker, ts DESC
+                    """,
+                    tickers,
+                )
+            latest_prices = {
+                str(r["ticker"]).upper(): float(r["last_price"])
+                for r in rows
+                if r["last_price"] is not None
+            }
+
+        await db.close()
+
+        ts = snap.get("scraped_at", "—")[:16].replace("T", " ")
+        cash = float(snap.get("cash_ars", 0) or 0)
+
+        enriched_positions = []
+        total_positions_value = 0.0
+
+        for p in positions:
+            ticker = str(p.get("ticker", "?")).upper()
+            qty = float(p.get("quantity", 0) or 0)
+            avg_cost = float(p.get("avg_cost", 0) or 0)
+            snapshot_price = float(p.get("current_price", 0) or 0)
+
+            live_price = latest_prices.get(ticker, snapshot_price)
+            market_value = qty * live_price
+
+            unrealized_pnl = (live_price - avg_cost) * qty if avg_cost > 0 and qty > 0 else 0.0
+            unrealized_pnl_pct = ((live_price / avg_cost) - 1.0) * 100 if avg_cost > 0 else 0.0
+
+            enriched_positions.append({
+                **p,
+                "ticker": ticker,
+                "quantity": qty,
+                "avg_cost": avg_cost,
+                "current_price": live_price,
+                "market_value": market_value,
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_pct_display": unrealized_pnl_pct,
+                "has_live_price": ticker in latest_prices,
+            })
+            total_positions_value += market_value
+
+        total = total_positions_value + cash
 
         lines = [
-            f"📊 <b>Portfolio</b> — {ts} UTC\n",
-            f"💼 Total: <b>${total:,.0f} ARS</b>",
-            f"💵 Cash:  <b>${cash:,.0f} ARS</b>\n",
+            f"📊 <b>Portfolio</b> — snapshot base {ts} UTC",
+            f"🟢 Precios intradía: <b>{len(latest_prices)}</b> ticker(s) actualizados\n",
+            f"💼 Total estimado: <b>${total:,.0f} ARS</b>",
+            f"💵 Cash: <b>${cash:,.0f} ARS</b>\n",
             "<b>Posiciones:</b>",
         ]
-        sorted_pos = sorted(positions, key=lambda p: float(p.get("market_value", 0) or 0), reverse=True)
-        total_inv  = sum(float(p.get("market_value", 0) or 0) for p in sorted_pos)
 
-        for p in sorted_pos:
-            ticker = p.get("ticker", "?")
-            mv     = float(p.get("market_value", 0) or 0)
-            qty    = float(p.get("quantity", 0) or 0)
-            price  = float(p.get("current_price", 0) or 0)
-            pnl_p  = float(p.get("unrealized_pnl_pct", 0) or 0) * 100
-            pct    = mv / total_inv * 100 if total_inv > 0 else 0
-            icon   = "🟢" if pnl_p >= 0 else "🔴"
+        enriched_positions.sort(key=lambda p: float(p.get("market_value", 0) or 0), reverse=True)
+
+        for p in enriched_positions:
+            ticker = p["ticker"]
+            mv = float(p.get("market_value", 0) or 0)
+            qty = float(p.get("quantity", 0) or 0)
+            price = float(p.get("current_price", 0) or 0)
+            pnl_p = float(p.get("unrealized_pnl_pct_display", 0) or 0)
+            pct = mv / total_positions_value * 100 if total_positions_value > 0 else 0
+            icon = "🟢" if pnl_p >= 0 else "🔴"
+            live_tag = "•live" if p.get("has_live_price") else "•snap"
+
             lines.append(
-                f"  {icon} <b>{ticker}</b>  {pct:.1f}%  ${mv:,.0f}  ({pnl_p:+.1f}%)\n"
+                f"  {icon} <b>{ticker}</b>  {pct:.1f}%  ${mv:,.0f}  ({pnl_p:+.1f}%)  <i>{live_tag}</i>\n"
                 f"     x{qty:.0f} @ ${price:,.2f}"
             )
 
@@ -181,6 +330,8 @@ async def _run_subprocess(
 ) -> None:
     msg = await message.reply_text(wait_text)
     try:
+        await redis_client.set(BOT_BUSY_KEY, "1", ex=timeout + 60)
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -197,7 +348,7 @@ async def _run_subprocess(
 
         await msg.delete()
         for i in range(0, max(len(report), 1), 3500):
-            await _send_html_chunk(message, report[i : i + 3500])
+            await _send_html_chunk(message, report[i: i + 3500])
 
     except asyncio.TimeoutError:
         await msg.edit_text(f"⏱️ Timeout ({timeout // 60} min). Revisá los logs.")
@@ -205,6 +356,10 @@ async def _run_subprocess(
         logger.error("subprocess error: %s", e, exc_info=True)
         await msg.edit_text(f"❌ Error: {e}")
     finally:
+        try:
+            await redis_client.delete(BOT_BUSY_KEY)
+        except Exception:
+            pass
         await _reply_menu(message)
 
 
@@ -221,6 +376,8 @@ async def _action_analisis(message: Message, *, rapido: bool = False) -> None:
 async def _action_scrape(message: Message) -> None:
     msg = await message.reply_text("🔄 Scrape en curso...")
     try:
+        await redis_client.set(BOT_BUSY_KEY, "1", ex=240)
+
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "scripts/run_once.py",
             stdout=asyncio.subprocess.PIPE,
@@ -239,6 +396,10 @@ async def _action_scrape(message: Message) -> None:
     except Exception as e:
         await msg.edit_text(f"❌ Error: {e}")
     finally:
+        try:
+            await redis_client.delete(BOT_BUSY_KEY)
+        except Exception:
+            pass
         await _reply_menu(message)
 
 
@@ -268,16 +429,15 @@ async def _action_resumen_semanal(message: Message) -> None:
     )
 
 
-# ── Despachador central ───────────────────────────────────────────────────────
-
 _ACTIONS: dict[str, object] = {
-    "status":          _action_status,
-    "portfolio":       _action_portfolio,
-    "analisis":        lambda m: _action_analisis(m, rapido=False),
+    "status": _action_status,
+    "monitor": _action_monitor,
+    "portfolio": _action_portfolio,
+    "analisis": lambda m: _action_analisis(m, rapido=False),
     "analisis_rapido": lambda m: _action_analisis(m, rapido=True),
-    "scrape":          _action_scrape,
-    "oportunidades":   _action_oportunidades,
-    "performance":     _action_performance,
+    "scrape": _action_scrape,
+    "oportunidades": _action_oportunidades,
+    "performance": _action_performance,
     "resumen_semanal": _action_resumen_semanal,
 }
 
@@ -292,12 +452,13 @@ _AYUDA_TEXT = (
     "/performance       — win rate, EV y últimas decisiones\n"
     "/resumen_semanal   — comparativa de la semana\n"
     "/status            — estado del sistema\n"
+    "/monitor           — estado del monitor intradía\n"
+    "/monitor_pause     — pausa 15 minutos\n"
+    "/monitor_resume    — reanuda monitor\n"
     "/ayuda             — esta lista\n\n"
     "<b>MFA:</b> cuando el sistema pida código, mandá los 6 dígitos."
 )
 
-
-# ── Handlers ──────────────────────────────────────────────────────────────────
 
 @only_allowed
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -314,12 +475,28 @@ async def cmd_ayuda(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @only_allowed
+async def cmd_monitor_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _action_monitor_pause(update.message, minutes=15)
+
+
+@only_allowed
+async def cmd_monitor_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await _action_monitor_resume(update.message)
+
+
+@only_allowed
 async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
 
     if query.data == "ayuda":
         await query.message.reply_text(_AYUDA_TEXT, parse_mode="HTML")
+        return
+    if query.data == "monitor_pause_15":
+        await _action_monitor_pause(query.message, minutes=15)
+        return
+    if query.data == "monitor_resume":
+        await _action_monitor_resume(query.message)
         return
 
     action_fn = _ACTIONS.get(query.data)
@@ -331,8 +508,15 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 @only_allowed
 async def handle_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler genérico para todos los comandos de acción."""
-    cmd = update.message.text.lstrip("/").split("@")[0]  # quita el @bot si existe
+    cmd = update.message.text.lstrip("/").split("@")[0]
+
+    if cmd == "monitor_pause":
+        await _action_monitor_pause(update.message, minutes=15)
+        return
+    if cmd == "monitor_resume":
+        await _action_monitor_resume(update.message)
+        return
+
     action_fn = _ACTIONS.get(cmd)
     if action_fn:
         await action_fn(update.message)
@@ -356,15 +540,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-
 def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler(["ayuda", "help"], cmd_ayuda))
-
-    # Todos los comandos de acción van al mismo handler genérico
+    app.add_handler(CommandHandler(["monitor_pause"], cmd_monitor_pause))
+    app.add_handler(CommandHandler(["monitor_resume"], cmd_monitor_resume))
     app.add_handler(CommandHandler(list(_ACTIONS), handle_command))
 
     app.add_handler(CallbackQueryHandler(handle_callback))

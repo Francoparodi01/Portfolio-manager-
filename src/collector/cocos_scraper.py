@@ -11,6 +11,7 @@ MFA Flow (prioridad):
 from __future__ import annotations
 
 import asyncio
+from email.mime import message
 import os
 import re
 import time
@@ -105,16 +106,8 @@ class TelegramMFA:
         self._base = f"https://api.telegram.org/bot{bot_token}"
 
     def send(self, message: str) -> bool:
-        try:
-            r = requests.post(
-                f"{self._base}/sendMessage",
-                data={"chat_id": self._chat_id, "text": message, "parse_mode": "HTML"},
-                timeout=10,
-            )
-            return r.status_code == 200
-        except Exception as e:
-            logger.error(f"Telegram send error: {e}")
-            return False
+        logger.info("Telegram MFA silenciado: %s", message[:80].replace("\n", " "))
+        return True
 
     async def wait_for_code(self) -> Optional[str]:
         """
@@ -311,27 +304,26 @@ class CocosCapitalScraper:
     async def login(self) -> bool:
         """
         Login en Cocos Capital.
-        Si la plataforma pide MFA, usa Telegram para recibir el código del usuario.
+        Si la plataforma pide MFA, usa TOTP automático o fallback manual,
+        pero sin enviar notificaciones de Telegram por login/MFA.
         """
         if self._is_logged_in:
             return True
 
         try:
             logger.info("Navegando a Cocos Capital...")
-            # domcontentloaded evita timeout por websockets de Cocos
             await self._page.goto(
                 "https://app.cocos.capital/login",
                 wait_until="domcontentloaded",
                 timeout=60_000,
             )
 
-            # Esperar que el input exista en el DOM (state=attached, no visible)
             await self._page.wait_for_selector(
                 "input[type='email']",
                 state="attached",
                 timeout=60_000,
             )
-            await asyncio.sleep(0.3)  # hydration de React
+            await asyncio.sleep(0.3)
 
             email_input = await self._page.query_selector("input[type='email']")
             password_input = await self._page.query_selector("input[type='password']")
@@ -339,7 +331,6 @@ class CocosCapitalScraper:
             if not email_input or not password_input:
                 raise RuntimeError("No se encontraron los campos email/password")
 
-            # click + type simula send_keys de Selenium
             await email_input.click()
             await email_input.type(self._cfg.username, delay=30)
             logger.info(f"Email ingresado: {self._cfg.username}")
@@ -359,7 +350,6 @@ class CocosCapitalScraper:
             await submit_btn.click()
             logger.info("Click en Iniciar sesión")
 
-            # Esperar que desaparezca el campo de password (pantalla cambió)
             try:
                 await self._page.wait_for_selector(
                     "input[type='password']",
@@ -371,25 +361,20 @@ class CocosCapitalScraper:
 
             await self._page.wait_for_load_state("domcontentloaded", timeout=60_000)
 
-            # ── ¿Login directo sin MFA? ────────────
+            # ── Login directo sin MFA ────────────
             if "capital-portfolio" in self._page.url:
                 self._is_logged_in = True
                 logger.info("Login exitoso sin MFA")
-                if self._telegram:
-                    self._telegram.send("✅ Login exitoso (sin MFA)")
                 return True
 
             # ── MFA requerido ──────────────────────
             logger.info(f"MFA requerido. URL actual: {self._page.url}")
 
-            # ── TOTP automático (si hay secret configurado) ──────────────
             totp_secret = getattr(self._cfg, "totp_secret", None) or os.environ.get("COCOS_TOTP_SECRET", "")
             if totp_secret and HAS_PYOTP:
                 try:
                     mfa_code = pyotp.TOTP(totp_secret).now()
-                    logger.info(f"TOTP generado automáticamente: {mfa_code}")
-                    if self._telegram:
-                        self._telegram.send(f"🔐 TOTP generado automáticamente: <code>{mfa_code}</code>")
+                    logger.info("TOTP generado automáticamente")
                 except Exception as e:
                     logger.warning(f"TOTP falló ({e}), fallback a Telegram manual")
                     mfa_code = None
@@ -399,7 +384,7 @@ class CocosCapitalScraper:
             else:
                 mfa_code = None
 
-            # ── Fallback: pedir código manualmente por Telegram ──────────────
+            # ── Fallback: pedir código manualmente por Telegram/Redis ──────────────
             if not mfa_code:
                 if not self._telegram:
                     raise RuntimeError(
@@ -411,10 +396,6 @@ class CocosCapitalScraper:
                 raise RuntimeError("No se recibió código MFA a tiempo")
 
             # ── Ingresar el código MFA ──────────────
-            # Cocos muestra 6 inputs individuales (3 + guión + 3)
-            # Verificado en screenshot Mar 2026
-
-            # Esperar que aparezcan los inputs del MFA
             await self._page.wait_for_selector(
                 "input",
                 state="attached",
@@ -422,7 +403,6 @@ class CocosCapitalScraper:
             )
             await asyncio.sleep(0.3)
 
-            # Obtener todos los inputs visibles en pantalla
             all_inputs = await self._page.query_selector_all("input")
             logger.info(f"Inputs en pantalla MFA: {len(all_inputs)}")
 
@@ -435,31 +415,27 @@ class CocosCapitalScraper:
             }"""
 
             if len(all_inputs) >= 6:
-                # 6 inputs React controlled — usar setter nativo para disparar onChange
                 for i, digit in enumerate(mfa_code[:6]):
                     inp = all_inputs[i]
                     await inp.click()
                     await inp.evaluate(JS_FILL, digit)
                     await asyncio.sleep(0.12)
-                logger.info(f"Código ingresado dígito a dígito (React): {mfa_code}")
+                logger.info("Código MFA ingresado dígito a dígito (React)")
 
             elif len(all_inputs) > 0:
                 await all_inputs[0].click()
                 await all_inputs[0].evaluate(JS_FILL, mfa_code)
-                logger.info(f"Código ingresado en input único: {mfa_code}")
+                logger.info("Código MFA ingresado en input único")
 
             else:
                 await self._screenshot("mfa_no_inputs")
                 raise RuntimeError("No se encontraron inputs MFA en el DOM")
 
-            # Enter para confirmar el código y cualquier prompt posterior
-            # (ej: "¿es este un dispositivo de confianza?")
             await asyncio.sleep(0.3)
             await self._page.keyboard.press("Enter")
             await asyncio.sleep(2)
-            await self._page.keyboard.press("Enter")  # segundo prompt si existe
+            await self._page.keyboard.press("Enter")
 
-            # Navegar directo al portfolio — no depender del redirect de Cocos
             logger.info("Navegando directo al portfolio...")
             await self._page.goto(
                 "https://app.cocos.capital/capital-portfolio",
@@ -476,7 +452,6 @@ class CocosCapitalScraper:
                 raise RuntimeError(f"Login fallido post-MFA. URL: {final_url}")
 
             self._is_logged_in = True
-            self._telegram.send("✅ Login exitoso con MFA")
             logger.info("Login con MFA confirmado")
             await self.context.storage_state(path=SESSION_FILE)
             logger.info("Sesion Playwright guardada")
@@ -485,8 +460,6 @@ class CocosCapitalScraper:
         except Exception as e:
             await self._screenshot("login_failure")
             logger.error(f"Login fallido: {e}")
-            if self._telegram:
-                self._telegram.send(f"❌ Error en login: {e}")
             raise
 
     # ── Portfolio ─────────────────────────────────
