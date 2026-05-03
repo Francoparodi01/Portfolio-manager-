@@ -1,29 +1,39 @@
 """
 src/scheduler/runner.py
 
-Scheduler principal + loops intradía coordinados con Redis.
+Scheduler principal para Cocos Copilot.
 
 Qué hace:
-- 10:30 ART -> scrape portfolio
-- 10:31 ART -> arranca listener intradía de mercado
-- 10:31 ART -> arranca guard intradía de riesgo
-- 17:00 ART -> portfolio + mercado completo
-- 17:01 ART -> apaga loops intradía
-- 21:30 ART -> update_outcomes
+  - 10:30 ART → run_scrape("10:30_PORTFOLIO")
+  - 10:31 ART → inicia loops intradía
+  - 17:00 ART → run_full("17:00_FULL")
+  - 17:01 ART → detiene loops intradía
+  - 21:30 ART → run_update_outcomes()
+  - Si arranca durante horario de mercado, inicia loops de inmediato.
 
-Coordinación con bot:
-- lock global de scraper vía Redis
-- heartbeats de mercado y riesgo
-- pausa temporal del monitor
-- bot_busy para silenciar alertas menores mientras se ejecutan acciones manuales
+Diseño intradía:
+  Un único loop de scraping (sin competencia, sin login doble):
+    - Mercado cada 90s.
+    - Portfolio cada ~10min (dentro del mismo login).
+  Risk guard separado: solo lee DB, sin Playwright.
+
+Redis:
+  Completamente opcional. Si falla, el sistema sigue funcionando.
+  Se usa solo para heartbeats y flags de estado (fire-and-forget).
+
+Coordinación de scraper:
+  asyncio.Lock en proceso. Confiable, sin dependencia de red.
+  run_scrape / run_full respetan el lock sin bloquear: si está ocupado, abortan
+  con log honesto — nunca reportan éxito cuando abortaron.
 """
 
 from __future__ import annotations
 
 import asyncio
 import signal
+import time
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 try:
@@ -39,46 +49,47 @@ from src.core.redis_client import client as redis_client
 from src.collector.cocos_scraper import CocosCapitalScraper
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
-from src.collector.db import PortfolioDatabase as _PDB
 
 logger = get_logger(__name__)
+
+# ─── Constantes ────────────────────────────────────────────────────────────────
 
 TIMEZONE = "America/Argentina/Buenos_Aires"
 ART_TZ = ZoneInfo(TIMEZONE)
 UTC = timezone.utc
 
-MARKET_OPEN = time(hour=10, minute=30)
-MARKET_CLOSE = time(hour=17, minute=0)
+MARKET_OPEN_H, MARKET_OPEN_M = 10, 30
+MARKET_CLOSE_H, MARKET_CLOSE_M = 17, 0
 
-MARKET_POLL_SECONDS = 90
-RISK_POLL_SECONDS = 60
-
-PORTFOLIO_REFRESH_SECONDS = 600  # 10 min
+MARKET_POLL_SECONDS = 90       # frecuencia del loop de mercado
+RISK_POLL_SECONDS = 60         # frecuencia del risk guard
+PORTFOLIO_REFRESH_SECONDS = 600  # cada ~10 min, dentro del loop de mercado
 
 WARNING_PCT = -0.04
 CRITICAL_PCT = -0.06
 STOP_NEAR_PCT = 0.02
 
-# Redis keys
-SCRAPER_LOCK_KEY = "cocos:lock:scraper"
-MONITOR_STATE_KEY = "cocos:monitor:state"
-MONITOR_PAUSED_UNTIL_KEY = "cocos:monitor:paused_until"
+# Redis keys (todos opcionales)
+SCRAPER_LOCK_KEY = "cocos:lock:scraper"      # soft-lock cross-process: bot lo lee para saber si el runner está scrapando
 MARKET_HEARTBEAT_KEY = "cocos:monitor:market:last_tick"
 RISK_HEARTBEAT_KEY = "cocos:monitor:risk:last_check"
+MONITOR_STATE_KEY = "cocos:monitor:state"
 BOT_BUSY_KEY = "cocos:bot:busy"
 
+# Lock en proceso: garantiza un único scraper activo a la vez.
+# Se crea la primera vez que se usa (dentro del event loop).
+_scraper_lock: asyncio.Lock | None = None
 _intraday_manager: "IntradayManager | None" = None
 
 
-@dataclass
-class RiskAlert:
-    ticker: str
-    level: str
-    current_price: float
-    entry_price: float
-    pnl_pct: float
-    stop_loss_price: float | None = None
-    target_price: float | None = None
+# ─── Helpers generales ─────────────────────────────────────────────────────────
+
+def _get_scraper_lock() -> asyncio.Lock:
+    """Lazy init del lock para que funcione dentro del event loop."""
+    global _scraper_lock
+    if _scraper_lock is None:
+        _scraper_lock = asyncio.Lock()
+    return _scraper_lock
 
 
 def _now_art() -> datetime:
@@ -87,174 +98,160 @@ def _now_art() -> datetime:
 
 def _is_market_window(now: datetime | None = None) -> bool:
     now = now or _now_art()
-    t = now.timetz().replace(tzinfo=None)
-    return MARKET_OPEN <= t < MARKET_CLOSE
+    current_mins = now.hour * 60 + now.minute
+    open_mins = MARKET_OPEN_H * 60 + MARKET_OPEN_M
+    close_mins = MARKET_CLOSE_H * 60 + MARKET_CLOSE_M
+    return open_mins <= current_mins < close_mins
 
 
 def _safe_float(value, default: float | None = None) -> float | None:
     try:
-        if value is None:
-            return default
-        return float(value)
+        return float(value) if value is not None else default
     except Exception:
         return default
 
 
-async def _get_pool(db: PortfolioDatabase):
-    if hasattr(db, "get_pool"):
-        pool = await db.get_pool()
-        if pool is not None:
-            return pool
-    pool = getattr(db, "_db_pool", None) or getattr(db, "_pool", None)
-    return pool
+# ─── Redis helpers (fire-and-forget, nunca rompen el flujo) ────────────────────
+
+async def _redis_set(key: str, value: str, ex: int = 3600) -> None:
+    try:
+        await redis_client.set(key, value, ex=ex)
+    except Exception as e:
+        logger.debug("Redis set ignorado [%s]: %s", key, e)
+
+
+async def _redis_get(key: str) -> str | None:
+    try:
+        raw = await redis_client.get(key)
+        if raw is None:
+            return None
+        return raw.decode() if isinstance(raw, bytes) else str(raw)
+    except Exception as e:
+        logger.debug("Redis get ignorado [%s]: %s", key, e)
+        return None
+
+
+async def _redis_delete(key: str) -> None:
+    try:
+        await redis_client.delete(key)
+    except Exception as e:
+        logger.debug("Redis delete ignorado [%s]: %s", key, e)
 
 
 async def _heartbeat(key: str) -> None:
-    try:
-        await redis_client.set(key, str(int(datetime.now(tz=UTC).timestamp())), ex=3600)
-    except Exception as e:
-        logger.warning("Heartbeat redis falló [%s]: %s", key, e)
+    await _redis_set(key, str(int(datetime.now(tz=UTC).timestamp())))
 
 
 async def _set_monitor_state(state: str) -> None:
-    try:
-        await redis_client.set(MONITOR_STATE_KEY, state, ex=3600)
-    except Exception as e:
-        logger.warning("Monitor state redis falló: %s", e)
-
-
-async def _is_monitor_paused() -> bool:
-    try:
-        raw = await redis_client.get(MONITOR_PAUSED_UNTIL_KEY)
-        if not raw:
-            return False
-        paused_until = int(raw.decode() if isinstance(raw, bytes) else raw)
-        now_ts = int(datetime.now(tz=UTC).timestamp())
-        return now_ts < paused_until
-    except Exception as e:
-        logger.warning("Monitor pause check redis falló: %s", e)
-        return False
-
-
-async def _acquire_scraper_lock(owner: str, ttl: int = 300) -> bool:
-    try:
-        ok = await redis_client.set(SCRAPER_LOCK_KEY, owner, ex=ttl, nx=True)
-        return bool(ok)
-    except Exception as e:
-        logger.warning("Acquire scraper lock falló: %s", e)
-        return False
-
-
-async def _release_scraper_lock(owner: str) -> None:
-    try:
-        current = await redis_client.get(SCRAPER_LOCK_KEY)
-        if not current:
-            return
-        current_str = current.decode() if isinstance(current, bytes) else str(current)
-        if current_str == owner:
-            await redis_client.delete(SCRAPER_LOCK_KEY)
-    except Exception as e:
-        logger.warning("Release scraper lock falló: %s", e)
+    await _redis_set(MONITOR_STATE_KEY, state)
 
 
 async def _is_bot_busy() -> bool:
-    try:
-        value = await redis_client.get(BOT_BUSY_KEY)
-        return bool(value)
-    except Exception:
-        return False
+    """Retorna False si Redis no responde — no bloquear alertas por falla de infra."""
+    return bool(await _redis_get(BOT_BUSY_KEY))
 
+
+# ─── Jobs programados ──────────────────────────────────────────────────────────
 
 async def run_scrape(run_type: str = "SCHEDULED") -> dict:
+    """
+    Scrape de portfolio.
+    Si el scraper está ocupado (loop intradía activo), aborta y lo dice claramente.
+    Nunca reporta éxito si abortó.
+    """
     cfg = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
     db = PortfolioDatabase(cfg.database.url)
 
-    logger.info("=== Iniciando run [%s] ===", run_type)
-    notifier.notify_run_start(run_type)
+    logger.info("=== run_scrape [%s] iniciando ===", run_type)
+    result: dict = {"success": False, "run_type": run_type}
 
-    result: dict = {"success": False}
-    owner = f"run_scrape:{int(datetime.now(tz=UTC).timestamp())}"
+    lock = _get_scraper_lock()
+    if lock.locked():
+        logger.warning(
+            "run_scrape [%s]: scraper ocupado por loop intradía — abortando (no es error, es coordinación normal)",
+            run_type,
+        )
+        result["aborted"] = "scraper_busy"
+        return result
 
-    try:
-        got_lock = await _acquire_scraper_lock(owner, ttl=300)
-        if not got_lock:
-            logger.warning("run_scrape: lock ocupado, abortando run [%s]", run_type)
-            result["error"] = "scraper lock ocupado"
-            return result
-
-        await db.connect()
-
-        async with CocosCapitalScraper(cfg.scraper) as scraper:
-            try:
+    async with lock:
+        # Soft-lock Redis: señaliza a otros procesos (bot) que el scraper está activo.
+        # Fire-and-forget — si Redis falla, el scraping continúa igual.
+        await _redis_set(SCRAPER_LOCK_KEY, f"run_scrape:{run_type}", ex=180)
+        try:
+            await db.connect()
+            async with CocosCapitalScraper(cfg.scraper) as scraper:
                 await scraper.login()
-                notifier.notify_login_ok()
-            except Exception as e:
-                notifier.notify_login_error(str(e))
-                raise
+                snapshot = await scraper.scrape_portfolio()
+                sid = await db.save_snapshot(snapshot)
 
-            snapshot = await scraper.scrape_portfolio()
-            sid = await db.save_snapshot(snapshot)
-
-            result.update(success=True, snapshot_id=str(sid), positions=len(snapshot.positions))
-
+            result.update(
+                success=True,
+                snapshot_id=str(sid),
+                positions=len(snapshot.positions),
+            )
+            logger.info(
+                "run_scrape ok: %d posiciones · confianza %.2f · total %s ARS",
+                len(snapshot.positions),
+                snapshot.confidence_score,
+                f"{snapshot.total_value_ars:,.0f}",
+            )
             notifier.notify_scrape_complete(
                 total_ars=float(snapshot.total_value_ars),
                 positions_count=len(snapshot.positions),
                 confidence=snapshot.confidence_score,
                 cash_ars=float(snapshot.cash_ars),
             )
-
             if snapshot.positions:
                 notifier.send_snapshot_json(snapshot.to_dict())
 
-            logger.info(
-                "Run ok: %d posiciones, confianza=%.2f, total=%s ARS",
-                len(snapshot.positions),
-                snapshot.confidence_score,
-                f"{snapshot.total_value_ars:,.0f}",
-            )
-
-    except Exception as e:
-        logger.error("Run fallido [%s]: %s", run_type, e, exc_info=True)
-        notifier.notify_critical_error(run_type, str(e))
-        result["error"] = str(e)
-    finally:
-        await _release_scraper_lock(owner)
-        await db.close()
+        except Exception as e:
+            logger.error("run_scrape [%s] falló: %s", run_type, e, exc_info=True)
+            notifier.notify_critical_error(run_type, str(e))
+            result["error"] = str(e)
+        finally:
+            await _redis_delete(SCRAPER_LOCK_KEY)
+            await db.close()
 
     return result
 
 
 async def run_full(run_type: str = "FULL") -> dict:
+    """
+    Scrape completo: portfolio + mercado + análisis técnico.
+    Si el scraper está ocupado, aborta con log honesto.
+    """
     cfg = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
     db = PortfolioDatabase(cfg.database.url)
 
-    logger.info("=== Iniciando run FULL [%s] ===", run_type)
-    notifier.notify_run_start(run_type)
-    result: dict = {"success": False}
-    owner = f"run_full:{int(datetime.now(tz=UTC).timestamp())}"
+    logger.info("=== run_full [%s] iniciando ===", run_type)
+    result: dict = {"success": False, "run_type": run_type}
 
-    try:
-        got_lock = await _acquire_scraper_lock(owner, ttl=600)
-        if not got_lock:
-            logger.warning("run_full: lock ocupado, abortando run [%s]", run_type)
-            result["error"] = "scraper lock ocupado"
-            return result
+    lock = _get_scraper_lock()
+    if lock.locked():
+        logger.warning(
+            "run_full [%s]: scraper ocupado — abortando (el loop intradía corre en paralelo)",
+            run_type,
+        )
+        result["aborted"] = "scraper_busy"
+        return result
 
-        await db.connect()
+    async with lock:
+        await _redis_set(SCRAPER_LOCK_KEY, f"run_full:{run_type}", ex=300)
+        try:
+            await db.connect()
+            async with CocosCapitalScraper(cfg.scraper) as scraper:
+                await scraper.login()
 
-        async with CocosCapitalScraper(cfg.scraper) as scraper:
-            await scraper.login()
-            notifier.notify_login_ok()
+                snapshot = await scraper.scrape_portfolio()
+                await db.save_snapshot(snapshot)
 
-            snapshot = await scraper.scrape_portfolio()
-            await db.save_snapshot(snapshot)
-
-            acciones = await scraper.scrape_market("ACCIONES")
-            cedears = await scraper.scrape_market("CEDEARS")
-            await db.save_market_prices(acciones + cedears)
+                acciones = await scraper.scrape_market("ACCIONES")
+                cedears = await scraper.scrape_market("CEDEARS")
+                if acciones or cedears:
+                    await db.save_market_prices(acciones + cedears)
 
             result.update(
                 success=True,
@@ -262,7 +259,10 @@ async def run_full(run_type: str = "FULL") -> dict:
                 acciones=len(acciones),
                 cedears=len(cedears),
             )
-
+            logger.info(
+                "run_full ok: %d posiciones · %d acciones · %d cedears",
+                len(snapshot.positions), len(acciones), len(cedears),
+            )
             notifier.notify_scrape_complete(
                 total_ars=float(snapshot.total_value_ars),
                 positions_count=len(snapshot.positions),
@@ -270,36 +270,36 @@ async def run_full(run_type: str = "FULL") -> dict:
                 cash_ars=float(snapshot.cash_ars),
             )
             notifier.send_raw(
-                f"Mercado: {len(acciones)} acciones, {len(cedears)} CEDEARs guardados"
+                f"📊 Mercado EOD: {len(acciones)} acciones · {len(cedears)} CEDEARs guardados."
             )
 
-        if snapshot and snapshot.positions:
-            try:
-                from src.analysis.technical import analyze_portfolio, build_telegram_report
+            # Análisis técnico — no crítico, fallo no afecta el resultado principal
+            if snapshot.positions:
+                try:
+                    from src.analysis.technical import analyze_portfolio, build_telegram_report
+                    tickers = [p.ticker for p in snapshot.positions]
+                    signals = analyze_portfolio(tickers, period="3mo")
+                    report = build_telegram_report(signals, float(snapshot.total_value_ars))
+                    notifier.send_raw(report)
+                    logger.info("Análisis técnico: %d señales enviadas", len(signals))
+                except Exception as e:
+                    logger.warning("Análisis técnico falló (no crítico): %s", e)
 
-                tickers = [p.ticker for p in snapshot.positions]
-                logger.info("Ejecutando analisis tecnico: %s", tickers)
-                signals = analyze_portfolio(tickers, period="3mo")
-                report = build_telegram_report(signals, float(snapshot.total_value_ars))
-                notifier.send_raw(report)
-                logger.info("Analisis tecnico: %d señales enviadas", len(signals))
-            except Exception as e:
-                logger.warning("Analisis tecnico falló (no crítico): %s", e)
-
-    except Exception as e:
-        logger.error("Run FULL fallido: %s", e, exc_info=True)
-        notifier.notify_critical_error(run_type, str(e))
-        result["error"] = str(e)
-    finally:
-        await _release_scraper_lock(owner)
-        await db.close()
+        except Exception as e:
+            logger.error("run_full [%s] falló: %s", run_type, e, exc_info=True)
+            notifier.notify_critical_error(run_type, str(e))
+            result["error"] = str(e)
+        finally:
+            await _redis_delete(SCRAPER_LOCK_KEY)
+            await db.close()
 
     return result
 
 
 async def run_update_outcomes() -> None:
+    """Actualiza outcomes de decisiones pasadas. Solo DB, sin scraper."""
     cfg = get_config()
-    db = _PDB(cfg.database.url)
+    db = PortfolioDatabase(cfg.database.url)
     try:
         await db.connect()
         updated = await db.update_outcomes(lookback_days=60)
@@ -313,18 +313,46 @@ async def run_update_outcomes() -> None:
             pass
 
 
+# ─── Risk alert ────────────────────────────────────────────────────────────────
+
+@dataclass
+class RiskAlert:
+    ticker: str
+    level: str          # WARNING | CRITICAL | STOP_NEAR | STOP_TRIGGERED
+    current_price: float
+    entry_price: float
+    pnl_pct: float
+    stop_loss_price: float | None = None
+    target_price: float | None = None
+
+
+# ─── Intraday Manager ──────────────────────────────────────────────────────────
+
 class IntradayManager:
-    def __init__(self):
+    """
+    Dos loops independientes durante horario de mercado:
+
+    1. _scraper_loop:
+       Un único loop de scraping — un login por iteración, sin competencia.
+       - Mercado (ACCIONES + CEDEARS) cada MARKET_POLL_SECONDS (90s).
+       - Portfolio cada PORTFOLIO_REFRESH_SECONDS (~10min), dentro del mismo login.
+       Esto resuelve el problema de dos scrapers peleándose y logins dobles.
+
+    2. _risk_guard_loop:
+       Solo lee DB. Sin Playwright. Sin scraper.
+       Emite alertas por Telegram según umbrales de PNL / stop loss.
+    """
+
+    def __init__(self) -> None:
         self.cfg = get_config()
         self.notifier = TelegramNotifier(
             self.cfg.scraper.telegram_bot_token,
             self.cfg.scraper.telegram_chat_id,
         )
-        self._market_task: asyncio.Task | None = None
+        self._scraper_task: asyncio.Task | None = None
         self._risk_task: asyncio.Task | None = None
-        self._portfolio_task: asyncio.Task | None = None
         self._running = False
-        self._last_alert_keys: dict[str, datetime] = {}
+        self._last_alert_sent: dict[str, datetime] = {}
 
     @property
     def running(self) -> bool:
@@ -332,153 +360,133 @@ class IntradayManager:
 
     async def start(self) -> None:
         if self._running:
-            logger.info("IntradayManager: loops ya activos")
+            logger.info("IntradayManager: loops ya activos, ignorando start()")
             return
-
         self._running = True
-        self._portfolio_task = asyncio.create_task(self._portfolio_refresh_loop(),name="portfolio_refresh_loop",)
-        self._market_task = asyncio.create_task(self._market_listener_loop(), name="market_listener_loop")
-        self._risk_task = asyncio.create_task(self._risk_guard_loop(), name="risk_guard_loop")
+        self._scraper_task = asyncio.create_task(
+            self._scraper_loop(), name="intraday_scraper"
+        )
+        self._risk_task = asyncio.create_task(
+            self._risk_guard_loop(), name="intraday_risk_guard"
+        )
         await _set_monitor_state("running")
         logger.info("IntradayManager: loops intradía iniciados")
-
         try:
             self.notifier.send_raw(
                 "🟢 <b>Monitoreo intradía iniciado</b>\n"
-                "Escuchando mercado y riesgo entre 10:30 y 17:00 ART."
+                "Mercado cada 90s · Portfolio cada 10min · Risk guard cada 60s."
             )
         except Exception as e:
-            logger.warning("No se pudo enviar aviso de inicio de monitoreo: %s", e)
-
-    async def _portfolio_refresh_loop(self) -> None:
-        """
-        Refresca el snapshot real del portfolio durante la rueda.
-        No corre tan seguido como market listener para no castigar login/sesión.
-        """
-        while self._running:
-            now = _now_art()
-
-            if not _is_market_window(now):
-                await asyncio.sleep(30)
-                continue
-
-            if await _is_monitor_paused():
-                logger.info("Portfolio refresh: monitor pausado")
-                await asyncio.sleep(30)
-                continue
-
-            owner = f"portfolio_refresh:{int(datetime.now(tz=UTC).timestamp())}"
-            got_lock = await _acquire_scraper_lock(owner, ttl=300)
-            if not got_lock:
-                logger.info("Portfolio refresh: scraper lock ocupado, salteando iteración")
-                await asyncio.sleep(20)
-                continue
-
-            try:
-                logger.info("Portfolio refresh: iniciando snapshot intradía")
-                await run_scrape("INTRADAY_PORTFOLIO_REFRESH")
-                logger.info("Portfolio refresh: snapshot intradía guardado")
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("Portfolio refresh falló (no crítico): %s", e, exc_info=True)
-            finally:
-                await _release_scraper_lock(owner)
-
-            await asyncio.sleep(PORTFOLIO_REFRESH_SECONDS)
+            logger.warning("No se pudo notificar inicio de monitoreo: %s", e)
 
     async def stop(self) -> None:
         self._running = False
-        tasks = [t for t in [self._market_task, self._risk_task, self._portfolio_task] if t is not None]
-        self._portfolio_task = None
-        for task in tasks:
-            task.cancel()
+        tasks = [t for t in (self._scraper_task, self._risk_task) if t is not None]
+        self._scraper_task = None
+        self._risk_task = None
 
+        for t in tasks:
+            t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        self._market_task = None
-        self._risk_task = None
         await _set_monitor_state("stopped")
         logger.info("IntradayManager: loops intradía detenidos")
-
         try:
-            self.notifier.send_raw(
-                "🔴 <b>Monitoreo intradía detenido</b>\n"
-                "Se frenó el listener de mercado y el guard de riesgo."
-            )
+            self.notifier.send_raw("🔴 <b>Monitoreo intradía detenido</b>")
         except Exception as e:
-            logger.warning("No se pudo enviar aviso de fin de monitoreo: %s", e)
+            logger.warning("No se pudo notificar fin de monitoreo: %s", e)
 
-    async def _market_listener_loop(self) -> None:
+    # ── Loop único de scraping ─────────────────────────────────────────────────
+
+    async def _scraper_loop(self) -> None:
+        """
+        Un login por iteración. Siempre hace mercado. Hace portfolio cada ~10min.
+        Si un job scheduled (run_scrape / run_full) tiene el lock, espera y reintenta.
+        """
+        last_portfolio_ts: float = 0.0
+
         while self._running:
-            now = _now_art()
-            if not _is_market_window(now):
+            if not _is_market_window():
                 await asyncio.sleep(30)
                 continue
 
-            if await _is_monitor_paused():
-                logger.info("Market listener: monitor pausado")
-                await asyncio.sleep(30)
-                continue
-
-            owner = f"market_listener:{int(datetime.now(tz=UTC).timestamp())}"
-            got_lock = await _acquire_scraper_lock(owner, ttl=240)
-            if not got_lock:
-                logger.info("Market listener: scraper lock ocupado, salteando iteración")
+            lock = _get_scraper_lock()
+            if lock.locked():
+                # Job scheduled corriendo (run_scrape o run_full). Esperar sin error.
+                logger.info("Scraper loop: lock ocupado por job scheduled, esperando 20s...")
                 await asyncio.sleep(20)
                 continue
 
+            now_ts = time.monotonic()
+            do_portfolio = (now_ts - last_portfolio_ts) >= PORTFOLIO_REFRESH_SECONDS
+
             db = PortfolioDatabase(self.cfg.database.url)
             try:
-                await db.connect()
-                async with CocosCapitalScraper(self.cfg.scraper) as scraper:
-                    await scraper.login()
-                    acciones = await scraper.scrape_market("ACCIONES")
-                    cedears = await scraper.scrape_market("CEDEARS")
-                    total = len(acciones) + len(cedears)
+                async with lock:
+                    await _redis_set(SCRAPER_LOCK_KEY, "intraday_loop", ex=120)
+                    try:
+                        await db.connect()
+                        async with CocosCapitalScraper(self.cfg.scraper) as scraper:
+                            await scraper.login()
 
-                    if total > 0:
-                        await db.save_market_prices(acciones + cedears)
-                        await _heartbeat(MARKET_HEARTBEAT_KEY)
-                        logger.info(
-                            "Market listener: guardados %d precios (%d acciones, %d cedears)",
-                            total, len(acciones), len(cedears)
-                        )
-                    else:
-                        logger.info("Market listener: sin filas de mercado en esta iteración")
+                            # — Mercado (siempre) —
+                            acciones = await scraper.scrape_market("ACCIONES")
+                            cedears = await scraper.scrape_market("CEDEARS")
+                            total_prices = len(acciones) + len(cedears)
+
+                            if total_prices > 0:
+                                await db.save_market_prices(acciones + cedears)
+                                await _heartbeat(MARKET_HEARTBEAT_KEY)
+                                logger.info(
+                                    "Scraper loop: %d precios guardados (%dA + %dC)",
+                                    total_prices, len(acciones), len(cedears),
+                                )
+                            else:
+                                logger.info("Scraper loop: mercado sin filas en esta iteración")
+
+                            # — Portfolio (cada ~10min) —
+                            if do_portfolio:
+                                snapshot = await scraper.scrape_portfolio()
+                                await db.save_snapshot(snapshot)
+                                last_portfolio_ts = time.monotonic()
+                                logger.info(
+                                    "Scraper loop: portfolio intradía guardado · %d posiciones · conf %.2f",
+                                    len(snapshot.positions),
+                                    snapshot.confidence_score,
+                                )
+                    finally:
+                        await _redis_delete(SCRAPER_LOCK_KEY)
 
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning("Market listener loop falló (no crítico): %s", e, exc_info=True)
+                logger.warning("Scraper loop error (reintentará en %ds): %s", MARKET_POLL_SECONDS, e, exc_info=True)
             finally:
-                await _release_scraper_lock(owner)
                 try:
                     await db.close()
                 except Exception:
                     pass
-
             await asyncio.sleep(MARKET_POLL_SECONDS)
 
-    async def _risk_guard_loop(self) -> None:
-        while self._running:
-            now = _now_art()
-            if not _is_market_window(now):
-                await asyncio.sleep(30)
-                continue
+    # ── Risk guard (solo DB) ────────────────────────────────────────────────────
 
-            if await _is_monitor_paused():
-                logger.info("Risk guard: monitor pausado")
+    async def _risk_guard_loop(self) -> None:
+        """
+        Lee DB. Calcula PNL contra entries de decision_log. Envía alertas.
+        Sin Playwright. Sin scraper. Sin lock de scraper.
+        """
+        while self._running:
+            if not _is_market_window():
                 await asyncio.sleep(30)
                 continue
 
             db = PortfolioDatabase(self.cfg.database.url)
             try:
                 await db.connect()
-                pool = await _get_pool(db)
+                pool = await self._resolve_pool(db)
                 if pool is None:
-                    logger.warning("Risk guard: no se pudo obtener pool DB")
+                    logger.warning("Risk guard: no se pudo obtener pool DB, reintentando en %ds", RISK_POLL_SECONDS)
                     await asyncio.sleep(RISK_POLL_SECONDS)
                     continue
 
@@ -486,26 +494,26 @@ class IntradayManager:
                 alerts = await self._compute_risk_alerts(pool)
 
                 for alert in alerts:
+                    # Silenciar alertas no críticas si el bot está procesando algo manual
                     if bot_busy and alert.level not in ("CRITICAL", "STOP_TRIGGERED"):
                         logger.info(
-                            "Risk guard: bot busy, alerta no crítica silenciada [%s %s]",
-                            alert.level, alert.ticker
+                            "Risk guard: bot busy, silenciando [%s %s]",
+                            alert.level, alert.ticker,
                         )
                         continue
-
                     if self._should_send_alert(alert):
                         self._send_alert(alert)
-                        self._last_alert_keys[f"{alert.ticker}:{alert.level}"] = datetime.now(tz=UTC)
+                        self._last_alert_sent[f"{alert.ticker}:{alert.level}"] = datetime.now(tz=UTC)
 
                 await _heartbeat(RISK_HEARTBEAT_KEY)
 
                 if not alerts:
-                    logger.info("Risk guard: sin alertas")
+                    logger.info("Risk guard: todo dentro de parámetros")
 
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning("Risk guard loop falló (no crítico): %s", e, exc_info=True)
+                logger.warning("Risk guard error (reintentará en %ds): %s", RISK_POLL_SECONDS, e, exc_info=True)
             finally:
                 try:
                     await db.close()
@@ -514,6 +522,15 @@ class IntradayManager:
 
             await asyncio.sleep(RISK_POLL_SECONDS)
 
+    @staticmethod
+    async def _resolve_pool(db: PortfolioDatabase):
+        """Intenta obtener el pool asyncpg desde la instancia de DB."""
+        if hasattr(db, "get_pool"):
+            pool = await db.get_pool()
+            if pool is not None:
+                return pool
+        return getattr(db, "_db_pool", None) or getattr(db, "_pool", None)
+
     async def _compute_risk_alerts(self, pool) -> list[RiskAlert]:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -521,29 +538,24 @@ class IntradayManager:
                 WITH latest_prices AS (
                     SELECT DISTINCT ON (ticker)
                         ticker,
-                        last_price,
-                        ts
+                        last_price
                     FROM market_prices
                     WHERE last_price IS NOT NULL
                     ORDER BY ticker, ts DESC
                 ),
                 latest_buys AS (
                     SELECT DISTINCT ON (ticker)
-                        id,
                         ticker,
                         price_at_decision,
                         stop_loss_pct,
                         stop_loss_price,
-                        target_price,
-                        decided_at,
-                        decision
+                        target_price
                     FROM decision_log
                     WHERE decision = 'BUY'
                       AND price_at_decision IS NOT NULL
                     ORDER BY ticker, decided_at DESC
                 )
                 SELECT
-                    b.id,
                     b.ticker,
                     b.price_at_decision,
                     b.stop_loss_pct,
@@ -551,8 +563,7 @@ class IntradayManager:
                     b.target_price,
                     p.last_price
                 FROM latest_buys b
-                JOIN latest_prices p
-                  ON p.ticker = b.ticker
+                JOIN latest_prices p ON p.ticker = b.ticker
                 """
             )
 
@@ -565,100 +576,82 @@ class IntradayManager:
             target_price = _safe_float(row["target_price"])
             stop_pct = _safe_float(row["stop_loss_pct"])
 
-            if entry is None or current is None:
+            if entry is None or current is None or entry == 0:
                 continue
 
+            # Derivar stop_price desde stop_pct si no viene explícito
             if stop_price is None and stop_pct is not None:
-                stop_pct_dec = stop_pct / 100.0 if abs(stop_pct) > 1 else stop_pct
-                if stop_pct_dec > 0:
-                    stop_pct_dec = -abs(stop_pct_dec)
-                stop_price = entry * (1.0 + stop_pct_dec)
+                pct = stop_pct / 100.0 if abs(stop_pct) > 1 else stop_pct
+                pct = -abs(pct)  # siempre negativo
+                stop_price = entry * (1.0 + pct)
 
             pnl_pct = (current / entry) - 1.0
 
             if stop_price is not None and current <= stop_price:
-                alerts.append(RiskAlert(
-                    ticker=ticker,
-                    level="STOP_TRIGGERED",
-                    current_price=current,
-                    entry_price=entry,
-                    pnl_pct=pnl_pct,
-                    stop_loss_price=stop_price,
-                    target_price=target_price,
-                ))
+                level = "STOP_TRIGGERED"
+            elif (
+                stop_price is not None
+                and stop_price > 0
+                and 0 < (current - stop_price) / stop_price <= STOP_NEAR_PCT
+            ):
+                level = "STOP_NEAR"
+            elif pnl_pct <= CRITICAL_PCT:
+                level = "CRITICAL"
+            elif pnl_pct <= WARNING_PCT:
+                level = "WARNING"
+            else:
                 continue
 
-            if stop_price is not None:
-                dist_to_stop = (current - stop_price) / stop_price
-                if 0 < dist_to_stop <= STOP_NEAR_PCT:
-                    alerts.append(RiskAlert(
-                        ticker=ticker,
-                        level="STOP_NEAR",
-                        current_price=current,
-                        entry_price=entry,
-                        pnl_pct=pnl_pct,
-                        stop_loss_price=stop_price,
-                        target_price=target_price,
-                    ))
-                    continue
-
-            if pnl_pct <= CRITICAL_PCT:
-                alerts.append(RiskAlert(
-                    ticker=ticker,
-                    level="CRITICAL",
-                    current_price=current,
-                    entry_price=entry,
-                    pnl_pct=pnl_pct,
-                    stop_loss_price=stop_price,
-                    target_price=target_price,
-                ))
-            elif pnl_pct <= WARNING_PCT:
-                alerts.append(RiskAlert(
-                    ticker=ticker,
-                    level="WARNING",
-                    current_price=current,
-                    entry_price=entry,
-                    pnl_pct=pnl_pct,
-                    stop_loss_price=stop_price,
-                    target_price=target_price,
-                ))
+            alerts.append(RiskAlert(
+                ticker=ticker,
+                level=level,
+                current_price=current,
+                entry_price=entry,
+                pnl_pct=pnl_pct,
+                stop_loss_price=stop_price,
+                target_price=target_price,
+            ))
 
         return alerts
 
     def _should_send_alert(self, alert: RiskAlert) -> bool:
         key = f"{alert.ticker}:{alert.level}"
-        last = self._last_alert_keys.get(key)
+        last = self._last_alert_sent.get(key)
         if last is None:
             return True
-
         elapsed = (datetime.now(tz=UTC) - last).total_seconds()
-        if alert.level == "STOP_TRIGGERED":
-            return elapsed >= 60
-        return elapsed >= 30 * 60
+        # STOP_TRIGGERED: re-alertar cada 1min. Resto: cada 30min.
+        return elapsed >= (60 if alert.level == "STOP_TRIGGERED" else 1800)
 
     def _send_alert(self, alert: RiskAlert) -> None:
         pnl = alert.pnl_pct * 100.0
-        stop_txt = (
-            f"\nStop: <b>${alert.stop_loss_price:,.2f}</b>"
-            if alert.stop_loss_price is not None else ""
-        )
-        target_txt = (
-            f"\nTarget: <b>${alert.target_price:,.2f}</b>"
-            if alert.target_price is not None else ""
-        )
+        stop_txt = f"\nStop: <b>${alert.stop_loss_price:,.2f}</b>" if alert.stop_loss_price else ""
+        target_txt = f"\nTarget: <b>${alert.target_price:,.2f}</b>" if alert.target_price else ""
+        icons = {
+            "STOP_TRIGGERED": "🚨",
+            "STOP_NEAR":      "⚠️",
+            "CRITICAL":       "🔴",
+            "WARNING":        "🟡",
+        }
+        icon = icons.get(alert.level, "⚠️")
 
         msg = (
-            f"⚠️ <b>{alert.level} — {alert.ticker}</b>\n"
-            f"Precio actual: <b>${alert.current_price:,.2f}</b>\n"
-            f"Entrada: <b>${alert.entry_price:,.2f}</b>{stop_txt}{target_txt}\n"
+            f"{icon} <b>{alert.level} — {alert.ticker}</b>\n"
+            f"Precio: <b>${alert.current_price:,.2f}</b> · Entrada: <b>${alert.entry_price:,.2f}</b>"
+            f"{stop_txt}{target_txt}\n"
             f"PNL: <b>{pnl:+.2f}%</b>"
         )
         try:
             self.notifier.send_raw(msg)
-            logger.warning("Risk alert enviada: %s %s", alert.level, alert.ticker)
+            logger.warning(
+                "Risk alert enviada: %s %s (PNL %.2f%%)",
+                alert.level, alert.ticker, pnl,
+            )
         except Exception as e:
             logger.warning("No se pudo enviar alerta Telegram: %s", e)
 
+
+# ─── Wrappers de start/stop para APScheduler ───────────────────────────────────
 
 async def start_intraday_loops() -> None:
     global _intraday_manager
@@ -673,9 +666,11 @@ async def stop_intraday_loops() -> None:
         await _intraday_manager.stop()
 
 
-async def _scheduler_main():
+# ─── Scheduler principal ───────────────────────────────────────────────────────
+
+async def _scheduler_main() -> None:
     if not HAS_APSCHEDULER:
-        raise ImportError("apscheduler no instalado: pip install apscheduler")
+        raise ImportError("apscheduler no instalado: pip install apscheduler>=3.10")
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
@@ -688,61 +683,58 @@ async def _scheduler_main():
         misfire_grace_time=300,
         replace_existing=True,
     )
-
     scheduler.add_job(
         start_intraday_loops,
         CronTrigger(hour=10, minute=31, timezone=TIMEZONE),
         id="intraday_start",
-        name="Start intraday loops 10:31 ART",
+        name="Intraday start 10:31 ART",
         misfire_grace_time=300,
         replace_existing=True,
     )
-
     scheduler.add_job(
         run_full,
         CronTrigger(hour=17, minute=0, timezone=TIMEZONE),
         args=["17:00_FULL"],
         id="portfolio_eod",
-        name="Portfolio + Mercado 17:00 ART",
+        name="Full 17:00 ART",
         misfire_grace_time=300,
         replace_existing=True,
     )
-
     scheduler.add_job(
         stop_intraday_loops,
         CronTrigger(hour=17, minute=1, timezone=TIMEZONE),
         id="intraday_stop",
-        name="Stop intraday loops 17:01 ART",
+        name="Intraday stop 17:01 ART",
         misfire_grace_time=300,
         replace_existing=True,
     )
-
     scheduler.add_job(
         run_update_outcomes,
         CronTrigger(hour=21, minute=30, timezone=TIMEZONE),
         id="update_outcomes_daily",
-        name="Update Outcomes 21:30 ART",
+        name="Update outcomes 21:30 ART",
         misfire_grace_time=600,
         replace_existing=True,
     )
 
     scheduler.start()
     logger.info(
-        "Scheduler activo — jobs: 10:30 scrape | 10:31 intraday on | 17:00 full | 17:01 intraday off | 21:30 update outcomes"
+        "Scheduler activo — 10:30 scrape · 10:31 intraday on · 17:00 full · 17:01 intraday off · 21:30 outcomes"
     )
 
+    # Si arrancamos durante rueda, iniciar loops de inmediato
     now = _now_art()
     if _is_market_window(now):
         logger.info(
-            "Scheduler arrancó dentro de rueda (%s ART) — iniciando loops intradía inmediatamente",
+            "Scheduler arrancó dentro de rueda (%s ART) — iniciando loops intradía",
             now.strftime("%H:%M:%S"),
         )
         await start_intraday_loops()
 
     stop_event = asyncio.Event()
 
-    def _handle_signal():
-        logger.info("Señal recibida — apagando scheduler...")
+    def _handle_signal() -> None:
+        logger.info("Señal recibida — iniciando apagado limpio...")
         scheduler.shutdown(wait=False)
         stop_event.set()
 
@@ -755,9 +747,10 @@ async def _scheduler_main():
 
     await stop_event.wait()
     await stop_intraday_loops()
+    logger.info("Scheduler apagado limpiamente")
 
 
-def start_scheduler():
+def start_scheduler() -> None:
     try:
         asyncio.run(_scheduler_main())
     except KeyboardInterrupt:

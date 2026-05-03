@@ -212,38 +212,107 @@ async def _action_monitor_resume(message: Message) -> None:
     await _reply_menu(message)
 
 
-async def _action_portfolio(message: Message) -> None:
+async def _action_portfolio(message: Message, *, force_refresh: bool = True) -> None:
+    """
+    Muestra el portfolio.
+
+    Si force_refresh=True (default) y el scraper no está ocupado:
+      - Dispara un scrape en-proceso para obtener datos frescos.
+      - Muestra el snapshot recién guardado.
+
+    Si el scraper está activo (runner intradía o job scheduled):
+      - Muestra el último snapshot en DB con nota de staleness.
+
+    Si estamos fuera de horario de mercado:
+      - Muestra el último snapshot directamente (no hay nada útil que scrapear).
+
+    force_refresh=False: solo lee DB, sin scrape (usado por _action_scrape que ya scrapó).
+    """
     msg = await message.reply_text("📊 Cargando portfolio...")
+
+    scrape_done = False
+    scrape_skipped_reason: str | None = None
+
     try:
         from src.core.config import get_config
         from src.collector.db import PortfolioDatabase
+        from src.scheduler.runner import run_scrape, _is_market_window
 
+        if force_refresh and _is_market_window():
+            # Verificar soft-lock Redis: si el runner está scrapando, no compitir.
+            scraper_lock_val = await _redis_get_str(SCRAPER_LOCK_KEY)
+            if scraper_lock_val:
+                scrape_skipped_reason = f"scraper activo ({scraper_lock_val})"
+                logger.info("Portfolio: scraper ocupado (%s), mostrando cache", scraper_lock_val)
+            else:
+                # Runner libre → scrapear en-proceso
+                await msg.edit_text("📊 Actualizando portfolio desde Cocos...")
+                try:
+                    await redis_client.set(BOT_BUSY_KEY, "1", ex=240)
+                    result = await asyncio.wait_for(
+                        run_scrape("BOT_PORTFOLIO"),
+                        timeout=150,
+                    )
+                    if result.get("success"):
+                        scrape_done = True
+                        logger.info("Portfolio: scrape fresco ok (%d posiciones)", result.get("positions", 0))
+                    else:
+                        scrape_skipped_reason = result.get("error") or result.get("aborted") or "falló"
+                        logger.warning("Portfolio: scrape falló — %s — mostrando cache", scrape_skipped_reason)
+                        await msg.edit_text(f"⚠️ Scrape falló ({scrape_skipped_reason}). Mostrando último snapshot...")
+                except asyncio.TimeoutError:
+                    scrape_skipped_reason = "timeout (2min)"
+                    logger.warning("Portfolio: scrape timeout, mostrando cache")
+                    await msg.edit_text("⏱️ Scrape tardó demasiado. Mostrando último snapshot...")
+                except Exception as e:
+                    scrape_skipped_reason = str(e)
+                    logger.warning("Portfolio: scrape error — %s — mostrando cache", e)
+                    await msg.edit_text("⚠️ Error en scrape. Mostrando último snapshot...")
+                finally:
+                    try:
+                        await redis_client.delete(BOT_BUSY_KEY)
+                    except Exception:
+                        pass
+        elif force_refresh and not _is_market_window():
+            scrape_skipped_reason = "mercado cerrado"
+
+        # ── Leer snapshot de DB (fresco si se scrapó, cache si no) ──────────────
         db = PortfolioDatabase(get_config().database.url)
         await db.connect()
         snap = await db.get_latest_snapshot()
         await db.close()
 
         if not snap:
-            await msg.edit_text("⚠️ Sin snapshots. Corré un scrape primero.")
+            await msg.edit_text("⚠️ Sin snapshots en DB. Corré un scrape primero.")
             await _reply_menu(message)
             return
 
-        ts = snap.get("scraped_at", "—")[:16].replace("T", " ")
+        ts_raw = snap.get("scraped_at", "—")
+        ts = ts_raw[:16].replace("T", " ") if ts_raw != "—" else "—"
         total = float(snap.get("total_value_ars", 0) or 0)
         cash = float(snap.get("cash_ars", 0) or 0)
         positions = snap.get("positions", []) or []
 
-        # Ordenar por valor de mercado descendente
         sorted_pos = sorted(
             positions,
             key=lambda p: float(p.get("market_value", 0) or 0),
             reverse=True,
         )
-
         total_inv = sum(float(p.get("market_value", 0) or 0) for p in sorted_pos)
 
+        # Indicador de frescura
+        if scrape_done:
+            freshness = "🟢 actualizado ahora"
+        elif scrape_skipped_reason == "mercado cerrado":
+            freshness = "📁 mercado cerrado"
+        elif scrape_skipped_reason:
+            freshness = f"⚡ cache ({scrape_skipped_reason})"
+        else:
+            freshness = "📁 último snapshot"
+
         lines = [
-            f"📊 <b>Portfolio</b> — snapshot real {ts} UTC\n",
+            f"📊 <b>Portfolio</b> — {freshness}",
+            f"🕐 {ts} UTC\n",
             f"💼 Total: <b>${total:,.0f} ARS</b>",
             f"💵 Cash: <b>${cash:,.0f} ARS</b>",
             f"📦 Posiciones: <b>{len(sorted_pos)}</b>\n",
@@ -255,24 +324,23 @@ async def _action_portfolio(message: Message) -> None:
             mv = float(p.get("market_value", 0) or 0)
             qty = float(p.get("quantity", 0) or 0)
             price = float(p.get("current_price", 0) or 0)
-
             pct = mv / total_inv * 100 if total_inv > 0 else 0
-            icon = "🟢" if mv >= 0 else "⚪"
 
             lines.append(
-                f"  {icon} <b>{ticker}</b>  {pct:.1f}%  ${mv:,.0f}\n"
+                f"  🟢 <b>{ticker}</b>  {pct:.1f}%  ${mv:,.0f}\n"
                 f"     x{qty:.0f} @ ${price:,.2f}"
             )
 
-        lines.append(
-            "\n<i>Fuente: último snapshot real del portfolio en Cocos.</i>"
-        )
+        lines.append("\n<i>Fuente: snapshot real del portfolio en Cocos.</i>")
 
         await msg.edit_text("\n".join(lines), parse_mode="HTML")
 
     except Exception as e:
         logger.error("_action_portfolio: %s", e, exc_info=True)
-        await msg.edit_text(f"❌ Error: {e}")
+        try:
+            await msg.edit_text(f"❌ Error: {e}")
+        except Exception:
+            pass
     finally:
         await _reply_menu(message)
 
@@ -329,7 +397,7 @@ async def _action_analisis(message: Message, *, rapido: bool = False) -> None:
 
 
 async def _action_scrape(message: Message) -> None:
-    msg = await message.reply_text("🔄 Scrape en curso...")
+    msg = await message.reply_text("🔄 Scrape manual en curso...")
     try:
         await redis_client.set(BOT_BUSY_KEY, "1", ex=240)
 
@@ -342,7 +410,8 @@ async def _action_scrape(message: Message) -> None:
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
         if proc.returncode == 0:
             await msg.delete()
-            await _action_portfolio(message)
+            # Scrape ya hecho → solo mostrar resultado, sin volver a scrapear
+            await _action_portfolio(message, force_refresh=False)
             return
         err = stderr.decode("utf-8", errors="replace")[-800:]
         await msg.edit_text(f"❌ Scrape falló.\n<code>{err}</code>", parse_mode="HTML")
