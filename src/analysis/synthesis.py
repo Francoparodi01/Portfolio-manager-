@@ -178,12 +178,27 @@ def blend_scores(ticker: str, technical_signal: str, technical_strength: float,
             sentiment_score * LAYER_WEIGHTS["sentiment"]
         ))
     else:
-        # Redistribuir 15% → 7.5% técnico + 7.5% macro (ya sumado arriba)
+        # Redistribuir 15% → 7.5% técnico + 7.5% macro
         extra = LAYER_WEIGHTS["sentiment"] / 2.0
-        layers[0] = LayerScore("technical", layers[0].score, layers[0].weight + extra,
-                               layers[0].score * (layers[0].weight + extra))
-        layers[1] = LayerScore("macro",     layers[1].score, layers[1].weight + extra,
-                               layers[1].score * (layers[1].weight + extra))
+
+        tech = layers[0]
+        macro = layers[1]
+
+        layers[0] = LayerScore(
+            "technical",
+            tech.raw_score,
+            tech.weight + extra,
+            tech.raw_score * (tech.weight + extra),
+            reasons=tech.reasons,
+        )
+
+        layers[1] = LayerScore(
+            "macro",
+            macro.raw_score,
+            macro.weight + extra,
+            macro.raw_score * (macro.weight + extra),
+            reasons=macro.reasons,
+        )
 
     # ── Score final ────────────────────────────────────────────────────────────
     final = float(np.clip(sum(l.weighted for l in layers), -1.0, 1.0))

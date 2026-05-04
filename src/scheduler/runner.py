@@ -63,7 +63,8 @@ MARKET_CLOSE_H, MARKET_CLOSE_M = 17, 0
 
 MARKET_POLL_SECONDS = 90       # frecuencia del loop de mercado
 RISK_POLL_SECONDS = 60         # frecuencia del risk guard
-PORTFOLIO_REFRESH_SECONDS = 600  # cada ~10 min, dentro del loop de mercado
+PORTFOLIO_REFRESH_SECONDS = 300          # en rueda: cada 5 min, dentro del loop de mercado
+PORTFOLIO_OFFHOURS_REFRESH_SECONDS = 3600  # fuera de rueda / finde: cada 60 min # cada ~10 min, dentro del loop de mercado
 
 WARNING_PCT = -0.04
 CRITICAL_PCT = -0.06
@@ -96,12 +97,31 @@ def _now_art() -> datetime:
     return datetime.now(tz=ART_TZ)
 
 
-def _is_market_window(now: datetime | None = None) -> bool:
+def _is_business_day(now: datetime | None = None) -> bool:
+    now = now or _now_art()
+    return now.weekday() < 5  # 0=lunes, 6=domingo
+
+
+def _is_market_hours(now: datetime | None = None) -> bool:
     now = now or _now_art()
     current_mins = now.hour * 60 + now.minute
     open_mins = MARKET_OPEN_H * 60 + MARKET_OPEN_M
     close_mins = MARKET_CLOSE_H * 60 + MARKET_CLOSE_M
     return open_mins <= current_mins < close_mins
+
+
+def _is_market_window(now: datetime | None = None) -> bool:
+    now = now or _now_art()
+    return _is_business_day(now) and _is_market_hours(now)
+
+
+def _should_scrape_market(now: datetime | None = None) -> bool:
+    now = now or _now_art()
+    return _is_market_window(now)
+
+
+def _should_scrape_portfolio(now: datetime | None = None) -> bool:
+    return True
 
 
 def _safe_float(value, default: float | None = None) -> float | None:
@@ -401,25 +421,45 @@ class IntradayManager:
 
     async def _scraper_loop(self) -> None:
         """
-        Un login por iteración. Siempre hace mercado. Hace portfolio cada ~10min.
-        Si un job scheduled (run_scrape / run_full) tiene el lock, espera y reintenta.
+        Un único loop de scraping.
+
+        - En rueda (días hábiles 10:30-17:00 ART):
+        * scrapea mercado cada MARKET_POLL_SECONDS
+        * scrapea portfolio cada PORTFOLIO_REFRESH_SECONDS
+
+        - Fuera de rueda / fines de semana:
+        * NO scrapea mercado
+        * SÍ scrapea portfolio cada PORTFOLIO_OFFHOURS_REFRESH_SECONDS
         """
         last_portfolio_ts: float = 0.0
 
         while self._running:
-            if not _is_market_window():
-                await asyncio.sleep(30)
+            now = _now_art()
+            do_market = _should_scrape_market(now)
+            do_portfolio = _should_scrape_portfolio(now)
+
+            if not do_market and not do_portfolio:
+                await asyncio.sleep(60)
                 continue
 
             lock = _get_scraper_lock()
             if lock.locked():
-                # Job scheduled corriendo (run_scrape o run_full). Esperar sin error.
                 logger.info("Scraper loop: lock ocupado por job scheduled, esperando 20s...")
                 await asyncio.sleep(20)
                 continue
 
             now_ts = time.monotonic()
-            do_portfolio = (now_ts - last_portfolio_ts) >= PORTFOLIO_REFRESH_SECONDS
+
+            portfolio_interval = (
+                PORTFOLIO_REFRESH_SECONDS if do_market
+                else PORTFOLIO_OFFHOURS_REFRESH_SECONDS
+            )
+            should_refresh_portfolio = (now_ts - last_portfolio_ts) >= portfolio_interval
+
+            # Si no toca ni mercado ni portfolio, dormir lo justo
+            if not do_market and not should_refresh_portfolio:
+                await asyncio.sleep(60)
+                continue
 
             db = PortfolioDatabase(self.cfg.database.url)
             try:
@@ -430,44 +470,52 @@ class IntradayManager:
                         async with CocosCapitalScraper(self.cfg.scraper) as scraper:
                             await scraper.login()
 
-                            # — Mercado (siempre) —
-                            acciones = await scraper.scrape_market("ACCIONES")
-                            cedears = await scraper.scrape_market("CEDEARS")
-                            total_prices = len(acciones) + len(cedears)
+                            # ── Mercado solo en rueda ───────────────────────────────
+                            if do_market:
+                                acciones = await scraper.scrape_market("ACCIONES")
+                                cedears = await scraper.scrape_market("CEDEARS")
+                                total_prices = len(acciones) + len(cedears)
 
-                            if total_prices > 0:
-                                await db.save_market_prices(acciones + cedears)
-                                await _heartbeat(MARKET_HEARTBEAT_KEY)
-                                logger.info(
-                                    "Scraper loop: %d precios guardados (%dA + %dC)",
-                                    total_prices, len(acciones), len(cedears),
-                                )
-                            else:
-                                logger.info("Scraper loop: mercado sin filas en esta iteración")
+                                if total_prices > 0:
+                                    await db.save_market_prices(acciones + cedears)
+                                    await _heartbeat(MARKET_HEARTBEAT_KEY)
+                                    logger.info(
+                                        "Scraper loop: %d precios guardados (%dA + %dC)",
+                                        total_prices, len(acciones), len(cedears),
+                                    )
+                                else:
+                                    logger.info("Scraper loop: mercado sin filas en esta iteración")
 
-                            # — Portfolio (cada ~10min) —
-                            if do_portfolio:
+                            # ── Portfolio siempre permitido ───────────────────────
+                            if should_refresh_portfolio:
                                 snapshot = await scraper.scrape_portfolio()
                                 await db.save_snapshot(snapshot)
                                 last_portfolio_ts = time.monotonic()
                                 logger.info(
-                                    "Scraper loop: portfolio intradía guardado · %d posiciones · conf %.2f",
+                                    "Scraper loop: portfolio guardado · %d posiciones · conf %.2f",
                                     len(snapshot.positions),
                                     snapshot.confidence_score,
                                 )
+
                     finally:
                         await _redis_delete(SCRAPER_LOCK_KEY)
 
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning("Scraper loop error (reintentará en %ds): %s", MARKET_POLL_SECONDS, e, exc_info=True)
+                logger.warning(
+                    "Scraper loop error (reintentará luego): %s",
+                    e,
+                    exc_info=True,
+                )
             finally:
                 try:
                     await db.close()
                 except Exception:
                     pass
-            await asyncio.sleep(MARKET_POLL_SECONDS)
+
+            # En rueda dormir corto; fuera de rueda/finde, no hace falta tan seguido
+            await asyncio.sleep(MARKET_POLL_SECONDS if do_market else 300)
 
     # ── Risk guard (solo DB) ────────────────────────────────────────────────────
 

@@ -16,17 +16,10 @@ Inputs:
 Output:
   - RotationPlan con decisiones concretas en ARS
 
-Filosofía:
-  El engine compara directamente:
-    "¿Tiene más sentido aumentar MU (ya en cartera, score conocido)
-     o abrir AVGO (candidato nuevo, score X, asimetría Y)?"
-
-  La respuesta considera:
-    - Score relativo entre las opciones
-    - Diversificación sectorial
-    - Asimetría de la oportunidad nueva
-    - Concentración actual del portfolio
-    - Estado del gate de riesgo
+Fix P0:
+  - Bloquea destinos internos con score negativo.
+  - Bloquea candidatos externos con score negativo.
+  - Evita que el capital liberado termine en compras incoherentes.
 """
 from __future__ import annotations
 
@@ -35,6 +28,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ─── Constantes ───────────────────────────────────────────────────────────────
+
+BUY_SCORE_MIN = 0.0
 
 
 # ─── Dataclasses ──────────────────────────────────────────────────────────────
@@ -50,7 +48,7 @@ class RotationTarget:
     conviction:     float
     rationale:      str
     is_new:         bool = False
-    sector:         str  = ""
+    sector:         str = ""
 
 
 @dataclass
@@ -58,27 +56,75 @@ class RotationPlan:
     """Plan completo de rotación de capital."""
     total_capital_ars:   float   # capital disponible para rotar
     gate_state:          str     # NORMAL | CAUTIOUS | BLOCKED
-    # Fuentes (ventas)
-    sources:             list[dict] = field(default_factory=list)  # [{ticker, amount_ars}]
+
+    # Fuentes: ventas / reducciones
+    sources:             list[dict] = field(default_factory=list)
+
     # Destinos
     targets:             list[RotationTarget] = field(default_factory=list)
+
     # Resumen
-    to_existing:         float = 0.0   # ARS que van a posiciones existentes
-    to_new:              float = 0.0   # ARS que van a candidatos nuevos
-    to_cash:             float = 0.0   # ARS que quedan en cash
+    to_existing:         float = 0.0
+    to_new:              float = 0.0
+    to_cash:             float = 0.0
+
     # Decisión principal
-    primary_decision:    str   = ""
-    primary_rationale:   str   = ""
+    primary_decision:    str = ""
+    primary_rationale:   str = ""
+
     # Contexto
-    skipped_reason:      str   = ""    # por qué no hay rotación
+    skipped_reason:      str = ""
 
 
-# ─── Engine ───────────────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def _money(x: float) -> str:
+    try:
+        value = float(x)
+        sign = "-" if value < 0 else ""
+        return f"{sign}${abs(value):,.0f} ARS".replace(",", ".")
+    except Exception:
+        return "$0 ARS"
+
+
+def _normalize_conviction(value: float) -> float:
+    """
+    Normaliza conviction/confidence:
+    - Si viene como 75, lo pasa a 0.75.
+    - Si viene como 0.75, lo deja igual.
+    """
+    try:
+        conv = float(value or 0.0)
+    except Exception:
+        return 0.0
+
+    if conv > 1.0:
+        conv /= 100.0
+
+    return max(0.0, min(conv, 1.0))
+
+
+def _is_sell_action(action: str) -> bool:
+    action = str(action or "").upper()
+    return (
+        "SELL" in action
+        or "VENDER" in action
+        or "REDUCIR" in action
+        or "RECORTAR" in action
+    )
+
+
+def _is_buy_decision(decision: str) -> bool:
+    decision = str(decision or "").upper()
+    return decision in ("BUY", "ACCUMULATE", "COMPRAR", "AUMENTAR")
+
+
+# ─── Engine ──────────────────────────────────────────────────────────────────
 
 def build_rotation_plan(
     portfolio_results,       # list[SynthesisResult]
     opportunity_report,      # OpportunityReport
-    rebalance_report,        # RebalanceReport (del optimizer)
+    rebalance_report,        # RebalanceReport del optimizer
     portfolio_positions:     list[dict],
     portfolio_value_ars:     float,
     cash_ars:                float,
@@ -88,156 +134,245 @@ def build_rotation_plan(
     Construye el plan de rotación completo.
 
     Lógica:
-      1. ¿Cuánto capital se libera de las ventas planificadas?
-      2. ¿Hay candidatos nuevos con mejor score + asimetría que las opciones internas?
-      3. ¿Cuánto va a cada destino? ¿Cuánto queda en cash?
+      1. Calcula capital disponible: ventas + cash excedente sobre buffer.
+      2. Evalúa destinos internos con señal BUY/ACCUMULATE.
+      3. Evalúa candidatos externos del radar.
+      4. Bloquea destinos con score negativo.
+      5. Distribuye capital entre los mejores destinos restantes.
     """
+    gate_state = str(gate_state or "NORMAL").upper()
+
     if gate_state == "BLOCKED":
         return RotationPlan(
-            total_capital_ars = 0.0,
-            gate_state        = gate_state,
-            skipped_reason    = "Gate BLOCKED — capital liberado va a cash",
+            total_capital_ars=0.0,
+            gate_state=gate_state,
+            skipped_reason="Gate BLOCKED — capital liberado va a cash",
         )
 
+    portfolio_value_ars = float(portfolio_value_ars or 0.0)
+    cash_ars = float(cash_ars or 0.0)
+
     # ── Capital disponible ────────────────────────────────────────────────────
-    sells_ars     = float(getattr(rebalance_report, "total_sells_ars", 0.0) or 0.0)
-    available_ars = sells_ars + max(0.0, cash_ars - portfolio_value_ars * 0.05)
-    available_ars = max(0.0, available_ars)
+    sells_ars = float(getattr(rebalance_report, "total_sells_ars", 0.0) or 0.0)
+
+    # Mantener 5% mínimo de cash como buffer.
+    cash_buffer = portfolio_value_ars * 0.05
+    excess_cash = max(0.0, cash_ars - cash_buffer)
+
+    available_ars = max(0.0, sells_ars + excess_cash)
 
     if available_ars < 10_000:
         return RotationPlan(
-            total_capital_ars = available_ars,
-            gate_state        = gate_state,
-            skipped_reason    = f"Capital insuficiente para rotar (${available_ars:,.0f} ARS)",
+            total_capital_ars=available_ars,
+            gate_state=gate_state,
+            skipped_reason=f"Capital insuficiente para rotar ({_money(available_ars)})",
         )
 
     plan = RotationPlan(
-        total_capital_ars = available_ars,
-        gate_state        = gate_state,
+        total_capital_ars=available_ars,
+        gate_state=gate_state,
     )
 
-    # Fuentes (qué se vende)
+    # ── Fuentes: qué se vende/reduce ──────────────────────────────────────────
     trades = getattr(rebalance_report, "trades", []) or []
+
     for tr in trades:
         action = str(getattr(tr, "action", "") or "").upper()
-        if "SELL" in action or "REDUCIR" in action or "RECORTAR" in action:
+
+        if _is_sell_action(action):
             plan.sources.append({
-                "ticker":     getattr(tr, "ticker", "?"),
+                "ticker": getattr(tr, "ticker", "?"),
                 "amount_ars": abs(float(getattr(tr, "amount_ars", 0.0) or 0.0)),
             })
 
-    # ── Opciones internas: posiciones existentes con señal de AUMENTAR ────────
+    # ── Opciones internas: posiciones existentes con señal de aumentar ────────
     internal_options = []
-    for r in (portfolio_results or []):
-        decision = str(getattr(r, "decision", "HOLD")).upper()
-        if decision in ("BUY", "ACCUMULATE"):
-            ticker = str(getattr(r, "ticker", "")).upper()
-            score  = float(getattr(r, "final_score", 0.0) or 0.0)
-            conv   = float(getattr(r, "conviction", getattr(r, "confidence", 0.0)) or 0.0)
-            if conv > 1.0:
-                conv /= 100.0
-            internal_options.append({
-                "ticker":     ticker,
-                "score":      score,
-                "conviction": conv,
-                "is_new":     False,
-            })
 
-    internal_options.sort(key=lambda x: x["score"] * x["conviction"], reverse=True)
+    for r in (portfolio_results or []):
+        decision = str(getattr(r, "decision", "HOLD") or "HOLD").upper()
+
+        if not _is_buy_decision(decision):
+            continue
+
+        ticker = str(getattr(r, "ticker", "") or "").upper().strip()
+        if not ticker:
+            continue
+
+        score = float(getattr(r, "final_score", 0.0) or 0.0)
+        conv = _normalize_conviction(
+            getattr(r, "conviction", getattr(r, "confidence", 0.0))
+        )
+
+        # Guardrail P0:
+        # Una posición existente no puede recibir más capital si el score final es negativo.
+        # El optimizer puede sugerir aumentar por diversificación/riesgo, pero el rotation
+        # engine no debe convertir eso en compra operativa.
+        if score < BUY_SCORE_MIN:
+            logger.info(
+                f"Rotation engine: {ticker} excluido como destino interno "
+                f"por score negativo ({score:+.3f})"
+            )
+            continue
+
+        internal_options.append({
+            "ticker": ticker,
+            "score": score,
+            "conviction": conv,
+            "is_new": False,
+            "combined": score * conv,
+        })
+
+    internal_options.sort(key=lambda x: x["combined"], reverse=True)
 
     # ── Opciones externas: candidatos del radar ────────────────────────────────
     external_options = []
+
     if opportunity_report:
-        for c in (opportunity_report.comprable_ahora or []):
-            asym_bonus = (c.asymmetry.asymmetry_ratio / 3.0) if c.asymmetry else 0.0
+        # Usamos principalmente comprable_ahora.
+        # Si querés hacerlo más agresivo después, se puede sumar compra_habilitada,
+        # pero por ahora conviene mantenerlo conservador.
+        for c in (getattr(opportunity_report, "comprable_ahora", []) or []):
+            ticker = str(getattr(c, "ticker", "") or "").upper().strip()
+            if not ticker:
+                continue
+
+            score = float(getattr(c, "final_score", 0.0) or 0.0)
+            conviction = _normalize_conviction(getattr(c, "conviction", 0.0))
+
+            # Guardrail P0:
+            # Un candidato externo con score negativo no puede ser destino de capital.
+            if score < BUY_SCORE_MIN:
+                logger.info(
+                    f"Rotation engine: {ticker} excluido como candidato externo "
+                    f"por score negativo ({score:+.3f})"
+                )
+                continue
+
+            asym = getattr(c, "asymmetry", None)
+            asym_ratio = float(getattr(asym, "asymmetry_ratio", 0.0) or 0.0) if asym else 0.0
+            asym_bonus = asym_ratio / 3.0 if asym_ratio > 0 else 0.0
+
             external_options.append({
-                "ticker":     c.ticker,
-                "score":      c.final_score,
-                "conviction": c.conviction,
-                "asym_ratio": c.asymmetry.asymmetry_ratio if c.asymmetry else 0.0,
-                "asym_label": c.asymmetry_label,
-                "sizing":     c.sizing_suggested,
-                "competes":   c.competes_with,
-                "is_new":     True,
-                "combined":   c.final_score * c.conviction * (1 + asym_bonus),
+                "ticker": ticker,
+                "score": score,
+                "conviction": conviction,
+                "asym_ratio": asym_ratio,
+                "asym_label": getattr(c, "asymmetry_label", "") or "",
+                "sizing": float(getattr(c, "sizing_suggested", 0.05) or 0.05),
+                "competes": getattr(c, "competes_with", []) or [],
+                "is_new": True,
+                "combined": score * conviction * (1 + asym_bonus),
             })
 
     external_options.sort(key=lambda x: x["combined"], reverse=True)
 
-    # ── Decisión de asignación ────────────────────────────────────────────────
-    # Combinar internas y externas, ordenar por valor ajustado
+    # ── Combinar destinos internos y externos ─────────────────────────────────
     all_options = []
+
     for opt in internal_options[:3]:
-        all_options.append({**opt, "combined": opt["score"] * opt["conviction"]})
+        all_options.append(opt)
+
     for opt in external_options[:3]:
         all_options.append(opt)
+
+    # Evitar cualquier opción con combined <= 0.
+    # Esto previene pesos negativos o asignaciones raras si score/conviction vienen mal.
+    all_options = [
+        opt for opt in all_options
+        if float(opt.get("combined", 0.0) or 0.0) > 0
+    ]
 
     all_options.sort(key=lambda x: x.get("combined", 0.0), reverse=True)
 
     if not all_options:
-        plan.to_cash    = available_ars
-        plan.skipped_reason = "Sin candidatos claros — capital va a cash"
+        plan.to_cash = available_ars
+        plan.skipped_reason = "Sin candidatos claros con score positivo — capital va a cash"
         return plan
 
-    # Distribuir capital entre los mejores candidatos (máximo 3 destinos)
+    # ── Gate CAUTIOUS: limitar compras nuevas ─────────────────────────────────
     top = all_options[:3]
-    weights = [x.get("combined", 0.01) for x in top]
-    total_w = sum(weights) or 1.0
 
-    # En gate CAUTIOUS: limitar compras nuevas
     if gate_state == "CAUTIOUS":
         top = [x for x in top if not x.get("is_new", False)][:2]
+
         if not top:
             plan.to_cash = available_ars
             plan.skipped_reason = "Gate CAUTIOUS — sin aumentos internos claros, capital a cash"
             return plan
-        weights = [x.get("combined", 0.01) for x in top]
-        total_w = sum(weights) or 1.0
 
+    weights = [max(float(x.get("combined", 0.0) or 0.0), 0.0) for x in top]
+    total_w = sum(weights)
+
+    if total_w <= 0:
+        plan.to_cash = available_ars
+        plan.skipped_reason = "Opciones sin peso positivo — capital va a cash"
+        return plan
+
+    # ── Distribuir capital ────────────────────────────────────────────────────
     remaining = available_ars
+
     for opt, w in zip(top, weights):
-        # Límite por posición: 15% del portfolio o 50% del capital disponible
         max_amount = min(
-            portfolio_value_ars * 0.15,
-            available_ars * 0.50,
+            portfolio_value_ars * 0.15,  # límite por posición/destino
+            available_ars * 0.50,        # límite por concentración del capital rotado
         )
-        amount = min(available_ars * (w / total_w), max_amount, remaining)
+
+        amount = min(
+            available_ars * (w / total_w),
+            max_amount,
+            remaining,
+        )
 
         if amount < 5_000:
             continue
 
-        ticker     = opt["ticker"]
-        is_new     = opt.get("is_new", False)
-        score      = opt.get("score", 0.0)
-        conviction = opt.get("conviction", 0.0)
+        ticker = opt["ticker"]
+        is_new = bool(opt.get("is_new", False))
+        score = float(opt.get("score", 0.0) or 0.0)
+        conviction = _normalize_conviction(opt.get("conviction", 0.0))
 
-        # Rationale
+        # Segundo guard defensivo:
+        # Por si alguna opción negativa se filtró por error.
+        if score < BUY_SCORE_MIN:
+            logger.warning(
+                f"Rotation engine: {ticker} bloqueado en asignación final "
+                f"por score negativo ({score:+.3f})"
+            )
+            continue
+
         if is_new:
             asym_label = opt.get("asym_label", "")
-            asym_ratio = opt.get("asym_ratio", 0.0)
-            competes   = opt.get("competes", [])
-            rationale  = (
-                f"Candidato nuevo con asimetría {asym_label} (R/R {asym_ratio:.1f}x), "
-                f"score {score:+.3f}, convicción {round(conviction*100)}%"
+            asym_ratio = float(opt.get("asym_ratio", 0.0) or 0.0)
+            competes = opt.get("competes", []) or []
+
+            rationale = (
+                f"Candidato nuevo con asimetría {asym_label} "
+                f"(R/R {asym_ratio:.1f}x), score {score:+.3f}, "
+                f"convicción {round(conviction * 100)}%"
             )
+
             if competes:
-                rationale += f". Compite con {', '.join(competes)} — abre diversificación sectorial"
+                rationale += (
+                    f". Compite con {', '.join(competes)} — "
+                    "requiere reducir antes de comprar"
+                )
         else:
             rationale = (
                 f"Aumentar posición existente: score {score:+.3f}, "
-                f"convicción {round(conviction*100)}%"
+                f"convicción {round(conviction * 100)}%"
             )
 
         target = RotationTarget(
-            ticker       = ticker,
-            action       = "NUEVO_CANDIDATO" if is_new else "AUMENTAR_EXISTENTE",
-            amount_ars   = round(amount),
-            weight_delta = amount / portfolio_value_ars if portfolio_value_ars > 0 else 0.0,
-            score        = score,
-            conviction   = conviction,
-            rationale    = rationale,
-            is_new       = is_new,
+            ticker=ticker,
+            action="NUEVO_CANDIDATO" if is_new else "AUMENTAR_EXISTENTE",
+            amount_ars=round(amount),
+            weight_delta=amount / portfolio_value_ars if portfolio_value_ars > 0 else 0.0,
+            score=score,
+            conviction=conviction,
+            rationale=rationale,
+            is_new=is_new,
         )
+
         plan.targets.append(target)
         remaining -= amount
 
@@ -246,19 +381,20 @@ def build_rotation_plan(
         else:
             plan.to_existing += amount
 
-    # Resto va a cash
+    # Resto va a cash.
     plan.to_cash = max(0.0, remaining)
 
-    # Decisión principal
+    # ── Decisión principal ────────────────────────────────────────────────────
     if plan.targets:
         primary = plan.targets[0]
-        verb    = "Abrir" if primary.is_new else "Aumentar"
-        plan.primary_decision  = f"{verb} {primary.ticker}: +${primary.amount_ars:,.0f} ARS"
+        verb = "Abrir" if primary.is_new else "Aumentar"
+
+        plan.primary_decision = f"{verb} {primary.ticker}: +{_money(primary.amount_ars)}"
         plan.primary_rationale = primary.rationale
 
-        # Comparar mejor candidato nuevo vs mejor opción interna
-        best_new      = next((x for x in plan.targets if x.is_new), None)
+        best_new = next((x for x in plan.targets if x.is_new), None)
         best_internal = next((x for x in plan.targets if not x.is_new), None)
+
         if best_new and best_internal:
             if best_new.score > best_internal.score + 0.05:
                 plan.primary_rationale += (
@@ -268,10 +404,10 @@ def build_rotation_plan(
             else:
                 plan.primary_rationale += (
                     f" — Señal similar a {best_internal.ticker}: "
-                    f"balance entre concentración y diversificación"
+                    "balance entre concentración y diversificación"
                 )
     else:
-        plan.primary_decision  = "Capital a cash"
+        plan.primary_decision = "Capital a cash"
         plan.primary_rationale = "Sin opciones con suficiente calidad — esperar mejor señal"
         plan.to_cash = available_ars
 
@@ -284,12 +420,6 @@ def render_rotation_plan(plan: RotationPlan) -> str:
         return ""
 
     from html import escape
-
-    def _money(x):
-        try:
-            return f"${float(x):,.0f} ARS".replace(",", ".")
-        except Exception:
-            return "$0 ARS"
 
     h = []
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -311,12 +441,14 @@ def render_rotation_plan(plan: RotationPlan) -> str:
     h.append("")
 
     h.append("<b>Distribución del capital:</b>")
+
     step = 1
     for t in plan.targets:
         icon = "🌍" if t.is_new else "📈"
         verb = "Nuevo" if t.is_new else "Aumentar"
+
         h.append(
-            f"  {step}. {icon} {verb} <b>{t.ticker}</b>: "
+            f"  {step}. {icon} {verb} <b>{escape(t.ticker)}</b>: "
             f"+{_money(t.amount_ars)} (+{t.weight_delta:.1%} portfolio)"
         )
         h.append(f"     → {escape(t.rationale)}")
@@ -326,10 +458,18 @@ def render_rotation_plan(plan: RotationPlan) -> str:
         h.append(f"  {step}. 💵 Cash: {_money(plan.to_cash)}")
 
     h.append("")
+
     summary_parts = []
-    if plan.to_existing > 0:  summary_parts.append(f"existentes: {_money(plan.to_existing)}")
-    if plan.to_new      > 0:  summary_parts.append(f"nuevos: {_money(plan.to_new)}")
-    if plan.to_cash     > 0:  summary_parts.append(f"cash: {_money(plan.to_cash)}")
+
+    if plan.to_existing > 0:
+        summary_parts.append(f"existentes: {_money(plan.to_existing)}")
+
+    if plan.to_new > 0:
+        summary_parts.append(f"nuevos: {_money(plan.to_new)}")
+
+    if plan.to_cash > 0:
+        summary_parts.append(f"cash: {_money(plan.to_cash)}")
+
     if summary_parts:
         h.append("   " + " | ".join(summary_parts))
 

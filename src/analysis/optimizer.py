@@ -179,66 +179,105 @@ def _get_risk_gate_state(
 
     return "NORMAL", ""
 
-
 def _apply_risk_gate_to_trades(
     trades: list[RebalanceTrade],
     gate_state: str,
     score_map: dict[str, float],
 ) -> list[RebalanceTrade]:
     """
-    Filtra los trades según el estado del risk gate.
-    CAUTIOUS: bloquea compras de activos con score >= 0 (solo deja reducir negativos)
-    BLOCKED: bloquea todo excepto los stops más urgentes (delta < -0.15)
-    """
-    if gate_state == "NORMAL":
-        return trades
+    Filtra trades según risk gate + score guard.
 
-    filtered = []
+    Reglas:
+      NORMAL:
+        - Permite ventas/reducciones.
+        - Bloquea COMPRAR/NUEVO si score < BUY_SCORE_MIN.
+      CAUTIOUS:
+        - Bloquea toda compra nueva.
+        - Permite reducciones.
+      BLOCKED:
+        - Bloquea todo excepto ventas/reducciones urgentes.
+
+    Objetivo:
+      Evitar que el optimizer compre activos con score negativo solo porque
+      mejoran matemáticamente la frontera de riesgo/retorno.
+    """
+    BUY_SCORE_MIN = 0.0
+
+    filtered: list[RebalanceTrade] = []
     blocked_count = 0
 
     for t in trades:
-        if t.action == "MANTENER":
+        action = str(t.action or "").upper()
+        score = float(score_map.get(t.ticker, 0.0) or 0.0)
+
+        if action == "MANTENER":
             filtered.append(t)
             continue
 
-        score = score_map.get(t.ticker, 0.0)
+        # ── Guard global: nunca comprar score negativo ────────────────────────
+        if action in ("COMPRAR", "NUEVO") and score < BUY_SCORE_MIN:
+            logger.info(
+                f"  Score guard: {action} {t.ticker} bloqueado "
+                f"(score={score:+.3f}, {t.weight_current:.1%}→{t.weight_optimal:.1%})"
+            )
+            blocked_count += 1
+            filtered.append(RebalanceTrade(
+                ticker=t.ticker,
+                weight_current=t.weight_current,
+                weight_optimal=t.weight_current,
+                delta=0.0,
+                action="MANTENER",
+                amount_ars=0.0,
+            ))
+            continue
 
+        # ── Gate BLOCKED ─────────────────────────────────────────────────────
         if gate_state == "BLOCKED":
-            # Solo dejar pasar stops urgentes
-            if t.action in ("VENDER", "REDUCIR") and t.delta < -0.15:
+            if action in ("VENDER", "REDUCIR") and t.delta < -0.15:
                 filtered.append(t)
             else:
-                logger.info(f"  Gate BLOCKED: {t.action} {t.ticker} bloqueado")
-                blocked_count += 1
-                filtered.append(RebalanceTrade(
-                    ticker=t.ticker, weight_current=t.weight_current,
-                    weight_optimal=t.weight_current, delta=0.0,
-                    action="MANTENER", amount_ars=0.0,
-                ))
-
-        elif gate_state == "CAUTIOUS":
-            # Bloquear compras cuando score es negativo o señal débil
-            # (score >= -0.05 con convicción baja se trata como "sin señal")
-            should_block = t.action in ("COMPRAR", "NUEVO") and score > -0.10
-            if should_block:
                 logger.info(
-                    f"  Gate CAUTIOUS: {t.action} {t.ticker} bloqueado "
-                    f"(score={score:+.2f}, {t.weight_current:.1%}→{t.weight_optimal:.1%})"
+                    f"  Gate BLOCKED: {action} {t.ticker} bloqueado "
+                    f"(score={score:+.3f})"
                 )
                 blocked_count += 1
                 filtered.append(RebalanceTrade(
-                    ticker=t.ticker, weight_current=t.weight_current,
-                    weight_optimal=t.weight_current, delta=0.0,
-                    action="MANTENER", amount_ars=0.0,
+                    ticker=t.ticker,
+                    weight_current=t.weight_current,
+                    weight_optimal=t.weight_current,
+                    delta=0.0,
+                    action="MANTENER",
+                    amount_ars=0.0,
+                ))
+            continue
+
+        # ── Gate CAUTIOUS ────────────────────────────────────────────────────
+        if gate_state == "CAUTIOUS":
+            if action in ("COMPRAR", "NUEVO"):
+                logger.info(
+                    f"  Gate CAUTIOUS: {action} {t.ticker} bloqueado "
+                    f"(score={score:+.3f}, {t.weight_current:.1%}→{t.weight_optimal:.1%})"
+                )
+                blocked_count += 1
+                filtered.append(RebalanceTrade(
+                    ticker=t.ticker,
+                    weight_current=t.weight_current,
+                    weight_optimal=t.weight_current,
+                    delta=0.0,
+                    action="MANTENER",
+                    amount_ars=0.0,
                 ))
             else:
                 filtered.append(t)
+            continue
+
+        # ── Gate NORMAL ──────────────────────────────────────────────────────
+        filtered.append(t)
 
     if blocked_count:
-        logger.info(f"Risk gate {gate_state}: {blocked_count} trade(s) bloqueados")
+        logger.info(f"Risk/score guard: {blocked_count} trade(s) bloqueados")
 
     return filtered
-
 
 # ── Carga de datos ────────────────────────────────────────────────────────────
 
