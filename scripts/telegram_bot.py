@@ -584,12 +584,20 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
     await send_text(context, chat_id, "\n".join(lines))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Acción: Resumen semanal
+# ─────────────────────────────────────────────────────────────────────────────
+
 async def action_weekly_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_python_script(
         "scripts/weekly_summary.py", "--no-telegram", timeout=120,
     )
     await send_text(context, chat_id, report)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Acción: Análisis semanal
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_first_existing_script(
@@ -603,6 +611,10 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
     )
     await send_text(context, chat_id, report)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Acción: Performance
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_python_script(
@@ -720,6 +732,10 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
     return "\n".join(lines)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Acción: Radar
+# ─────────────────────────────────────────────────────────────────────────────
+
 async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_first_existing_script(
         [
@@ -750,6 +766,10 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
     await send_text(context, chat_id, report)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Acción: Radar completo
+# ─────────────────────────────────────────────────────────────────────────────
+
 async def action_radar_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_first_existing_script(
         [
@@ -768,6 +788,26 @@ async def action_radar_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 
     await send_text(context, chat_id, report)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Acción: Auditoría de regresión
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def action_regression_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    report = await run_python_script(
+        "scripts/run_regression_audit.py",
+        "--days",
+        "180",
+        "--target",
+        "directional",
+        "--compact",
+        timeout=240,
+    )
+    await send_text(context, chat_id, report)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Acción: Status
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def action_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """Estado del sistema: DB, market data, monitor."""
@@ -868,6 +908,10 @@ async def action_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Non
     await send_text(context, chat_id, "\n".join(lines))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Acción: Admin scrape
+# ─────────────────────────────────────────────────────────────────────────────
+
 async def action_admin_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     if not is_admin(chat_id):
         await send_text(context, chat_id, "🚫 Comando restringido a administradores.")
@@ -883,6 +927,10 @@ async def action_admin_scrape(context: ContextTypes.DEFAULT_TYPE, chat_id: int) 
     )
     await send_text(context, chat_id, report)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Acción: Admin refresh portfolio
+# ─────────────────────────────────────────────────────────────────────────────
 
 async def action_admin_refresh_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     if not is_admin(chat_id):
@@ -942,6 +990,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "performance":   "📊 Calculando performance y outcomes...",
     "radar":         "🔭 Generando radar de oportunidades...",
     "radar_full":    "🔭 Generando radar completo...",
+    "regression_audit": "📈 Ejecutando auditoría de regresión...",
     "status":        "🩺 Verificando estado del sistema...",
 }
 
@@ -954,6 +1003,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "performance":    action_performance,
         "radar":          action_radar,
         "radar_full": action_radar_full,
+        "regression_audit": action_regression_audit,
         "status":         action_status,
     }
     fn = dispatch.get(action)
@@ -1022,6 +1072,9 @@ async def radar_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def status_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "status")
+
+async def regression_audit_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "regression_audit")
 
 async def radar_full_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "radar_full")
@@ -1122,6 +1175,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("performance",      performance_handler))
     app.add_handler(CommandHandler("radar",            radar_handler))
     app.add_handler(CommandHandler("radar_full", radar_full_handler))
+    app.add_handler(CommandHandler("regression", regression_audit_handler))
+    app.add_handler(CommandHandler("regression_audit", regression_audit_handler))
     app.add_handler(CommandHandler("status",           status_handler))
 
     # Admin

@@ -544,6 +544,83 @@ async def _compute_information_coefficient(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# GUARDAR DECISIONES EN DECISION_LOG
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
+    """
+    Payload completo para decision_log.layers.
+
+    Antes se guardaba solo:
+        {"source": "optimizer", "delta_pct": ...}
+
+    Ahora se conserva esa metadata, pero también se guardan las capas reales
+    del análisis para que regression_audit.py pueda medir qué aporta cada una.
+    """
+    payload = dict(extra or {})
+
+    def _safe_float(x, default: float = 0.0) -> float:
+        try:
+            if x is None:
+                return default
+            return float(x)
+        except Exception:
+            return default
+
+    def _find_layer(name: str):
+        lname_target = name.lower()
+
+        for layer in getattr(result, "layers", []) or []:
+            lname = str(getattr(layer, "name", "") or "").lower()
+            if lname == lname_target:
+                return layer
+
+        return None
+
+    def _layer_payload(name: str) -> dict:
+        layer = _find_layer(name)
+
+        if not layer:
+            return {
+                "weighted": 0.0,
+                "raw": 0.0,
+                "weight": 0.0,
+                "reason": "layer_missing",
+            }
+
+        return {
+            "weighted": _safe_float(getattr(layer, "weighted", 0.0)),
+            "raw": _safe_float(getattr(layer, "raw_score", getattr(layer, "score", 0.0))),
+            "weight": _safe_float(getattr(layer, "weight", 0.0)),
+            "reason": str(getattr(layer, "reason", "") or ""),
+        }
+
+    payload.setdefault("source", "optimizer")
+
+    if result is None:
+        payload["technical"] = {"weighted": 0.0, "raw": 0.0, "weight": 0.0, "reason": "result_missing"}
+        payload["macro"] = {"weighted": 0.0, "raw": 0.0, "weight": 0.0, "reason": "result_missing"}
+        payload["sentiment"] = {"weighted": 0.0, "raw": 0.0, "weight": 0.0, "reason": "result_missing"}
+        payload["risk"] = {"weighted": 0.0, "raw": 0.0, "weight": 0.0, "reason": "result_missing"}
+        return payload
+
+    payload["technical"] = _layer_payload("technical")
+    payload["macro"] = _layer_payload("macro")
+    payload["sentiment"] = _layer_payload("sentiment")
+    payload["risk"] = _layer_payload("risk")
+
+    payload["final_score"] = _safe_float(getattr(result, "final_score", 0.0))
+    payload["decision_from_synthesis"] = str(getattr(result, "decision", "") or "")
+    payload["confidence"] = _safe_float(
+        getattr(result, "conviction", getattr(result, "confidence", 0.0))
+    )
+
+    return payload
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # GUARDAR TRADES EN DECISION_LOG
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -587,7 +664,7 @@ async def _save_optimizer_trades(
         str(getattr(r, "ticker", "")).upper(): {
             "score":      float(getattr(r, "final_score", 0.0) or 0.0),
             "conviction": min(1.0, float(getattr(r, "conviction",
-                           getattr(r, "confidence", 0.5)) or 0.5)),
+                        getattr(r, "confidence", 0.5)) or 0.5)),
             "vol_annual": float(
                 getattr(r, "volatility_annual", None) or
                 next((
@@ -598,6 +675,12 @@ async def _save_optimizer_trades(
             ),
         }
         for r in (results or [])
+    }
+
+    result_map = {
+        str(getattr(r, "ticker", "")).upper(): r
+        for r in (results or [])
+        if str(getattr(r, "ticker", "") or "").strip()
     }
 
     _tickers_to_price = list(current_w.keys())
@@ -669,6 +752,20 @@ async def _save_optimizer_trades(
         target_pct = abs(stop) * TARGET_RR * (1 if direction == "BUY" else -1)
         rr         = abs(target_pct) / abs(stop_pct) if stop_pct else TARGET_RR
 
+        result_for_ticker = result_map.get(ticker)
+
+        layers_payload = _layers_payload_for_decision(
+            result_for_ticker,
+            {
+                "source": "optimizer",
+                "delta_pct": size_pct,
+                "optimizer_direction": direction,
+                "weight_current": w_cur,
+                "weight_optimal": w_opt,
+                "weight_delta": delta,
+            },
+        )
+
         trades_to_save.append({
             "ticker":        ticker,
             "direction":     direction,
@@ -682,6 +779,7 @@ async def _save_optimizer_trades(
             "regime":        regime,
             "vix":           float(vix) if vix else None,
             "decided_at":    datetime.utcnow(),
+            "layers":        layers_payload,
         })
 
     if not trades_to_save:
@@ -721,7 +819,7 @@ async def _save_optimizer_trades(
                     """,
                     t["decided_at"], t["ticker"], t["direction"],
                     t["score"], t["conviction"],
-                    _json.dumps({"source": "optimizer", "delta_pct": t["size_pct"]}),
+                    _json.dumps(t["layers"]),
                     t["price"], t["vix"], t["regime"],
                     t["size_pct"], t["stop_loss_pct"], t["target_pct"],
                     HORIZON_MED, t["rr_ratio"],
