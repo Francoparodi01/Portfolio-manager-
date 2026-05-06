@@ -8,11 +8,12 @@
 
 Cocos Copilot está organizado como un sistema cuantitativo modular que transforma datos reales de portfolio en decisiones auditables.
 
-El sistema se compone de tres flujos principales:
+El sistema se compone de cuatro bloques principales:
 
-- **Portfolio Analyzer** → análisis de cartera actual.
-- **Opportunity Radar** → búsqueda de oportunidades externas.
-- **Execution Planner / Rotation Engine** → traducción de targets en acciones ejecutables, bloqueadas o en observación.
+- **Scheduler / Monitor** → mantiene datos frescos, outcomes y alertas.
+- **Portfolio Analyzer** → analiza cartera actual.
+- **Opportunity Radar** → busca oportunidades externas.
+- **Execution Planner / Rotation Engine** → traduce targets en acciones ejecutables, bloqueadas o en observación.
 
 Los pipelines pueden ejecutarse desde CLI o desde el bot de Telegram.
 
@@ -40,7 +41,38 @@ Esto evita que el sistema opere por ruido o por obedecer ciegamente al optimizer
 | `cocos_scraper` | Python + Playwright | Scraping, scheduler y pipelines batch |
 | `cocos_telegram_bot` | Python | Bot interactivo, comandos y ejecución desde Telegram |
 
-Redis se utiliza como canal de comunicación/eventos cuando aplica.
+Redis se utiliza como canal opcional para heartbeats, estado del monitor, flags y coordinación de eventos.
+
+---
+
+## Roles principales
+
+```text
+runner.py
+  ├─ run_scrape()
+  ├─ run_full()
+  ├─ update_outcomes()
+  ├─ intraday market loop
+  └─ risk guard
+
+run_analysis.py
+  ├─ macro
+  ├─ technical
+  ├─ risk
+  ├─ synthesis
+  ├─ optimizer
+  ├─ execution_planner
+  ├─ decision_log
+  └─ render Telegram
+
+telegram_bot.py
+  ├─ /portfolio
+  ├─ /analisis → run_analysis.py
+  ├─ /radar → run_opportunity.py
+  ├─ /performance → run_performance.py
+  ├─ /resumen → weekly_summary.py
+  └─ /status
+```
 
 ---
 
@@ -66,6 +98,55 @@ Execution Planner
 Decision Log
   ↓
 Telegram / CLI report
+```
+
+---
+
+## Scheduler / monitor
+
+`src/scheduler/runner.py` mantiene vivo al sistema.
+
+Responsabilidades:
+
+- Scrape programado de portfolio.
+- Scrape programado de mercado.
+- Loop intradía de precios.
+- Refresh periódico de portfolio.
+- Update diario de outcomes.
+- Risk guard por DB.
+- Heartbeats y estado del monitor.
+
+Tareas programadas orientativas:
+
+| Horario ART | Acción |
+|---|---|
+| 10:30 | Scrape de portfolio |
+| 10:31 | Inicio de loops intradía |
+| 17:00 | Scrape completo EOD |
+| 17:01 | Stop loops intradía |
+| 21:30 | Update outcomes |
+
+El scheduler no reemplaza a `run_analysis.py`: mantiene datos frescos y riesgo monitoreado, pero el análisis cuantitativo completo se ejecuta por `/analisis` o CLI.
+
+---
+
+## Bot de Telegram
+
+`scripts/telegram_bot.py` es la interfaz del sistema.
+
+Responsabilidades:
+
+- Mostrar menú principal.
+- Ejecutar scripts por comando.
+- Mostrar reportes en Telegram.
+- Separar comandos principales de comandos admin.
+- Compactar el radar para no romper mensajes largos.
+- Mostrar `/portfolio` limpio y sin P&L dudoso.
+
+El bot no debe contener lógica cuantitativa. Debe actuar como router:
+
+```text
+comando → script → output → Telegram
 ```
 
 ---
@@ -267,6 +348,30 @@ Métricas principales:
 
 ---
 
+## Módulos legacy / soporte / experimental
+
+### `decision_engine.py`
+
+Módulo de soporte/legacy.
+
+Conserva constantes y helpers de sizing, stop, target, horizonte y normalización de régimen usados por `decision_log` y reportes históricos.
+
+La decisión operativa actual del MVP no sale de este archivo. La fuente de verdad operativa es `execution_planner.py`.
+
+### `feature_builder.py` y `ml_model.py`
+
+Capa experimental/post-MVP para ML.
+
+No forman parte del runtime MVP actual. Si se conservan, deberían vivir en:
+
+```text
+src/analysis/experimental/
+```
+
+No conviene agregar `lightgbm`, `scikit-learn` o `joblib` al `requirements.txt` hasta activar esa capa.
+
+---
+
 ## Esquema de base de datos
 
 Tablas principales:
@@ -300,6 +405,7 @@ cocos_copilot/
 │   ├── run_opportunity.py
 │   ├── run_performance.py
 │   ├── update_outcomes.py
+│   ├── weekly_summary.py
 │   ├── run_once.py
 │   └── telegram_bot.py
 │
@@ -315,6 +421,9 @@ cocos_copilot/
     │   ├── db.py
     │   └── notifier.py
     │
+    ├── scheduler/
+    │   └── runner.py
+    │
     └── analysis/
         ├── technical.py
         ├── macro.py
@@ -324,10 +433,37 @@ cocos_copilot/
         ├── optimizer.py
         ├── execution_planner.py
         ├── validators.py
+        ├── trade_lifecycle.py
+        ├── decision_engine.py
         ├── decision_memory.py
         ├── opportunity_screener.py
-        └── rotation_engine.py
+        ├── rotation_engine.py
+        └── experimental/
+            ├── feature_builder.py
+            └── ml_model.py
 ```
+
+---
+
+## Requirements actuales
+
+Para el MVP actual, las dependencias principales son:
+
+- Playwright
+- python-telegram-bot
+- Redis
+- asyncpg
+- requests / aiohttp
+- python-dotenv
+- cryptography
+- pyotp
+- pandas / numpy / yfinance
+- ta
+- scipy
+- apscheduler
+- python-dateutil / pytz
+
+La capa ML experimental no debería inflar `requirements.txt` hasta estar activada.
 
 ---
 
