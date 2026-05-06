@@ -1,15 +1,32 @@
+# Entorno local
 .env
-*.pyc
-__pycache__/
-.pytest_cache/
-*.egg-info/
-dist/
-build/
-.venv/
 venv/
-screenshots/
-logs/
-*.log
-.secrets
-.secret_key
+__pycache__/
+*.pyc
+
+# Secretos
+secret_key/
 secrets/
+*.key
+*.pem
+
+# Outputs locales
+logs/
+screenshots/
+models/
+*.log
+
+# Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# DB / backups
+*.sql.gz
+backup_*.sql

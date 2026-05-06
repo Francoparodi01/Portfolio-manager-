@@ -399,6 +399,10 @@ async def send_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Acciones de cada sección
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Portfolio — renderizado de tabla
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -406,26 +410,19 @@ def _render_portfolio_table(positions: list[dict], total_invested: float) -> str
     """
     Genera tabla monoespaciada para el bloque <code>.
 
-    Columnas separadas por SEP para garantizar espacio incluso cuando
-    el valor ocupa exactamente el ancho de columna (bug original).
-
-    Ejemplo de output:
-      TICKER      CANT    PRECIO       VALOR   PESO
-      ───────────────────────────────────────────────
-      NVDA ●        24   $12.570    $301.680  31.8%
-      XOM            9   $23.220    $208.980  17.0%
-      ───────────────────────────────────────────────
-      TOTAL                       $1.227.240 100.0%
+    Para MVP:
+    - No muestra flags raros tipo ● / ·.
+    - No muestra P&L.
+    - El peso se calcula sobre total_invested, no sobre cash ni total cuenta.
     """
     COL_TICKER = 10
-    COL_CANT   =  5
-    COL_PRECIO =  9
+    COL_CANT   = 5
+    COL_PRECIO = 9
     COL_VALOR  = 10
-    COL_PESO   =  6
-    SEP        = "  "   # separador explícito entre columnas
+    COL_PESO   = 6
+    SEP        = "  "
 
     def _ars(v: float) -> str:
-        """$1.227.240 — monoespaciado, sin signo."""
         return f"${abs(v):,.0f}".replace(",", ".")
 
     header = (
@@ -435,6 +432,7 @@ def _render_portfolio_table(positions: list[dict], total_invested: float) -> str
         f"{'VALOR':>{COL_VALOR}}{SEP}"
         f"{'PESO':>{COL_PESO}}"
     )
+
     sep_line = "─" * len(header)
     rows = [header, sep_line]
 
@@ -443,13 +441,11 @@ def _render_portfolio_table(positions: list[dict], total_invested: float) -> str
         qty    = _to_float(p.get("quantity", 0))
         price  = _to_float(p.get("current_price", 0))
         mv     = _to_float(p.get("market_value", 0))
+
         weight = mv / total_invested if total_invested > 0 else 0.0
 
-        flag       = " ●" if weight >= 0.30 else (" ·" if weight >= 0.22 else "")
-        ticker_col = f"{ticker}{flag}"
-
         rows.append(
-            f"{ticker_col:<{COL_TICKER}}{SEP}"
+            f"{ticker:<{COL_TICKER}}{SEP}"
             f"{qty:>{COL_CANT}g}{SEP}"
             f"{_ars(price):>{COL_PRECIO}}{SEP}"
             f"{_ars(mv):>{COL_VALOR}}{SEP}"
@@ -464,69 +460,12 @@ def _render_portfolio_table(positions: list[dict], total_invested: float) -> str
         f"{_ars(total_invested):>{COL_VALOR}}{SEP}"
         f"{'100.0%':>{COL_PESO}}"
     )
+
     return "\n".join(rows)
 
 
-def _render_pnl_section(positions: list[dict], total_invested: float) -> Optional[str]:
-    """
-    Devuelve sección de P&L no realizado solo si los datos parecen válidos.
-
-    Criterios de validez:
-    - pnl_pct debe existir
-    - |pnl_pct| <= 3.0 (300%) — más que eso sugiere costo base mal registrado
-    - Si más de la mitad de las posiciones tienen pnl_pct > 3.0 → datos corruptos,
-      retorna None con nota explicativa
-
-    Retorna None si no hay datos o todos parecen inválidos.
-    """
-    PNL_PCT_MAX = 3.0   # 300% — umbral de sanidad
-
-    valid_rows  = []
-    bad_count   = 0
-    total_count = 0
-
-    for p in positions:
-        pnl = p.get("unrealized_pnl")
-        if pnl is None:
-            continue
-
-        total_count += 1
-        pnl_v   = _to_float(pnl)
-        pnl_pct = _to_float(p.get("unrealized_pnl_pct", 0))
-
-        # Normalizar si viene en base 100 (ej: 5.102 en vez de 0.05102)
-        if abs(pnl_pct) > 1:
-            pnl_pct /= 100
-
-        ticker = str(p.get("ticker", "?")).upper()
-
-        if abs(pnl_pct) > PNL_PCT_MAX:
-            bad_count += 1
-            continue
-
-        icon = "🟢" if pnl_v > 0 else ("🔴" if pnl_v < 0 else "⚪")
-        valid_rows.append(
-            f"  {icon} {ticker:<6}  {_money_signed(pnl_v):>12}  ({_pct_signed(pnl_pct)})"
-        )
-
-    if total_count == 0:
-        return None
-
-    # Si la mayoría de los datos son inválidos → probablemente costo base mal registrado
-    if bad_count > total_count / 2:
-        return (
-            "⚠️ <i>P&amp;L no realizado no disponible — "
-            "costo base no registrado correctamente en DB.</i>"
-        )
-
-    if not valid_rows:
-        return None
-
-    return "<b>P&amp;L no realizado</b>\n" + "\n".join(valid_rows)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Acciones de cada sección
+# Acción: Portfolio
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -536,6 +475,7 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
 
     cfg = get_config()
     db  = PortfolioDatabase(cfg.database.url)
+
     await db.connect()
     try:
         snap = await db.get_latest_snapshot()
@@ -544,25 +484,24 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
 
     if not snap:
         await send_text(
-            context, chat_id,
+            context,
+            chat_id,
             "⚠️ Sin snapshots en DB.\nEjecutá <code>/admin_scrape</code> para actualizar.",
         )
         return
 
     # ── Valores base ──────────────────────────────────────────────────────────
     #
-    # MODELO DE ACCOUNTING:
-    #   total_value_ars = suma de posiciones (invertido, SIN cash)
-    #   cash_ars        = efectivo disponible (ADICIONAL al total_value_ars)
-    #   total_cuenta    = total_value_ars + cash_ars  ← número real del broker
+    # Criterio MVP:
+    # - total_invested = suma real de positions.market_value
+    # - cash = snap.cash_ars
+    # - total_account = total_invested + cash
     #
-    # Si total_value_ars incluyera cash, habría discrepancia entre
-    # total_value_ars y la suma de positions.market_value.
-    # Lo verificamos y ajustamos en consecuencia.
+    # No usamos P&L acá porque el costo base todavía no es confiable.
+    # El seguimiento de resultados queda centralizado en /performance.
     #
-    total_snapshot  = _to_float(snap.get("total_value_ars", 0))
-    cash            = _to_float(snap.get("cash_ars", 0))
-    positions_raw   = snap.get("positions") or []
+    cash          = _to_float(snap.get("cash_ars", 0))
+    positions_raw = snap.get("positions") or []
 
     positions = sorted(
         positions_raw,
@@ -570,49 +509,43 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         reverse=True,
     )
 
-    sum_positions = sum(_to_float(p.get("market_value", 0)) for p in positions)
+    total_invested = sum(
+        _to_float(p.get("market_value", 0))
+        for p in positions
+    )
 
-    # Detectar si total_value_ars incluye o excluye cash:
-    # Si sum_positions ≈ total_snapshot → total_snapshot = solo invertido
-    # Si sum_positions ≈ total_snapshot - cash → total_snapshot incluye cash
-    diff_excl = abs(sum_positions - total_snapshot)           # sin cash
-    diff_incl = abs(sum_positions - (total_snapshot - cash))  # con cash
-
-    if diff_excl <= max(500, sum_positions * 0.005):
-        # total_value_ars = invertido (sin cash) — caso de este portfolio
-        total_invested = sum_positions
-        total_account  = total_snapshot + cash
-        mv_discrepancy = 0.0
-    elif diff_incl <= max(500, sum_positions * 0.005):
-        # total_value_ars = invertido + cash
-        total_invested = sum_positions
-        total_account  = total_snapshot
-        mv_discrepancy = 0.0
-    else:
-        # Discrepancia real — mostrar advertencia
-        total_invested = sum_positions
-        total_account  = total_snapshot + cash
-        mv_discrepancy = diff_excl
+    total_account = total_invested + cash
 
     # Timestamp
-    ts_raw      = snap.get("scraped_at") or snap.get("timestamp") or snap.get("created_at")
-    age_text, _ = _age_label(ts_raw)
-    ts_exact    = _fmt_dt_art(ts_raw)
+    ts_raw       = snap.get("scraped_at") or snap.get("timestamp") or snap.get("created_at")
+    age_text, _  = _age_label(ts_raw)
+    ts_exact     = _fmt_dt_art(ts_raw)
 
-    # Porcentajes vs total_account (el número real del broker)
+    # Porcentajes sobre total cuenta
     inv_pct  = total_invested / total_account if total_account > 0 else 0.0
-    cash_pct = cash           / total_account if total_account > 0 else 0.0
+    cash_pct = cash / total_account if total_account > 0 else 0.0
 
-    # Concentración sobre total_invested
-    max_weight, max_ticker = 0.0, "—"
+    # Concentración sobre capital invertido
+    max_weight = 0.0
+    max_ticker = "—"
+
     for p in positions:
         mv = _to_float(p.get("market_value", 0))
         w  = mv / total_invested if total_invested > 0 else 0.0
-        if w > max_weight:
-            max_weight, max_ticker = w, str(p.get("ticker", "?")).upper()
 
-    conc_icon = "🔴" if max_weight >= 0.35 else ("🟡" if max_weight >= 0.25 else "🟢")
-    conc_lbl  = "alta" if max_weight >= 0.35 else ("media" if max_weight >= 0.25 else "normal")
+        if w > max_weight:
+            max_weight = w
+            max_ticker = str(p.get("ticker", "?")).upper()
+
+    if max_weight >= 0.35:
+        conc_icon = "🔴"
+        conc_lbl  = f"alta — {max_ticker} {_pct(max_weight)}"
+    elif max_weight >= 0.25:
+        conc_icon = "🟡"
+        conc_lbl  = f"media — {max_ticker} {_pct(max_weight)}"
+    else:
+        conc_icon = "🟢"
+        conc_lbl  = "normal"
 
     # ── Construcción del reporte ──────────────────────────────────────────────
     lines = [
@@ -626,32 +559,23 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         f"📦 {len(positions)} posiciones  ·  {conc_icon} Concentración {conc_lbl}",
     ]
 
-    if mv_discrepancy > 500:
-        lines.append(
-            f"⚠️ Discrepancia en posiciones vs snapshot: <b>{_money(mv_discrepancy)}</b>"
-        )
-
     if not positions:
-        lines += ["", "Sin posiciones en el último snapshot."]
+        lines += [
+            "",
+            "Sin posiciones en el último snapshot.",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "<i>Portfolio — Cocos Copilot</i>",
+        ]
         await send_text(context, chat_id, "\n".join(lines))
         return
 
-    # ── Tabla de posiciones ───────────────────────────────────────────────────
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "<b>POSICIONES</b>  <i>(peso sobre invertido)</i>",
         "",
         f"<code>{_render_portfolio_table(positions, total_invested)}</code>",
-        "<i>● &gt;30%   · &gt;22%   del capital invertido</i>",
-    ]
-
-    # ── P&L no realizado (solo si datos son válidos) ──────────────────────────
-    pnl_section = _render_pnl_section(positions, total_invested)
-    if pnl_section:
-        lines += ["", pnl_section]
-
-    lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "<i>Portfolio — Cocos Copilot</i>",
@@ -687,6 +611,115 @@ async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
     await send_text(context, chat_id, report)
 
 
+def compact_radar_report(report: str, max_items: int = 6) -> str:
+    """
+    Compacta el radar largo para Telegram.
+    No recalcula nada: extrae bloques principales del texto renderizado.
+    """
+    import re
+
+    if not report:
+        return "⚠️ Radar sin output."
+
+    # Sacar tags HTML simples para parsear más fácil, pero mantener texto legible.
+    text = report
+    text = re.sub(r"</?b>", "", text)
+    text = re.sub(r"</?i>", "", text)
+    text = re.sub(r"</?code>", "", text)
+    text = text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
+
+    header_match = re.search(
+        r"🔍 Universo:\s*(.+?)\n✅ Gate:\s*(.+?)\n\s*VIX:\s*([0-9.]+)",
+        text,
+        re.DOTALL,
+    )
+
+    if header_match:
+        universe = header_match.group(1).strip()
+        gate = header_match.group(2).strip()
+        vix = header_match.group(3).strip()
+    else:
+        universe = "—"
+        gate = "—"
+        vix = "—"
+
+    # Detectar bloques por ticker: líneas tipo "━━ KKR ━━ ..."
+    ticker_blocks = re.split(r"\n(?=━━\s+[A-Z0-9.-]+\s+━━)", text)
+
+    items = []
+
+    for block in ticker_blocks:
+        title = re.search(r"━━\s+([A-Z0-9.-]+)\s+━━\s*(.*)", block)
+        if not title:
+            continue
+
+        ticker = title.group(1).strip()
+        title_tail = title.group(2).strip()
+
+        score = re.search(r"Score:\s*([+-]?\d+\.\d+)", block)
+        rr = re.search(r"R/R\s*([0-9.]+)x", block)
+        edge = re.search(r"Edge:\s*[🟢🟡🟠🔴]?\s*([+-]?\d+\.\d+)", block)
+        sizing_ars = re.search(r"≈\s*\$([0-9.]+)\s*ARS", block)
+        action = re.search(r"🎯 Acción sugerida:\s*(.+)", block)
+        compete = re.search(r"Compite con:\s*([A-Z0-9.-]+)", block)
+
+        tag = "🆕"
+        if "SWAP" in title_tail.upper():
+            tag = "🔄"
+        elif "VIGILANCIA" in title_tail.upper():
+            tag = "👁"
+
+        action_text = action.group(1).strip() if action else "—"
+
+        if compete:
+            action_text += f" ({compete.group(1)})"
+
+        items.append({
+            "ticker": ticker,
+            "tag": tag,
+            "score": score.group(1) if score else "—",
+            "rr": rr.group(1) if rr else "—",
+            "edge": edge.group(1) if edge else "—",
+            "ars": sizing_ars.group(1) if sizing_ars else "—",
+            "action": action_text,
+        })
+
+    if not items:
+        return report
+
+    top = items[:max_items]
+
+    lines = [
+        "🔭 <b>RADAR DE OPORTUNIDADES — COMPACTO</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"🔍 Universo: {universe}",
+        f"✅ Gate: <b>{gate}</b> | VIX {vix}",
+        "",
+        "<b>TOP IDEAS</b>",
+    ]
+
+    for i, item in enumerate(top, start=1):
+        lines.append(
+            f"{i}. {item['tag']} <b>{item['ticker']}</b> "
+            f"| score <code>{item['score']}</code> "
+            f"| edge <code>{item['edge']}</code> "
+            f"| R/R {item['rr']}x"
+        )
+
+        if item["ars"] != "—":
+            lines.append(f"   💰 Sizing aprox: <b>${item['ars']} ARS</b>")
+
+        lines.append(f"   🎯 {item['action']}")
+
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "<i>Usá consola para ver el radar completo.</i>",
+    ]
+
+    return "\n".join(lines)
+
+
 async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_first_existing_script(
         [
@@ -711,6 +744,27 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
             "Runner esperado:\n"
             "<code>scripts/run_opportunity.py --no-telegram --no-sentiment --period 6mo --top 6 --min-score 0.10</code>"
         )
+    else:
+        report = compact_radar_report(report, max_items=6)
+
+    await send_text(context, chat_id, report)
+
+
+async def action_radar_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    report = await run_first_existing_script(
+        [
+            [
+                "scripts/run_opportunity.py",
+                "--no-telegram",
+                "--no-sentiment",
+                "--period",
+                "1y",
+                "--max",
+                "8",
+            ],
+        ],
+        timeout=COMMAND_TIMEOUT_SECONDS,
+    )
 
     await send_text(context, chat_id, report)
 
@@ -887,6 +941,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
     "radar":         "🔭 Generando radar de oportunidades...",
+    "radar_full":    "🔭 Generando radar completo...",
     "status":        "🩺 Verificando estado del sistema...",
 }
 
@@ -898,6 +953,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "weekly_summary": action_weekly_summary,
         "performance":    action_performance,
         "radar":          action_radar,
+        "radar_full": action_radar_full,
         "status":         action_status,
     }
     fn = dispatch.get(action)
@@ -966,6 +1022,9 @@ async def radar_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def status_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "status")
+
+async def radar_full_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "radar_full")
 
 
 async def admin_scrape_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1062,6 +1121,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("resumen_semanal",  weekly_summary_handler))
     app.add_handler(CommandHandler("performance",      performance_handler))
     app.add_handler(CommandHandler("radar",            radar_handler))
+    app.add_handler(CommandHandler("radar_full", radar_full_handler))
     app.add_handler(CommandHandler("status",           status_handler))
 
     # Admin

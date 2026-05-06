@@ -18,6 +18,9 @@ Regla de oro:
       - plan de rotación
       - veredicto final
     Todo eso sale de ExecutionPlan.
+
+Principio MVP:
+    El optimizer puede sugerir, pero una señal neutral no justifica operar.
 """
 from __future__ import annotations
 
@@ -28,12 +31,45 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Parámetros operativos (todos sobreescribibles en llamada) ─────────────────
-MIN_WEIGHT_DELTA  = 0.015    # 1.5 pp — diferencias menores → HOLD
-MIN_TRADE_ARS     = 25_000   # monto mínimo para generar una orden
-FEE_PCT           = 0.006    # 0.6% fee total (comisión + spread)
-SLIPPAGE_PCT      = 0.0015   # 0.15% slippage estimado
-SELL_FULL_THRESH  = 0.005    # target < 0.5% → SELL_FULL
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PARÁMETROS OPERATIVOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+MIN_WEIGHT_DELTA = 0.015      # 1.5 pp — diferencias menores → HOLD
+MIN_TRADE_ARS = 25_000       # monto mínimo para generar una orden
+FEE_PCT = 0.006              # 0.6% fee total estimado
+SLIPPAGE_PCT = 0.0015        # 0.15% slippage estimado
+SELL_FULL_THRESH = 0.005     # target < 0.5% → SELL_FULL
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GUARDS DE CALIDAD OPERATIVA
+# ══════════════════════════════════════════════════════════════════════════════
+
+# BUY:
+# - score < -0.01   → BLOCKED por BUY_SCORE_GUARD
+# - score < +0.08   → WATCH por TRADE_QUALITY_GUARD
+# - score >= +0.08  → BUY permitido
+
+SCORE_BUY_STRONG = +0.12
+SCORE_BUY_MIN = +0.08
+SCORE_BUY_BLOCK_NEG = -0.01
+
+# Clasificación general de señal
+
+SCORE_NEU_HIGH = +0.05
+SCORE_NEU_LOW = -0.05
+SCORE_NEG_DEBIL_LOW = -0.08
+
+# SELL:
+# - score <= -0.08              → venta permitida por señal negativa
+# - -0.08 < score < -0.05       → venta solo si delta relevante o concentración
+# - -0.05 <= score <= +0.05     → HOLD salvo concentración
+# - score > +0.05               → HOLD salvo concentración fuerte
+
+MAX_WEIGHT_CONC = 0.25        # concentración media: permite rebalanceo con neutral
+MAX_WEIGHT_HARD_CONC = 0.30   # concentración alta: permite vender aunque score sea positivo
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -41,57 +77,76 @@ SELL_FULL_THRESH  = 0.005    # target < 0.5% → SELL_FULL
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Action(str, Enum):
-    BUY          = "BUY"
-    SELL_FULL    = "SELL_FULL"
+    BUY = "BUY"
+    SELL_FULL = "SELL_FULL"
     SELL_PARTIAL = "SELL_PARTIAL"
-    HOLD         = "HOLD"
-    WATCH        = "WATCH"
-    BLOCKED      = "BLOCKED"
+    HOLD = "HOLD"
+    WATCH = "WATCH"
+    BLOCKED = "BLOCKED"
 
 
 class OrderSide(str, Enum):
-    BUY  = "BUY"
+    BUY = "BUY"
     SELL = "SELL"
 
 
 class OrderStatus(str, Enum):
-    PLANNED          = "PLANNED"
-    SUBMITTED        = "SUBMITTED"
+    PLANNED = "PLANNED"
+    SUBMITTED = "SUBMITTED"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
-    FILLED           = "FILLED"
-    CANCELLED        = "CANCELLED"
-    EXPIRED          = "EXPIRED"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+
+
+class ScoreRange(str, Enum):
+    POS_FUERTE = "POS_FUERTE"
+    POS_OPERABLE = "POS_OPERABLE"
+    POS_DEBIL = "POS_DEBIL"
+    NEUTRAL = "NEUTRAL"
+    NEG_DEBIL = "NEG_DEBIL"
+    NEG_OPERABLE = "NEG_OPERABLE"
+
+
+SCORE_RANGE_LABELS: dict[ScoreRange, str] = {
+    ScoreRange.POS_FUERTE: "POSITIVA FUERTE",
+    ScoreRange.POS_OPERABLE: "POSITIVA OPERABLE",
+    ScoreRange.POS_DEBIL: "POSITIVA DÉBIL",
+    ScoreRange.NEUTRAL: "NEUTRAL / RUIDO",
+    ScoreRange.NEG_DEBIL: "NEGATIVA DÉBIL",
+    ScoreRange.NEG_OPERABLE: "NEGATIVA OPERABLE",
+}
 
 
 @dataclass
 class AssetSignal:
     """Calidad de señal del activo, independiente de la decisión de cartera."""
-    ticker:     str
-    score:      float
+    ticker: str
+    score: float
     conviction: float
-    technical:  float
-    macro:      float
-    sentiment:  float
+    technical: float
+    macro: float
+    sentiment: float
     explanation: Optional[str] = None
 
 
 @dataclass
 class PositionSnapshot:
     """Posición actual en el portfolio."""
-    ticker:           str
-    quantity:         float
-    price:            float
+    ticker: str
+    quantity: float
+    price: float
     market_value_ars: float
-    current_weight:   float
+    current_weight: float
 
 
 @dataclass
 class TargetWeight:
     """Un peso objetivo del optimizer para un ticker."""
-    ticker:        str
+    ticker: str
     current_weight: float
-    target_weight:  float
-    delta_weight:   float   # target - current (puede ser negativo)
+    target_weight: float
+    delta_weight: float
 
 
 @dataclass
@@ -101,57 +156,60 @@ class PortfolioTarget:
     Aparece SOLO en la sección informativa del reporte, nunca como fuente
     de la acción principal ni del plan de rotación.
     """
-    method:          str
+    method: str
     expected_return: float
-    volatility:      float
-    sharpe:          float
-    targets:         list[TargetWeight]
+    volatility: float
+    sharpe: float
+    targets: list[TargetWeight]
 
 
 @dataclass
 class DecisionIntent:
     """
-    Decisión de cartera para un ticker.
-    Combina la señal del activo con la lógica de rebalanceo y las restricciones
-    del gate. Separa explícitamente señal vs. decisión de cartera.
+    Decisión conceptual para un ticker.
+
+    Combina:
+      - señal del activo
+      - target del optimizer
+      - guards operativas
+      - restricciones del gate
     """
-    ticker:           str
-    action:           Action
-    reason_primary:   str
+    ticker: str
+    action: Action
+    reason_primary: str
     reason_secondary: Optional[str]
-    current_weight:   float
-    target_weight:    float
-    delta_weight:     float
-    score:            Optional[float] = None
-    conviction:       Optional[float] = None
-    # Teórico (antes de restricciones de funding)
-    theoretical_ars:  float = 0.0
+    current_weight: float
+    target_weight: float
+    delta_weight: float
+    score: Optional[float] = None
+    conviction: Optional[float] = None
+    theoretical_ars: float = 0.0
 
 
 @dataclass
 class OrderIntent:
     """
-    Una orden ejecutable concreta con monto real disponible.
-    El amount_ars puede ser menor al theoretical_ars si el cash no alcanza.
+    Orden ejecutable concreta con monto real disponible.
+    amount_ars puede ser menor a theoretical_ars si el cash no alcanza.
     """
-    ticker:          str
-    side:            OrderSide
-    action:          Action
-    amount_ars:      float          # monto ejecutable REAL (reconciliado)
-    theoretical_ars: float          # lo que el optimizer quería
-    quantity_est:    float          # cantidad estimada de títulos
-    reference_price: float          # precio de referencia en ARS
-    reason:          str
-    priority:        int            # menor = más urgente
-    funded_by:       list[str]      = field(default_factory=list)
-    partial:         bool           = False   # True si amount < theoretical
-    status:          OrderStatus    = OrderStatus.PLANNED
-    # Campos para lifecycle futuro
-    planned_qty:     Optional[float] = None
-    filled_qty:      Optional[float] = None
-    avg_fill_price:  Optional[float] = None
-    submitted_at:    Optional[str]   = None
-    filled_at:       Optional[str]   = None
+    ticker: str
+    side: OrderSide
+    action: Action
+    amount_ars: float
+    theoretical_ars: float
+    quantity_est: float
+    reference_price: float
+    reason: str
+    priority: int
+    funded_by: list[str] = field(default_factory=list)
+    partial: bool = False
+    status: OrderStatus = OrderStatus.PLANNED
+
+    planned_qty: Optional[float] = None
+    filled_qty: Optional[float] = None
+    avg_fill_price: Optional[float] = None
+    submitted_at: Optional[str] = None
+    filled_at: Optional[str] = None
 
 
 @dataclass
@@ -159,41 +217,31 @@ class ExecutionPlan:
     """
     Plan ejecutable completo. Fuente única de verdad para el reporte operativo.
 
-    La consistencia matemática garantizada:
-        cash_after = cash_before + gross_sell_net - gross_buy_ars
-        gross_sell_net = gross_sell_ars * (1 - fee_pct - slippage_pct)
-        gross_buy_ars  = sum(o.amount_ars for o in buy_orders)
-        gross_sell_ars = sum(o.amount_ars for o in sell_orders)
+    cash_after = cash_before + net_sell_ars - gross_buy_ars - fee_buy_ars
     """
-    # Decisiones por ticker (nivel conceptual)
-    decisions:       list[DecisionIntent]
+    decisions: list[DecisionIntent]
 
-    # Órdenes concretas (nivel operativo)
-    sell_orders:     list[OrderIntent]
-    buy_orders:      list[OrderIntent]
-    blocked_orders:  list[OrderIntent]   # gate impidió la acción
+    sell_orders: list[OrderIntent]
+    buy_orders: list[OrderIntent]
+    blocked_orders: list[OrderIntent]
 
-    # Cash accounting (siempre cuadra)
-    cash_before:     float
-    gross_sell_ars:  float    # suma raw de ventas
-    fee_sell_ars:    float    # costo de las ventas
-    net_sell_ars:    float    # gross_sell_ars - fee_sell_ars
-    gross_buy_ars:   float    # suma de compras ejecutables
-    fee_buy_ars:     float    # costo de las compras
-    cash_after:      float    # cash_before + net_sell_ars - gross_buy_ars - fee_buy_ars
+    cash_before: float
+    gross_sell_ars: float
+    fee_sell_ars: float
+    net_sell_ars: float
+    gross_buy_ars: float
+    fee_buy_ars: float
+    cash_after: float
 
-    # Estado
-    feasible:        bool
-    gate:            str      # NORMAL | CAUTIOUS | BLOCKED
-    summary:         str
-    warnings:        list[str] = field(default_factory=list)
+    feasible: bool
+    gate: str
+    summary: str
+    warnings: list[str] = field(default_factory=list)
 
-    # Acciones pendientes por falta de funding
-    pending_buys:    list[str] = field(default_factory=list)
+    pending_buys: list[str] = field(default_factory=list)
 
     @property
     def main_action(self) -> Optional[OrderIntent]:
-        """La orden más importante del plan (primera venta, o primera compra)."""
         if self.sell_orders:
             return self.sell_orders[0]
         if self.buy_orders:
@@ -211,25 +259,216 @@ class ExecutionPlan:
         return sum(o.amount_ars for o in self.buy_orders)
 
     def verdict(self) -> str:
-        """Veredicto final derivado del plan — nunca de otra lógica."""
         if not self.feasible:
             return "Sin plan ejecutable — revisar restricciones del sistema."
+
         if self.gate == "BLOCKED":
             return "Sistema bloqueado por gate de riesgo — solo stops de emergencia."
+
         if not self.has_orders:
-            return "Mantener y observar — sin ventaja operativa para actuar hoy."
+            return (
+                "Mantener y observar — el optimizer sugirió cambios, "
+                "pero la calidad de señal no justifica operar."
+            )
+
         sells = [o for o in self.sell_orders]
-        buys  = [o for o in self.buy_orders]
+        buys = [o for o in self.buy_orders]
+
         if sells and buys:
             return (
                 "Plan de rotación definido — ejecutar ventas primero, "
                 "luego reasignar capital en el orden indicado."
             )
+
         if sells:
-            return "Reducir exposición — ejecutar ventas. Sin compras habilitadas por el régimen."
+            return (
+                "Reducir exposición — ejecutar ventas. "
+                "Sin compras habilitadas por calidad de señal."
+            )
+
         if buys:
             return "Aumentar exposición selectiva — ejecutar compras en el orden indicado."
+
         return "Mantener y observar — sin ventaja operativa para actuar hoy."
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS DE SCORE / SEÑAL
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fmt_score(score: Optional[float]) -> str:
+    return "N/A" if score is None else f"{score:+.3f}"
+
+
+def classify_score(score: Optional[float]) -> tuple[ScoreRange, str]:
+    """
+    Clasifica el score en una señal operativa.
+
+    Esto separa:
+      - score: magnitud/dirección
+      - señal: interpretación operativa
+      - conviction: acuerdo entre capas
+    """
+    if score is None:
+        return ScoreRange.NEUTRAL, SCORE_RANGE_LABELS[ScoreRange.NEUTRAL]
+
+    if score >= SCORE_BUY_STRONG:
+        rango = ScoreRange.POS_FUERTE
+    elif score >= SCORE_BUY_MIN:
+        rango = ScoreRange.POS_OPERABLE
+    elif score >= SCORE_NEU_HIGH:
+        rango = ScoreRange.POS_DEBIL
+    elif score >= SCORE_NEU_LOW:
+        rango = ScoreRange.NEUTRAL
+    elif score >= SCORE_NEG_DEBIL_LOW:
+        rango = ScoreRange.NEG_DEBIL
+    else:
+        rango = ScoreRange.NEG_OPERABLE
+
+    return rango, SCORE_RANGE_LABELS[rango]
+
+
+def signal_label_for_render(score: Optional[float]) -> str:
+    """Helper público para el renderer."""
+    _, label = classify_score(score)
+    return label
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS DE GUARDIAS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _buy_guard(
+    score: Optional[float],
+    w_cur: float,
+    w_opt: float,
+    theoretical_ars: float,
+) -> tuple[Action, str, str]:
+    """
+    Devuelve:
+      action, reason_primary, reason_secondary
+    """
+    if score is None:
+        return (
+            Action.BLOCKED,
+            "Compra bloqueada: score no disponible",
+            f"Optimizer sugería aumentar {w_cur:.1%} → {w_opt:.1%} "
+            f"({theoretical_ars:,.0f} ARS), pero falta señal cuantitativa",
+        )
+
+    if score < SCORE_BUY_BLOCK_NEG:
+        return (
+            Action.BLOCKED,
+            f"Compra bloqueada por scorer negativo: {score:+.3f}",
+            f"Optimizer sugería aumentar {w_cur:.1%} → {w_opt:.1%} "
+            f"({theoretical_ars:,.0f} ARS), pero no pasa BUY_SCORE_GUARD",
+        )
+
+    if score < SCORE_BUY_MIN:
+        return (
+            Action.WATCH,
+            f"Compra en WATCH: señal insuficiente {score:+.3f}",
+            f"Optimizer sugería aumentar {w_cur:.1%} → {w_opt:.1%} "
+            f"({theoretical_ars:,.0f} ARS), pero BUY requiere score >= {SCORE_BUY_MIN:+.2f}",
+        )
+
+    return (
+        Action.BUY,
+        f"Aumentar posición: {w_cur:.1%} → {w_opt:.1%} ({(w_opt - w_cur):+.1%})",
+        f"score {score:+.3f}",
+    )
+
+
+def _sell_guard(
+    score: Optional[float],
+    conv: Optional[float],
+    w_cur: float,
+    w_opt: float,
+    delta: float,
+) -> tuple[Action, str, str]:
+    """
+    Devuelve:
+      action, reason_primary, reason_secondary
+
+    Regla MVP:
+    - Score neutral sin concentración NO opera.
+    - Score positivo sin concentración NO se vende.
+    - Score negativo operable sí permite venta.
+    """
+    rango, label = classify_score(score)
+    high_concentration = w_cur >= MAX_WEIGHT_CONC
+    hard_concentration = w_cur >= MAX_WEIGHT_HARD_CONC
+
+    # Score no disponible: no vender salvo concentración.
+    if score is None:
+        if high_concentration:
+            return (
+                Action.SELL_PARTIAL,
+                f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
+                "rebalanceo por concentración; score no disponible",
+            )
+
+        return (
+            Action.HOLD,
+            "Venta bloqueada: score no disponible",
+            f"Optimizer sugería reducir {w_cur:.1%} → {w_opt:.1%}, "
+            "pero no hay señal suficiente ni concentración",
+        )
+
+    # Score positivo: bloquear salvo concentración fuerte.
+    if score >= SCORE_NEU_HIGH:
+        if hard_concentration:
+            return (
+                Action.SELL_PARTIAL,
+                f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
+                f"rebalanceo por concentración ({w_cur:.1%}); score positivo {score:+.3f}",
+            )
+
+        return (
+            Action.HOLD,
+            f"Venta bloqueada: score positivo {score:+.3f}",
+            f"Optimizer sugería reducir {w_cur:.1%} → {w_opt:.1%}, "
+            "pero la señal del activo es positiva y no hay concentración excesiva",
+        )
+
+    # Score neutral: bloquear salvo concentración media.
+    if rango == ScoreRange.NEUTRAL:
+        if high_concentration:
+            return (
+                Action.SELL_PARTIAL,
+                f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
+                f"rebalanceo por concentración ({w_cur:.1%}); score neutral/ruido {score:+.3f}",
+            )
+
+        return (
+            Action.HOLD,
+            f"Venta bloqueada: score neutral/ruido {score:+.3f}",
+            f"Optimizer sugería reducir {w_cur:.1%} → {w_opt:.1%}, "
+            "pero una señal neutral no justifica operar",
+        )
+
+    # Score negativo débil: vender solo si delta relevante o concentración.
+    if rango == ScoreRange.NEG_DEBIL:
+        if abs(delta) >= 0.05 or high_concentration:
+            return (
+                Action.SELL_PARTIAL,
+                f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
+                f"rebalanceo por señal negativa débil ({score:+.3f})",
+            )
+
+        return (
+            Action.HOLD,
+            f"Venta bloqueada: señal negativa débil {score:+.3f}",
+            f"Optimizer sugería reducir {w_cur:.1%} → {w_opt:.1%}, "
+            "pero el delta no justifica costos/slippage",
+        )
+
+    # NEG_OPERABLE
+    return (
+        Action.SELL_PARTIAL,
+        f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
+        f"rebalanceo por score negativo ({score:+.3f})",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -238,27 +477,24 @@ class ExecutionPlan:
 
 def derive_decision_intents(
     rebalance_report,
-    signals_by_ticker:   dict[str, AssetSignal],
-    current_positions:   dict[str, PositionSnapshot],
+    signals_by_ticker: dict[str, AssetSignal],
+    current_positions: dict[str, PositionSnapshot],
     portfolio_value_ars: float,
-    gate:                str,
-    min_weight_delta:    float = MIN_WEIGHT_DELTA,
-    sell_full_thresh:    float = SELL_FULL_THRESH,
+    gate: str,
+    min_weight_delta: float = MIN_WEIGHT_DELTA,
+    sell_full_thresh: float = SELL_FULL_THRESH,
 ) -> list[DecisionIntent]:
     """
-    Traduce los trades del RebalanceReport en DecisionIntents tipados.
+    Traduce trades del optimizer en DecisionIntent.
 
-    Separa explícitamente:
-      - señal del activo (AssetSignal)
-      - decisión de cartera (Action derivada del delta y las restricciones)
+    El optimizer propone targets.
+    El execution planner decide si son operables.
 
-    Reglas de clasificación:
-      target < sell_full_thresh y hay posición → SELL_FULL
-      delta < -min_weight_delta               → SELL_PARTIAL
-      delta >  min_weight_delta               → BUY
-      |delta| <= min_weight_delta             → HOLD
-      buena señal pero gate bloquea           → BLOCKED
-      señal positiva sin entry clara          → WATCH
+    Guards MVP:
+      - BUY con score negativo → BLOCKED
+      - BUY con score débil → WATCH
+      - SELL con score neutral sin concentración → HOLD
+      - SELL con score positivo sin concentración → HOLD
     """
     intents: list[DecisionIntent] = []
 
@@ -269,82 +505,96 @@ def derive_decision_intents(
         if not ticker:
             continue
 
-        w_cur  = float(getattr(trade, "weight_current", 0.0) or 0.0)
-        w_opt  = float(getattr(trade, "weight_optimal", 0.0) or 0.0)
-        delta  = w_opt - w_cur
-        sig    = signals_by_ticker.get(ticker)
-        score  = sig.score      if sig else None
-        conv   = sig.conviction if sig else None
+        w_cur = float(getattr(trade, "weight_current", 0.0) or 0.0)
+        w_opt = float(getattr(trade, "weight_optimal", 0.0) or 0.0)
+        delta = w_opt - w_cur
+
+        sig = signals_by_ticker.get(ticker)
+        score = sig.score if sig else None
+        conv = sig.conviction if sig else None
 
         theoretical_ars = abs(delta) * portfolio_value_ars
 
-        # ── Clasificar acción ──────────────────────────────────────────────
         pos = current_positions.get(ticker)
         has_position = (pos is not None and pos.market_value_ars > 0) or w_cur > 0.001
 
+        # ── SELL_FULL ───────────────────────────────────────────────────────
         if w_opt <= sell_full_thresh and has_position:
-            action           = Action.SELL_FULL
-            reason_primary   = f"Target {w_opt:.1%} — liquidar posición completa"
-            reason_secondary = f"Score: {score:+.3f}" if score is not None else None
+            action, reason_primary, reason_secondary = _sell_guard(
+                score=score,
+                conv=conv,
+                w_cur=w_cur,
+                w_opt=w_opt,
+                delta=delta,
+            )
 
+            # Si el guard permitió vender, respetar liquidación completa.
+            if action == Action.SELL_PARTIAL:
+                action = Action.SELL_FULL
+                reason_primary = f"Target {w_opt:.1%} — liquidar posición completa"
+
+        # ── SELL_PARTIAL ────────────────────────────────────────────────────
         elif delta < -min_weight_delta:
-            if gate in ("BLOCKED",):
-                action         = Action.BLOCKED
+            if gate == "BLOCKED":
+                action = Action.BLOCKED
                 reason_primary = f"Gate {gate} — venta parcial bloqueada"
                 reason_secondary = f"Delta objetivo: {delta:+.1%}"
             else:
-                action           = Action.SELL_PARTIAL
-                reason_primary   = f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})"
-                reason_secondary = (
-                    "concentración excesiva" if w_cur > 0.30
-                    else "rebalanceo por score"
+                action, reason_primary, reason_secondary = _sell_guard(
+                    score=score,
+                    conv=conv,
+                    w_cur=w_cur,
+                    w_opt=w_opt,
+                    delta=delta,
                 )
 
+        # ── BUY ─────────────────────────────────────────────────────────────
         elif delta > min_weight_delta:
             if gate in ("BLOCKED", "CAUTIOUS"):
-                action           = Action.BLOCKED
-                reason_primary   = f"Gate {gate} — compra bloqueada"
+                action = Action.BLOCKED
+                reason_primary = f"Gate {gate} — compra bloqueada"
                 reason_secondary = f"Delta objetivo: {delta:+.1%} ({theoretical_ars:,.0f} ARS)"
             else:
-                action           = Action.BUY
-                reason_primary   = f"Aumentar posición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})"
-                reason_secondary = (
-                    f"score {score:+.3f}" if score is not None else None
+                action, reason_primary, reason_secondary = _buy_guard(
+                    score=score,
+                    w_cur=w_cur,
+                    w_opt=w_opt,
+                    theoretical_ars=theoretical_ars,
                 )
 
+        # ── HOLD / WATCH por delta chico ────────────────────────────────────
         else:
-            # Delta pequeño — HOLD o WATCH según la señal
-            if sig and sig.score >= 0.08 and sig.conviction >= 0.40:
-                action           = Action.WATCH
-                reason_primary   = "Señal positiva — delta insuficiente para operar"
+            if sig and sig.score >= SCORE_BUY_MIN and sig.conviction >= 0.40:
+                action = Action.WATCH
+                reason_primary = "Señal positiva — delta insuficiente para operar"
                 reason_secondary = f"score {sig.score:+.3f}, delta {delta:+.1%} < umbral"
             else:
-                action           = Action.HOLD
-                reason_primary   = f"Sin ventaja operativa clara (delta {delta:+.1%})"
+                action = Action.HOLD
+                reason_primary = f"Sin ventaja operativa clara (delta {delta:+.1%})"
                 reason_secondary = None
 
         intents.append(DecisionIntent(
-            ticker           = ticker,
-            action           = action,
-            reason_primary   = reason_primary,
-            reason_secondary = reason_secondary,
-            current_weight   = round(w_cur, 4),
-            target_weight    = round(w_opt, 4),
-            delta_weight     = round(delta, 4),
-            score            = round(score, 4) if score is not None else None,
-            conviction       = round(conv, 4)  if conv  is not None else None,
-            theoretical_ars  = round(theoretical_ars, 0),
+            ticker=ticker,
+            action=action,
+            reason_primary=reason_primary,
+            reason_secondary=reason_secondary,
+            current_weight=round(w_cur, 4),
+            target_weight=round(w_opt, 4),
+            delta_weight=round(delta, 4),
+            score=round(score, 4) if score is not None else None,
+            conviction=round(conv, 4) if conv is not None else None,
+            theoretical_ars=round(theoretical_ars, 0),
         ))
 
-    # Ordenar: SELL_FULL > SELL_PARTIAL > BUY > BLOCKED > WATCH > HOLD
     priority_order = {
-        Action.SELL_FULL:    0,
+        Action.SELL_FULL: 0,
         Action.SELL_PARTIAL: 1,
-        Action.BUY:          2,
-        Action.BLOCKED:      3,
-        Action.WATCH:        4,
-        Action.HOLD:         5,
+        Action.BUY: 2,
+        Action.BLOCKED: 3,
+        Action.WATCH: 4,
+        Action.HOLD: 5,
     }
+
     intents.sort(key=lambda x: priority_order.get(x.action, 9))
     return intents
 
@@ -354,50 +604,37 @@ def derive_decision_intents(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def reconcile_funding(
-    decisions:           list[DecisionIntent],
-    current_positions:   dict[str, PositionSnapshot],
-    cash_before:         float,
+    decisions: list[DecisionIntent],
+    current_positions: dict[str, PositionSnapshot],
+    cash_before: float,
     portfolio_value_ars: float,
-    gate:                str,
-    min_trade_ars:       float = MIN_TRADE_ARS,
-    fee_pct:             float = FEE_PCT,
-    slippage_pct:        float = SLIPPAGE_PCT,
-    # Candidatos externos del radar (adicionales al rebalanceo)
-    external_buys:       Optional[list[dict]] = None,
-    allow_new_entries:   bool = True,
+    gate: str,
+    min_trade_ars: float = MIN_TRADE_ARS,
+    fee_pct: float = FEE_PCT,
+    slippage_pct: float = SLIPPAGE_PCT,
+    external_buys: Optional[list[dict]] = None,
+    allow_new_entries: bool = True,
 ) -> ExecutionPlan:
     """
     Convierte decisiones conceptuales en órdenes ejecutables con cash real.
 
-    Cash accounting (determinístico):
-        net_cash_from_sells = gross_sell_ars × (1 - fee_pct - slippage_pct)
-        available           = cash_before + net_cash_from_sells
-        gross_buy_ars       = sum de compras ejecutadas (hasta agotar available)
-        fee_buy_ars         = gross_buy_ars × (fee_pct + slippage_pct)
-        cash_after          = available - gross_buy_ars - fee_buy_ars
-
-    Orden de construcción del plan:
-        1. SELL_FULL  (liquidaciones totales — obligatorias)
-        2. SELL_PARTIAL (recortes por rebalanceo/riesgo)
-        3. BUY core  (posiciones existentes con señal de aumento)
-        4. BUY nuevo del radar externo
-        5. Cash remanente
-
-    Reglas de funding:
-        - Si no hay cash suficiente para una BUY completa → ejecutar parcial
-        - Si monto parcial < min_trade_ars → no generar la orden (pending)
-        - Nunca generar orden BUY que deje cash_after < 0
+    Orden:
+      1. Ventas ejecutables
+      2. Cash disponible
+      3. Compras core ejecutables
+      4. Compras externas del radar
+      5. Bloqueadas / WATCH
+      6. Cash accounting
     """
     warnings: list[str] = []
-    sell_orders:    list[OrderIntent] = []
-    buy_orders:     list[OrderIntent] = []
+    sell_orders: list[OrderIntent] = []
+    buy_orders: list[OrderIntent] = []
     blocked_orders: list[OrderIntent] = []
-    pending_buys:   list[str]         = []
+    pending_buys: list[str] = []
 
-    cost_rate = fee_pct + slippage_pct  # tasa total por operación
+    cost_rate = fee_pct + slippage_pct
 
-    # ── PASO 1: Construir ventas ──────────────────────────────────────────────
-    # Ventas primero (siempre ejecutables — no dependen de cash)
+    # ── PASO 1: Ventas ejecutables ──────────────────────────────────────────
     sell_decisions = [
         d for d in decisions
         if d.action in (Action.SELL_FULL, Action.SELL_PARTIAL)
@@ -405,51 +642,48 @@ def reconcile_funding(
 
     for d in sell_decisions:
         amount = d.theoretical_ars
+
         if amount < min_trade_ars:
             warnings.append(
                 f"{d.ticker}: venta ignorada (${amount:,.0f} < mínimo ${min_trade_ars:,.0f})"
             )
             continue
 
-        ref_price = 0.0
         pos = current_positions.get(d.ticker)
-        if pos and pos.price > 0:
-            ref_price = pos.price
-
+        ref_price = pos.price if pos and pos.price > 0 else 0.0
         qty_est = amount / ref_price if ref_price > 0 else 0.0
 
         sell_orders.append(OrderIntent(
-            ticker          = d.ticker,
-            side            = OrderSide.SELL,
-            action          = d.action,
-            amount_ars      = round(amount, 0),
-            theoretical_ars = round(d.theoretical_ars, 0),
-            quantity_est    = round(qty_est, 4),
-            reference_price = ref_price,
-            reason          = d.reason_primary,
-            priority        = 0 if d.action == Action.SELL_FULL else 1,
-            funded_by       = [],
-            partial         = False,
+            ticker=d.ticker,
+            side=OrderSide.SELL,
+            action=d.action,
+            amount_ars=round(amount, 0),
+            theoretical_ars=round(d.theoretical_ars, 0),
+            quantity_est=round(qty_est, 4),
+            reference_price=ref_price,
+            reason=d.reason_primary,
+            priority=0 if d.action == Action.SELL_FULL else 1,
+            funded_by=[],
+            partial=False,
         ))
 
-    # ── PASO 2: Cash disponible post-ventas ───────────────────────────────────
+    # ── PASO 2: Cash disponible ─────────────────────────────────────────────
     gross_sell_ars = sum(o.amount_ars for o in sell_orders)
-    fee_sell_ars   = round(gross_sell_ars * cost_rate, 0)
-    net_sell_ars   = round(gross_sell_ars - fee_sell_ars, 0)
-    available      = cash_before + net_sell_ars
+    fee_sell_ars = round(gross_sell_ars * cost_rate, 0)
+    net_sell_ars = round(gross_sell_ars - fee_sell_ars, 0)
+    available = cash_before + net_sell_ars
 
     logger.info(
         f"[reconcile] cash_before={cash_before:,.0f} + ventas_netas={net_sell_ars:,.0f} "
         f"= disponible={available:,.0f}"
     )
 
-    # ── PASO 3: Construir compras en orden de prioridad ───────────────────────
+    # ── PASO 3: Compras core ejecutables ────────────────────────────────────
     buy_decisions = [d for d in decisions if d.action == Action.BUY]
-    # Prioridad: mayor convicción primero, luego mayor score
     buy_decisions.sort(
         key=lambda d: (
             -(d.conviction or 0.0),
-            -(d.score      or 0.0),
+            -(d.score or 0.0),
         )
     )
 
@@ -457,12 +691,11 @@ def reconcile_funding(
 
     for d in buy_decisions:
         wanted = d.theoretical_ars
-
-        # Limitar por cash disponible
         executable = min(wanted, available)
 
         if executable < min_trade_ars:
             pending_buys.append(d.ticker)
+
             if executable > 0:
                 warnings.append(
                     f"{d.ticker}: compra reducida a ${executable:,.0f} "
@@ -475,22 +708,25 @@ def reconcile_funding(
                 )
             continue
 
-        is_partial = executable < wanted - 1  # tolerancia $1
-        fee_buy    = round(executable * cost_rate, 0)
+        is_partial = executable < wanted - 1
+        fee_buy = round(executable * cost_rate, 0)
 
         buy_orders.append(OrderIntent(
-            ticker          = d.ticker,
-            side            = OrderSide.BUY,
-            action          = d.action,
-            amount_ars      = round(executable, 0),
-            theoretical_ars = round(wanted, 0),
-            quantity_est    = 0.0,   # se completa con precios reales
-            reference_price = 0.0,
-            reason          = d.reason_primary
-                              + (f" (parcial: ${executable:,.0f} de ${wanted:,.0f})" if is_partial else ""),
-            priority        = 2,
-            funded_by       = list(sell_tickers),
-            partial         = is_partial,
+            ticker=d.ticker,
+            side=OrderSide.BUY,
+            action=d.action,
+            amount_ars=round(executable, 0),
+            theoretical_ars=round(wanted, 0),
+            quantity_est=0.0,
+            reference_price=0.0,
+            reason=d.reason_primary
+                   + (
+                       f" (parcial: ${executable:,.0f} de ${wanted:,.0f})"
+                       if is_partial else ""
+                   ),
+            priority=2,
+            funded_by=list(sell_tickers),
+            partial=is_partial,
         ))
 
         if is_partial:
@@ -501,34 +737,42 @@ def reconcile_funding(
 
         available -= (executable + fee_buy)
 
-    # ── PASO 4: Entradas externas del radar (si hay cash disponible) ──────────
+    # ── PASO 4: Entradas externas del radar ─────────────────────────────────
     if allow_new_entries and external_buys and gate == "NORMAL":
         for ext in external_buys:
-            ticker  = str(ext.get("ticker", "")).upper()
-            wanted  = float(ext.get("amount_ars", 0.0) or 0.0)
-            score   = float(ext.get("score", 0.0) or 0.0)
-            reason  = ext.get("reason", "Candidato radar externo")
+            ticker = str(ext.get("ticker", "")).upper()
+            wanted = float(ext.get("amount_ars", 0.0) or 0.0)
+            score = float(ext.get("score", 0.0) or 0.0)
+            reason = ext.get("reason", "Candidato radar externo")
+
+            if score < SCORE_BUY_MIN:
+                pending_buys.append(ticker)
+                warnings.append(
+                    f"{ticker} (radar): compra bloqueada por score insuficiente {score:+.3f}"
+                )
+                continue
 
             executable = min(wanted, available)
+
             if executable < min_trade_ars:
                 pending_buys.append(ticker)
                 continue
 
             is_partial = executable < wanted - 1
-            fee_buy    = round(executable * cost_rate, 0)
+            fee_buy = round(executable * cost_rate, 0)
 
             buy_orders.append(OrderIntent(
-                ticker          = ticker,
-                side            = OrderSide.BUY,
-                action          = Action.BUY,
-                amount_ars      = round(executable, 0),
-                theoretical_ars = round(wanted, 0),
-                quantity_est    = 0.0,
-                reference_price = 0.0,
-                reason          = reason + (" (parcial)" if is_partial else ""),
-                priority        = 3,
-                funded_by       = list(sell_tickers),
-                partial         = is_partial,
+                ticker=ticker,
+                side=OrderSide.BUY,
+                action=Action.BUY,
+                amount_ars=round(executable, 0),
+                theoretical_ars=round(wanted, 0),
+                quantity_est=0.0,
+                reference_price=0.0,
+                reason=reason + (" (parcial)" if is_partial else ""),
+                priority=3,
+                funded_by=list(sell_tickers),
+                partial=is_partial,
             ))
 
             if is_partial:
@@ -538,70 +782,89 @@ def reconcile_funding(
 
             available -= (executable + fee_buy)
 
-    # ── PASO 5: Órdenes bloqueadas por gate ───────────────────────────────────
+    # ── PASO 5: Bloqueadas / WATCH ──────────────────────────────────────────
     for d in decisions:
-        if d.action == Action.BLOCKED:
+        if d.action in (Action.BLOCKED, Action.WATCH):
             blocked_orders.append(OrderIntent(
-                ticker          = d.ticker,
-                side            = OrderSide.BUY if d.delta_weight > 0 else OrderSide.SELL,
-                action          = Action.BLOCKED,
-                amount_ars      = 0.0,
-                theoretical_ars = d.theoretical_ars,
-                quantity_est    = 0.0,
-                reference_price = 0.0,
-                reason          = d.reason_primary,
-                priority        = 9,
+                ticker=d.ticker,
+                side=OrderSide.BUY if d.delta_weight > 0 else OrderSide.SELL,
+                action=d.action,
+                amount_ars=0.0,
+                theoretical_ars=d.theoretical_ars,
+                quantity_est=0.0,
+                reference_price=0.0,
+                reason=d.reason_primary,
+                priority=9,
             ))
 
-    # ── PASO 6: Cash accounting final ─────────────────────────────────────────
+    # ── PASO 6: Cash accounting ─────────────────────────────────────────────
     gross_buy_ars = sum(o.amount_ars for o in buy_orders)
-    fee_buy_ars   = round(gross_buy_ars * cost_rate, 0)
-    cash_after    = round(cash_before + net_sell_ars - gross_buy_ars - fee_buy_ars, 0)
+    fee_buy_ars = round(gross_buy_ars * cost_rate, 0)
+    cash_after = round(cash_before + net_sell_ars - gross_buy_ars - fee_buy_ars, 0)
 
-    if cash_after < -100:  # tolerancia $100 por redondeos
+    if cash_after < -100:
         warnings.append(
-            f"ALERTA: cash_after={cash_after:,.0f} es negativo — "
-            f"revisar cálculo de funding"
+            f"ALERTA: cash_after={cash_after:,.0f} es negativo — revisar funding"
         )
 
-    # ── PASO 7: Resumen ────────────────────────────────────────────────────────
+    warnings = list(dict.fromkeys(warnings))
+
+    # ── PASO 7: Resumen ─────────────────────────────────────────────────────
     n_sells = len(sell_orders)
-    n_buys  = len(buy_orders)
+    n_buys = len(buy_orders)
+    n_blocked = len([o for o in blocked_orders if o.action == Action.BLOCKED])
+    n_watch = len([o for o in blocked_orders if o.action == Action.WATCH])
+
     summary_parts = []
+
     if n_sells:
         summary_parts.append(
-            f"{n_sells} venta{'s' if n_sells>1 else ''} por ${gross_sell_ars:,.0f}"
+            f"{n_sells} venta{'s' if n_sells > 1 else ''} por ${gross_sell_ars:,.0f}"
         )
+
     if n_buys:
         summary_parts.append(
-            f"{n_buys} compra{'s' if n_buys>1 else ''} por ${gross_buy_ars:,.0f}"
+            f"{n_buys} compra{'s' if n_buys > 1 else ''} por ${gross_buy_ars:,.0f}"
         )
+
+    if n_blocked:
+        summary_parts.append(
+            f"{n_blocked} bloqueada{'s' if n_blocked > 1 else ''} por guardias"
+        )
+
+    if n_watch:
+        summary_parts.append(
+            f"{n_watch} en WATCH por señal insuficiente"
+        )
+
     if pending_buys:
-        summary_parts.append(f"{len(pending_buys)} compra(s) pendiente(s) por funding")
+        summary_parts.append(f"{len(pending_buys)} pendiente(s) por funding/señal")
+
     summary = " | ".join(summary_parts) if summary_parts else "Sin órdenes — mantener"
 
     logger.info(
         f"[reconcile] ventas=${gross_sell_ars:,.0f} compras=${gross_buy_ars:,.0f} "
-        f"cash_after=${cash_after:,.0f} warnings={len(warnings)}"
+        f"bloqueadas={n_blocked} watch={n_watch} cash_after=${cash_after:,.0f} "
+        f"warnings={len(warnings)}"
     )
 
     return ExecutionPlan(
-        decisions       = decisions,
-        sell_orders     = sell_orders,
-        buy_orders      = buy_orders,
-        blocked_orders  = blocked_orders,
-        cash_before     = round(cash_before, 0),
-        gross_sell_ars  = round(gross_sell_ars, 0),
-        fee_sell_ars    = round(fee_sell_ars, 0),
-        net_sell_ars    = round(net_sell_ars, 0),
-        gross_buy_ars   = round(gross_buy_ars, 0),
-        fee_buy_ars     = round(fee_buy_ars, 0),
-        cash_after      = round(cash_after, 0),
-        feasible        = cash_after >= 0,
-        gate            = gate,
-        summary         = summary,
-        warnings        = warnings,
-        pending_buys    = pending_buys,
+        decisions=decisions,
+        sell_orders=sell_orders,
+        buy_orders=buy_orders,
+        blocked_orders=blocked_orders,
+        cash_before=round(cash_before, 0),
+        gross_sell_ars=round(gross_sell_ars, 0),
+        fee_sell_ars=round(fee_sell_ars, 0),
+        net_sell_ars=round(net_sell_ars, 0),
+        gross_buy_ars=round(gross_buy_ars, 0),
+        fee_buy_ars=round(fee_buy_ars, 0),
+        cash_after=round(cash_after, 0),
+        feasible=cash_after >= 0,
+        gate=gate,
+        summary=summary,
+        warnings=warnings,
+        pending_buys=pending_buys,
     )
 
 
@@ -611,22 +874,23 @@ def reconcile_funding(
 
 def build_signals_from_synthesis(results: list) -> dict[str, AssetSignal]:
     """
-    Construye el dict ticker → AssetSignal desde los SynthesisResult actuales.
+    Construye dict ticker → AssetSignal desde SynthesisResult actuales.
     Bridge para no romper el pipeline existente.
     """
     out: dict[str, AssetSignal] = {}
+
     for r in results or []:
         ticker = str(getattr(r, "ticker", "") or "").upper()
         if not ticker:
             continue
 
         score = float(getattr(r, "final_score", getattr(r, "score", 0.0)) or 0.0)
-        conv  = getattr(r, "conviction", getattr(r, "confidence", 0.0)) or 0.0
-        conv  = float(conv)
+        conv = getattr(r, "conviction", getattr(r, "confidence", 0.0)) or 0.0
+        conv = float(conv)
+
         if conv > 1.0:
             conv /= 100.0
 
-        # Extraer capas individuales
         layers = {}
         for layer in getattr(r, "layers", []) or []:
             name = getattr(layer, "name", None)
@@ -634,35 +898,40 @@ def build_signals_from_synthesis(results: list) -> dict[str, AssetSignal]:
                 layers[name] = float(getattr(layer, "weighted", 0.0))
 
         out[ticker] = AssetSignal(
-            ticker     = ticker,
-            score      = round(score, 4),
-            conviction = round(conv, 4),
-            technical  = round(layers.get("technical", 0.0), 4),
-            macro      = round(layers.get("macro", 0.0), 4),
-            sentiment  = round(layers.get("sentiment", 0.0), 4),
+            ticker=ticker,
+            score=round(score, 4),
+            conviction=round(conv, 4),
+            technical=round(layers.get("technical", 0.0), 4),
+            macro=round(layers.get("macro", 0.0), 4),
+            sentiment=round(layers.get("sentiment", 0.0), 4),
         )
+
     return out
 
 
 def build_positions_from_snapshot(
-    positions_raw:    list[dict],
-    portfolio_value:  float,
+    positions_raw: list[dict],
+    portfolio_value: float,
 ) -> dict[str, PositionSnapshot]:
-    """Construye dict ticker → PositionSnapshot desde las posiciones del DB."""
+    """Construye dict ticker → PositionSnapshot desde posiciones del DB."""
     out: dict[str, PositionSnapshot] = {}
     denom = portfolio_value if portfolio_value > 0 else 1.0
+
     for p in positions_raw or []:
         ticker = str(p.get("ticker", "") or "").upper()
         if not ticker:
             continue
-        mv     = float(p.get("market_value", 0.0) or 0.0)
-        price  = float(p.get("current_price", 0.0) or 0.0)
-        qty    = float(p.get("quantity", 0.0) or 0.0)
+
+        mv = float(p.get("market_value", 0.0) or 0.0)
+        price = float(p.get("current_price", 0.0) or 0.0)
+        qty = float(p.get("quantity", 0.0) or 0.0)
+
         out[ticker] = PositionSnapshot(
-            ticker           = ticker,
-            quantity         = qty,
-            price            = price,
-            market_value_ars = mv,
-            current_weight   = round(mv / denom, 4),
+            ticker=ticker,
+            quantity=qty,
+            price=price,
+            market_value_ars=mv,
+            current_weight=round(mv / denom, 4),
         )
+
     return out

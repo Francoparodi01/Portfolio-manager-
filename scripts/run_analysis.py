@@ -75,10 +75,13 @@ logger = get_logger(__name__)
 
 LAYER_WEIGHTS = {"technical": 0.30, "macro": 0.30, "risk": 0.25, "sentiment": 0.15}
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # UTILIDADES DE RENDER
 # ══════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass
+from typing import Optional
+
 
 def _get(obj, name, default=None):
     if isinstance(obj, dict):
@@ -100,35 +103,26 @@ def _pct(x: float) -> str:
         return "0.0%"
 
 
-def _conv_label(x: float) -> str:
-    x = float(x or 0.0)
-    if x >= 0.70: return "ALTA"
-    if x >= 0.45: return "MEDIA"
-    if x >= 0.25: return "BAJA"
-    return "MUY BAJA"
-
-
-def _bar(x: float) -> str:
-    n = max(0, min(5, round(float(x or 0.0) * 5)))
-    return "█" * n + "░" * (5 - n)
-
-
 def _rankdata(values: np.ndarray) -> np.ndarray:
     arr = np.asarray(values, dtype=float)
     n = arr.size
     if n == 0:
         return np.array([], dtype=float)
+
     order = np.argsort(arr, kind="mergesort")
     sorted_vals = arr[order]
     ranks_sorted = np.zeros(n, dtype=float)
+
     i = 0
     while i < n:
         j = i
         while j + 1 < n and sorted_vals[j + 1] == sorted_vals[i]:
             j += 1
+
         avg_rank = (i + j + 2) / 2.0
         ranks_sorted[i:j + 1] = avg_rank
         i = j + 1
+
     ranks = np.empty(n, dtype=float)
     ranks[order] = ranks_sorted
     return ranks
@@ -137,26 +131,229 @@ def _rankdata(values: np.ndarray) -> np.ndarray:
 def _safe_corr(x_vals: list[float], y_vals: list[float]) -> float | None:
     if len(x_vals) < 5 or len(y_vals) < 5:
         return None
+
     x = np.asarray(x_vals, dtype=float)
     y = np.asarray(y_vals, dtype=float)
+
     if x.size != y.size or x.size < 5:
         return None
+
     if np.std(x) < 1e-12 or np.std(y) < 1e-12:
         return None
+
     corr = float(np.corrcoef(x, y)[0, 1])
+
     if not np.isfinite(corr):
         return None
+
     return corr
 
 
 def _ic_label(ic: float | None) -> str:
     if ic is None:
         return "SIN DATOS"
+
     a = abs(ic)
-    if a >= 0.10: return "FUERTE"
-    if a >= 0.05: return "MODERADO"
-    if a >= 0.02: return "DÉBIL"
+
+    if a >= 0.10:
+        return "FUERTE"
+    if a >= 0.05:
+        return "MODERADO"
+    if a >= 0.02:
+        return "DÉBIL"
+
     return "NULO"
+
+
+@dataclass
+class ICTextRegime:
+    label: str
+    icon: str
+    note: str
+
+
+def _build_ic_text_regime(
+    ic_5d: Optional[float] = None,
+    ic_10d: Optional[float] = None,
+) -> ICTextRegime:
+    """
+    Régimen textual de IC.
+
+    Importante:
+    Esto NO cambia todavía los thresholds del planner.
+    Solo explica el comportamiento conservador cuando el IC viene negativo.
+    """
+    values = [x for x in (ic_5d, ic_10d) if x is not None]
+
+    if not values:
+        return ICTextRegime(
+            label="SIN DATOS",
+            icon="⚪",
+            note="IC no disponible: el sistema mantiene postura conservadora.",
+        )
+
+    worst_ic = min(values)
+
+    if worst_ic < -0.10:
+        return ICTextRegime(
+            label="CAUTELA ALTA",
+            icon="🔴",
+            note=(
+                "IC negativo fuerte: el sistema evita rotaciones con señales débiles "
+                "y prioriza mantener posiciones salvo señal clara."
+            ),
+        )
+
+    if worst_ic < -0.05:
+        return ICTextRegime(
+            label="CAUTELA",
+            icon="🟡",
+            note=(
+                "IC negativo: el sistema reduce agresividad y evita operar señales débiles."
+            ),
+        )
+
+    if worst_ic < 0:
+        return ICTextRegime(
+            label="NEUTRAL CON ADVERTENCIA",
+            icon="🟡",
+            note="IC levemente negativo: las señales se interpretan con cautela.",
+        )
+
+    return ICTextRegime(
+        label="NORMAL",
+        icon="✅",
+        note="IC positivo: el sistema mantiene umbrales normales de operación.",
+    )
+
+
+def _classify_signal_label(score: Optional[float]) -> str:
+    """
+    Convierte score numérico en label operativo para mostrar en el reporte.
+
+    Score = dirección/fuerza cuantitativa.
+    Señal = interpretación operativa.
+    """
+    if score is None:
+        return "SIN DATOS"
+
+    if score >= 0.12:
+        return "POSITIVA FUERTE"
+    if score >= 0.08:
+        return "POSITIVA OPERABLE"
+    if score >= 0.05:
+        return "POSITIVA DÉBIL"
+    if score > -0.05:
+        return "NEUTRAL / RUIDO"
+    if score > -0.08:
+        return "NEGATIVA DÉBIL"
+
+    return "NEGATIVA OPERABLE"
+
+
+def _agreement_bar(value: float, width: int = 5) -> str:
+    value = max(0.0, min(1.0, float(value or 0.0)))
+    filled = round(value * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _agreement_label(agreement: float) -> str:
+    if agreement >= 0.75:
+        return "ALTO"
+    if agreement >= 0.45:
+        return "PARCIAL"
+    return "BAJO"
+
+
+def _calculate_agreement_from_layers(
+    technical: float = 0.0,
+    macro: float = 0.0,
+    sentiment: float = 0.0,
+    momentum: Optional[float] = None,
+    datos_frescos: bool = True,
+) -> float:
+    """
+    Calcula 'Acuerdo capas' sin inflarlo artificialmente.
+
+    No mide fuerza operativa.
+    Mide cuántas capas acompañan positivamente.
+
+    Sistema:
+    - Técnico positivo: +30
+    - Macro positivo: +20
+    - Momentum positivo: +20, si existe
+    - Sentiment positivo: +10, si existe y no es 0
+    - Datos no frescos: -20
+
+    Base:
+    - Técnico + macro: 50
+    - Si hay momentum: +20
+    - Si hay sentiment real: +10
+    """
+    points = 0
+    base = 50
+
+    if technical > 0:
+        points += 30
+
+    if macro > 0:
+        points += 20
+
+    if momentum is not None:
+        base += 20
+        if momentum > 0:
+            points += 20
+
+    # sentiment = 0.0 se interpreta como "sin señal", no como positivo.
+    if sentiment is not None and abs(sentiment) > 0.0001:
+        base += 10
+        if sentiment > 0:
+            points += 10
+
+    if not datos_frescos:
+        points -= 20
+
+    if base <= 0:
+        return 0.0
+
+    return max(0.0, min(1.0, points / base))
+
+
+def _render_signal_line(
+    score: Optional[float],
+    technical: float = 0.0,
+    macro: float = 0.0,
+    sentiment: float = 0.0,
+    momentum: Optional[float] = None,
+) -> str:
+    """
+    Nueva línea de señal.
+
+    Antes:
+      Score: +0.015 | Conv: ALTA (100%) [█████]
+
+    Ahora:
+      Score: +0.015 | Señal: NEUTRAL / RUIDO | Acuerdo capas: PARCIAL (40%) [██░░░]
+    """
+    signal_label = _classify_signal_label(score)
+
+    agreement = _calculate_agreement_from_layers(
+        technical=technical,
+        macro=macro,
+        sentiment=sentiment,
+        momentum=momentum,
+    )
+
+    agreement_pct = agreement * 100
+    agreement_lbl = _agreement_label(agreement)
+    score_txt = "N/A" if score is None else f"{score:+.3f}"
+
+    return (
+        f"Score: <code>{score_txt}</code> | "
+        f"Señal: <b>{signal_label}</b> | "
+        f"Acuerdo capas: <b>{agreement_lbl}</b> "
+        f"({agreement_pct:.0f}%) [{_agreement_bar(agreement)}]"
+    )
 
 
 def _layer_map(result) -> dict:
@@ -174,17 +371,26 @@ def _layer_weighted(result, name: str) -> float:
 
 
 def _component_reason(result) -> tuple[str, str]:
-    tech  = _layer_weighted(result, "technical")
+    tech = _layer_weighted(result, "technical")
     macro = _layer_weighted(result, "macro")
-    sent  = _layer_weighted(result, "sentiment")
+    sent = _layer_weighted(result, "sentiment")
 
     positives, negatives = [], []
-    if tech  > 0.02:  positives.append("técnico")
-    elif tech  < -0.02: negatives.append("técnico")
-    if macro > 0.02:  positives.append("macro")
-    elif macro < -0.02: negatives.append("macro")
-    if sent  > 0.02:  positives.append("sentiment")
-    elif sent  < -0.02: negatives.append("sentiment")
+
+    if tech > 0.02:
+        positives.append("técnico")
+    elif tech < -0.02:
+        negatives.append("técnico")
+
+    if macro > 0.02:
+        positives.append("macro")
+    elif macro < -0.02:
+        negatives.append("macro")
+
+    if sent > 0.02:
+        positives.append("sentiment")
+    elif sent < -0.02:
+        negatives.append("sentiment")
 
     if positives and negatives:
         lectura = f"{positives[0]} ayuda, pero {negatives[0]} frena"
@@ -195,17 +401,32 @@ def _component_reason(result) -> tuple[str, str]:
     else:
         lectura = "señal plana sin ventaja clara"
 
-    mags = {"technical": abs(tech), "macro": abs(macro), "sentiment": abs(sent)}
-    top  = max(mags, key=mags.get)
-    top_val = {"technical": tech, "macro": macro, "sentiment": sent}[top]
-    if top_val > 0.02:   motivo = f"{top} favorable"
-    elif top_val < -0.02: motivo = f"{top} en contra"
-    else:                 motivo = "sin ventaja clara"
+    mags = {
+        "technical": abs(tech),
+        "macro": abs(macro),
+        "sentiment": abs(sent),
+    }
+
+    top = max(mags, key=mags.get)
+    top_val = {
+        "technical": tech,
+        "macro": macro,
+        "sentiment": sent,
+    }[top]
+
+    if top_val > 0.02:
+        motivo = f"{top} favorable"
+    elif top_val < -0.02:
+        motivo = f"{top} en contra"
+    else:
+        motivo = "sin ventaja clara"
+
     return lectura, motivo
 
 
 def _current_weights(positions: list[dict], total_ars: float) -> dict[str, float]:
     denom = float(total_ars) if total_ars else 1.0
+
     return {
         str(p.get("ticker", "")).upper(): float(p.get("market_value", 0.0) or 0.0) / denom
         for p in positions or []
@@ -215,7 +436,9 @@ def _current_weights(positions: list[dict], total_ars: float) -> dict[str, float
 
 def _normalize_conviction(x) -> float:
     try:
-        if x is None: return 0.0
+        if x is None:
+            return 0.0
+
         x = float(x)
         return max(0.0, min(1.0, x / 100.0 if x > 1.0 else x))
     except Exception:
@@ -223,10 +446,15 @@ def _normalize_conviction(x) -> float:
 
 
 def _extract_conviction(result) -> float:
+    """
+    Se mantiene por compatibilidad con radar / ordenamientos viejos.
+    Ya no se muestra como 'Conv' en cartera actual.
+    """
     for key in ("conviction", "confidence", "confidence_pct", "conviction_pct"):
         val = _get(result, key, None)
         if val is not None:
             return _normalize_conviction(val)
+
     return 0.0
 
 
@@ -544,9 +772,9 @@ def render_report(
     ic_metrics:       dict | None = None,
     execution_plan:   ExecutionPlan | None = None,
 ) -> str:
-    plan  = execution_plan
-    gate  = plan.gate if plan else "NORMAL"
-    h     = []
+    plan = execution_plan
+    gate = plan.gate if plan else "NORMAL"
+    h = []
 
     # ── Header ────────────────────────────────────────────────────────────────
     h.append("🧠 <b>ANÁLISIS SEMANAL — SISTEMA CUANTITATIVO</b>")
@@ -557,6 +785,7 @@ def render_report(
 
     # ── RESUMEN EJECUTIVO ─────────────────────────────────────────────────────
     h.append("<b>RESUMEN EJECUTIVO</b>")
+
     if gate == "BLOCKED":
         h.append("🔴 Sistema en modo bloqueado — solo se ejecutan stops urgentes.")
     elif gate in ("CAUTIOUS", "DEFENSIVE"):
@@ -566,58 +795,79 @@ def render_report(
 
     if plan:
         h.append(plan.summary)
-        # Warnings del plan (máx 3 para no saturar)
+
         for w in plan.warnings[:3]:
             h.append(f"⚠️ {escape(w)}")
     else:
         h.append("Sin plan de ejecución disponible.")
+
     h.append("")
 
     # ── INFORMATION COEFFICIENT ────────────────────────────────────────────────
     ic_data = ic_metrics or {}
+
     if ic_data.get("has_data"):
         h.append("<b>INFORMATION COEFFICIENT (IC)</b>")
+
         by_h = ic_data.get("by_horizon", {}) or {}
+        ic_5d = None
+        ic_10d = None
+
         for hz in ("5d", "10d", "20d"):
-            v     = by_h.get(hz, {})
+            v = by_h.get(hz, {})
             n_obs = int(v.get("n_obs", 0) or 0)
-            n_tk  = int(v.get("n_tickers", 0) or 0)
-            ic    = v.get("ic", None)
-            ric   = v.get("rank_ic", None)
+            n_tk = int(v.get("n_tickers", 0) or 0)
+            ic = v.get("ic", None)
+            ric = v.get("rank_ic", None)
+
             if ic is None or n_obs < 5:
                 continue
+
+            if hz == "5d":
+                ic_5d = ic
+            elif hz == "10d":
+                ic_10d = ic
+
             q = v.get("quality", "NULO")
+
             h.append(
-                f"{hz}: IC <code>{ic:+.3f}</code> | Rank IC <code>{(ric or 0.0):+.3f}</code> "
-                f"| n={n_obs} ({n_tk} tickers) | <b>{q}</b>"
+                f"{hz}: IC <code>{ic:+.3f}</code> | "
+                f"Rank IC <code>{(ric or 0.0):+.3f}</code> | "
+                f"n={n_obs} ({n_tk} tickers) | <b>{q}</b>"
             )
+
+        ic_regime = _build_ic_text_regime(ic_5d=ic_5d, ic_10d=ic_10d)
+
         h.append("IC > 0 indica poder predictivo direccional.")
+        h.append(
+            f"{ic_regime.icon} Régimen IC: <b>{ic_regime.label}</b> — "
+            f"{escape(ic_regime.note)}"
+        )
         h.append("")
 
     # ── ACCIÓN PRINCIPAL — desde plan.main_action, NUNCA del optimizer ────────
     h.append("<b>ACCIÓN PRINCIPAL</b>")
+
     if plan and plan.main_action:
         main_order = plan.main_action
-        verb       = "VENDER" if main_order.side.value == "SELL" else "COMPRAR"
-        icon       = "🔴" if main_order.side.value == "SELL" else "🟢"
+        verb = "VENDER" if main_order.side.value == "SELL" else "COMPRAR"
+        icon = "🔴" if main_order.side.value == "SELL" else "🟢"
         partial_tag = " <i>(parcial)</i>" if main_order.partial else ""
 
         h.append(
             f"{icon} <b>{verb} {main_order.ticker} "
             f"({_money_ars(main_order.amount_ars)}){partial_tag}</b>"
         )
-        # Razón de la orden
         h.append(f"   {escape(main_order.reason)}")
 
-        # Delta de peso
         d = next((x for x in plan.decisions if x.ticker == main_order.ticker), None)
+
         if d:
             h.append(
                 f"   Peso actual: <b>{_pct(d.current_weight)}</b> → "
                 f"objetivo: <b>{_pct(d.target_weight)}</b>"
             )
 
-        # Advertencia de parcialidad
         if main_order.partial and main_order.theoretical_ars > main_order.amount_ars:
             h.append(
                 f"   💡 Target teórico: {_money_ars(main_order.theoretical_ars)} — "
@@ -627,48 +877,62 @@ def render_report(
     else:
         h.append("🟡 <b>SIN ACCIÓN ACTIVA</b>")
         h.append("   No hay órdenes ejecutables en este momento.")
+
     h.append("")
 
     # ── RESULTADO ESPERADO — del plan cash accounting ─────────────────────────
     h.append("💵 <b>Resultado esperado</b>")
+
     if plan:
         h.append(f"   Ventas: <b>{_money_ars(plan.gross_sell_ars)}</b>")
+
         if gate in ("CAUTIOUS", "BLOCKED") and plan.gross_sell_ars > 0:
             h.append(
-                f"   Compras: <b>$0 ARS</b> (gate {gate} — solo reducciones activas)"
+                f"   Compras: <b>$0 ARS</b> "
+                f"(gate {gate} — solo reducciones activas)"
             )
         else:
             h.append(f"   Compras: <b>{_money_ars(plan.gross_buy_ars)}</b>")
+
         total_fees = plan.fee_sell_ars + plan.fee_buy_ars
+
         if total_fees > 500:
             h.append(f"   Fees estimados: {_money_ars(total_fees)}")
+
         h.append(f"   Cash luego del ajuste: <b>{_money_ars(plan.cash_after)}</b>")
+
         if plan.pending_buys:
             h.append(
                 f"   ⏳ Compras pendientes por funding: {', '.join(plan.pending_buys)}"
             )
     else:
         h.append(f"   Sin plan disponible — cash actual: {_money_ars(cash_ars)}")
+
     h.append("")
 
     # ── PLAN DE ROTACIÓN — SOLO sell_orders + buy_orders del plan ─────────────
     if plan and (plan.sell_orders or plan.buy_orders):
         h.append("📋 <b>PLAN DE ROTACIÓN</b>")
+
         step = 1
+
         for o in sorted(plan.sell_orders, key=lambda x: x.priority):
             h.append(
                 f"   {step}. 🔴 Vender <b>{o.ticker}</b>: "
                 f"-{_money_ars(o.amount_ars)}"
             )
+
             if o.action == Action.SELL_FULL:
-                h.append(f"      → Liquidación total (target 0%)")
+                h.append("      → Liquidación total (target 0%)")
+
             step += 1
 
         for o in sorted(plan.buy_orders, key=lambda x: x.priority):
-            ext_icon    = "🌍" if o.priority >= 3 else "📈"
+            ext_icon = "🌍" if o.priority >= 3 else "📈"
             partial_tag = " <i>(parcial)</i>" if o.partial else ""
-            d           = next((x for x in plan.decisions if x.ticker == o.ticker), None)
-            score_tag   = f" | score {d.score:+.3f}" if d and d.score is not None else ""
+            d = next((x for x in plan.decisions if x.ticker == o.ticker), None)
+            score_tag = f" | score {d.score:+.3f}" if d and d.score is not None else ""
+
             h.append(
                 f"   {step}. {ext_icon} Comprar <b>{o.ticker}</b>: "
                 f"+{_money_ars(o.amount_ars)}{partial_tag}{score_tag}"
@@ -680,12 +944,37 @@ def render_report(
 
         if plan.blocked_orders:
             h.append("")
-            h.append("   🚫 <b>Bloqueadas por gate:</b>")
+            h.append("   🚫 <b>Bloqueadas / WATCH por guardias:</b>")
+
             for o in plan.blocked_orders[:3]:
+                action_name = o.action.value if hasattr(o.action, "value") else str(o.action)
+                icon = "🔵" if action_name == "WATCH" else "⛔"
+
                 h.append(
-                    f"      {o.ticker}: {_money_ars(o.theoretical_ars)} teórico — "
+                    f"      {icon} {o.ticker}: {action_name} — "
+                    f"{_money_ars(o.theoretical_ars)} teórico — "
                     f"{escape(o.reason)}"
                 )
+
+        h.append("")
+
+    elif plan and plan.blocked_orders:
+        h.append("📋 <b>PLAN DE ROTACIÓN</b>")
+        h.append("   Sin órdenes ejecutables.")
+
+        h.append("")
+        h.append("   🚫 <b>Bloqueadas / WATCH por guardias:</b>")
+
+        for o in plan.blocked_orders[:5]:
+            action_name = o.action.value if hasattr(o.action, "value") else str(o.action)
+            icon = "🔵" if action_name == "WATCH" else "⛔"
+
+            h.append(
+                f"      {icon} {o.ticker}: {action_name} — "
+                f"{_money_ars(o.theoretical_ars)} teórico — "
+                f"{escape(o.reason)}"
+            )
+
         h.append("")
 
     elif plan and gate in ("CAUTIOUS", "BLOCKED") and plan.gross_sell_ars > 0:
@@ -701,154 +990,187 @@ def render_report(
     h.append("<b>CARTERA ACTUAL</b>")
     h.append("")
 
-    current_w    = _current_weights(positions, total_ars)
+    current_w = _current_weights(positions, total_ars)
     decision_map = {d.ticker: d for d in (plan.decisions if plan else [])}
 
-    # Ordenar por action priority, luego por score desc
     action_priority = {
-        Action.SELL_FULL.value:    0,
+        Action.SELL_FULL.value: 0,
         Action.SELL_PARTIAL.value: 1,
-        Action.BUY.value:          2,
-        Action.BLOCKED.value:      3,
-        Action.WATCH.value:        4,
-        Action.HOLD.value:         5,
+        Action.BUY.value: 2,
+        Action.BLOCKED.value: 3,
+        Action.WATCH.value: 4,
+        Action.HOLD.value: 5,
     }
 
-    sorted_results = sorted(
-        results or [],
-        key=lambda r: (
-            action_priority.get(
-                decision_map.get(
-                    str(getattr(r, "ticker", "")).upper(), None
-                ) and decision_map[str(getattr(r, "ticker", "")).upper()].action.value or "HOLD",
-                5
-            ),
-            -abs(float(getattr(r, "final_score", 0) or 0)),
+    def _result_priority(r):
+        ticker = str(getattr(r, "ticker", "")).upper()
+        d = decision_map.get(ticker)
+        action_value = d.action.value if d else "HOLD"
+        score_value = abs(float(getattr(r, "final_score", 0) or 0))
+        return (
+            action_priority.get(action_value, 5),
+            -score_value,
         )
-    )
+
+    sorted_results = sorted(results or [], key=_result_priority)
 
     for r in sorted_results:
-        ticker     = str(getattr(r, "ticker", "")).upper()
-        score      = float(getattr(r, "final_score", getattr(r, "score", 0)) or 0)
-        conviction = _extract_conviction(r)
+        ticker = str(getattr(r, "ticker", "")).upper()
+        score = float(getattr(r, "final_score", getattr(r, "score", 0)) or 0)
         lectura, _ = _component_reason(r)
-        d          = decision_map.get(ticker)
+        d = decision_map.get(ticker)
 
-        cw          = float(current_w.get(ticker, 0.0))
-        tw          = d.target_weight if d else cw
-        action_str  = d.action.value if d else "HOLD"
-        icon        = _action_icon(d.action if d else Action.HOLD)
+        cw = float(current_w.get(ticker, 0.0))
+        tw = d.target_weight if d else cw
+        action_str = d.action.value if d else "HOLD"
+        icon = _action_icon(d.action if d else Action.HOLD)
 
-        # Monto ejecutable real (no teórico)
+        tech = _layer_weighted(r, "technical")
+        macro = _layer_weighted(r, "macro")
+        sent = _layer_weighted(r, "sentiment")
+
         ars_str = ""
+
         if plan:
             for o in plan.sell_orders + plan.buy_orders:
                 if o.ticker == ticker:
                     verb = "-" if o.side.value == "SELL" else "+"
                     ars_str = f" → {verb}{_money_ars(o.amount_ars)}"
+
                     if o.partial:
                         ars_str += " <i>(parcial)</i>"
+
                     break
 
         h.append(f"{icon} <b>{ticker}</b> → <b>{action_str}</b>{ars_str}")
-        c = conviction
+
         h.append(
-            f"   Score: <code>{score:+.3f}</code> | "
-            f"Conv: <b>{_conv_label(c)}</b> ({round(c*100)}%) [{_bar(c)}] | "
+            f"   {_render_signal_line(score, tech, macro, sent)} | "
             f"Peso: {_pct(cw)} → {_pct(tw)}"
         )
-        # Razón de la decisión de cartera si difiere de la señal
+
         if d and d.reason_secondary:
             h.append(f"   {escape(d.reason_secondary)}.")
         else:
             h.append(f"   {escape(lectura)}.")
+
         h.append(
-            f"   <code>técnico {_layer_weighted(r, 'technical'):+.3f} | "
-            f"macro {_layer_weighted(r, 'macro'):+.3f} | "
-            f"sentiment {_layer_weighted(r, 'sentiment'):+.3f}</code>"
+            f"   <code>técnico {tech:+.3f} | "
+            f"macro {macro:+.3f} | "
+            f"sentiment {sent:+.3f}</code>"
         )
+
         h.append("")
 
     # ── CONTEXTO MACRO ────────────────────────────────────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>CONTEXTO DE MERCADO</b>")
+
     macro_parts = []
+
     for attr, fmt in [
-        ("wti",    "WTI ${:.1f}"),
-        ("brent",  "Brent ${:.1f}"),
-        ("dxy",    "DXY {:.1f}"),
-        ("vix",    "VIX {:.1f}"),
-        ("sp500",  "SP500 {:,.0f}"),
+        ("wti", "WTI ${:.1f}"),
+        ("brent", "Brent ${:.1f}"),
+        ("dxy", "DXY {:.1f}"),
+        ("vix", "VIX {:.1f}"),
+        ("sp500", "SP500 {:,.0f}"),
         ("merval", "Merval {:,.0f}"),
     ]:
         v = getattr(macro_snap, attr, None)
+
         if v is not None:
             macro_parts.append(fmt.format(float(v)).replace(",", "."))
+
     tnx = getattr(macro_snap, "tnx", None)
+
     if tnx:
         macro_parts.append(f"10Y {float(tnx):.2f}%")
+
     h.append(" | ".join(macro_parts))
 
     arg_parts = []
-    ccl_v      = getattr(macro_snap, "ccl", None)
-    mep_v      = getattr(macro_snap, "mep", None)
+    ccl_v = getattr(macro_snap, "ccl", None)
+    mep_v = getattr(macro_snap, "mep", None)
     reservas_v = getattr(macro_snap, "reservas", None)
-    riesgo_v   = getattr(macro_snap, "riesgo_pais", None)
-    if ccl_v:      arg_parts.append(f"CCL ${ccl_v:,.0f}")
-    if mep_v:      arg_parts.append(f"MEP ${mep_v:,.0f}")
-    if reservas_v: arg_parts.append(f"Reservas ${reservas_v:,.0f}M")
+    riesgo_v = getattr(macro_snap, "riesgo_pais", None)
+
+    if ccl_v:
+        arg_parts.append(f"CCL ${ccl_v:,.0f}")
+    if mep_v:
+        arg_parts.append(f"MEP ${mep_v:,.0f}")
+    if reservas_v:
+        arg_parts.append(f"Reservas ${reservas_v:,.0f}M")
     if riesgo_v:
         rp_icon = "🔴" if riesgo_v > 1000 else "🟡" if riesgo_v > 600 else "🟢"
         arg_parts.append(f"Riesgo País {rp_icon} {riesgo_v} pb")
+
     if arg_parts:
         h.append("🇦🇷 " + " | ".join(arg_parts))
+
     h.append(f"Gate actual: <b>{escape(gate)}</b>")
     h.append("")
 
-    # ── OPTIMIZER — bloque INFORMATIVO (pesos teóricos, no operativos) ─────────
+    # ── OPTIMIZER — bloque INFORMATIVO ────────────────────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>OPTIMIZER</b>")
+
     opt = _get(rebalance_report, "optimization", rebalance_report)
+
     if opt:
-        method  = escape(str(_get(opt, "method", "N/A")))
+        method = escape(str(_get(opt, "method", "N/A")))
         obj_str = escape(str(_get(opt, "method_reason", _get(opt, "reason", "N/A"))))
-        ret     = float(_get(opt, "expected_return_annual", 0.0) or 0.0)
-        vol     = float(_get(opt, "expected_vol_annual",    0.0) or 0.0)
-        sharpe  = float(_get(opt, "sharpe_ratio",           0.0) or 0.0)
+        ret = float(_get(opt, "expected_return_annual", 0.0) or 0.0)
+        vol = float(_get(opt, "expected_vol_annual", 0.0) or 0.0)
+        sharpe = float(_get(opt, "sharpe_ratio", 0.0) or 0.0)
+
         h.append(f"Método: <b>{method}</b> | {obj_str}")
+
         if 0 < ret < 2.0:
             h.append(
-                f"Ret esperado: <b>{ret:.1%}</b> | Vol: {vol:.1%} | Sharpe: <b>{sharpe:.2f}</b>"
+                f"Ret esperado: <b>{ret:.1%}</b> | "
+                f"Vol: {vol:.1%} | Sharpe: <b>{sharpe:.2f}</b>"
             )
         else:
             h.append(f"Vol estimada: {vol:.1%} | Sharpe: <b>{sharpe:.2f}</b>")
 
-    # Pesos objetivo teóricos — claramente marcados como "teóricos"
     if plan and plan.decisions:
         h.append("<b>Pesos objetivo:</b>")
+
         for d in sorted(plan.decisions, key=lambda x: x.ticker):
             if d.action == Action.HOLD and abs(d.delta_weight) < 0.015:
                 continue
+
             arrow = "📈" if d.delta_weight > 0.03 else "📉" if d.delta_weight < -0.03 else "➡️"
+
             h.append(
                 f"  {arrow} <b>{d.ticker}</b>: {d.current_weight:.1%} → "
                 f"<b>{d.target_weight:.1%}</b>  ({d.delta_weight:+.1%})"
             )
+
+        h.append("")
+        h.append(
+            "<i>Nota: los pesos objetivo son teóricos; "
+            "el execution planner puede bloquearlos por guards de calidad.</i>"
+        )
+
     h.append("")
 
-    # ── RADAR EXTERNO ─────────────────────────────────────────────────────────
+    # ── RADAR EXTERNO — compacto dentro de /analisis ──────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>RADAR EXTERNO</b>")
 
     owned = {str(p.get("ticker", "")).upper() for p in positions or []}
     radar = []
+
     for r in universe_results or []:
-        ticker     = str(getattr(r, "ticker", "")).upper()
+        ticker = str(getattr(r, "ticker", "")).upper()
+
         if not ticker or ticker in owned:
             continue
-        score      = float(getattr(r, "final_score", getattr(r, "score", 0)) or 0)
+
+        score = float(getattr(r, "final_score", getattr(r, "score", 0)) or 0)
         conviction = _extract_conviction(r)
-        decision   = str(getattr(r, "decision", "HOLD")).upper()
+        decision = str(getattr(r, "decision", "HOLD")).upper()
         lectura, _ = _component_reason(r)
 
         if score >= 0.18 and conviction >= 0.50 and decision in ("BUY", "ACCUMULATE"):
@@ -861,32 +1183,39 @@ def render_report(
             continue
 
         radar.append({
-            "ticker": ticker, "score": score, "conviction": conviction,
-            "label": label, "tier": tier, "lectura": lectura,
+            "ticker": ticker,
+            "score": score,
+            "conviction": conviction,
+            "label": label,
+            "tier": tier,
+            "lectura": lectura,
         })
 
     radar.sort(key=lambda x: (x["tier"], -x["conviction"], -x["score"]))
-    radar = radar[:6]
 
-    if not radar:
+    # Máximo 3 dentro de /analisis para evitar que Telegram lo parta.
+    shown_radar = radar[:3]
+
+    if not shown_radar:
         h.append("Sin compras claras en el universo de Cocos.")
+
         if gate in ("CAUTIOUS", "BLOCKED"):
             h.append(f"Gate {gate}: mantener en observación hasta mejora del régimen.")
         else:
             h.append("Esperar señales técnicas más definidas para actuar.")
     else:
-        strong = [x for x in radar if x["tier"] == 0]
-        watch  = [x for x in radar if x["tier"] == 1]
-        obs    = [x for x in radar if x["tier"] == 2]
+        strong = [x for x in shown_radar if x["tier"] == 0]
+        watch = [x for x in shown_radar if x["tier"] == 1]
+        obs = [x for x in shown_radar if x["tier"] == 2]
 
         if strong:
             h.append("🟢🟢 <b>Compras fuertes</b>")
             for x in strong:
                 h.append(
-                    f"   <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code> "
-                    f"| conv. {round(x['conviction']*100)}%"
+                    f"   <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code>"
                 )
                 h.append(f"   └ {escape(x['lectura'])}")
+
         if watch:
             h.append("👁 <b>En vigilancia</b>")
             for x in watch:
@@ -894,28 +1223,34 @@ def render_report(
                     f"  <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code> "
                     f"| {escape(x['lectura'])}"
                 )
+
         if obs:
             h.append("👁 En observación")
             for x in obs:
                 h.append(
                     f"  <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code>"
                 )
+
+        if len(radar) > len(shown_radar):
+            h.append(f"  <i>+{len(radar) - len(shown_radar)} más en /radar</i>")
+
     h.append("")
 
-    # ── VEREDICTO FINAL — derivado EXCLUSIVAMENTE del ExecutionPlan ────────────
+    # ── VEREDICTO FINAL — derivado EXCLUSIVAMENTE del ExecutionPlan ───────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>VEREDICTO FINAL</b>")
+
     if plan:
         h.append(plan.verdict())
     elif gate == "BLOCKED":
         h.append("Sistema bloqueado por gate de riesgo — solo stops de emergencia.")
     else:
         h.append("Sin plan de ejecución disponible — mantener y observar.")
+
     h.append("")
     h.append("<i>Sistema cuantitativo multicapa — no es asesoramiento financiero</i>")
 
     return "\n".join(h)
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PIPELINE PRINCIPAL

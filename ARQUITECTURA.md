@@ -1,217 +1,348 @@
 # ARQUITECTURA DEL SISTEMA
+
 ### Cocos Copilot — Diseño técnico y decisiones de arquitectura
 
 ---
 
 ## Visión general
 
-El sistema está organizado en tres pipelines independientes que comparten la infraestructura base (DB + Redis + macro):
+Cocos Copilot está organizado como un sistema cuantitativo modular que transforma datos reales de portfolio en decisiones auditables.
 
-- **Portfolio Analyzer** → `run_analysis.py`
-- **Opportunity Radar** → `run_opportunity.py`
-- **Rotation Engine** → `rotation_engine.py` (módulo, invocado por el radar)
+El sistema se compone de tres flujos principales:
 
-Los tres pipelines se invocan desde el bot de Telegram o desde CLI directamente. El scheduler automatiza `run_analysis.py` en horarios fijos.
+- **Portfolio Analyzer** → análisis de cartera actual.
+- **Opportunity Radar** → búsqueda de oportunidades externas.
+- **Execution Planner / Rotation Engine** → traducción de targets en acciones ejecutables, bloqueadas o en observación.
+
+Los pipelines pueden ejecutarse desde CLI o desde el bot de Telegram.
+
+---
+
+## Principio de arquitectura
+
+La regla central del sistema es:
+
+```text
+El optimizer propone targets teóricos.
+El Execution Planner decide si esos targets son operables.
+El renderer solo muestra el Execution Plan como fuente de verdad operativa.
+```
+
+Esto evita que el sistema opere por ruido o por obedecer ciegamente al optimizer.
 
 ---
 
 ## Infraestructura Docker
 
 | Contenedor | Imagen | Responsabilidad |
-|------------|--------|-----------------|
-| `cocos_db` | timescale/timescaledb:latest-pg16 | Persistencia time-series (snapshots, posiciones, precios, decisiones) |
-| `cocos_scraper` | python:3.12-slim + Playwright | Scheduler, scraping, análisis, optimizer |
-| `cocos_telegram_bot` | python:3.12-slim | Bot interactivo, captura MFA, lanza pipelines |
+|---|---|---|
+| `cocos_db` | `timescale/timescaledb:pg16` | Persistencia time-series: snapshots, posiciones, precios y decisiones |
+| `cocos_scraper` | Python + Playwright | Scraping, scheduler y pipelines batch |
+| `cocos_telegram_bot` | Python | Bot interactivo, comandos y ejecución desde Telegram |
 
-Redis Cloud corre fuera de Docker. La comunicación usa `REDIS_URL` como variable de entorno en ambos contenedores que lo necesitan.
+Redis se utiliza como canal de comunicación/eventos cuando aplica.
 
 ---
 
-## Flujo MFA (anti race-condition)
+## Flujo general
 
-El problema original: el scraper y el bot corrían en contenedores separados con filesystems aislados. La solución usa Redis Cloud como broker de eventos:
-
-| Paso | Actor | Acción |
-|------|-------|--------|
-| 1 | Scraper | Detecta pantalla MFA en Cocos Capital |
-| 2 | Scraper | Manda mensaje al usuario por Telegram pidiendo el código |
-| 3 | Scraper | Llama `BLPOP mfa:<chat_id>` — se bloquea esperando en Redis |
-| 4 | Usuario | Manda los 6 dígitos al bot de Telegram |
-| 5 | Bot | Recibe el mensaje, valida 6 dígitos, ejecuta `LPUSH mfa:<chat_id>` |
-| 6 | Redis | El BLPOP del scraper se desbloquea instantáneamente |
-| 7 | Scraper | Recibe el código y lo ingresa en los inputs de Cocos |
-
-> Latencia típica: 10-50ms. Sin polling, sin race conditions, funciona entre contenedores en cualquier host.
+```text
+Cocos Capital
+  ↓
+Scraper Playwright
+  ↓
+TimescaleDB
+  ↓
+run_analysis.py
+  ↓
+Technical + Macro + Risk + Sentiment
+  ↓
+Synthesis
+  ↓
+Optimizer
+  ↓
+Execution Planner
+  ↓
+Decision Log
+  ↓
+Telegram / CLI report
+```
 
 ---
 
 ## Pipeline de análisis de cartera
 
-`run_analysis.py` ejecuta estas etapas en orden:
+`run_analysis.py` ejecuta estas etapas:
 
 | Etapa | Módulo | Output |
-|-------|--------|--------|
-| 1. Cargar posiciones | `db.py` | Lista de posiciones del último snapshot en DB |
-| 2. Macro | `macro.py` | MacroSnapshot: WTI, VIX, S&P 500, CCL, MEP, Reservas, Riesgo País |
-| 3. Técnico | `technical.py` | Signal por ticker: BUY/SELL/HOLD + strength + score_raw + reasons |
-| 4. Risk Engine | `risk.py` | RiskMetrics: vol, Kelly, sizing, drawdown, gate state |
-| 5. Sentiment | `sentiment.py` | Score RSS por ticker (Yahoo Finance + Reuters) |
-| 6. Síntesis | `synthesis.py` | SynthesisResult: decision + final_score + conviction |
-| 7. Universo Cocos | `technical.py` + `synthesis.py` | Análisis de tickers del mercado no en cartera |
-| 8. Optimizer | `optimizer.py` | RebalanceReport: trades, pesos objetivo, gate state |
-| 9. IC histórico | `decision_memory.py` + DB | Pearson IC y Rank IC de señales pasadas |
-| 10. Render | `run_analysis.py` | HTML → stdout → Telegram |
+|---|---|---|
+| 1. Cargar posiciones | `collector/db.py` | Último snapshot de cartera |
+| 2. Macro | `analysis/macro.py` | VIX, S&P 500, petróleo, tasas, variables locales |
+| 3. Técnico | `analysis/technical.py` | Señales por ticker, strength, score y razones |
+| 4. Riesgo | `analysis/risk.py` | Volatilidad, sizing, drawdown y risk gate |
+| 5. Sentiment | `analysis/sentiment.py` | Score RSS por ticker, opcional |
+| 6. Síntesis | `analysis/synthesis.py` | Score final, capas y decisión preliminar |
+| 7. Universo Cocos | `technical.py` + `synthesis.py` | Análisis de tickers fuera de cartera |
+| 8. Optimizer | `analysis/optimizer.py` | Pesos objetivo teóricos |
+| 9. Execution Planner | `analysis/execution_planner.py` | Órdenes ejecutables, bloqueadas o WATCH |
+| 10. Decision Log | `run_analysis.py` + DB | Registro de decisiones y contexto |
+| 11. IC histórico | DB / decision log | Pearson IC y Rank IC |
+| 12. Render | `run_analysis.py` | HTML para Telegram / stdout |
 
 ---
 
-## Motor de síntesis — Capas y pesos
+## Execution Planner
 
-| Capa | Peso | Qué mide | Cuándo penaliza |
-|------|------|----------|-----------------|
-| Técnico | 30% | RSI, MACD, ADX, Bollinger, OBV | Señal bajista o sin dirección |
-| Macro | 30% | Tendencia de indicadores macro por sector | Indicadores adversos al sector del ticker |
-| Riesgo | 25% | Volatilidad extrema y drawdown del portfolio | Solo vol>80% o drawdown activo — no penaliza vol normal de tech |
-| Sentiment | 15% | Score lexicón sobre RSS de Yahoo Finance + Reuters | Noticias negativas relevantes al ticker |
+El Execution Planner es la capa que convierte targets teóricos del optimizer en un plan operativo.
 
-### Conviction (acuerdo entre capas)
+Puede generar:
 
-La conviction **NO es** `abs(score)`. Es el porcentaje de capas activas que apuntan en la misma dirección que el score final.
+- `BUY`
+- `SELL_PARTIAL`
+- `SELL_FULL`
+- `HOLD`
+- `WATCH`
+- `BLOCKED`
 
-Ejemplo con CVX (score = +0.058):
-- Técnico: −0.033 (bajista) → en contra
-- Macro: +0.087 (alcista) → a favor
-- Sentiment: +0.004 (neutral) → inactivo
-- Capas activas: 2. Acuerdan: 1. **Conviction: 50%**
+### Guards principales
 
-Una señal con conviction 100% y score alto merece tamaño máximo. Una señal con conviction 33% recibe tamaño reducido aunque el score sea alto.
+#### BUY_SCORE_GUARD
+
+Bloquea compras con score negativo.
+
+```text
+BUY si score < -0.01 → BLOCKED
+```
+
+#### TRADE_QUALITY_GUARD
+
+Evita operar señales débiles.
+
+```text
+BUY requiere score >= +0.08
+score positivo débil → WATCH
+score neutral → HOLD / no operar
+```
+
+#### Sell protection
+
+Evita vender posiciones con score positivo salvo concentración o riesgo claro.
+
+```text
+Optimizer quiere vender + score positivo + sin concentración → HOLD
+```
+
+#### Neutral guard
+
+Una señal neutral no justifica operar.
+
+```text
+score entre -0.05 y +0.05 → señal neutral / ruido
+```
+
+---
+
+## Score, señal y alineación de capas
+
+El reporte separa tres conceptos:
+
+| Concepto | Qué representa |
+|---|---|
+| Score | Magnitud y dirección cuantitativa |
+| Señal | Interpretación operativa del score |
+| Alineación de capas | Coincidencia entre técnico, macro, sentiment y otras capas |
+
+Ejemplo:
+
+```text
+Score: +0.048
+Señal: NEUTRAL / RUIDO
+Alineación: ALTA
+Acción: WATCH
+```
+
+La alineación puede ser alta aunque el score no sea operable. Por eso no se usa como sinónimo de convicción de compra.
+
+---
+
+## Information Coefficient
+
+El IC mide si los scores históricos tuvieron relación con retornos posteriores.
+
+| IC absoluto | Interpretación |
+|---|---|
+| < 0.02 | Nulo |
+| 0.02 – 0.05 | Débil |
+| 0.05 – 0.10 | Moderado |
+| > 0.10 | Fuerte |
+
+Si el IC viene negativo, el reporte marca un régimen de cautela:
+
+```text
+Régimen IC: CAUTELA ALTA
+IC negativo fuerte: evitar rotaciones con señales débiles.
+```
+
+Por ahora el IC se usa como explicación del régimen de confianza. Puede pasar a modificar thresholds en iteraciones futuras.
 
 ---
 
 ## Risk Gate
 
-El Risk Gate es la primera operación del optimizer. Define el espacio operativo antes de cualquier cálculo de pesos:
+El Risk Gate define el espacio operativo antes de cualquier cálculo de pesos.
 
-| Estado | Condición de entrada | Comportamiento |
-|--------|----------------------|----------------|
-| NORMAL | VIX < 28 y drawdown > −12% | Opera sin restricciones adicionales |
-| CAUTIOUS | VIX > 28 o drawdown > −12% o régimen risk_off | Solo reducciones de posiciones con score negativo. Nuevas compras bloqueadas |
-| BLOCKED | VIX > 38 o drawdown > −22% | Optimizer no corre. Solo se generan stops de emergencia (delta < −15%) |
-
----
-
-## Pipeline del Opportunity Radar
-
-### Capa 1: Screener
-
-| Filtro | Umbral | Razón |
-|--------|--------|-------|
-| Precio mínimo | > $3 USD | Evita penny stocks |
-| Volumen promedio | > 500,000 diario | Liquidez mínima operativa |
-| Volatilidad | 8% – 120% anual | Excluye activos muertos y explosivos |
-| Distancia máximos 6m | < 45% debajo | No analiza activos en caída libre |
-| Distancia mínimos 6m | > 3% sobre | No compra en mínimos sin rebote |
-| RS vs SPY 20d | > −10% | No peor que el mercado por más del umbral |
-
-### Capa 2: Asimetría (métrica clave)
-
-Para cada candidato que pasa el screener se calcula la `AsymmetryMetrics`:
-
-- **Upside**: distancia al máximo de 6 meses (potencial de recovery)
-- **Stop sugerido**: max(1.5 × ATR, 5%) — capeado a 18%
-- **Risk/Reward ratio**: upside / stop_pct
-- **Asymmetry ratio**: > 1.5 es MODERADA, > 2.0 es BUENA, > 3.0 es EXCELENTE
-
-### Capa 3: Entry Engine
-
-| Clasificación | Condiciones requeridas |
-|---------------|------------------------|
-| COMPRABLE_AHORA | score ≥ 0.15 + conviction ≥ 40% + asimetría ≥ MODERADA + precio sobre soporte + momentum 20d > −5% |
-| EN_VIGILANCIA | score ≥ 0.07 (potencial real pero falta confirmación técnica o punto de entrada) |
-| DESCARTAR | Todo lo que no cumple los umbrales anteriores |
+| Estado | Condición orientativa | Comportamiento |
+|---|---|---|
+| NORMAL | Mercado estable | Opera con restricciones normales |
+| CAUTIOUS | VIX alto, drawdown o régimen defensivo | Bloquea compras nuevas o reduce agresividad |
+| BLOCKED | Riesgo extremo | Solo reducciones / stops de emergencia |
 
 ---
 
-## Capital allocation dinámico
+## Optimizer
 
-El sizing sugerido no es fijo. La fórmula es:
+El optimizer genera pesos objetivo teóricos.
 
-```
-sizing = base × conviction_mult × asym_mult × sector_penalty
+Métodos:
+
+- Black-Litterman, cuando está disponible.
+- Fallback por mínima varianza / heurísticas internas.
+- Restricciones por risk gate y límites de concentración.
+
+Importante:
+
+```text
+Los pesos del optimizer son informativos.
+La acción real sale del Execution Planner.
 ```
 
-| Factor | Rango | Lógica |
-|--------|-------|--------|
-| `base` | 2% – 9% | Deriva del score: score×25 clipeado. Score 0.20 → 5%, score 0.30 → 7% |
-| `conviction_mult` | 0.50× – 1.30× | Penaliza fuerte convicción baja (<25% → 0.50×). Premia alta convicción |
-| `asym_mult` | 0.70× – 1.35× | R/R < 1.2 → 0.70×. R/R ≥ 4.0 → 1.35× |
-| `sector_penalty` | 0.40× – 1.00× | Si ya tenemos >30% en el mismo sector → 0.40× del tamaño calculado |
+---
+
+## Opportunity Radar
+
+El radar busca candidatos externos fuera de la cartera actual.
+
+Etapas:
+
+1. Screener básico de liquidez, precio, volatilidad y tendencia.
+2. Score técnico/macro/riesgo/sentiment.
+3. Cálculo de asimetría riesgo/retorno.
+4. Clasificación:
+   - compra fuerte,
+   - vigilancia,
+   - observación,
+   - descartar.
+
+El radar del análisis semanal se muestra compacto para no romper el mensaje de Telegram. El detalle completo vive en `/radar`.
 
 ---
 
-## Rotation Engine
+## Decision Memory
 
-El Rotation Engine responde: *"¿La plata que sale de CVX va a MU, a AVGO, o a cash?"*
+Cada decisión relevante se registra en `decision_log` con:
 
-Compara dos tipos de opciones:
-- **Opciones internas**: posiciones existentes con decisión BUY/ACCUMULATE del pipeline
-- **Opciones externas**: candidatos del radar con status COMPRABLE_AHORA
+- ticker,
+- decisión,
+- score,
+- alineación/confidence,
+- capas,
+- precio al decidir,
+- VIX,
+- régimen,
+- size,
+- stop,
+- target,
+- horizonte.
 
-El ranking usa `score × conviction × (1 + asym_bonus)`. Se distribuye el capital entre los top 3 con límite de 15% del portfolio o 50% del capital disponible por posición. El resto va a cash.
+Luego se calculan outcomes a 5, 10 y 20 días para evaluar performance.
 
-> En gate CAUTIOUS, el Rotation Engine solo considera opciones internas. En gate BLOCKED, todo el capital liberado va a cash.
+Métricas principales:
+
+- Win rate.
+- Expected Value.
+- Avg win / avg loss.
+- IC y Rank IC.
+- Equity curve.
+- Max drawdown.
 
 ---
 
-## Decision Memory & IC
+## Esquema de base de datos
 
-Cada decisión del pipeline se registra en `decision_log` con: ticker, decisión, score, conviction, capas individuales, precio, VIX y régimen. El outcome (retorno a 5, 10 y 20 días) se rellena en un job posterior.
+Tablas principales:
 
-El **IC de Pearson** mide la correlación lineal entre `final_score` y el retorno real. El **Rank IC** (Spearman) es más robusto a outliers:
+| Tabla | Uso |
+|---|---|
+| `portfolio_snapshots` | Snapshots históricos del portfolio |
+| `positions` | Posiciones asociadas a cada snapshot |
+| `market_prices` | Precios de mercado por ticker |
+| `raw_snapshots` | Payload completo de scraping |
+| `decision_log` | Registro de decisiones y outcomes |
 
-| IC | Interpretación |
-|----|----------------|
-| < 0.02 | NULO — el score no predice mejor que random |
-| 0.02 – 0.05 | DÉBIL — hay alguna señal |
-| 0.05 – 0.10 | MODERADO — sistema tiene valor |
-| > 0.10 | FUERTE — nivel de hedge fund cuantitativo |
+La base usa TimescaleDB para datos time-series.
 
 ---
 
 ## Estructura del proyecto
 
-```
+```text
 cocos_copilot/
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
 ├── init.sql
+├── README.md
+├── ARQUITECTURA.md
+├── COMANDOS.md
 │
 ├── scripts/
-│   ├── run_analysis.py          ← Pipeline principal — análisis de cartera
-│   ├── run_opportunity.py       ← Pipeline de oportunidades externas
-│   ├── run_once.py              ← Scrape manual del portfolio
-│   └── telegram_bot.py          ← Bot interactivo con menú de botones
+│   ├── run_analysis.py
+│   ├── run_opportunity.py
+│   ├── run_performance.py
+│   ├── update_outcomes.py
+│   ├── run_once.py
+│   └── telegram_bot.py
 │
 └── src/
     ├── core/
-    │   ├── config.py            ← Configuración desde variables de entorno
-    │   ├── logger.py            ← Logger centralizado → stderr
-    │   ├── redis_client.py      ← Cliente Redis async singleton
-    │   └── credentials.py       ← Credenciales encriptadas con Fernet
+    │   ├── config.py
+    │   ├── logger.py
+    │   ├── redis_client.py
+    │   └── credentials.py
     │
     ├── collector/
-    │   ├── cocos_scraper.py     ← Scraper Playwright + MFA Redis
-    │   ├── db.py                ← Capa de persistencia TimescaleDB (asyncpg)
-    │   └── notifier.py          ← Notificaciones Telegram (requests sync)
+    │   ├── cocos_scraper.py
+    │   ├── db.py
+    │   └── notifier.py
     │
     └── analysis/
-        ├── technical.py         ← RSI, MACD, ADX, Bollinger, OBV
-        ├── macro.py             ← Macro global + Argentina (APIs locales)
-        ├── risk.py              ← Kelly, VaR, sizing, drawdown, gate
-        ├── sentiment.py         ← RSS multifuente + lexicón financiero
-        ├── synthesis.py         ← Blend multicapa + convicción + LLM display
-        ├── optimizer.py         ← Black-Litterman + Min-Varianza + risk gate
-        ├── decision_memory.py   ← Persistencia de decisiones + IC histórico
-        ├── opportunity_screener.py ← Screener + scorer + entry engine
-        └── rotation_engine.py   ← Rotation Engine — asignación de capital
+        ├── technical.py
+        ├── macro.py
+        ├── risk.py
+        ├── sentiment.py
+        ├── synthesis.py
+        ├── optimizer.py
+        ├── execution_planner.py
+        ├── validators.py
+        ├── decision_memory.py
+        ├── opportunity_screener.py
+        └── rotation_engine.py
 ```
+
+---
+
+## Archivos locales y secretos
+
+No deberían subirse al repositorio:
+
+```text
+.env
+secret_key/
+secrets/
+logs/
+screenshots/
+models/
+venv/
+```
+
+Estos archivos/carpetas deben estar cubiertos por `.gitignore`.
