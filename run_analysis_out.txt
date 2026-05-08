@@ -1,0 +1,127 @@
+🧠 <b>ANÁLISIS SEMANAL — SISTEMA CUANTITATIVO</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 07/05/2026 10:26 ART
+💼 Portfolio: <b>$2.099.835 ARS</b>
+
+<b>RESUMEN EJECUTIVO</b>
+✅ Régimen operativo normal — sistema operando sin restricciones.
+3 en WATCH por señal insuficiente | 1 pendiente(s) por funding/señal
+⚠️ ⚠️ Error de validación: ExecutionPlan inválido (1 error(es)):
+  [1] TSLA: target=0.0% ≈ 0 pero action=HOLD — debería ser SELL_FULL o SELL_PARTIAL
+⚠️ CVX: compra reducida a $3,239 (&lt; mínimo $25,000) — queda pendiente
+
+<b>INFORMATION COEFFICIENT (IC)</b>
+5d: IC <code>-0.173</code> | Rank IC <code>-0.224</code> | n=18 (7 tickers) | <b>FUERTE</b>
+10d: IC <code>-0.452</code> | Rank IC <code>-0.150</code> | n=9 (6 tickers) | <b>FUERTE</b>
+IC > 0 indica poder predictivo direccional.
+🔴 Régimen IC: <b>CAUTELA ALTA</b> — IC negativo fuerte: el sistema evita rotaciones con señales débiles y prioriza mantener posiciones salvo señal clara.
+
+<b>ACCIÓN PRINCIPAL</b>
+🟡 <b>SIN ACCIÓN ACTIVA</b>
+   No hay órdenes ejecutables en este momento.
+
+💵 <b>Resultado esperado</b>
+   Ventas: <b>$0 ARS</b>
+   Compras: <b>$0 ARS</b>
+   Cash luego del ajuste: <b>$3.239 ARS</b>
+   ⏳ Compras pendientes por funding: CVX
+
+📋 <b>PLAN DE ROTACIÓN</b>
+   Sin órdenes ejecutables.
+
+   🚫 <b>Bloqueadas / WATCH por guardias:</b>
+      🔵 AMD: WATCH — $44.307 ARS teórico — Compra en WATCH: señal insuficiente +0.062
+      🔵 NFLX: WATCH — $20.158 ARS teórico — Señal positiva — delta insuficiente para operar
+      🔵 XOM: WATCH — $403.588 ARS teórico — Compra en WATCH: señal insuficiente +0.027
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>CARTERA ACTUAL</b>
+
+🟢 <b>CVX</b> → <b>BUY</b>
+   Score: <code>+0.090</code> | Señal: <b>POSITIVA OPERABLE</b> | Acuerdo capas: <b>PARCIAL</b> (50%) [██░░░] | Peso: 6.5% → 24.5%
+   score +0.090.
+   <code>técnico -0.010 | macro +0.031 | sentiment +0.069</code>
+
+🔵 <b>NFLX</b> → <b>WATCH</b>
+   Score: <code>+0.100</code> | Señal: <b>POSITIVA OPERABLE</b> | Acuerdo capas: <b>ALTO</b> (100%) [█████] | Peso: 1.0% → 2.0%
+   score +0.100, delta +1.0% &lt; umbral.
+   <code>técnico +0.074 | macro +0.020 | sentiment +0.006</code>
+
+🔵 <b>AMD</b> → <b>WATCH</b>
+   Score: <code>+0.062</code> | Señal: <b>POSITIVA DÉBIL</b> | Acuerdo capas: <b>PARCIAL</b> (50%) [██░░░] | Peso: 20.7% → 22.8%
+   Optimizer sugería aumentar 20.7% → 22.8% (44,307 ARS), pero BUY requiere score &gt;= +0.08.
+   <code>técnico -0.028 | macro +0.024 | sentiment +0.078</code>
+
+🔵 <b>XOM</b> → <b>WATCH</b>
+   Score: <code>+0.027</code> | Señal: <b>NEUTRAL / RUIDO</b> | Acuerdo capas: <b>PARCIAL</b> (50%) [██░░░] | Peso: 8.4% → 27.6%
+   Optimizer sugería aumentar 8.4% → 27.6% (403,588 ARS), pero BUY requiere score &gt;= +0.08.
+   <code>técnico -0.010 | macro +0.031 | sentiment +0.006</code>
+
+🟡 <b>MELI</b> → <b>HOLD</b>
+   Score: <code>+0.113</code> | Señal: <b>POSITIVA OPERABLE</b> | Acuerdo capas: <b>ALTO</b> (100%) [█████] | Peso: 8.7% → 2.0%
+   Optimizer sugería reducir 8.7% → 2.0%, pero la señal del activo es positiva y no hay concentración excesiva.
+   <code>técnico +0.022 | macro +0.017 | sentiment +0.073</code>
+
+🟡 <b>NVDA</b> → <b>HOLD</b>
+   Score: <code>+0.071</code> | Señal: <b>POSITIVA DÉBIL</b> | Acuerdo capas: <b>ALTO</b> (83%) [████░] | Peso: 24.4% → 15.0%
+   Optimizer sugería reducir 24.4% → 15.0%, pero la señal del activo es positiva y no hay concentración excesiva.
+   <code>técnico +0.049 | macro +0.024 | sentiment -0.002</code>
+
+🟡 <b>QCOM</b> → <b>HOLD</b>
+   Score: <code>+0.053</code> | Señal: <b>POSITIVA DÉBIL</b> | Acuerdo capas: <b>PARCIAL</b> (50%) [██░░░] | Peso: 17.3% → 2.0%
+   Optimizer sugería reducir 17.3% → 2.0%, pero la señal del activo es positiva y no hay concentración excesiva.
+   <code>técnico -0.015 | macro +0.020 | sentiment +0.048</code>
+
+🟡 <b>TSLA</b> → <b>HOLD</b>
+   Score: <code>+0.049</code> | Señal: <b>NEUTRAL / RUIDO</b> | Acuerdo capas: <b>ALTO</b> (83%) [████░] | Peso: 1.9% → 0.0%
+   Optimizer sugería reducir 1.9% → 0.0%, pero una señal neutral no justifica operar.
+   <code>técnico +0.030 | macro +0.020 | sentiment -0.001</code>
+
+🟡 <b>DOW</b> → <b>HOLD</b>
+   Score: <code>+0.044</code> | Señal: <b>NEUTRAL / RUIDO</b> | Acuerdo capas: <b>PARCIAL</b> (50%) [██░░░] | Peso: 6.8% → 2.1%
+   Optimizer sugería reducir 6.8% → 2.1%, pero una señal neutral no justifica operar.
+   <code>técnico -0.003 | macro +0.020 | sentiment +0.026</code>
+
+🟡 <b>GGAL</b> → <b>HOLD</b>
+   Score: <code>-0.024</code> | Señal: <b>NEUTRAL / RUIDO</b> | Acuerdo capas: <b>PARCIAL</b> (50%) [██░░░] | Peso: 4.3% → 2.0%
+   Optimizer sugería reducir 4.2% → 2.0%, pero una señal neutral no justifica operar.
+   <code>técnico -0.045 | macro +0.000 | sentiment +0.021</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>CONTEXTO DE MERCADO</b>
+WTI $91.7 | Brent $98.0 | DXY 97.9 | VIX 17.4 | SP500 7.365 | Merval 2.881.352 | 10Y 4.32%
+Gate actual: <b>NORMAL</b>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>OPTIMIZER</b>
+Método: <b>BLACK_LITTERMAN</b> | Régimen neutral — BL con views del pipeline
+Ret esperado: <b>69.0%</b> | Vol: 20.9% | Sharpe: <b>3.06</b>
+<b>Pesos objetivo:</b>
+  ➡️ <b>AMD</b>: 20.7% → <b>22.8%</b>  (+2.1%)
+  📈 <b>CVX</b>: 6.5% → <b>24.5%</b>  (+17.9%)
+  📉 <b>DOW</b>: 6.8% → <b>2.1%</b>  (-4.7%)
+  ➡️ <b>GGAL</b>: 4.2% → <b>2.0%</b>  (-2.2%)
+  📉 <b>MELI</b>: 8.7% → <b>2.0%</b>  (-6.7%)
+  ➡️ <b>NFLX</b>: 1.0% → <b>2.0%</b>  (+1.0%)
+  📉 <b>NVDA</b>: 24.4% → <b>15.0%</b>  (-9.4%)
+  📉 <b>QCOM</b>: 17.3% → <b>2.0%</b>  (-15.3%)
+  ➡️ <b>TSLA</b>: 1.9% → <b>0.0%</b>  (-1.9%)
+  📈 <b>XOM</b>: 8.4% → <b>27.6%</b>  (+19.2%)
+
+<i>Nota: los pesos objetivo son teóricos; el execution planner puede bloquearlos por guards de calidad.</i>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>RADAR EXTERNO</b>
+🟢🟢 <b>Compras fuertes</b>
+   <b>EA</b>: score <code>+0.208</code>
+   └ técnico sostiene la señal
+👁 En observación
+  <b>META</b>: score <code>+0.094</code>
+  <b>ARKK</b>: score <code>+0.085</code>
+  <i>+9 más en /radar</i>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>VEREDICTO FINAL</b>
+Sin plan ejecutable — revisar restricciones del sistema.
+
+<i>Sistema cuantitativo multicapa — no es asesoramiento financiero</i>

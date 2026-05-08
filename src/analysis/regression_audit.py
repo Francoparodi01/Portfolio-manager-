@@ -9,18 +9,27 @@ Objetivo:
     No decide BUY/SELL.
 
 Sirve para responder:
-    - ¿El final_score predice retornos futuros?
-    - ¿El score funciona en retorno bruto del activo?
-    - ¿El score funciona sobre el resultado direccional de la decisión?
-    - ¿Qué capas aportan más?
-    - ¿Qué umbral de score empieza a cubrir costos?
+    1. Signal Audit:
+        ¿El final_score predice retornos futuros?
+
+    2. Optimizer Audit:
+        ¿Los targets / rotaciones teóricas del optimizer tenían buen outcome?
+
+    3. Execution Audit:
+        ¿Las órdenes aprobadas / ejecutables funcionaron?
+
+    4. Blocked Audit:
+        ¿Los guards bloquearon bien o fueron demasiado conservadores?
 
 Datos usados:
     Usa decision_log, no precios históricos crudos.
 
-    final_score     = score generado por tu análisis
+    final_score     = score generado por el análisis
     outcome_5d/10d  = retorno posterior guardado en DB
-    decision        = BUY / SELL / HOLD / WATCH / BLOCKED
+    decision        = BUY / SELL / SELL_PARTIAL / SELL_FULL
+    source          = optimizer / execution_plan / radar / manual
+    decision_type   = theoretical / executable / blocked / manual / pilot
+    status          = THEORETICAL / APPROVED / BLOCKED / EXECUTED / SKIPPED
 
 Targets:
     raw:
@@ -29,7 +38,7 @@ Targets:
     directional:
         BUY  -> outcome_Xd
         SELL -> -outcome_Xd
-        HOLD/WATCH/BLOCKED -> se excluyen por default
+        SELL_PARTIAL / SELL_FULL -> -outcome_Xd
 """
 
 from __future__ import annotations
@@ -55,6 +64,40 @@ except Exception:
 DEFAULT_HORIZONS = ("5d", "10d", "20d")
 ACTIVE_ACTIONS = ("BUY", "SELL", "SELL_PARTIAL", "SELL_FULL")
 
+VALID_MODES = ("signal", "optimizer", "execution", "blocked", "all")
+
+MODE_TITLES = {
+    "signal": "SIGNAL AUDIT — ¿el score predice retornos?",
+    "optimizer": "OPTIMIZER AUDIT — ¿los targets teóricos funcionaron?",
+    "execution": "EXECUTION AUDIT — ¿las órdenes aprobadas funcionaron?",
+    "blocked": "BLOCKED AUDIT — ¿los guards bloquearon bien?",
+    "all": "AUDIT GLOBAL — mezcla exploratoria",
+}
+
+MODE_READINGS = {
+    "signal": (
+        "Este modo mide si el score ordena correctamente retornos futuros. "
+        "No implica que todas las señales debían ejecutarse."
+    ),
+    "optimizer": (
+        "Este modo mide ideas teóricas del optimizer. Sirve para calibrar targets "
+        "y detectar si el planner bloquea ideas buenas, pero no mide performance operativa real."
+    ),
+    "execution": (
+        "Este modo mide órdenes aprobadas/ejecutables por el sistema. "
+        "Es la métrica más cercana a performance operativa real."
+    ),
+    "blocked": (
+        "Este modo mide operaciones rechazadas por guards. Si los outcomes son positivos "
+        "de forma consistente, los guards podrían ser demasiado conservadores. "
+        "Si son negativos, el planner protegió bien."
+    ),
+    "all": (
+        "Este modo mezcla señales de distintos orígenes. Es exploratorio y no debería usarse "
+        "para calibración final sin separar fuentes."
+    ),
+}
+
 
 @dataclass
 class RegressionAuditConfig:
@@ -63,6 +106,9 @@ class RegressionAuditConfig:
     min_n: int = 12
     cost_bps: float = 75.0
     horizons: tuple[str, ...] = DEFAULT_HORIZONS
+
+    # signal / optimizer / execution / blocked / all
+    mode: str = "optimizer"
 
     # raw = outcome bruto del activo
     # directional = outcome ajustado por dirección de la decisión
@@ -95,6 +141,7 @@ class RegressionModelResult:
     score_pvalue: Optional[float]
     ic: Optional[float]
     suggested_buy_threshold: Optional[float]
+    threshold_reason: Optional[str]
     expected_return_at_buy_min_008: Optional[float]
     notes: list[str]
 
@@ -106,7 +153,10 @@ class RegressionAuditReport:
     rows_usable: int
     cost_threshold: float
     target_mode: str
+    mode: str
     actions_used: list[str]
+    source_counts: dict[str, int]
+    status_counts: dict[str, int]
     models: list[RegressionModelResult]
     bucket_tables: dict[str, pd.DataFrame]
     warnings: list[str]
@@ -166,6 +216,18 @@ async def load_decision_log(
             "was_correct",
             "guard_triggered",
             "block_reason",
+
+            # Nuevas columnas de clasificación de evento
+            "source",
+            "decision_type",
+            "status",
+            "theoretical_amount_ars",
+            "executed_amount_ars",
+            "current_weight",
+            "target_weight",
+            "delta_weight",
+            "is_executable",
+            "was_blocked",
         ]
 
         selected = [c for c in wanted if c in cols]
@@ -217,7 +279,31 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
     if "decision" in out.columns:
         out["decision"] = out["decision"].astype(str).str.upper().str.strip()
 
-    for col in [
+    for col in ["source", "decision_type", "status", "block_reason", "ticker", "regime"]:
+        if col in out.columns:
+            out[col] = out[col].astype(str).str.strip()
+
+    if "source" not in out.columns:
+        out["source"] = None
+
+    if "status" not in out.columns:
+        out["status"] = None
+
+    if "decision_type" not in out.columns:
+        out["decision_type"] = None
+
+    # Completar source desde layers si existe.
+    if "layers" in out.columns:
+        out["_source_from_layers"] = out["layers"].apply(_extract_source_from_layers)
+        out["source"] = out["source"].replace({"": None, "None": None, "nan": None})
+        out["source"] = out["source"].fillna(out["_source_from_layers"])
+        out.drop(columns=["_source_from_layers"], inplace=True, errors="ignore")
+
+    out["source"] = out["source"].fillna("sin_source").astype(str).str.lower().str.strip()
+    out["status"] = out["status"].fillna("UNKNOWN").astype(str).str.upper().str.strip()
+    out["decision_type"] = out["decision_type"].fillna("unknown").astype(str).str.lower().str.strip()
+
+    numeric_cols = [
         "final_score",
         "confidence",
         "conviction",
@@ -230,7 +316,14 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
         "outcome_5d",
         "outcome_10d",
         "outcome_20d",
-    ]:
+        "theoretical_amount_ars",
+        "executed_amount_ars",
+        "current_weight",
+        "target_weight",
+        "delta_weight",
+    ]
+
+    for col in numeric_cols:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
@@ -238,6 +331,10 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
         if col in out.columns:
             mask = out[col].abs() > 1.0
             out.loc[mask, col] = out.loc[mask, col] / 100.0
+
+    for col in ["is_executable", "was_blocked", "was_correct", "guard_triggered"]:
+        if col in out.columns:
+            out[col] = out[col].map(_to_bool)
 
     # Extraer capas desde JSONB layers.
     if "layers" in out.columns:
@@ -264,6 +361,46 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _to_bool(x: Any) -> bool:
+    if isinstance(x, bool):
+        return x
+    if x is None or pd.isna(x):
+        return False
+    s = str(x).strip().lower()
+    return s in {"true", "t", "1", "yes", "y", "si", "sí"}
+
+
+def _json_load_maybe(raw: Any) -> Any:
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        if isinstance(raw, str):
+            return json.loads(raw)
+    except Exception:
+        return None
+    return raw
+
+
+def _extract_source_from_layers(raw: Any) -> Optional[str]:
+    raw = _json_load_maybe(raw)
+    if not isinstance(raw, dict):
+        return None
+
+    for key in ("source", "decision_source", "origin"):
+        if key in raw and raw[key]:
+            return str(raw[key]).lower().strip()
+
+    extra = raw.get("extra")
+    if isinstance(extra, dict):
+        for key in ("source", "decision_source", "origin"):
+            if key in extra and extra[key]:
+                return str(extra[key]).lower().strip()
+
+    return None
+
+
 def _extract_layers(raw: Any) -> dict[str, float]:
     """
     Soporta formatos:
@@ -282,13 +419,9 @@ def _extract_layers(raw: Any) -> dict[str, float]:
         "risk_score": 0.0,
     }
 
-    if raw is None:
-        return result
+    raw = _json_load_maybe(raw)
 
-    try:
-        if isinstance(raw, str):
-            raw = json.loads(raw)
-    except Exception:
+    if raw is None:
         return result
 
     def pick_value(obj: dict) -> float:
@@ -362,6 +495,90 @@ def _extract_layers(raw: Any) -> dict[str, float]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MODE FILTERING
+# ══════════════════════════════════════════════════════════════════════════════
+def apply_audit_mode_filter(
+    df: pd.DataFrame,
+    config: RegressionAuditConfig,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Filtra el DataFrame según el modo de auditoría.
+
+    signal:
+        Todas las señales activas BUY/SELL, sin filtrar source.
+
+    optimizer:
+        Ideas teóricas del optimizer.
+
+    execution:
+        Solo órdenes finales aprobadas/ejecutadas.
+        NO incluye BLOCKED aunque source sea execution_plan.
+
+    blocked:
+        Solo eventos bloqueados por guards / funding / planner.
+
+    all:
+        Todo BUY/SELL activo, exploratorio.
+    """
+    warnings: list[str] = []
+
+    if df.empty:
+        return df, warnings
+
+    mode = (config.mode or "optimizer").lower().strip()
+
+    if mode not in VALID_MODES:
+        warnings.append(f"Modo inválido {mode}; usando optimizer.")
+        mode = "optimizer"
+
+    out = df.copy()
+
+    if "decision" in out.columns:
+        out = out[out["decision"].isin(ACTIVE_ACTIONS)].copy()
+
+    if mode == "signal":
+        return out, warnings
+
+    if mode == "optimizer":
+        mask = (
+            out["source"].eq("optimizer")
+            | out["decision_type"].eq("theoretical")
+            | out["status"].eq("THEORETICAL")
+        )
+        return out[mask].copy(), warnings
+
+    if mode == "execution":
+        mask = (
+            out["decision_type"].eq("executable")
+            | out["status"].isin(["APPROVED", "EXECUTED"])
+        )
+
+        if "is_executable" in out.columns:
+            mask = mask | out["is_executable"].fillna(False).astype(bool)
+
+        # Protección extra: excluir explícitamente bloqueados.
+        mask = mask & ~out["status"].eq("BLOCKED")
+        mask = mask & ~out["decision_type"].eq("blocked")
+
+        return out[mask].copy(), warnings
+
+    if mode == "blocked":
+        mask = (
+            out["status"].eq("BLOCKED")
+            | out["decision_type"].eq("blocked")
+        )
+
+        if "was_blocked" in out.columns:
+            mask = mask | out["was_blocked"].fillna(False).astype(bool)
+
+        return out[mask].copy(), warnings
+
+    if mode == "all":
+        return out, warnings
+
+    return out, warnings
+
+# ══════════════════════════════════════════════════════════════════════════════
 # TARGET BUILDING
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -433,152 +650,17 @@ def prepare_model_frame(
     else:
         out[target_col] = out[raw_col]
 
-    actions_used = sorted(out["decision"].dropna().unique().tolist()) if "decision" in out.columns else []
+    actions_used = (
+        sorted(out["decision"].dropna().unique().tolist())
+        if "decision" in out.columns
+        else []
+    )
 
     return out, target_col, actions_used, warnings
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MODELING
-# ══════════════════════════════════════════════════════════════════════════════
-def render_regression_audit_compact(report: RegressionAuditReport) -> str:
-    """
-    Render compacto para Telegram.
-
-    Objetivo:
-    - Evitar que Telegram parta el mensaje.
-    - Mostrar solo lo accionable para MVP.
-    - Dejar el reporte completo para CLI o /regression_full.
-    """
-    lines: list[str] = []
-
-    title_target = (
-        "RETORNO DIRECCIONAL"
-        if report.target_mode == "directional"
-        else "RETORNO BRUTO"
-    )
-
-    lines.append("📈 <b>REGRESSION AUDIT — RESUMEN</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🎯 Target: <b>{title_target}</b>")
-    lines.append(
-        f"📦 Filas: <b>{report.rows_loaded}</b> | "
-        f"Obs usadas: <b>{report.rows_usable}</b>"
-    )
-    lines.append(f"💸 Costo mínimo: <b>{report.cost_threshold:.2%}</b>")
-
-    if report.actions_used:
-        lines.append(f"🔎 Acciones: <code>{', '.join(report.actions_used)}</code>")
-
-    # Warning compacto por layers
-    has_layer_warning = any(
-        "está todo en 0" in w
-        for w in report.warnings or []
-    )
-
-    if has_layer_warning:
-        lines.append("")
-        lines.append(
-            "⚠️ Capas técnicas/macro/riesgo aún no disponibles en decisiones viejas."
-        )
-
-    # Buscar baseline 5d
-    baseline_5d = next(
-        (
-            m for m in report.models
-            if m.horizon == "5d" and m.model_name == "baseline_score"
-        ),
-        None,
-    )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("<b>HORIZONTE 5D</b>")
-
-    if baseline_5d is None:
-        lines.append("⚠️ Sin modelo baseline 5D disponible.")
-    elif baseline_5d.r2 is None:
-        lines.append(
-            f"⚠️ Sin modelo: {' | '.join(baseline_5d.notes)}"
-        )
-    else:
-        lines.append(
-            f"n={baseline_5d.n} | "
-            f"R² <b>{baseline_5d.r2:.3f}</b> | "
-            f"RMSE {baseline_5d.rmse:.2%}"
-        )
-
-        if baseline_5d.ic is not None:
-            lines.append(
-                f"IC score/target: <code>{baseline_5d.ic:+.3f}</code>"
-            )
-
-        if baseline_5d.score_coef is not None:
-            ptxt = (
-                f" | p={baseline_5d.score_pvalue:.3f}"
-                if baseline_5d.score_pvalue is not None
-                else ""
-            )
-            lines.append(
-                f"Coef score: <code>{baseline_5d.score_coef:+.4f}</code>{ptxt}"
-            )
-
-        if baseline_5d.expected_return_at_buy_min_008 is not None:
-            lines.append(
-                f"Score +0.08 → ret esperado "
-                f"<b>{baseline_5d.expected_return_at_buy_min_008:+.2%}</b>"
-            )
-
-        if baseline_5d.suggested_buy_threshold is not None:
-            th = baseline_5d.suggested_buy_threshold
-            if 0.00 <= th <= 0.30:
-                lines.append(
-                    f"Umbral estimado para cubrir costo: <b>{th:+.3f}</b>"
-                )
-            else:
-                lines.append("Umbral estimado: <b>fuera de rango razonable</b>")
-
-    # Buckets 5D compactos
-    bucket = report.bucket_tables.get("5d")
-
-    if bucket is not None and not bucket.empty:
-        lines.append("")
-        lines.append("<b>Buckets 5D</b>")
-
-        wanted = {"POS_DEBIL", "POS_OPERABLE", "POS_FUERTE", "NEG_OPERABLE"}
-
-        for _, row in bucket.iterrows():
-            bucket_name = str(row["bucket"])
-
-            if bucket_name not in wanted:
-                continue
-
-            if int(row["n"]) == 0:
-                continue
-
-            lines.append(
-                f"  {bucket_name}: n={int(row['n'])} | "
-                f"target {row['avg_return']:+.2%} | "
-                f"hit {row['hit_rate']:.0%}"
-            )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("<b>LECTURA</b>")
-
-    for line in _build_human_reading(report):
-        lines.append(line)
-
-    lines.append("")
-    lines.append(
-        "<i>Auditoría auxiliar — no genera órdenes ni reemplaza al Execution Planner.</i>"
-    )
-
-    return "\n".join(lines)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# BUCKETS / RENDER
+# BUCKETS / MATURITY / THRESHOLD
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_score_bucket_table(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
@@ -588,10 +670,10 @@ def build_score_bucket_table(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
     if len(data) < 5:
         return pd.DataFrame()
 
-    bins = [-np.inf, -0.08, -0.05, 0.05, 0.08, 0.12, np.inf]
+    bins = [-np.inf, -0.15, -0.08, 0.03, 0.08, 0.15, np.inf]
     labels = [
+        "NEG_FUERTE",
         "NEG_OPERABLE",
-        "NEG_DEBIL",
         "NEUTRAL",
         "POS_DEBIL",
         "POS_OPERABLE",
@@ -616,229 +698,64 @@ def build_score_bucket_table(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
         .reset_index()
     )
 
+    out["reliability"] = out["n"].apply(bucket_reliability)
+
     return out
 
 
-def render_regression_audit(report: RegressionAuditReport) -> str:
-    lines: list[str] = []
-
-    title_target = "RETORNO DIRECCIONAL" if report.target_mode == "directional" else "RETORNO BRUTO"
-
-    lines.append("📈 <b>REGRESSION AUDIT — CALIBRACIÓN DEL SCORE</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🕐 {report.generated_at.astimezone().strftime('%d/%m/%Y %H:%M')}")
-    lines.append(f"🎯 Target: <b>{title_target}</b>")
-    lines.append(f"📦 Filas cargadas: <b>{report.rows_loaded}</b>")
-    lines.append(f"🧪 Observaciones usadas acumuladas: <b>{report.rows_usable}</b>")
-    lines.append(f"💸 Costo mínimo a cubrir: <b>{report.cost_threshold:.2%}</b>")
-
-    if report.actions_used:
-        lines.append(f"🔎 Acciones incluidas: <code>{', '.join(report.actions_used)}</code>")
-
-    if report.target_mode == "directional":
-        lines.append("Direccional: BUY usa outcome; SELL invierte el signo del outcome.")
-
-    if report.warnings:
-        lines.append("")
-        lines.append("⚠️ <b>Warnings</b>")
-        for w in report.warnings[:5]:
-            lines.append(f"• {w}")
-
-    lines.append("")
-
-    if not report.models:
-        lines.append("⚠️ No hay suficientes datos cerrados para correr regresión.")
-        lines.append("")
-        lines.append("<i>Necesitás más decisiones con outcome_5d / outcome_10d / outcome_20d poblados.</i>")
-        return "\n".join(lines)
-
-    by_horizon: dict[str, list[RegressionModelResult]] = {}
-    for m in report.models:
-        by_horizon.setdefault(m.horizon, []).append(m)
-
-    for horizon, models in by_horizon.items():
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"<b>HORIZONTE {horizon.upper()}</b>")
-
-        for m in models:
-            lines.append("")
-            lines.append(f"Modelo: <b>{m.model_name}</b>")
-            lines.append(f"Target col: <code>{m.target_col}</code>")
-            lines.append(f"Features: <code>{', '.join(m.features) if m.features else '—'}</code>")
-            lines.append(f"n={m.n}")
-
-            if m.r2 is None:
-                lines.append("⚠️ Sin modelo: " + " | ".join(m.notes))
-                continue
-
-            lines.append(
-                f"R²: <b>{m.r2:.3f}</b>"
-                + (f" | Adj R²: {m.adj_r2:.3f}" if m.adj_r2 is not None else "")
-                + (f" | RMSE: {m.rmse:.2%}" if m.rmse is not None else "")
-            )
-
-            if m.ic is not None:
-                lines.append(f"IC simple score/target: <code>{m.ic:+.3f}</code>")
-
-            if m.intercept is not None:
-                lines.append(f"Intercept: <code>{m.intercept:+.4f}</code>")
-
-            if m.score_coef is not None:
-                pv = ""
-                if m.score_pvalue is not None:
-                    pv = f" | p={m.score_pvalue:.3f}"
-
-                lines.append(
-                    f"Coef final_score: <code>{m.score_coef:+.4f}</code>{pv}"
-                )
-
-            layer_coefs = {
-                k: v
-                for k, v in m.coefficients.items()
-                if k != "final_score"
-            }
-
-            if layer_coefs:
-                lines.append("Coef features:")
-                for k, v in layer_coefs.items():
-                    ptxt = ""
-                    if k in m.pvalues:
-                        ptxt = f" p={m.pvalues[k]:.3f}"
-                    lines.append(f"  {k}: <code>{v:+.4f}</code>{ptxt}")
-
-            if m.expected_return_at_buy_min_008 is not None:
-                lines.append(
-                    f"Ret esperado con score +0.08: "
-                    f"<b>{m.expected_return_at_buy_min_008:+.2%}</b>"
-                )
-
-            if m.suggested_buy_threshold is not None:
-                lines.append(
-                    f"Umbral score estimado para cubrir costo: "
-                    f"<b>{m.suggested_buy_threshold:+.3f}</b>"
-                )
-            else:
-                lines.append(
-                    "Umbral score estimado: <b>N/A</b> "
-                    "(coeficiente no positivo o datos insuficientes)"
-                )
-
-            for note in m.notes:
-                lines.append(f"• {note}")
-
-        bucket = report.bucket_tables.get(horizon)
-        if bucket is not None and not bucket.empty:
-            lines.append("")
-            lines.append("<b>Buckets por score</b>")
-            for _, row in bucket.iterrows():
-                if int(row["n"]) == 0:
-                    continue
-                lines.append(
-                    f"  {row['bucket']}: n={int(row['n'])} | "
-                    f"avg score {row['avg_score']:+.3f} | "
-                    f"target {row['avg_return']:+.2%} | "
-                    f"hit {row['hit_rate']:.0%}"
-                )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("<b>LECTURA</b>")
-    lines.extend(_build_human_reading(report))
-
-    lines.append("")
-    lines.append("<i>Auditoría estadística auxiliar — no genera órdenes ni reemplaza al Execution Planner.</i>")
-
-    return "\n".join(lines)
+def bucket_reliability(n: int) -> str:
+    n = int(n or 0)
+    if n < 5:
+        return "muy baja"
+    if n < 15:
+        return "baja"
+    if n < 30:
+        return "media"
+    return "alta"
 
 
-def _build_human_reading(report: RegressionAuditReport) -> list[str]:
-    lines: list[str] = []
+def sample_maturity(n: int) -> tuple[str, str]:
+    n = int(n or 0)
+    if n < 30:
+        return "EXPLORATORIO", "Usar como monitoreo, no como calibrador."
+    if n < 60:
+        return "PRELIMINAR", "Hay lectura inicial, pero no ajustar thresholds."
+    if n < 100:
+        return "ÚTIL", "Puede empezar a usarse para calibración conservadora."
+    return "ROBUSTO", "Muestra razonable para comparar modelos simples."
 
-    baseline_5d = next(
-        (
-            m for m in report.models
-            if m.horizon == "5d" and m.model_name == "baseline_score"
-        ),
-        None,
-    )
 
-    if baseline_5d is None or baseline_5d.r2 is None:
-        return [
-            "⚠️ Todavía no hay suficiente muestra para calibrar thresholds con regresión.",
-            "Seguí acumulando decisiones cerradas y outcomes.",
-        ]
-
-    coef = baseline_5d.score_coef
-    pval = baseline_5d.score_pvalue
-    r2 = baseline_5d.r2
-    ic = baseline_5d.ic
+def safe_threshold(
+    intercept: Optional[float],
+    coef: Optional[float],
+    cost: float,
+    n: int,
+    p_value: Optional[float] = None,
+) -> tuple[Optional[float], str]:
+    if intercept is None:
+        return None, "intercept no disponible"
 
     if coef is None:
-        return ["⚠️ No se pudo estimar coeficiente de final_score."]
+        return None, "coeficiente no disponible"
 
-    target_name = "direccional" if report.target_mode == "directional" else "bruto"
+    if abs(coef) < 1e-6:
+        return None, "coeficiente demasiado cercano a cero"
 
-    if coef <= 0:
-        lines.append(
-            f"🔴 El coeficiente de final_score es negativo o nulo sobre retorno {target_name}: "
-            "en esta muestra, mayor score no se tradujo en mejor resultado."
-        )
-        lines.append(
-            "No conviene bajar thresholds todavía. Mantener TRADE_QUALITY_GUARD conservador."
-        )
-        return lines
+    if n < 60:
+        return None, f"muestra insuficiente para calibrar threshold (n={n}, mínimo sugerido=60)"
 
-    if pval is not None and pval > 0.10:
-        lines.append(
-            f"🟡 El coeficiente de final_score es positivo sobre retorno {target_name}, "
-            "pero no significativo. Hay señal posible, pero todavía débil."
-        )
-    else:
-        lines.append(
-            f"🟢 El coeficiente de final_score es positivo sobre retorno {target_name} "
-            "y estadísticamente útil para calibración."
-        )
+    if p_value is not None and p_value > 0.10:
+        return None, f"coeficiente no significativo (p={p_value:.3f})"
 
-    if r2 < 0.03:
-        lines.append(
-            "R² bajo: el score explica poco del resultado. Usarlo como filtro, no como predictor exacto."
-        )
-    elif r2 < 0.10:
-        lines.append(
-            "R² moderado/bajo: el score aporta, pero el ruido sigue dominando."
-        )
-    else:
-        lines.append(
-            "R² razonable para una señal financiera simple. Buena base para calibrar thresholds."
-        )
+    th = (cost - intercept) / coef
 
-    if ic is not None:
-        if ic < 0:
-            lines.append(
-                "IC negativo: mantener modo conservador hasta mejorar consistencia."
-            )
-        elif ic < 0.05:
-            lines.append(
-                "IC positivo débil: hay algo de relación, pero todavía no suficiente para agresividad."
-            )
-        else:
-            lines.append(
-                "IC positivo relevante: el ranking de scores empieza a tener valor predictivo."
-            )
+    if not math.isfinite(th):
+        return None, "threshold no finito"
 
-    if baseline_5d.suggested_buy_threshold is not None:
-        th = baseline_5d.suggested_buy_threshold
-        if 0.00 <= th <= 0.30:
-            lines.append(
-                f"Umbral sugerido para cubrir costos: score >= {th:+.3f}. "
-                "Comparar contra el BUY_MIN actual antes de tocar el planner."
-            )
-        else:
-            lines.append(
-                f"Umbral estimado fuera de rango razonable ({th:+.3f}); no ajustar automáticamente."
-            )
+    if not (0.00 <= th <= 0.30):
+        return None, f"threshold fuera de rango razonable ({th:+.3f})"
 
-    return lines
+    return float(th), "ok"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -854,6 +771,7 @@ def run_regression_audit_sync(
     """
     generated_at = datetime.now(tz=timezone.utc)
     cost_threshold = float(config.cost_bps) / 10_000.0
+    mode = (config.mode or "optimizer").lower().strip()
 
     if df.empty:
         return RegressionAuditReport(
@@ -862,19 +780,43 @@ def run_regression_audit_sync(
             rows_usable=0,
             cost_threshold=cost_threshold,
             target_mode=config.target_mode,
+            mode=mode,
             actions_used=[],
+            source_counts={},
+            status_counts={},
             models=[],
             bucket_tables={},
             warnings=["No se cargaron filas desde decision_log."],
         )
 
+    rows_loaded = len(df)
+
+    source_counts = (
+        df["source"].value_counts(dropna=False).to_dict()
+        if "source" in df.columns
+        else {}
+    )
+
+    status_counts = (
+        df["status"].value_counts(dropna=False).to_dict()
+        if "status" in df.columns
+        else {}
+    )
+
+    df, mode_warnings = apply_audit_mode_filter(df, config)
+
     models: list[RegressionModelResult] = []
     buckets: dict[str, pd.DataFrame] = {}
-    warnings: list[str] = []
+    warnings: list[str] = list(mode_warnings)
 
-    rows_loaded = len(df)
     rows_usable_total = 0
     all_actions_used: set[str] = set()
+
+    if df.empty:
+        warnings.append(
+            f"Sin filas para mode={mode}. "
+            "Puede ser normal si todavía no se registraron eventos de ese tipo."
+        )
 
     # Detectar si las capas están vacías.
     for col in ["technical_score", "macro_score", "sentiment_score", "risk_score"]:
@@ -891,7 +833,6 @@ def run_regression_audit_sync(
         )
 
         warnings.extend(prep_warnings)
-        all_actions_used.update(actions_used)
 
         if hdf.empty or target_col not in hdf.columns:
             continue
@@ -902,6 +843,12 @@ def run_regression_audit_sync(
 
         if hdf.empty:
             continue
+
+        # Acciones realmente usadas por el modelo, luego de exigir outcome disponible.
+        if "decision" in hdf.columns:
+            all_actions_used.update(
+        sorted(hdf["decision"].dropna().unique().tolist())
+        )
 
         rows_usable_total += len(hdf)
 
@@ -949,6 +896,9 @@ def run_regression_audit_sync(
             "size_pct",
             "technical_score",
             "macro_score",
+            "current_weight",
+            "target_weight",
+            "delta_weight",
         ]
         context_features = [f for f in context_features if f in hdf.columns]
 
@@ -976,7 +926,10 @@ def run_regression_audit_sync(
         rows_usable=rows_usable_total,
         cost_threshold=cost_threshold,
         target_mode=config.target_mode,
+        mode=mode,
         actions_used=sorted(all_actions_used),
+        source_counts={str(k): int(v) for k, v in source_counts.items()},
+        status_counts={str(k): int(v) for k, v in status_counts.items()},
         models=models,
         bucket_tables=buckets,
         warnings=warnings,
@@ -1036,6 +989,7 @@ def fit_ols_model(
             score_pvalue=None,
             ic=_corr(df.get("final_score"), df.get(target_col)),
             suggested_buy_threshold=None,
+            threshold_reason=f"Muestra insuficiente: n={n}, mínimo={min_n}",
             expected_return_at_buy_min_008=None,
             notes=[f"Muestra insuficiente: n={n}, mínimo={min_n}"] + notes,
         )
@@ -1057,6 +1011,7 @@ def fit_ols_model(
             score_pvalue=None,
             ic=None,
             suggested_buy_threshold=None,
+            threshold_reason="Sin features útiles",
             expected_return_at_buy_min_008=None,
             notes=["Sin features útiles para regresión"] + notes,
         )
@@ -1106,20 +1061,21 @@ def fit_ols_model(
     score_coef = coefficients.get("final_score")
     score_pvalue = pvalues.get("final_score")
 
-    # Importante:
     # Threshold y retorno esperado con score +0.08 solo tienen sentido
     # en el modelo simple final_score -> target.
     is_score_only_model = features == ["final_score"]
 
-    suggested = (
-        _suggest_score_threshold(
+    suggested = None
+    threshold_reason = None
+
+    if is_score_only_model:
+        suggested, threshold_reason = safe_threshold(
             intercept=intercept,
-            score_coef=score_coef,
-            cost_threshold=cost_threshold,
+            coef=score_coef,
+            cost=cost_threshold,
+            n=n,
+            p_value=score_pvalue,
         )
-        if is_score_only_model
-        else None
-    )
 
     expected_008 = (
         intercept + score_coef * 0.08
@@ -1141,6 +1097,9 @@ def fit_ols_model(
                 "Coeficiente de final_score positivo; hay relación útil para calibración."
             )
 
+    if is_score_only_model and threshold_reason and threshold_reason != "ok":
+        notes.append(f"Threshold no usable: {threshold_reason}.")
+
     return RegressionModelResult(
         horizon=horizon,
         model_name=model_name,
@@ -1157,6 +1116,7 @@ def fit_ols_model(
         score_pvalue=score_pvalue,
         ic=ic,
         suggested_buy_threshold=suggested,
+        threshold_reason=threshold_reason,
         expected_return_at_buy_min_008=expected_008,
         notes=notes,
     )
@@ -1192,18 +1152,19 @@ def _fit_numpy_fallback(
     }
 
     score_coef = coefficients.get("final_score")
-
     is_score_only_model = features == ["final_score"]
 
-    suggested = (
-        _suggest_score_threshold(
+    suggested = None
+    threshold_reason = None
+
+    if is_score_only_model:
+        suggested, threshold_reason = safe_threshold(
             intercept=intercept,
-            score_coef=score_coef,
-            cost_threshold=cost_threshold,
+            coef=score_coef,
+            cost=cost_threshold,
+            n=len(X),
+            p_value=None,
         )
-        if is_score_only_model
-        else None
-    )
 
     expected_008 = (
         intercept + score_coef * 0.08
@@ -1227,34 +1188,10 @@ def _fit_numpy_fallback(
         score_pvalue=None,
         ic=ic,
         suggested_buy_threshold=suggested,
+        threshold_reason=threshold_reason,
         expected_return_at_buy_min_008=expected_008,
         notes=notes,
     )
-
-
-def _suggest_score_threshold(
-    intercept: Optional[float],
-    score_coef: Optional[float],
-    cost_threshold: float,
-) -> Optional[float]:
-    """
-    Resuelve:
-        cost_threshold = intercept + score_coef * score
-
-    Solo usar en modelo simple.
-    """
-    if intercept is None or score_coef is None:
-        return None
-
-    if score_coef <= 0:
-        return None
-
-    threshold = (cost_threshold - intercept) / score_coef
-
-    if not math.isfinite(threshold):
-        return None
-
-    return float(threshold)
 
 
 def _corr(x, y) -> Optional[float]:
@@ -1277,7 +1214,461 @@ def _corr(x, y) -> Optional[float]:
         return c
     except Exception:
         return None
-    
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RENDER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _mode_title(mode: str) -> str:
+    return MODE_TITLES.get((mode or "optimizer").lower(), str(mode).upper())
+
+
+def _mode_reading(mode: str) -> str:
+    return MODE_READINGS.get((mode or "optimizer").lower(), "")
+
+
+def render_regression_audit_compact(report: RegressionAuditReport) -> str:
+    """
+    Render compacto para Telegram.
+    """
+    lines: list[str] = []
+
+    title_target = (
+        "RETORNO DIRECCIONAL"
+        if report.target_mode == "directional"
+        else "RETORNO BRUTO"
+    )
+
+    mode = (report.mode or "optimizer").lower()
+    mode_title = _mode_title(mode)
+
+    lines.append(f"📈 <b>REGRESSION AUDIT — {mode_title}</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🎯 Target: <b>{title_target}</b>")
+    lines.append(
+        f"📦 Filas: <b>{report.rows_loaded}</b> | "
+        f"Obs usadas: <b>{report.rows_usable}</b>"
+    )
+    lines.append(f"💸 Costo mínimo: <b>{report.cost_threshold:.2%}</b>")
+
+    if report.actions_used:
+        lines.append(f"🔎 Acciones: <code>{', '.join(report.actions_used)}</code>")
+
+    if report.source_counts:
+        compact_sources = ", ".join(
+            f"{k}:{v}" for k, v in sorted(report.source_counts.items())
+        )
+        lines.append(f"🧾 Sources: <code>{compact_sources}</code>")
+
+    reading = _mode_reading(mode)
+    if reading:
+        lines.append("")
+        lines.append(f"ℹ️ {reading}")
+
+    # Warning compacto por layers
+    has_layer_warning = any(
+        "está todo en 0" in w
+        for w in report.warnings or []
+    )
+
+    if has_layer_warning:
+        lines.append("")
+        lines.append(
+            "⚠️ Capas técnicas/macro/riesgo aún no disponibles en decisiones viejas."
+        )
+
+    # Buscar baseline 5d
+    baseline_5d = next(
+        (
+            m for m in report.models
+            if m.horizon == "5d" and m.model_name == "baseline_score"
+        ),
+        None,
+    )
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<b>HORIZONTE 5D</b>")
+
+    if baseline_5d is None:
+        lines.append("⚠️ Sin modelo baseline 5D disponible.")
+    elif baseline_5d.r2 is None:
+        lines.append(
+            f"⚠️ Sin modelo: {' | '.join(baseline_5d.notes)}"
+        )
+    else:
+        maturity, maturity_msg = sample_maturity(baseline_5d.n)
+
+        lines.append(
+            f"n={baseline_5d.n} | "
+            f"R² <b>{baseline_5d.r2:.3f}</b> | "
+            f"RMSE {baseline_5d.rmse:.2%}"
+        )
+        lines.append(f"Madurez: <b>{maturity}</b> — {maturity_msg}")
+
+        if baseline_5d.ic is not None:
+            lines.append(
+                f"IC score/target: <code>{baseline_5d.ic:+.3f}</code>"
+            )
+
+        if baseline_5d.score_coef is not None:
+            ptxt = (
+                f" | p={baseline_5d.score_pvalue:.3f}"
+                if baseline_5d.score_pvalue is not None
+                else ""
+            )
+            lines.append(
+                f"Coef score: <code>{baseline_5d.score_coef:+.4f}</code>{ptxt}"
+            )
+
+        if baseline_5d.expected_return_at_buy_min_008 is not None:
+            lines.append(
+                f"Score +0.08 → ret esperado "
+                f"<b>{baseline_5d.expected_return_at_buy_min_008:+.2%}</b>"
+            )
+
+        if baseline_5d.suggested_buy_threshold is not None:
+            lines.append(
+                f"Umbral estimado para cubrir costo: "
+                f"<b>{baseline_5d.suggested_buy_threshold:+.3f}</b>"
+            )
+        elif baseline_5d.threshold_reason:
+            lines.append(
+                f"Umbral estimado no usable: <b>{baseline_5d.threshold_reason}</b>"
+            )
+
+    # Buckets 5D compactos
+    bucket = report.bucket_tables.get("5d")
+
+    if bucket is not None and not bucket.empty:
+        lines.append("")
+        lines.append("<b>Buckets 5D</b>")
+
+        wanted = {
+            "NEG_FUERTE",
+            "NEG_OPERABLE",
+            "POS_DEBIL",
+            "POS_OPERABLE",
+            "POS_FUERTE",
+        }
+
+        for _, row in bucket.iterrows():
+            bucket_name = str(row["bucket"])
+
+            if bucket_name not in wanted:
+                continue
+
+            if int(row["n"]) == 0:
+                continue
+
+            lines.append(
+                f"  {bucket_name}: n={int(row['n'])} | "
+                f"target {row['avg_return']:+.2%} | "
+                f"hit {row['hit_rate']:.0%} | "
+                f"conf {row.get('reliability', '—')}"
+            )
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<b>LECTURA</b>")
+
+    for line in _build_human_reading(report):
+        lines.append(line)
+
+    lines.append("")
+    lines.append(
+        "<i>Auditoría auxiliar — no genera órdenes ni reemplaza al Execution Planner.</i>"
+    )
+
+    return "\n".join(lines)
+
+
+def render_regression_audit(report: RegressionAuditReport) -> str:
+    lines: list[str] = []
+
+    title_target = (
+        "RETORNO DIRECCIONAL"
+        if report.target_mode == "directional"
+        else "RETORNO BRUTO"
+    )
+
+    mode = (report.mode or "optimizer").lower()
+    mode_title = _mode_title(mode)
+
+    lines.append(f"📈 <b>REGRESSION AUDIT — {mode_title}</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🕐 {report.generated_at.astimezone().strftime('%d/%m/%Y %H:%M')}")
+    lines.append(f"🎯 Target: <b>{title_target}</b>")
+    lines.append(f"📦 Filas cargadas: <b>{report.rows_loaded}</b>")
+    lines.append(f"🧪 Observaciones usadas acumuladas: <b>{report.rows_usable}</b>")
+    lines.append(f"💸 Costo mínimo a cubrir: <b>{report.cost_threshold:.2%}</b>")
+
+    reading = _mode_reading(mode)
+    if reading:
+        lines.append(f"ℹ️ {reading}")
+
+    if report.actions_used:
+        lines.append(f"🔎 Acciones incluidas: <code>{', '.join(report.actions_used)}</code>")
+
+    if report.source_counts:
+        lines.append("")
+        lines.append("<b>Fuentes cargadas</b>")
+        for k, v in sorted(report.source_counts.items()):
+            lines.append(f"• {k}: {v}")
+
+    if report.status_counts:
+        lines.append("")
+        lines.append("<b>Status cargados</b>")
+        for k, v in sorted(report.status_counts.items()):
+            lines.append(f"• {k}: {v}")
+
+    if report.target_mode == "directional":
+        lines.append("Direccional: BUY usa outcome; SELL invierte el signo del outcome.")
+
+    if report.warnings:
+        lines.append("")
+        lines.append("⚠️ <b>Warnings</b>")
+        for w in report.warnings[:8]:
+            lines.append(f"• {w}")
+
+    lines.append("")
+
+    if not report.models:
+        lines.append("⚠️ No hay suficientes datos cerrados para correr regresión.")
+        lines.append("")
+        lines.append("<i>Necesitás más decisiones con outcome_5d / outcome_10d / outcome_20d poblados.</i>")
+        return "\n".join(lines)
+
+    by_horizon: dict[str, list[RegressionModelResult]] = {}
+    for m in report.models:
+        by_horizon.setdefault(m.horizon, []).append(m)
+
+    for horizon, models in by_horizon.items():
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"<b>HORIZONTE {horizon.upper()}</b>")
+
+        for m in models:
+            lines.append("")
+            lines.append(f"Modelo: <b>{m.model_name}</b>")
+            lines.append(f"Target col: <code>{m.target_col}</code>")
+            lines.append(f"Features: <code>{', '.join(m.features) if m.features else '—'}</code>")
+            lines.append(f"n={m.n}")
+
+            maturity, maturity_msg = sample_maturity(m.n)
+            lines.append(f"Madurez estadística: <b>{maturity}</b> — {maturity_msg}")
+
+            if m.r2 is None:
+                lines.append("⚠️ Sin modelo: " + " | ".join(m.notes))
+                continue
+
+            lines.append(
+                f"R²: <b>{m.r2:.3f}</b>"
+                + (f" | Adj R²: {m.adj_r2:.3f}" if m.adj_r2 is not None else "")
+                + (f" | RMSE: {m.rmse:.2%}" if m.rmse is not None else "")
+            )
+
+            if m.ic is not None:
+                lines.append(f"IC simple score/target: <code>{m.ic:+.3f}</code>")
+
+            if m.intercept is not None:
+                lines.append(f"Intercept: <code>{m.intercept:+.4f}</code>")
+
+            if m.score_coef is not None:
+                pv = ""
+                if m.score_pvalue is not None:
+                    pv = f" | p={m.score_pvalue:.3f}"
+
+                lines.append(
+                    f"Coef final_score: <code>{m.score_coef:+.4f}</code>{pv}"
+                )
+
+            layer_coefs = {
+                k: v
+                for k, v in m.coefficients.items()
+                if k != "final_score"
+            }
+
+            if layer_coefs:
+                lines.append("Coef features:")
+                for k, v in layer_coefs.items():
+                    ptxt = ""
+                    if k in m.pvalues:
+                        ptxt = f" p={m.pvalues[k]:.3f}"
+                    lines.append(f"  {k}: <code>{v:+.4f}</code>{ptxt}")
+
+            if m.expected_return_at_buy_min_008 is not None:
+                lines.append(
+                    f"Ret esperado con score +0.08: "
+                    f"<b>{m.expected_return_at_buy_min_008:+.2%}</b>"
+                )
+
+            if m.suggested_buy_threshold is not None:
+                lines.append(
+                    f"Umbral score estimado para cubrir costo: "
+                    f"<b>{m.suggested_buy_threshold:+.3f}</b>"
+                )
+            elif m.threshold_reason:
+                lines.append(
+                    f"Umbral score estimado no usable: "
+                    f"<b>{m.threshold_reason}</b>"
+                )
+            else:
+                lines.append("Umbral score estimado: <b>N/A</b>")
+
+            for note in m.notes:
+                lines.append(f"• {note}")
+
+        bucket = report.bucket_tables.get(horizon)
+        if bucket is not None and not bucket.empty:
+            lines.append("")
+            lines.append("<b>Buckets por score</b>")
+            for _, row in bucket.iterrows():
+                if int(row["n"]) == 0:
+                    continue
+                lines.append(
+                    f"  {row['bucket']}: n={int(row['n'])} | "
+                    f"avg score {row['avg_score']:+.3f} | "
+                    f"target {row['avg_return']:+.2%} | "
+                    f"hit {row['hit_rate']:.0%} | "
+                    f"conf {row.get('reliability', '—')}"
+                )
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<b>LECTURA</b>")
+    lines.extend(_build_human_reading(report))
+
+    lines.append("")
+    lines.append("<i>Auditoría estadística auxiliar — no genera órdenes ni reemplaza al Execution Planner.</i>")
+
+    return "\n".join(lines)
+
+
+def _build_human_reading(report: RegressionAuditReport) -> list[str]:
+    lines: list[str] = []
+
+    mode = (report.mode or "optimizer").lower()
+
+    baseline_5d = next(
+        (
+            m for m in report.models
+            if m.horizon == "5d" and m.model_name == "baseline_score"
+        ),
+        None,
+    )
+
+    if baseline_5d is None or baseline_5d.r2 is None:
+        prefix = {
+            "execution": "Todavía no hay suficientes órdenes ejecutables registradas.",
+            "blocked": "Todavía no hay suficientes operaciones bloqueadas con outcome.",
+            "optimizer": "Todavía no hay suficiente muestra del optimizer.",
+            "signal": "Todavía no hay suficiente muestra de señales.",
+            "all": "Todavía no hay suficiente muestra global.",
+        }.get(mode, "Todavía no hay suficiente muestra.")
+
+        return [
+            f"⚠️ {prefix}",
+            "Seguí acumulando eventos cerrados y outcomes.",
+        ]
+
+    coef = baseline_5d.score_coef
+    pval = baseline_5d.score_pvalue
+    r2 = baseline_5d.r2
+    ic = baseline_5d.ic
+    n = baseline_5d.n
+
+    maturity, maturity_msg = sample_maturity(n)
+    lines.append(f"Madurez estadística: {maturity} — {maturity_msg}")
+
+    if mode == "optimizer":
+        lines.append(
+            "Este resultado mide ideas teóricas del optimizer, no órdenes finales ejecutadas."
+        )
+    elif mode == "execution":
+        lines.append(
+            "Este resultado mide decisiones aprobadas/ejecutables. Es la lectura operativa más importante."
+        )
+    elif mode == "blocked":
+        lines.append(
+            "Este resultado mide operaciones bloqueadas. Sirve para saber si los guards protegen o bloquean demasiado."
+        )
+    elif mode == "signal":
+        lines.append(
+            "Este resultado mide si el score tiene valor predictivo general."
+        )
+
+    if coef is None:
+        return lines + ["⚠️ No se pudo estimar coeficiente de final_score."]
+
+    target_name = "direccional" if report.target_mode == "directional" else "bruto"
+
+    if coef <= 0:
+        lines.append(
+            f"🔴 El coeficiente de final_score es negativo o nulo sobre retorno {target_name}: "
+            "en esta muestra, mayor score no se tradujo en mejor resultado."
+        )
+        lines.append(
+            "No conviene bajar thresholds. Mantener guards conservadores."
+        )
+        return lines
+
+    if pval is not None and pval > 0.10:
+        lines.append(
+            f"🟡 El coeficiente de final_score es positivo sobre retorno {target_name}, "
+            "pero no significativo. Hay señal posible, todavía débil."
+        )
+    else:
+        lines.append(
+            f"🟢 El coeficiente de final_score es positivo sobre retorno {target_name} "
+            "y estadísticamente útil para calibración."
+        )
+
+    if r2 < 0.03:
+        lines.append(
+            "R² bajo: el score explica poco del resultado. Usarlo como filtro, no como predictor exacto."
+        )
+    elif r2 < 0.10:
+        lines.append(
+            "R² moderado/bajo: el score aporta, pero el ruido sigue dominando."
+        )
+    else:
+        lines.append(
+            "R² razonable para una señal financiera simple. Buena base para calibrar thresholds."
+        )
+
+    if ic is not None:
+        if ic < 0:
+            lines.append(
+                "IC negativo: mantener modo conservador hasta mejorar consistencia."
+            )
+        elif ic < 0.05:
+            lines.append(
+                "IC positivo débil: hay algo de relación, pero todavía no suficiente para agresividad."
+            )
+        else:
+            lines.append(
+                "IC positivo relevante: el ranking de scores empieza a tener valor predictivo."
+            )
+
+    if baseline_5d.suggested_buy_threshold is not None:
+        th = baseline_5d.suggested_buy_threshold
+        lines.append(
+            f"Umbral sugerido para cubrir costos: score >= {th:+.3f}. "
+            "Comparar contra el BUY_MIN actual antes de tocar el planner."
+        )
+    elif baseline_5d.threshold_reason:
+        lines.append(
+            f"Umbral estimado no usable: {baseline_5d.threshold_reason}. "
+            "No ajustar automáticamente."
+        )
+
+    return lines
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENTRYPOINT
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def run_regression_audit(
     config: RegressionAuditConfig,

@@ -618,7 +618,382 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
 
     return payload
 
+# ══════════════════════════════════════════════════════════════════════════════
+# GUARDAR DECISIONES DEL EXECUTION PLAN EN DECISION_LOG
+# ══════════════════════════════════════════════════════════════════════════════
 
+async def _save_execution_plan_events(
+    *,
+    cfg,
+    execution_plan,
+    results,
+    macro_snap,
+    macro_regime,
+    total_ars: float,
+) -> list[int]:
+    """
+    Guarda eventos del ExecutionPlan en decision_log.
+
+    Guarda:
+      - buy_orders / sell_orders como APPROVED + executable
+      - blocked_orders como BLOCKED + was_blocked
+      - pending_buys como BLOCKED por funding si existen
+
+    Importante:
+      Esto mide el sistema operativo real, no el optimizer teórico.
+    """
+    import asyncpg
+    from datetime import datetime, timezone
+
+    if not execution_plan:
+        return []
+
+    db_url = cfg.database.url
+    saved_ids: list[int] = []
+
+    result_by_ticker = {
+        str(getattr(r, "ticker", "")).upper(): r
+        for r in (results or [])
+        if str(getattr(r, "ticker", "") or "").strip()
+    }
+
+    decision_by_ticker = {
+        str(getattr(d, "ticker", "")).upper(): d
+        for d in (getattr(execution_plan, "decisions", []) or [])
+        if str(getattr(d, "ticker", "") or "").strip()
+    }
+
+    def _safe_float(x, default: float = 0.0):
+        try:
+            if x is None:
+                return default
+            return float(x)
+        except Exception:
+            return default
+
+    def _side_to_decision(side) -> str:
+        raw = getattr(side, "value", side)
+        raw = str(raw or "").upper().strip()
+        return "SELL" if raw == "SELL" else "BUY"
+
+    def _action_to_text(action) -> str:
+        return str(getattr(action, "value", action) or "")
+
+    def _get_order_side(order, ticker: str) -> str:
+        side = getattr(order, "side", None)
+
+        if side is not None:
+            return _side_to_decision(side)
+
+        d = decision_by_ticker.get(ticker)
+        delta = _safe_float(getattr(d, "delta_weight", 0.0), 0.0)
+
+        return "SELL" if delta < 0 else "BUY"
+
+    def _get_amount(order) -> float:
+        for key in ("amount_ars", "executable_ars", "theoretical_ars"):
+            val = getattr(order, key, None)
+            if val is not None:
+                return _safe_float(val, 0.0)
+        return 0.0
+
+    def _get_theoretical_amount(order) -> float:
+        val = getattr(order, "theoretical_ars", None)
+        if val is not None:
+            return _safe_float(val, 0.0)
+        return _get_amount(order)
+
+    def _confidence_from_result(r) -> float:
+        if r is None:
+            return 0.0
+
+        val = getattr(r, "conviction", getattr(r, "confidence", 0.0))
+        val = _safe_float(val, 0.0)
+
+        if abs(val) > 1:
+            val = val / 100.0
+
+        return max(0.0, min(1.0, val))
+
+    def _price_from_result(r):
+        if r is None:
+            return None
+
+        for key in ("price", "price_at_decision", "current_price", "last_price"):
+            val = getattr(r, key, None)
+            if val is not None:
+                try:
+                    return float(val)
+                except Exception:
+                    pass
+
+        return None
+
+    def _layers_for(ticker: str, r, d, order, *, status: str, decision_type: str) -> dict:
+        extra = {
+            "source": "execution_plan",
+            "status": status,
+            "decision_type": decision_type,
+            "action": _action_to_text(getattr(d, "action", None)),
+            "order_side": str(
+                getattr(
+                    getattr(order, "side", None),
+                    "value",
+                    getattr(order, "side", ""),
+                )
+            ),
+            "reason": str(getattr(order, "reason", "") or ""),
+            "gate": str(getattr(execution_plan, "gate", "") or ""),
+            "current_weight": _safe_float(getattr(d, "current_weight", None), 0.0),
+            "target_weight": _safe_float(getattr(d, "target_weight", None), 0.0),
+            "delta_weight": _safe_float(getattr(d, "delta_weight", None), 0.0),
+            "amount_ars": _get_amount(order),
+            "theoretical_amount_ars": _get_theoretical_amount(order),
+        }
+
+        try:
+            return _layers_payload_for_decision(r, extra=extra)
+        except Exception:
+            return extra
+
+    async def _insert_event(
+        conn,
+        *,
+        order,
+        status: str,
+        decision_type: str,
+        is_executable: bool,
+        was_blocked: bool,
+        forced_reason: str | None = None,
+    ):
+        ticker = str(getattr(order, "ticker", "") or "").upper().strip()
+
+        if not ticker:
+            return None
+
+        r = result_by_ticker.get(ticker)
+        d = decision_by_ticker.get(ticker)
+
+        decision = _get_order_side(order, ticker)
+
+        final_score = _safe_float(
+            getattr(r, "final_score", getattr(r, "score", 0.0)),
+            0.0,
+        )
+
+        confidence = _confidence_from_result(r)
+
+        amount_ars = _get_amount(order)
+        theoretical_ars = _get_theoretical_amount(order)
+
+        current_weight = _safe_float(getattr(d, "current_weight", None), 0.0)
+        target_weight = _safe_float(getattr(d, "target_weight", None), 0.0)
+        delta_weight = _safe_float(getattr(d, "delta_weight", None), 0.0)
+
+        price = _price_from_result(r)
+        vix = _safe_float(getattr(macro_snap, "vix", None), None)
+
+        block_reason = None
+        if was_blocked:
+            block_reason = forced_reason or str(
+                getattr(order, "reason", "") or "Bloqueado por guards"
+            )
+
+        layers_payload = _layers_for(
+            ticker,
+            r,
+            d,
+            order,
+            status=status,
+            decision_type=decision_type,
+        )
+
+        if forced_reason:
+            layers_payload["forced_reason"] = forced_reason
+
+        exists = await conn.fetchval(
+            """
+            SELECT 1
+            FROM decision_log
+            WHERE ticker = $1
+              AND decision = $2
+              AND COALESCE(source, layers->>'source') = 'execution_plan'
+              AND COALESCE(status, '') = $3
+              AND decided_at > NOW() - INTERVAL '20 hours'
+            LIMIT 1
+            """,
+            ticker,
+            decision,
+            status,
+        )
+
+        if exists:
+            logger.info(
+                "Dedup execution_plan: %s %s status=%s ya existe en últimas 20h — skip",
+                decision,
+                ticker,
+                status,
+            )
+            return None
+
+        size_pct = abs(delta_weight) if delta_weight else (
+            _safe_float(amount_ars, 0.0) / total_ars if total_ars else 0.0
+        )
+
+        row = await conn.fetchrow(
+            """
+            INSERT INTO decision_log (
+                decided_at,
+                ticker,
+                decision,
+                final_score,
+                confidence,
+                layers,
+                price_at_decision,
+                vix_at_decision,
+                regime,
+                size_pct,
+                stop_loss_pct,
+                target_pct,
+                horizon_days,
+                rr_ratio,
+                decision_type,
+                source,
+                status,
+                block_reason,
+                theoretical_amount_ars,
+                executed_amount_ars,
+                current_weight,
+                target_weight,
+                delta_weight,
+                is_executable,
+                was_blocked
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6::jsonb,
+                $7, $8, $9,
+                $10, $11, $12, $13, $14,
+                $15, $16, $17, $18,
+                $19, $20, $21, $22, $23,
+                $24, $25
+            )
+            RETURNING id
+            """,
+            datetime.now(timezone.utc),
+            ticker,
+            decision,
+            final_score,
+            confidence,
+            _json.dumps(layers_payload),
+            price,
+            vix,
+            str(macro_regime),
+            size_pct,
+            None,
+            None,
+            None,
+            None,
+            decision_type,
+            "execution_plan",
+            status,
+            block_reason,
+            theoretical_ars,
+            amount_ars if is_executable else 0.0,
+            current_weight,
+            target_weight,
+            delta_weight,
+            bool(is_executable),
+            bool(was_blocked),
+        )
+
+        return int(row["id"]) if row else None
+
+    conn = await asyncpg.connect(db_url)
+
+    try:
+        for order in (getattr(execution_plan, "sell_orders", []) or []):
+            row_id = await _insert_event(
+                conn,
+                order=order,
+                status="APPROVED",
+                decision_type="executable",
+                is_executable=True,
+                was_blocked=False,
+            )
+            if row_id:
+                saved_ids.append(row_id)
+
+        for order in (getattr(execution_plan, "buy_orders", []) or []):
+            row_id = await _insert_event(
+                conn,
+                order=order,
+                status="APPROVED",
+                decision_type="executable",
+                is_executable=True,
+                was_blocked=False,
+            )
+            if row_id:
+                saved_ids.append(row_id)
+
+        for order in (getattr(execution_plan, "blocked_orders", []) or []):
+            row_id = await _insert_event(
+                conn,
+                order=order,
+                status="BLOCKED",
+                decision_type="blocked",
+                is_executable=False,
+                was_blocked=True,
+            )
+            if row_id:
+                saved_ids.append(row_id)
+
+        # pending_buys suele ser lista de tickers. Lo guardamos como BLOCKED por funding
+        # para que el blocked audit pueda aprender si esos bloqueos fueron correctos.
+        pending_buys = getattr(execution_plan, "pending_buys", []) or []
+
+        for ticker in pending_buys:
+            ticker = str(ticker or "").upper().strip()
+            if not ticker:
+                continue
+
+            d = decision_by_ticker.get(ticker)
+
+            if d is None:
+                continue
+
+            class _SyntheticPendingOrder:
+                pass
+
+            order = _SyntheticPendingOrder()
+            order.ticker = ticker
+            order.side = "BUY"
+            order.amount_ars = 0.0
+            order.theoretical_ars = abs(
+                _safe_float(getattr(d, "delta_weight", 0.0), 0.0)
+            ) * total_ars
+            order.reason = "Compra pendiente por funding/señal"
+
+            row_id = await _insert_event(
+                conn,
+                order=order,
+                status="BLOCKED",
+                decision_type="blocked",
+                is_executable=False,
+                was_blocked=True,
+                forced_reason="Compra pendiente por funding/señal",
+            )
+
+            if row_id:
+                saved_ids.append(row_id)
+
+    finally:
+        await conn.close()
+
+    if not saved_ids:
+        logger.info("_save_execution_plan_events: no se guardaron eventos nuevos")
+
+    return saved_ids
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GUARDAR TRADES EN DECISION_LOG
@@ -1629,25 +2004,26 @@ async def main(
                 summary="Sin rebalanceo necesario.",
             )
 
-    # ── 9.5 Guardar trades en decision_log ────────────────────────────────────
-    if rebalance_report and total_ars > 0:
-        logger.info("Guardando trades del optimizer en decision_log...")
+    # ── 9.5 Guardar eventos del ExecutionPlan en decision_log ─────────────────
+    if execution_plan and total_ars > 0:
+        logger.info(
+            "Paso 9.5: guardando eventos ExecutionPlan — "
+            "APPROVED/BLOCKED con source=execution_plan"
+        )
         try:
-            saved = await _save_optimizer_trades(
-                cfg              = cfg,
-                rebalance_report = rebalance_report,
-                current_w        = _current_weights(positions, total_ars),
-                positions        = positions,
-                results          = results,
-                macro_snap       = macro_snap,
-                macro_regime     = macro_regime,
-                total_ars        = total_ars,
+            saved = await _save_execution_plan_events(
+                cfg=cfg,
+                execution_plan=execution_plan,
+                results=results,
+                macro_snap=macro_snap,
+                macro_regime=macro_regime,
+                total_ars=total_ars,
             )
-            logger.info(f"Trades guardados en DB: ids={saved}")
+            logger.info(f"Eventos ExecutionPlan guardados en DB: ids={saved}")
         except Exception as e:
-            logger.warning(f"No se pudieron guardar trades (no crítico): {e}")
+            logger.warning(f"No se pudieron guardar eventos ExecutionPlan (no crítico): {e}")
     else:
-        logger.info("Paso 9.5: sin optimizer o portfolio vacío — skip")
+        logger.info("Paso 9.5: sin execution_plan o portfolio vacío — skip")
 
     # ── 10. Information Coefficient ────────────────────────────────────────────
     ic_metrics = await _compute_information_coefficient(

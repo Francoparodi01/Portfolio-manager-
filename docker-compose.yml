@@ -21,9 +21,9 @@ services:
       timeout: 5s
       retries: 10
 
-  scraper:
+  scheduler:
     build: .
-    container_name: cocos_scraper
+    container_name: cocos_scheduler
     restart: always
     env_file:
       - .env
@@ -31,6 +31,7 @@ services:
       - ./logs:/app/logs
       - ./screenshots:/app/screenshots
       - secrets_data:/app/secrets
+    command: ["python", "-m", "src.scheduler.runner"]
     environment:
       TZ: America/Argentina/Buenos_Aires
     deploy:
@@ -60,3 +61,4 @@ services:
 volumes:
   postgres_data:
   secrets_data:
+  

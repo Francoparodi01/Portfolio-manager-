@@ -8,12 +8,40 @@ Usa datos generados por el sistema:
     - layers
     - decision
     - outcome_5d / outcome_10d / outcome_20d
+    - source
+    - decision_type
+    - status
+    - block_reason
+    - is_executable
+    - was_blocked
 
 No usa precios históricos crudos directamente.
 Los retornos vienen desde decision_log, previamente calculados por update_outcomes.
 
 Objetivo:
-    Calibrar si el score del sistema tiene relación con resultados futuros.
+    Calibrar si el score del sistema tiene relación con resultados futuros,
+    separando distintos niveles de decisión.
+
+Modos de auditoría:
+    signal:
+        Evalúa si el score predice retornos, mezclando señales BUY/SELL
+        con outcome disponible.
+
+    optimizer:
+        Evalúa ideas teóricas del optimizer.
+        Sirve para saber si el optimizer propone buenos targets,
+        aunque el Execution Planner luego los bloquee.
+
+    execution:
+        Evalúa órdenes aprobadas/ejecutables por el Execution Planner.
+        Esta es la auditoría más cercana a performance operativa real.
+
+    blocked:
+        Evalúa ideas bloqueadas por guards.
+        Sirve para saber si los guards protegen bien o bloquean demasiado.
+
+    all:
+        Mezcla exploratoria global. Útil para diagnóstico, no para calibración final.
 
 Targets:
     raw:
@@ -24,16 +52,18 @@ Targets:
         SELL -> -outcome_Xd
 
 Uso:
-    python scripts/run_regression_audit.py
-    python scripts/run_regression_audit.py --compact
-    python scripts/run_regression_audit.py --days 365
-    python scripts/run_regression_audit.py --horizon 5d
-    python scripts/run_regression_audit.py --target raw
-    python scripts/run_regression_audit.py --target directional
-    python scripts/run_regression_audit.py --actions BUY SELL
-    python scripts/run_regression_audit.py --since 2026-05-04
-    python scripts/run_regression_audit.py --cost-bps 75
-    python scripts/run_regression_audit.py --no-telegram
+    python scripts/run_regression_audit.py --mode signal
+    python scripts/run_regression_audit.py --mode optimizer
+    python scripts/run_regression_audit.py --mode execution
+    python scripts/run_regression_audit.py --mode blocked
+    python scripts/run_regression_audit.py --mode all
+
+Ejemplos:
+    python scripts/run_regression_audit.py --mode optimizer --compact
+    python scripts/run_regression_audit.py --mode execution --horizon 5d
+    python scripts/run_regression_audit.py --mode blocked --target directional
+    python scripts/run_regression_audit.py --mode signal --days 365
+    python scripts/run_regression_audit.py --mode optimizer --no-telegram
 """
 
 from __future__ import annotations
@@ -60,6 +90,9 @@ from src.core.logger import get_logger
 logger = get_logger(__name__)
 
 
+AUDIT_MODES = ("signal", "optimizer", "execution", "blocked", "all")
+
+
 def _normalize_actions(actions: Optional[list[str]]) -> Optional[tuple[str, ...]]:
     if not actions:
         return None
@@ -73,9 +106,44 @@ def _normalize_actions(actions: Optional[list[str]]) -> Optional[tuple[str, ...]
     return cleaned or None
 
 
+def _default_actions_for_mode(mode: str, target: str) -> Optional[tuple[str, ...]]:
+    """
+    Acciones por defecto.
+
+    Para directional normalmente interesa BUY/SELL porque el target se ajusta
+    por dirección. Para raw se puede permitir más flexibilidad, pero por defecto
+    mantenemos BUY/SELL para evitar mezclar HOLD/WATCH si el usuario no lo pidió.
+    """
+    mode = (mode or "optimizer").lower()
+    target = (target or "directional").lower()
+
+    if target == "directional":
+        return ("BUY", "SELL", "SELL_PARTIAL", "SELL_FULL")
+
+    if mode in ("signal", "optimizer", "execution", "blocked", "all"):
+        return ("BUY", "SELL", "SELL_PARTIAL", "SELL_FULL")
+
+    return None
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Auditoría de regresión para calibración de score"
+    )
+
+    parser.add_argument(
+        "--mode",
+        choices=AUDIT_MODES,
+        default="optimizer",
+        help=(
+            "Tipo de auditoría. "
+            "signal = score general; "
+            "optimizer = ideas teóricas del optimizer; "
+            "execution = órdenes aprobadas/ejecutables; "
+            "blocked = ideas bloqueadas por guards; "
+            "all = mezcla exploratoria. "
+            "Default: optimizer"
+        ),
     )
 
     parser.add_argument(
@@ -116,7 +184,7 @@ async def main() -> None:
         default=None,
         help=(
             "Acciones a incluir. Ej: --actions BUY SELL. "
-            "Default en directional: BUY SELL SELL_PARTIAL SELL_FULL"
+            "Si no se pasa, usa BUY SELL SELL_PARTIAL SELL_FULL."
         ),
     )
 
@@ -157,7 +225,10 @@ async def main() -> None:
     cfg = get_config()
 
     horizons = DEFAULT_HORIZONS if args.horizon == "all" else (args.horizon,)
+
     actions = _normalize_actions(args.actions)
+    if actions is None and not args.include_non_active:
+        actions = _default_actions_for_mode(args.mode, args.target)
 
     audit_cfg = RegressionAuditConfig(
         database_url=cfg.database.url,
@@ -169,6 +240,7 @@ async def main() -> None:
         target_mode=args.target,
         actions=actions,
         include_non_active=args.include_non_active,
+        mode=args.mode,
     )
 
     report = await run_regression_audit(audit_cfg)

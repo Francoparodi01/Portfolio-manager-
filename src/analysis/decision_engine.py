@@ -1,306 +1,683 @@
 """
 src/analysis/decision_engine.py
 ────────────────────────────────
-Convierte un SynthesisResult en una DECISIÓN FORZADA con parámetros concretos.
 
-Antes:  "NFLX score 0.2 | convicción MEDIA"
+Motor conservador de decisión.
+
+Objetivo:
+    Convertir score + contexto en una intención operativa clara,
+    sin saltear al Execution Planner.
+
+Antes:
+    score + conviction -> BUY/SELL/HOLD definitivo
+
 Ahora:
-    DECISIÓN:   BUY NFLX
-    SIZE:       12% del portfolio
-    ENTRY:      ahora
-    STOP:       -8%  (stop loss)
-    TARGET:     +16% (take profit)
-    HORIZONTE:  10 días
-    R/R:        2.0x
+    score + contexto -> SIGNAL + INTENT + BLOCKERS
 
-Reglas de diseño:
-  - Si score es ambiguo → HOLD (no se guarda en DB)
-  - El stop/target se ajustan por régimen macro y VIX
-  - El size se escala por convicción (nunca >20% en una sola posición)
-  - La decisión es DEFINITIVA — el LLM no la modifica
+Principios:
+    - El optimizer nunca genera órdenes directas.
+    - El radar nunca ejecuta compra directa sin validación.
+    - Un BUY ejecutable requiere score, convicción, delta útil, R/R válido y gate habilitado.
+    - En IC_CAUTION / CAUTELA_ALTA se endurecen umbrales.
+    - Si falta contexto operativo, se devuelve WATCH/HOLD, no BUY.
+    - SELL significa reducir posición, no short.
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from enum import Enum
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Umbrales ──────────────────────────────────────────────────────────────────
-SCORE_BUY_STRONG   =  0.20   # compra fuerte
-SCORE_BUY_WEAK     =  0.08   # compra débil
-SCORE_SELL_STRONG  = -0.20   # venta fuerte
-SCORE_SELL_WEAK    = -0.08   # reducción
-SCORE_HOLD_BAND    =  0.08   # zona muerta: abs(score) < esto → HOLD
 
-# ── Sizing (% del portfolio) ──────────────────────────────────────────────────
-SIZE_MAX       = 0.20   # máximo por posición
-SIZE_MIN       = 0.03   # mínimo para que valga la pena
-SIZE_BASE      = 0.20   # base sobre la que escala la convicción
+# ──────────────────────────────────────────────────────────────────────────────
+# Umbrales base
+# ──────────────────────────────────────────────────────────────────────────────
 
-# ── Risk defaults ─────────────────────────────────────────────────────────────
-STOP_NORMAL    = -0.08   # -8%
-STOP_CAUTIOUS  = -0.05   # -5% en régimen defensivo
-TARGET_RR      =  2.0    # target = stop * RR (R/R 2:1 por defecto)
+SCORE_BUY_MIN = 0.08
+SCORE_BUY_STRONG = 0.15
+SCORE_BUY_EXCEPTIONAL = 0.18
 
-# ── Horizontes (días) ─────────────────────────────────────────────────────────
-HORIZON_SHORT  =  5
-HORIZON_MED    = 10
-HORIZON_LONG   = 20
+SCORE_SELL_MIN = -0.08
+SCORE_SELL_STRONG = -0.15
+
+CONVICTION_MIN = 0.45
+CONVICTION_STRONG = 0.60
+
+MIN_DELTA_PCT = 0.015       # 1.5% del portfolio para operar
+MIN_TRADE_SIZE_PCT = 0.015  # 1.5% del portfolio
+MAX_POSITION_PCT = 0.25     # hard cap por activo
+MAX_NEW_POSITION_PCT = 0.06 # posición inicial máxima si no existe
+
+RR_MIN = 1.20
+RR_GOOD = 1.50
+
+STOP_NORMAL = -0.08
+STOP_CAUTIOUS = -0.05
+TARGET_RR = 2.0
+
+HORIZON_SHORT = 5
+HORIZON_MED = 10
+HORIZON_LONG = 20
+
+
+class SignalClass(str, Enum):
+    NEG_STRONG = "NEG_FUERTE"
+    NEG_OPERABLE = "NEG_OPERABLE"
+    NEUTRAL = "NEUTRAL_RUIDO"
+    POS_WEAK = "POS_DEBIL"
+    POS_OPERABLE = "POS_OPERABLE"
+    POS_STRONG = "POS_FUERTE"
+
+
+class FinalAction(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
+    WATCH = "WATCH"
+    SWAP_CANDIDATE = "SWAP_CANDIDATE"
+    NO_ACTION = "NO_ACTION"
 
 
 @dataclass
 class DecisionOutput:
-    """Decisión forzada con todos los parámetros operativos."""
-    ticker:         str
-    direction:      str          # 'BUY' | 'SELL' | 'HOLD'
-    score:          float
-    conviction:     float        # 0–1
-    size_pct:       float        # fracción del portfolio (0.12 = 12%)
-    entry_price:    Optional[float]
-    stop_loss_pct:  float        # negativo  (ej: -0.08)
-    target_pct:     float        # positivo  (ej: +0.16)
-    horizon_days:   int
-    rr_ratio:       float
-    regime:         str
-    vix:            Optional[float]
-    decided_at:     datetime = field(default_factory=datetime.utcnow)
+    ticker: str
+    final_action: str
+    executable: bool
 
-    # ── Helpers de display ────────────────────────────────────────────────────
+    score: float
+    conviction: float
+    signal_class: str
+
+    current_weight: Optional[float] = None
+    target_weight: Optional[float] = None
+    delta_weight: Optional[float] = None
+
+    size_pct: float = 0.0
+    entry_price: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    target_pct: Optional[float] = None
+    rr_ratio: Optional[float] = None
+    horizon_days: int = HORIZON_MED
+
+    regime: str = "NEUTRAL"
+    ic_regime: str = "NORMAL"
+    vix: Optional[float] = None
+
+    reason: str = ""
+    blockers: list[str] = field(default_factory=list)
+    source: str = "decision_engine"
+    decided_at: datetime = field(default_factory=datetime.utcnow)
+
+    @property
+    def direction(self) -> str:
+        """
+        Compatibilidad con código viejo.
+        Devuelve BUY/SELL/HOLD aunque internamente exista WATCH/SWAP.
+        """
+        if self.final_action == FinalAction.BUY.value:
+            return "BUY"
+        if self.final_action == FinalAction.SELL.value:
+            return "SELL"
+        return "HOLD"
 
     def is_actionable(self) -> bool:
-        return self.direction != "HOLD"
+        return bool(self.executable and self.final_action in {"BUY", "SELL"})
 
     def stop_price(self) -> Optional[float]:
-        if self.entry_price:
-            return round(self.entry_price * (1 + self.stop_loss_pct), 4)
-        return None
+        if self.entry_price is None or self.stop_loss_pct is None:
+            return None
+        return round(self.entry_price * (1 + self.stop_loss_pct), 4)
 
     def target_price(self) -> Optional[float]:
-        if self.entry_price:
-            return round(self.entry_price * (1 + self.target_pct), 4)
-        return None
+        if self.entry_price is None or self.target_pct is None:
+            return None
+        return round(self.entry_price * (1 + self.target_pct), 4)
 
-    def format_telegram(self) -> str:
-        """Bloque de decisión listo para pegar en Telegram (HTML)."""
-        if not self.is_actionable():
-            return f"⚪ <b>HOLD {self.ticker}</b> — sin ventaja operativa clara (score {self.score:+.3f})"
-
-        icon = "🟢" if self.direction == "BUY" else "🔴"
-        lines = [
-            f"{icon} <b>DECISIÓN: {self.direction} {self.ticker}</b>",
-            f"   SIZE:       <b>{self.size_pct:.0%}</b> del portfolio",
-            f"   ENTRY:      ahora (precio referencia: {self.entry_price or '?'})",
-            f"   STOP:       <code>{self.stop_loss_pct:+.1%}</code>",
-            f"   TARGET:     <code>{self.target_pct:+.1%}</code>",
-            f"   HORIZONTE:  {self.horizon_days} días",
-            f"   R/R:        <b>{self.rr_ratio:.1f}x</b>",
-            f"   Score:      <code>{self.score:+.3f}</code> | Conv: <b>{self.conviction:.0%}</b>",
-            f"   Régimen:    {self.regime}",
-        ]
-        if self.stop_price():
-            lines.append(f"   Stop price: <code>${self.stop_price():,.2f}</code>  →  Target: <code>${self.target_price():,.2f}</code>")
-        return "\n".join(lines)
-
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "ticker":        self.ticker,
-            "direction":     self.direction,
-            "score":         self.score,
-            "conviction":    self.conviction,
-            "size_pct":      self.size_pct,
-            "entry_price":   self.entry_price,
+            "ticker": self.ticker,
+            "final_action": self.final_action,
+            "direction": self.direction,
+            "executable": self.executable,
+            "score": self.score,
+            "conviction": self.conviction,
+            "signal_class": self.signal_class,
+            "current_weight": self.current_weight,
+            "target_weight": self.target_weight,
+            "delta_weight": self.delta_weight,
+            "size_pct": self.size_pct,
+            "entry_price": self.entry_price,
             "stop_loss_pct": self.stop_loss_pct,
-            "target_pct":    self.target_pct,
-            "horizon_days":  self.horizon_days,
-            "rr_ratio":      self.rr_ratio,
-            "regime":        self.regime,
-            "vix":           self.vix,
-            "decided_at":    self.decided_at.isoformat(),
+            "target_pct": self.target_pct,
+            "rr_ratio": self.rr_ratio,
+            "horizon_days": self.horizon_days,
+            "regime": self.regime,
+            "ic_regime": self.ic_regime,
+            "vix": self.vix,
+            "reason": self.reason,
+            "blockers": self.blockers,
+            "source": self.source,
+            "decided_at": self.decided_at.isoformat(),
         }
 
+    def format_telegram(self) -> str:
+        icon = {
+            "BUY": "🟢",
+            "SELL": "🔴",
+            "HOLD": "🟡",
+            "WATCH": "🔵",
+            "SWAP_CANDIDATE": "🔄",
+            "NO_ACTION": "⚪",
+        }.get(self.final_action, "⚪")
 
-# ── Lógica principal ──────────────────────────────────────────────────────────
+        lines = [
+            f"{icon} <b>{self.ticker} → {self.final_action}</b>",
+            f"   Score: <code>{self.score:+.3f}</code> | Conv: <b>{self.conviction:.0%}</b>",
+            f"   Señal: <b>{self.signal_class}</b>",
+            f"   Ejecutable: <b>{'sí' if self.executable else 'no'}</b>",
+        ]
+
+        if self.current_weight is not None and self.target_weight is not None:
+            lines.append(
+                f"   Peso: {self.current_weight:.1%} → {self.target_weight:.1%}"
+            )
+
+        if self.size_pct:
+            lines.append(f"   Size sugerido: <b>{self.size_pct:.1%}</b> del portfolio")
+
+        if self.rr_ratio is not None:
+            lines.append(f"   R/R: <b>{self.rr_ratio:.1f}x</b>")
+
+        if self.stop_loss_pct is not None and self.target_pct is not None:
+            lines.append(
+                f"   Stop: <code>{self.stop_loss_pct:+.1%}</code> | "
+                f"Target: <code>{self.target_pct:+.1%}</code>"
+            )
+
+        if self.reason:
+            lines.append(f"   Motivo: {self.reason}")
+
+        if self.blockers:
+            lines.append("   Bloqueos:")
+            for b in self.blockers:
+                lines.append(f"      • {b}")
+
+        return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# API principal
+# ──────────────────────────────────────────────────────────────────────────────
+
+def classify_signal(score: float, conviction: float = 0.0) -> SignalClass:
+    score = float(score or 0.0)
+    conviction = _normalize_conviction(conviction)
+
+    if score >= SCORE_BUY_STRONG and conviction >= CONVICTION_MIN:
+        return SignalClass.POS_STRONG
+
+    if score >= SCORE_BUY_MIN and conviction >= CONVICTION_MIN:
+        return SignalClass.POS_OPERABLE
+
+    if score > 0.03:
+        return SignalClass.POS_WEAK
+
+    if score <= SCORE_SELL_STRONG and conviction >= CONVICTION_MIN:
+        return SignalClass.NEG_STRONG
+
+    if score <= SCORE_SELL_MIN and conviction >= CONVICTION_MIN:
+        return SignalClass.NEG_OPERABLE
+
+    return SignalClass.NEUTRAL
+
 
 def make_decision(
-    ticker:      str,
-    score:       float,
-    conviction:  float,
-    regime:      str,
-    vix:         Optional[float] = None,
+    ticker: str,
+    score: float,
+    conviction: float,
+    regime: str,
+    vix: Optional[float] = None,
     entry_price: Optional[float] = None,
-    layers:      Optional[dict]  = None,
+    layers: Optional[dict] = None,
+
+    # Contexto operativo nuevo
+    current_weight: Optional[float] = None,
+    target_weight: Optional[float] = None,
+    rr_ratio: Optional[float] = None,
+    ic_regime: str = "NORMAL",
+    has_position: Optional[bool] = None,
+    source: str = "portfolio",
+    allow_new_buy: bool = True,
 ) -> DecisionOutput:
     """
-    Convierte un score + contexto en una decisión forzada.
+    Genera una decisión conservadora.
 
-    Parámetros
-    ----------
-    ticker      : símbolo del activo
-    score       : final_score del sistema (-1 a +1)
-    conviction  : confidence normalizado (0 a 1)
-    regime      : 'RISK_ON' | 'NEUTRAL' | 'RISK_OFF' | 'DEFENSIVE'
-    vix         : VIX actual (ajusta stops)
-    entry_price : precio actual (para calcular niveles absolutos)
-    layers      : dict de layer scores para logging
+    Importante:
+        Si no recibe current_weight/target_weight, NO emite BUY ejecutable.
+        Solo clasifica señal y devuelve WATCH/HOLD.
 
-    Retorna
-    -------
-    DecisionOutput con direction='HOLD' si no hay ventaja clara.
+    Esto evita que un score aislado se transforme en orden directa.
     """
-    score      = float(score or 0.0)
-    conviction = float(conviction or 0.0)
-    vix        = float(vix) if vix else None
-    regime     = _normalize_regime(regime)
 
-    # ── 1. Dirección ──────────────────────────────────────────────────────────
-    is_defensive = regime in ("RISK_OFF", "DEFENSIVE", "BLOCKED", "CAUTIOUS")
+    ticker = str(ticker or "").upper().strip()
+    score = float(score or 0.0)
+    conviction = _normalize_conviction(conviction)
+    regime = _normalize_regime(regime)
+    ic_regime = _normalize_ic_regime(ic_regime)
+    vix = float(vix) if vix is not None else None
 
-    if score >= SCORE_BUY_STRONG and conviction >= 0.45:
-        direction = "BUY"
-    elif score >= SCORE_BUY_WEAK and conviction >= 0.30 and not is_defensive:
-        direction = "BUY"
-    elif score <= SCORE_SELL_STRONG:
-        direction = "SELL"
-    elif score <= SCORE_SELL_WEAK and conviction >= 0.40:
-        direction = "SELL"
-    else:
-        # Zona muerta — no hay ventaja suficiente para actuar
+    signal = classify_signal(score, conviction)
+    is_defensive = regime in {"RISK_OFF", "DEFENSIVE", "BLOCKED", "CAUTIOUS"}
+    ic_caution = ic_regime in {"CAUTION", "CAUTELA", "CAUTELA_ALTA", "HIGH_CAUTION"}
+
+    blockers: list[str] = []
+
+    if current_weight is not None:
+        current_weight = float(current_weight)
+
+    if target_weight is not None:
+        target_weight = float(target_weight)
+
+    delta_weight: Optional[float] = None
+    if current_weight is not None and target_weight is not None:
+        delta_weight = target_weight - current_weight
+
+    if has_position is None:
+        has_position = bool(current_weight and current_weight > 0)
+
+    # Stops y targets estándar
+    stop_loss_pct, target_pct, default_rr = _risk_params(
+        regime=regime,
+        vix=vix,
+        direction="BUY" if score >= 0 else "SELL",
+    )
+
+    effective_rr = float(rr_ratio) if rr_ratio is not None else default_rr
+
+    # ── Sin contexto operativo: no ejecutar ───────────────────────────────────
+    if delta_weight is None:
         return DecisionOutput(
-            ticker=ticker, direction="HOLD", score=score, conviction=conviction,
-            size_pct=0.0, entry_price=entry_price,
-            stop_loss_pct=STOP_NORMAL, target_pct=abs(STOP_NORMAL) * TARGET_RR,
-            horizon_days=HORIZON_MED, rr_ratio=TARGET_RR,
-            regime=regime, vix=vix,
+            ticker=ticker,
+            final_action=FinalAction.WATCH.value if signal != SignalClass.NEUTRAL else FinalAction.HOLD.value,
+            executable=False,
+            score=score,
+            conviction=conviction,
+            signal_class=signal.value,
+            current_weight=current_weight,
+            target_weight=target_weight,
+            delta_weight=delta_weight,
+            entry_price=entry_price,
+            stop_loss_pct=stop_loss_pct,
+            target_pct=target_pct,
+            rr_ratio=effective_rr,
+            horizon_days=_horizon(score, conviction),
+            regime=regime,
+            ic_regime=ic_regime,
+            vix=vix,
+            reason="Señal clasificada, pero falta contexto de peso/delta para ejecutar.",
+            blockers=["Falta current_weight/target_weight"],
+            source=source,
         )
 
-    # ── 2. Sizing — escala por convicción ────────────────────────────────────
-    # size = conviction * SIZE_BASE, ajustado por intensidad del score
-    score_intensity = min(abs(score) / SCORE_BUY_STRONG, 1.0)  # 0–1
-    raw_size = conviction * SIZE_BASE * (0.7 + 0.3 * score_intensity)
-    size_pct = max(SIZE_MIN, min(SIZE_MAX, raw_size))
+    # ── Gates globales ────────────────────────────────────────────────────────
+    if is_defensive and score > 0:
+        blockers.append(f"Régimen defensivo {regime}: no habilita compras débiles")
 
-    # En régimen defensivo, reducir tamaño a la mitad
-    if is_defensive and direction == "BUY":
-        size_pct *= 0.5
+    if ic_caution:
+        if score > 0 and score < SCORE_BUY_EXCEPTIONAL:
+            blockers.append(
+                f"IC en cautela ({ic_regime}): BUY requiere score >= {SCORE_BUY_EXCEPTIONAL:+.2f}"
+            )
 
-    # ── 3. Stop loss — ajustado por VIX y régimen ────────────────────────────
-    if vix and vix > 25:
-        # Mercado volátil: stops más amplios para no ser sacado
-        stop_loss = STOP_NORMAL * 1.25       # -10%
-    elif is_defensive:
-        stop_loss = STOP_CAUTIOUS            # -5%
-    else:
-        stop_loss = STOP_NORMAL              # -8%
+    if effective_rr < RR_MIN:
+        blockers.append(f"R/R insuficiente ({effective_rr:.1f}x < {RR_MIN:.1f}x)")
 
-    # En SELL, el stop es al alza
-    if direction == "SELL":
-        stop_loss = abs(stop_loss)           # stop positivo para posición corta
+    if abs(delta_weight) < MIN_DELTA_PCT:
+        blockers.append(
+            f"Delta insuficiente ({delta_weight:+.1%} < {MIN_DELTA_PCT:.1%})"
+        )
 
-    # ── 4. Target — R/R 2:1 ──────────────────────────────────────────────────
-    target_pct = abs(stop_loss) * TARGET_RR
-    if direction == "SELL":
-        target_pct = -target_pct            # target negativo para short
+    # ── BUY intent ────────────────────────────────────────────────────────────
+    if delta_weight > 0:
+        if signal not in {SignalClass.POS_OPERABLE, SignalClass.POS_STRONG}:
+            blockers.append(f"BUY requiere señal positiva operable; actual {signal.value}")
 
-    rr_ratio = abs(target_pct) / abs(stop_loss) if stop_loss != 0 else TARGET_RR
+        if not allow_new_buy and not has_position:
+            blockers.append("Compra nueva no habilitada por configuración")
 
-    # ── 5. Horizonte ──────────────────────────────────────────────────────────
-    if conviction >= 0.70 and abs(score) >= SCORE_BUY_STRONG:
-        horizon_days = HORIZON_SHORT
-    elif conviction >= 0.45:
-        horizon_days = HORIZON_MED
-    else:
-        horizon_days = HORIZON_LONG
+        if target_weight > MAX_POSITION_PCT:
+            blockers.append(
+                f"Target excede cap por activo ({target_weight:.1%} > {MAX_POSITION_PCT:.1%})"
+            )
 
-    logger.info(
-        f"[decision_engine] {direction} {ticker} | score={score:+.3f} conv={conviction:.0%} "
-        f"size={size_pct:.0%} stop={stop_loss:+.1%} target={target_pct:+.1%} "
-        f"horizon={horizon_days}d regime={regime}"
-    )
+        if not has_position and target_weight > MAX_NEW_POSITION_PCT:
+            blockers.append(
+                f"Posición nueva excede sizing inicial ({target_weight:.1%} > {MAX_NEW_POSITION_PCT:.1%})"
+            )
 
+        if blockers:
+            return DecisionOutput(
+                ticker=ticker,
+                final_action=FinalAction.WATCH.value,
+                executable=False,
+                score=score,
+                conviction=conviction,
+                signal_class=signal.value,
+                current_weight=current_weight,
+                target_weight=target_weight,
+                delta_weight=delta_weight,
+                size_pct=max(0.0, delta_weight),
+                entry_price=entry_price,
+                stop_loss_pct=stop_loss_pct,
+                target_pct=target_pct,
+                rr_ratio=effective_rr,
+                horizon_days=_horizon(score, conviction),
+                regime=regime,
+                ic_regime=ic_regime,
+                vix=vix,
+                reason="Compra bloqueada por guardias.",
+                blockers=blockers,
+                source=source,
+            )
+
+        return DecisionOutput(
+            ticker=ticker,
+            final_action=FinalAction.BUY.value,
+            executable=True,
+            score=score,
+            conviction=conviction,
+            signal_class=signal.value,
+            current_weight=current_weight,
+            target_weight=target_weight,
+            delta_weight=delta_weight,
+            size_pct=max(MIN_TRADE_SIZE_PCT, min(delta_weight, MAX_NEW_POSITION_PCT if not has_position else MAX_POSITION_PCT)),
+            entry_price=entry_price,
+            stop_loss_pct=stop_loss_pct,
+            target_pct=target_pct,
+            rr_ratio=effective_rr,
+            horizon_days=_horizon(score, conviction),
+            regime=regime,
+            ic_regime=ic_regime,
+            vix=vix,
+            reason="BUY habilitado: señal, delta y guardias operativas OK.",
+            blockers=[],
+            source=source,
+        )
+
+    # ── SELL / reducción intent ───────────────────────────────────────────────
+    if delta_weight < 0:
+        reduction_size = abs(delta_weight)
+
+        sell_allowed = signal in {SignalClass.NEG_OPERABLE, SignalClass.NEG_STRONG}
+
+        # Permitir reducción por concentración, aunque la señal no sea negativa,
+        # pero solo si el peso es alto.
+        concentration_trim = (
+            current_weight is not None
+            and current_weight > MAX_POSITION_PCT
+            and reduction_size >= MIN_DELTA_PCT
+        )
+
+        if not sell_allowed and not concentration_trim:
+            blockers.append(
+                f"SELL requiere señal negativa o concentración excesiva; actual {signal.value}"
+            )
+
+        if blockers:
+            return DecisionOutput(
+                ticker=ticker,
+                final_action=FinalAction.HOLD.value,
+                executable=False,
+                score=score,
+                conviction=conviction,
+                signal_class=signal.value,
+                current_weight=current_weight,
+                target_weight=target_weight,
+                delta_weight=delta_weight,
+                size_pct=0.0,
+                entry_price=entry_price,
+                stop_loss_pct=None,
+                target_pct=None,
+                rr_ratio=effective_rr,
+                horizon_days=_horizon(score, conviction),
+                regime=regime,
+                ic_regime=ic_regime,
+                vix=vix,
+                reason="Venta/reducción bloqueada por guardias.",
+                blockers=blockers,
+                source=source,
+            )
+
+        return DecisionOutput(
+            ticker=ticker,
+            final_action=FinalAction.SELL.value,
+            executable=True,
+            score=score,
+            conviction=conviction,
+            signal_class=signal.value,
+            current_weight=current_weight,
+            target_weight=target_weight,
+            delta_weight=delta_weight,
+            size_pct=reduction_size,
+            entry_price=entry_price,
+            stop_loss_pct=None,
+            target_pct=None,
+            rr_ratio=effective_rr,
+            horizon_days=_horizon(score, conviction),
+            regime=regime,
+            ic_regime=ic_regime,
+            vix=vix,
+            reason="Reducción habilitada por señal negativa o concentración.",
+            blockers=[],
+            source=source,
+        )
+
+    # delta 0
     return DecisionOutput(
-        ticker=ticker, direction=direction, score=score, conviction=conviction,
-        size_pct=size_pct, entry_price=entry_price,
-        stop_loss_pct=stop_loss if direction == "BUY" else -abs(stop_loss),
-        target_pct=target_pct,
-        horizon_days=horizon_days, rr_ratio=rr_ratio,
-        regime=regime, vix=vix,
+        ticker=ticker,
+        final_action=FinalAction.HOLD.value,
+        executable=False,
+        score=score,
+        conviction=conviction,
+        signal_class=signal.value,
+        current_weight=current_weight,
+        target_weight=target_weight,
+        delta_weight=delta_weight,
+        size_pct=0.0,
+        entry_price=entry_price,
+        stop_loss_pct=None,
+        target_pct=None,
+        rr_ratio=effective_rr,
+        horizon_days=_horizon(score, conviction),
+        regime=regime,
+        ic_regime=ic_regime,
+        vix=vix,
+        reason="Sin delta operativo.",
+        blockers=[],
+        source=source,
     )
 
 
-def make_decisions_from_results(results: list, macro_snap, regime: str) -> list[DecisionOutput]:
+def make_decisions_from_results(
+    results: list,
+    macro_snap,
+    regime: str,
+    *,
+    weights_current: Optional[dict[str, float]] = None,
+    weights_target: Optional[dict[str, float]] = None,
+    rr_by_ticker: Optional[dict[str, float]] = None,
+    ic_regime: str = "NORMAL",
+    source: str = "portfolio",
+) -> list[DecisionOutput]:
     """
-    Wrapper conveniente: toma la lista de SynthesisResult de run_analysis
-    y devuelve una lista de DecisionOutput (filtrando HOLDs si se desea).
+    Wrapper para run_analysis.
 
-    Uso en run_analysis.py:
-        decisions = make_decisions_from_results(results, macro_snap, macro_regime)
+    Acepta pesos actuales/objetivo si existen.
+    Si no existen, clasifica señal pero NO genera orden ejecutable.
     """
     vix = getattr(macro_snap, "vix", None)
-    regime = _normalize_regime(regime)
-    outputs = []
+    outputs: list[DecisionOutput] = []
+
+    weights_current = weights_current or {}
+    weights_target = weights_target or {}
+    rr_by_ticker = rr_by_ticker or {}
+
     for r in results:
-        ticker     = str(getattr(r, "ticker", "")).upper()
-        score      = float(getattr(r, "final_score", getattr(r, "score", 0.0)) or 0.0)
-        conviction = _normalize_conviction(getattr(r, "conviction",
-                                           getattr(r, "confidence", 0.0)))
-        price      = _extract_price(r)
-        layers     = _extract_layers(r)
+        ticker = str(getattr(r, "ticker", "")).upper()
+        score = float(getattr(r, "final_score", getattr(r, "score", 0.0)) or 0.0)
+        conviction = _normalize_conviction(
+            getattr(r, "conviction", getattr(r, "confidence", 0.0))
+        )
+        price = _extract_price(r)
+        layers = _extract_layers(r)
 
         dec = make_decision(
-            ticker=ticker, score=score, conviction=conviction,
-            regime=regime, vix=vix, entry_price=price, layers=layers,
+            ticker=ticker,
+            score=score,
+            conviction=conviction,
+            regime=regime,
+            vix=vix,
+            entry_price=price,
+            layers=layers,
+            current_weight=weights_current.get(ticker),
+            target_weight=weights_target.get(ticker),
+            rr_ratio=rr_by_ticker.get(ticker),
+            ic_regime=ic_regime,
+            source=source,
         )
         outputs.append(dec)
+
     return outputs
 
 
-# ── Helpers privados ──────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
 
-def _normalize_regime(regime) -> str:
-    """
-    Convierte régimen a string normalizado.
-    Acepta str O dict (el formato que retorna get_macro_regime()).
+def _risk_params(
+    regime: str,
+    vix: Optional[float],
+    direction: str,
+) -> tuple[float, float, float]:
+    regime = _normalize_regime(regime)
+    is_defensive = regime in {"RISK_OFF", "DEFENSIVE", "BLOCKED", "CAUTIOUS"}
 
-    dict ejemplo: {'market': 'risk_off', 'oil': 'bull', 'rates': 'neutral',
-                   'dollar': 'neutral', 'argentina': 'estable'}
-    → prioriza 'market', que es el campo más relevante para decisiones.
-    """
+    if vix is not None and vix > 25:
+        stop = STOP_NORMAL * 1.25
+    elif is_defensive:
+        stop = STOP_CAUTIOUS
+    else:
+        stop = STOP_NORMAL
+
+    target = abs(stop) * TARGET_RR
+
+    if direction == "SELL":
+        # Para CEDEARs, SELL significa reducir, no short.
+        # No usamos stop/target como short en este módulo.
+        return stop, target, TARGET_RR
+
+    return stop, target, TARGET_RR
+
+
+def _horizon(score: float, conviction: float) -> int:
+    score = abs(float(score or 0.0))
+    conviction = _normalize_conviction(conviction)
+
+    if conviction >= 0.70 and score >= SCORE_BUY_STRONG:
+        return HORIZON_SHORT
+    if conviction >= 0.45:
+        return HORIZON_MED
+    return HORIZON_LONG
+
+
+def _normalize_regime(regime: Any) -> str:
     if isinstance(regime, dict):
         market = str(regime.get("market", "neutral")).lower()
-        arg    = str(regime.get("argentina", "estable")).lower()
-        # Mapear a los valores que usa is_defensive
+        arg = str(regime.get("argentina", "estable")).lower()
+
         if market == "risk_off":
             return "RISK_OFF"
-        if arg == "crítico":
+        if market in {"cautious", "caution"}:
+            return "CAUTIOUS"
+        if arg in {"crítico", "critico", "risk_off"}:
             return "DEFENSIVE"
         return "NEUTRAL"
-    return (str(regime) if regime else "NEUTRAL").upper()
 
-def _normalize_conviction(x) -> float:
+    value = str(regime or "NEUTRAL").upper()
+    aliases = {
+        "NORMAL": "NEUTRAL",
+        "RISKON": "RISK_ON",
+        "RISK_ON": "RISK_ON",
+        "RISKOFF": "RISK_OFF",
+        "RISK_OFF": "RISK_OFF",
+        "CAUTION": "CAUTIOUS",
+        "CAUTELA": "CAUTIOUS",
+        "CAUTELA_ALTA": "CAUTIOUS",
+    }
+    return aliases.get(value, value)
+
+
+def _normalize_ic_regime(value: Any) -> str:
+    v = str(value or "NORMAL").upper()
+    aliases = {
+        "NORMAL": "NORMAL",
+        "OK": "NORMAL",
+        "CAUTION": "CAUTION",
+        "CAUTELA": "CAUTION",
+        "CAUTELA_ALTA": "HIGH_CAUTION",
+        "HIGH_CAUTION": "HIGH_CAUTION",
+        "BLOCKED": "BLOCKED",
+    }
+    return aliases.get(v, v)
+
+
+def _normalize_conviction(x: Any) -> float:
     try:
-        if x is None: return 0.0
+        if x is None:
+            return 0.0
         x = float(x)
-        return max(0.0, min(1.0, x / 100.0 if x > 1.0 else x))
+        if x > 1.0:
+            x = x / 100.0
+        return max(0.0, min(1.0, x))
     except Exception:
         return 0.0
 
 
-def _extract_price(result) -> Optional[float]:
+def _extract_price(result: Any) -> Optional[float]:
     for key in ("price", "price_at_decision", "current_price", "last_price"):
         val = getattr(result, key, None)
         if val is not None:
-            try: return float(val)
-            except Exception: pass
+            try:
+                return float(val)
+            except Exception:
+                pass
     return None
 
 
-def _extract_layers(result) -> dict:
-    out = {}
-    for layer in getattr(result, "layers", []) or []:
+def _extract_layers(result: Any) -> dict:
+    out: dict[str, float] = {}
+
+    layers = getattr(result, "layers", None)
+    if isinstance(layers, dict):
+        for k, v in layers.items():
+            try:
+                out[str(k)] = float(v)
+            except Exception:
+                pass
+        return out
+
+    for layer in layers or []:
         name = getattr(layer, "name", None)
-        if name:
-            out[name] = float(getattr(layer, "weighted", 0.0))
+        if not name:
+            continue
+        try:
+            out[str(name)] = float(getattr(layer, "weighted", 0.0))
+        except Exception:
+            pass
+
     return out
