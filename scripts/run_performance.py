@@ -1,24 +1,32 @@
 """
 scripts/run_performance.py
 ──────────────────────────
-Calcula y muestra el performance REAL del sistema de decisiones.
+Calcula y muestra el performance del sistema de decisiones.
 
-Output (para Telegram y stdout):
+Incluye:
+    - Performance histórica agregada.
+    - Actualización de outcomes pendientes.
+    - Estado del dataset operativo por source/status/decision_type.
 
+Esto permite distinguir:
+    optimizer / THEORETICAL  → ideas teóricas del optimizer
+    execution_plan / APPROVED → órdenes aprobadas reales
+    execution_plan / BLOCKED  → señales bloqueadas por guards/funding
+
+Output:
     📊 PERFORMANCE DEL SISTEMA
-    ──────────────────────────
-    Win rate:   54%
-    Avg win:    +6.2%
-    Avg loss:   -3.1%
-    EV:         +1.7%   ← la métrica que importa
-    Trades:     73
-    Pendientes: 12
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    DATASET OPERATIVO
+    optimizer / THEORETICAL / theoretical / BUY: ...
+    execution_plan / APPROVED / executable / SELL: ...
+    execution_plan / BLOCKED / blocked / BUY: ...
 
 Uso:
   python scripts/run_performance.py
   python scripts/run_performance.py --days 60
   python scripts/run_performance.py --no-telegram
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,6 +34,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime
+from html import escape
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -53,42 +62,174 @@ def _ev_label(ev: float | None) -> str:
     return "❌ NEGATIVO — el sistema no tiene edge demostrado"
 
 
+def _dataset_label(row: dict) -> str:
+    source = str(row.get("source") or "sin_source")
+    status = str(row.get("status") or "UNKNOWN")
+    decision_type = str(row.get("decision_type") or "unknown")
+    decision = str(row.get("decision") or "?")
+
+    return f"{source} / {status} / {decision_type} / {decision}"
+
+
+def _dataset_group_note(dataset_stats: list[dict]) -> str:
+    """
+    Mensaje corto para evitar interpretar el EV agregado como performance pura
+    del Execution Planner cuando todavía no tiene outcomes.
+    """
+    if not dataset_stats:
+        return "Sin eventos de decision_log para este período."
+
+    execution_with_outcome = 0
+    blocked_with_outcome = 0
+    optimizer_with_outcome = 0
+
+    for row in dataset_stats:
+        source = str(row.get("source") or "").lower()
+        status = str(row.get("status") or "").upper()
+        decision_type = str(row.get("decision_type") or "").lower()
+        con_5d = int(row.get("con_5d") or 0)
+
+        if source == "execution_plan" and status in ("APPROVED", "EXECUTED"):
+            execution_with_outcome += con_5d
+
+        if source == "execution_plan" and (status == "BLOCKED" or decision_type == "blocked"):
+            blocked_with_outcome += con_5d
+
+        if source == "optimizer" or status == "THEORETICAL" or decision_type == "theoretical":
+            optimizer_with_outcome += con_5d
+
+    if execution_with_outcome == 0 and optimizer_with_outcome > 0:
+        return (
+            "Lectura: el EV actual corresponde principalmente a histórico/optimizer. "
+            "El Execution Audit todavía está acumulando outcomes."
+        )
+
+    if execution_with_outcome > 0:
+        return (
+            "Lectura: ya hay outcomes de órdenes aprobadas. "
+            "El Execution Audit empieza a medir performance operativa real."
+        )
+
+    if blocked_with_outcome > 0:
+        return (
+            "Lectura: ya hay outcomes de bloqueos. "
+            "El Blocked Audit empieza a medir si los guards protegen o frenan demasiado."
+        )
+
+    return "Lectura: dataset operativo iniciado; todavía faltan outcomes 5D/10D/20D."
+
+
+async def _get_decision_dataset_stats(
+    db: PortfolioDatabase,
+    lookback_days: int = 90,
+) -> list[dict]:
+    """
+    Resume decision_log por source/status/decision_type/decision.
+
+    Esto no mide performance directamente.
+    Mide si estamos juntando datos útiles y de qué tipo.
+    """
+    pool = await db.get_pool()
+    if not pool:
+        return []
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                COALESCE(source, layers->>'source', 'sin_source') AS source,
+                COALESCE(status, 'UNKNOWN') AS status,
+                COALESCE(decision_type, 'unknown') AS decision_type,
+                decision,
+                COUNT(*) AS n,
+                COUNT(outcome_5d) AS con_5d,
+                COUNT(outcome_10d) AS con_10d,
+                COUNT(outcome_20d) AS con_20d
+            FROM decision_log
+            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+            GROUP BY 1,2,3,4
+            ORDER BY 1,2,3,4
+            """,
+            lookback_days,
+        )
+
+    return [dict(r) for r in rows]
+
+
+def render_dataset_operativo(stats: dict) -> list[str]:
+    dataset_stats = stats.get("dataset_stats", [])
+    lines: list[str] = []
+
+    lines.append("<b>DATASET OPERATIVO</b>")
+
+    if not dataset_stats:
+        lines.append("   Sin eventos en decision_log para este período.")
+        lines.append("")
+        return lines
+
+    for row in dataset_stats:
+        label = escape(_dataset_label(row))
+
+        n = int(row.get("n") or 0)
+        con_5d = int(row.get("con_5d") or 0)
+        con_10d = int(row.get("con_10d") or 0)
+        con_20d = int(row.get("con_20d") or 0)
+
+        lines.append(
+            f"   • <code>{label}</code>: "
+            f"<b>{n}</b> eventos | "
+            f"5D {con_5d} | 10D {con_10d} | 20D {con_20d}"
+        )
+
+    note = _dataset_group_note(dataset_stats)
+    if note:
+        lines.append(f"   ℹ️ {escape(note)}")
+
+    lines.append("")
+    return lines
+
+
 def render_performance_report(stats: dict) -> str:
     """Genera reporte de performance en HTML para Telegram."""
-    total   = stats.get("total_trades", 0)
+    total = stats.get("total_trades", 0)
     pending = stats.get("pending", 0)
-    days    = stats.get("lookback_days", 90)
+    days = stats.get("lookback_days", 90)
 
-    if total == 0:
-        lines = [
-            "📊 <b>PERFORMANCE DEL SISTEMA</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"⚠️ Sin trades completados en los últimos {days} días.",
-            "",
-        ]
-        if pending > 0:
-            lines.append(f"📋 {pending} decisiones pendientes de outcome (esperando ≥5 días).")
-            lines.append("Corriendo <code>python scripts/update_outcomes.py</code> se llena la DB.")
-        else:
-            lines.append("El sistema aún no tiene decisiones guardadas.")
-            lines.append("Verificá que <b>decision_engine</b> esté integrado en run_analysis.py.")
-        return "\n".join(lines)
-
-    win_rate = stats.get("win_rate")
-    avg_win  = stats.get("avg_win_5d")
-    avg_loss = stats.get("avg_loss_5d")
-    ev       = stats.get("ev")
-    winners  = stats.get("winners", 0)
-    losers   = stats.get("losers", 0)
-
-    lines = [
+    header = [
         "📊 <b>PERFORMANCE DEL SISTEMA</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"📅 Últimos {days} días | {datetime.now().strftime('%d/%m/%Y %H:%M')} ART",
         "",
+    ]
+
+    dataset_lines = render_dataset_operativo(stats)
+
+    if total == 0:
+        lines = header + dataset_lines + [
+            "⚠️ Sin trades completados en este período.",
+            "",
+        ]
+
+        if pending > 0:
+            lines.append(f"📋 {pending} decisiones pendientes de outcome.")
+            lines.append("Corriendo <code>python scripts/run_performance.py</code> se actualizan outcomes elegibles.")
+        else:
+            lines.append("El sistema aún no tiene decisiones con outcome cerrado.")
+            lines.append("Verificá que <b>run_analysis.py</b> esté guardando eventos en decision_log.")
+
+        return "\n".join(lines)
+
+    win_rate = stats.get("win_rate")
+    avg_win = stats.get("avg_win_5d")
+    avg_loss = stats.get("avg_loss_5d")
+    ev = stats.get("ev")
+    winners = stats.get("winners", 0)
+    losers = stats.get("losers", 0)
+
+    lines = header + dataset_lines + [
         "<b>MÉTRICAS PRINCIPALES (horizonte 5d)</b>",
         f"   Win rate:   <b>{win_rate:.0%}</b>  ({winners}W / {losers}L)"
-            if win_rate is not None else "   Win rate:   <b>N/A</b>",
+        if win_rate is not None else "   Win rate:   <b>N/A</b>",
         f"   Avg win:    <b>{_pct(avg_win)}</b>",
         f"   Avg loss:   <b>{_pct(avg_loss)}</b>",
         "",
@@ -107,52 +248,64 @@ def render_performance_report(stats: dict) -> str:
         f"   Pendientes:   {pending} (sin outcome aún)",
     ]
 
-    # Por ticker
     ticker_stats = stats.get("ticker_stats", [])
     if ticker_stats:
         lines += ["", "<b>POR TICKER</b>"]
         for ts in ticker_stats[:6]:
-            t         = ts.get("ticker", "?")
-            trades    = int(ts.get("trades") or 0)
-            wins      = int(ts.get("wins") or 0)
-            avg_ret   = ts.get("avg_return")
-            wr        = wins / trades if trades > 0 else 0
-            icon      = "🟢" if (avg_ret or 0) > 0 else "🔴"
+            t = ts.get("ticker", "?")
+            trades = int(ts.get("trades") or 0)
+            wins = int(ts.get("wins") or 0)
+            avg_ret = ts.get("avg_return")
+            wr = wins / trades if trades > 0 else 0
+            icon = "🟢" if (avg_ret or 0) > 0 else "🔴"
             lines.append(
-                f"   {icon} <b>{t}</b>: {trades} trades | WR {wr:.0%} | avg {_pct(avg_ret)}"
+                f"   {icon} <b>{escape(str(t))}</b>: "
+                f"{trades} trades | WR {wr:.0%} | avg {_pct(avg_ret)}"
             )
 
-    # Últimas decisiones
     recent = stats.get("recent", [])
     if recent:
         lines += ["", "<b>ÚLTIMAS DECISIONES</b>"]
         for r in recent:
-            ticker    = r.get("ticker", "?")
+            ticker = r.get("ticker", "?")
             direction = r.get("decision", "?")
-            score     = float(r.get("final_score") or 0.0)
-            outcome   = r.get("outcome_5d")
-            correct   = r.get("was_correct")
-            decided   = r.get("decided_at")
-            date_str  = decided.strftime("%d/%m") if decided else "?"
+            score = float(r.get("final_score") or 0.0)
+            outcome = r.get("outcome_5d")
+            correct = r.get("was_correct")
+            decided = r.get("decided_at")
+            date_str = decided.strftime("%d/%m") if decided else "?"
+
+            source = r.get("source") or None
+            status = r.get("status") or None
+
+            tag = ""
+            if source or status:
+                tag_parts = []
+                if source:
+                    tag_parts.append(str(source))
+                if status:
+                    tag_parts.append(str(status))
+                tag = f" <code>[{'/'.join(tag_parts)}]</code>"
+
             if correct is True:
                 res = f"✅ {_pct(outcome)}"
             elif correct is False:
                 res = f"❌ {_pct(outcome)}"
             else:
                 res = "⏳ pendiente"
+
             lines.append(
-                f"   {date_str} <b>{direction} {ticker}</b> "
+                f"   {date_str} <b>{escape(str(direction))} {escape(str(ticker))}</b>{tag} "
                 f"score <code>{score:+.3f}</code> → {res}"
             )
 
-    # Equity curve
     curve = stats.get("equity_curve", [])
     if curve and len(curve) >= 2:
-        eq_start  = stats.get("equity_start", 100.0)
-        eq_end    = stats.get("equity_end", 100.0)
-        eq_ret    = stats.get("equity_return", 0.0)
-        eq_dd     = stats.get("equity_max_drawdown", 0.0)
-        eq_icon   = "📈" if eq_ret >= 0 else "📉"
+        eq_end = stats.get("equity_end", 100.0)
+        eq_ret = stats.get("equity_return", 0.0)
+        eq_dd = stats.get("equity_max_drawdown", 0.0)
+        eq_icon = "📈" if eq_ret >= 0 else "📉"
+
         lines += [
             "",
             "<b>EQUITY CURVE</b>",
@@ -162,10 +315,11 @@ def render_performance_report(stats: dict) -> str:
             "",
             "   Últimos movimientos:",
         ]
+
         for p in curve[-5:]:
             icon = "✅" if p.get("correct") else "❌"
             lines.append(
-                f"   {icon} {p['date']} <b>{p['ticker']}</b> "
+                f"   {icon} {p['date']} <b>{escape(str(p['ticker']))}</b> "
                 f"<code>{p['outcome']:+.1%}</code> → equity {p['equity']:.1f}"
             )
 
@@ -174,28 +328,38 @@ def render_performance_report(stats: dict) -> str:
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "<i>EV = (win_rate × avg_win) − (loss_rate × avg_loss)</i>",
         "<i>Si EV &gt; 0 → el sistema tiene edge real. Si no → es ruido.</i>",
+        "<i>Separar dataset operativo evita mezclar optimizer teórico con ejecución real.</i>",
     ]
 
     return "\n".join(lines)
 
 
 async def main(lookback_days: int, no_telegram: bool) -> None:
-    cfg      = get_config()
-    db       = PortfolioDatabase(cfg.database.url)
-    notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    notifier = TelegramNotifier(
+        cfg.scraper.telegram_bot_token,
+        cfg.scraper.telegram_chat_id,
+    )
 
     try:
         await db.connect()
 
-        # Primero actualizar outcomes pendientes
         logger.info("Actualizando outcomes pendientes...")
         updated = await db.update_outcomes(lookback_days=lookback_days)
+
         if updated:
             logger.info(f"{updated} outcomes actualizados")
 
-        # Luego calcular stats
         logger.info("Calculando performance...")
-        stats  = await db.get_performance_stats_v2(lookback_days=lookback_days)
+        stats = await db.get_performance_stats_v2(lookback_days=lookback_days)
+
+        dataset_stats = await _get_decision_dataset_stats(
+            db=db,
+            lookback_days=lookback_days,
+        )
+        stats["dataset_stats"] = dataset_stats
+
         report = render_performance_report(stats)
 
         print(report)
@@ -210,15 +374,32 @@ async def main(lookback_days: int, no_telegram: bool) -> None:
         logger.error(f"Error: {e}", exc_info=True)
         print(f"❌ Error: {e}")
         sys.exit(1)
+
     finally:
         await db.close()
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Performance real del sistema de decisiones")
-    p.add_argument("--days",        type=int, default=90,
-                   help="Lookback en días (default: 90)")
-    p.add_argument("--no-telegram", action="store_true",
-                   help="No enviar a Telegram")
+    p = argparse.ArgumentParser(
+        description="Performance real del sistema de decisiones"
+    )
+    p.add_argument(
+        "--days",
+        type=int,
+        default=90,
+        help="Lookback en días (default: 90)",
+    )
+    p.add_argument(
+        "--no-telegram",
+        action="store_true",
+        help="No enviar a Telegram",
+    )
+
     args = p.parse_args()
-    asyncio.run(main(lookback_days=args.days, no_telegram=args.no_telegram))
+
+    asyncio.run(
+        main(
+            lookback_days=args.days,
+            no_telegram=args.no_telegram,
+        )
+    )

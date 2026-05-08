@@ -63,7 +63,7 @@ MARKET_CLOSE_H, MARKET_CLOSE_M = 17, 0
 
 MARKET_POLL_SECONDS = 90       # frecuencia del loop de mercado
 RISK_POLL_SECONDS = 60         # frecuencia del risk guard
-PORTFOLIO_REFRESH_SECONDS = 300          # en rueda: cada 5 min, dentro del loop de mercado
+PORTFOLIO_REFRESH_SECONDS = 180          # en rueda: cada 3 min, dentro del loop de mercado
 PORTFOLIO_OFFHOURS_REFRESH_SECONDS = 3600  # fuera de rueda / finde: cada 60 min # cada ~10 min, dentro del loop de mercado
 
 WARNING_PCT = -0.04
