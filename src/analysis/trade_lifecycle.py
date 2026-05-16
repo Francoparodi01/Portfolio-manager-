@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
+from src.analysis.risk_levels import compute_risk_levels
+
 logger = logging.getLogger(__name__)
 
 # ── Umbrales para BUY vs BUY_REBALANCE ────────────────────────────────────────
@@ -43,11 +45,6 @@ logger = logging.getLogger(__name__)
 BUY_SCORE_MIN      = 0.08   # score mínimo para BUY real
 BUY_CONVICTION_MIN = 0.40   # conviction mínima para BUY real
 BUY_RR_MIN         = 1.0    # R/R mínimo para BUY real (si se conoce)
-
-# Stop defaults
-STOP_DEFAULT_PCT   = 0.08   # -8% default
-STOP_CAUTIOUS_PCT  = 0.05   # -5% en régimen defensivo
-TARGET_RR_DEFAULT  = 2.0    # target = stop × RR
 
 # Horizonte default
 HORIZON_DEFAULT    = 10     # días
@@ -359,54 +356,26 @@ def compute_stop_levels(
     atr_pct:      Optional[float] = None,   # ATR del screener si está disponible
     rr_override:  Optional[float] = None,   # R/R explícito del radar
 ) -> StopLevel:
-    """
-    Calcula stop-loss y target para una compra.
-
-    Prioridad de stop:
-      1. ATR disponible → usar ATR × 1.5 (stop basado en volatilidad real)
-      2. VIX > 30       → stop ajustado a -5% (mercado en pánico)
-      3. Régimen defens.→ stop ajustado a -5%
-      4. Default        → -8%
-
-    Target: entry_price × (1 + abs(stop) × RR)
-    """
-    is_defensive = str(regime).upper() in (
-        "RISK_OFF", "DEFENSIVE", "BLOCKED", "CAUTIOUS"
+    """Construye el wrapper legacy de lifecycle desde la fuente única de riesgo."""
+    levels = compute_risk_levels(
+        entry_price=entry_price,
+        signal_class=score,
+        action="BUY",
+        regime=regime,
+        vix=vix,
+        atr_pct=atr_pct,
+        rr_override=rr_override,
     )
-    vix_f = float(vix) if vix else 0.0
-
-    # Determinar stop_pct y stop_source
-    if atr_pct and atr_pct > 0:
-        stop_pct   = -(atr_pct * 1.5)
-        stop_pct   = max(stop_pct, -0.18)   # cap -18%
-        stop_pct   = min(stop_pct, -0.04)   # mínimo -4%
-        stop_source = StopSource.ATR
-    elif vix_f > 30:
-        stop_pct   = -0.05
-        stop_source = StopSource.VIX_DYNAMIC
-    elif is_defensive:
-        stop_pct   = -STOP_CAUTIOUS_PCT
-        stop_source = StopSource.FIXED
-    else:
-        stop_pct   = -STOP_DEFAULT_PCT
-        stop_source = StopSource.FIXED
-
-    stop_price = round(entry_price * (1 + stop_pct), 4)
-
-    rr        = rr_override if rr_override and rr_override > 0 else TARGET_RR_DEFAULT
-    target_pct = abs(stop_pct) * rr
-    target_price = round(entry_price * (1 + target_pct), 4)
-    rr_ratio   = target_pct / abs(stop_pct) if stop_pct != 0 else rr
 
     return StopLevel(
         entry_price      = round(entry_price, 4),
-        stop_loss_pct    = round(stop_pct, 4),
-        stop_loss_price  = stop_price,
-        target_pct       = round(target_pct, 4),
-        target_price     = target_price,
-        rr_ratio         = round(rr_ratio, 2),
+        stop_loss_pct    = levels.stop_pct,
+        stop_loss_price  = levels.stop,
+        target_pct       = levels.target_pct,
+        target_price     = levels.target,
+        rr_ratio         = levels.rr,
         stop_policy      = StopPolicy.HARD,
-        stop_source      = stop_source,
+        stop_source      = StopSource(levels.stop_source),
         trailing_active  = False,
         exit_scope       = ExitScope.FULL,
         exit_reason_rule = ExitReasonRule.STOP_LOSS,
@@ -651,59 +620,7 @@ async def register_stop_exit(
 # MIGRACIÓN DE DB
 # ══════════════════════════════════════════════════════════════════════════════
 
-MIGRATION_SQL = """
--- trade_lifecycle migration — additive, no rompe filas existentes
--- Correr una vez: python scripts/init_db.py o psql manual
-
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS decision_type    TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS signal_strength  TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_loss_price  FLOAT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS target_price     FLOAT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS rr_ratio         FLOAT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_scope       TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_reason_rule TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_policy      TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_source      TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS trailing_active  BOOLEAN DEFAULT FALSE;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS was_stopped      BOOLEAN;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_reason      TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS closed_at        TIMESTAMPTZ;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS close_price      FLOAT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS source           TEXT;
-
--- Rellenar decision_type para filas existentes basado en `decision`
-UPDATE decision_log
-SET decision_type = CASE
-    WHEN decision = 'BUY'  THEN 'BUY'
-    WHEN decision = 'SELL' THEN 'SELL_FULL'
-    WHEN decision = 'HOLD' THEN 'HOLD'
-    ELSE decision
-END
-WHERE decision_type IS NULL;
-
--- Índice para queries de stops abiertos
-CREATE INDEX IF NOT EXISTS idx_decision_log_stops
-    ON decision_log(decision, stop_loss_price, outcome_5d)
-    WHERE stop_loss_price IS NOT NULL AND outcome_5d IS NULL;
-"""
-
-
 async def run_migration(pool) -> bool:
-    """Corre la migración de decision_log. Idempotente."""
-    if not pool:
-        return False
-    try:
-        stmts = [s.strip() for s in MIGRATION_SQL.split(";") if s.strip()]
-        async with pool.acquire() as conn:
-            for stmt in stmts:
-                if stmt.upper().startswith("--"):
-                    continue
-                try:
-                    await conn.execute(stmt)
-                except Exception as e:
-                    logger.debug(f"Migration stmt ignorado: {e!r}")
-        logger.info("trade_lifecycle migration completada")
-        return True
-    except Exception as e:
-        logger.error(f"run_migration error: {e}", exc_info=True)
-        return False
+    """Compatibilidad legacy: el schema ahora se administra solo desde init.sql."""
+    logger.info("run_migration omitida: schema administrado por init.sql")
+    return bool(pool)

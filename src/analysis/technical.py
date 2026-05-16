@@ -440,11 +440,33 @@ def analyze_ticker(ticker: str, period: str = "6mo") -> Optional[Signal]:
     return signal
 
 
+def analyze_ticker_from_frame(ticker: str, frame: "pd.DataFrame") -> Optional[Signal]:
+    ind = compute_indicators(frame, ticker)
+    if ind is None:
+        return None
+    signal = generate_signals(ind)
+    logger.info(f"{ticker}: {signal.signal} (fuerza={signal.strength:.0%}, score_reasons={len(signal.reasons)})")
+    return signal
+
+
 def analyze_portfolio(tickers: list[str], period: str = "6mo") -> list[Signal]:
     signals = []
     for ticker in tickers:
         try:
             sig = analyze_ticker(ticker, period)
+            if sig:
+                signals.append(sig)
+        except Exception as e:
+            logger.error(f"Error analizando {ticker}: {e}")
+    priority = {"BUY": 0, "SELL": 1, "HOLD": 2}
+    return sorted(signals, key=lambda s: (priority.get(s.signal, 3), -s.strength))
+
+
+def analyze_portfolio_from_frames(frames: dict[str, "pd.DataFrame"]) -> list[Signal]:
+    signals = []
+    for ticker, frame in frames.items():
+        try:
+            sig = analyze_ticker_from_frame(ticker, frame)
             if sig:
                 signals.append(sig)
         except Exception as e:

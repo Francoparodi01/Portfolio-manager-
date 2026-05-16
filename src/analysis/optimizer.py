@@ -281,14 +281,16 @@ def _apply_risk_gate_to_trades(
 
 # ── Carga de datos ────────────────────────────────────────────────────────────
 
-def _fetch_returns(tickers: list[str]):
+def _fetch_returns(tickers: list[str], history_frames: Optional[dict[str, object]] = None):
     try:
         import pandas as pd
         from src.analysis.technical import fetch_history
 
         data = {}
         for ticker in tickers:
-            df = fetch_history(ticker, period=HISTORY_PERIOD)
+            df = (history_frames or {}).get(ticker)
+            if df is None:
+                df = fetch_history(ticker, period=HISTORY_PERIOD)
             if df is None or "Close" not in df.columns:
                 continue
             prices = df["Close"].squeeze()
@@ -524,6 +526,7 @@ def run_optimizer(
     market_assets: list[dict],
     threshold: float = REBALANCE_THRESH,
     portfolio_drawdown: float = 0.0,
+    history_frames: Optional[dict[str, object]] = None,
 ) -> Optional[RebalanceReport]:
     try:
         import pandas as pd
@@ -564,7 +567,7 @@ def run_optimizer(
             return None
 
         # ── PASO 2: Retornos históricos ───────────────────────────────────────
-        returns = _fetch_returns(universe)
+        returns = _fetch_returns(universe, history_frames=history_frames)
         if returns.empty or len(returns.columns) < 2:
             logger.warning("Optimizer: datos históricos insuficientes")
             return None

@@ -25,7 +25,12 @@ from src.collector.notifier import TelegramNotifier
 logger = get_logger(__name__)
 
 
-async def main(full: bool = False, no_db: bool = False, json_output: str = None):
+async def main(
+    full: bool = False,
+    no_db: bool = False,
+    json_output: str = None,
+    no_telegram: bool = False,
+):
     cfg = get_config()
 
     errors = cfg.scraper.validate()
@@ -57,6 +62,14 @@ async def main(full: bool = False, no_db: bool = False, json_output: str = None)
                     f"  {p.ticker:8s} x{p.quantity:8.2f} "
                     f"@ ${p.current_price:>12,.2f} "
                     f"= ${p.market_value:>14,.2f}"
+                )
+
+            if not no_telegram:
+                notifier.notify_scrape_complete(
+                    total_ars=float(snapshot.total_value_ars),
+                    positions_count=len(snapshot.positions),
+                    confidence=float(snapshot.confidence_score),
+                    cash_ars=float(snapshot.cash_ars),
                 )
 
             if db:
@@ -94,4 +107,11 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
 
-    asyncio.run(main(full=args.full, no_db=args.no_db, json_output=args.json_output))
+    asyncio.run(
+        main(
+            full=args.full,
+            no_db=args.no_db,
+            json_output=args.json_output,
+            no_telegram=args.no_telegram,
+        )
+    )

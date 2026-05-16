@@ -81,6 +81,9 @@ TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 MAX_MESSAGE_LENGTH = 3900
 COMMAND_TIMEOUT_SECONDS = 300
 
+REGRESSION_MODES = {"optimizer", "execution", "blocked", "signal", "all"}
+DEFAULT_REGRESSION_MODE = "optimizer"
+
 ADMIN_CHAT_IDS: set[int] = {
     int(x)
     for x in os.getenv("ADMIN_CHAT_IDS", "").replace(";", ",").split(",")
@@ -368,7 +371,10 @@ def main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Performance",      callback_data="performance"),
         ],
         [
+            InlineKeyboardButton("📈 Regression",       callback_data="regression_audit"),
             InlineKeyboardButton("🔭 Radar",            callback_data="radar"),
+        ],
+        [
             InlineKeyboardButton("🩺 Status",           callback_data="status"),
         ],
     ])
@@ -381,9 +387,16 @@ def menu_text() -> str:
         "💼 <b>Portfolio</b> — último snapshot de la cartera\n"
         "🧠 <b>Análisis semanal</b> — plan de rotación completo\n"
         "📅 <b>Resumen semanal</b> — performance de la semana\n"
-        "📊 <b>Performance</b> — win rate y outcomes históricos\n"
+        "📊 <b>Performance</b> — win rate, EV y dataset operativo\n"
+        "📈 <b>Regression</b> — auditoría optimizer/execution/blocked\n"
         "🔭 <b>Radar</b> — oportunidades del universo\n"
         "🩺 <b>Status</b> — estado del sistema y DB\n\n"
+        "<b>Regresión:</b>\n"
+        "• <code>/regression</code> → optimizer\n"
+        "• <code>/regression execution</code>\n"
+        "• <code>/regression blocked</code>\n"
+        "• <code>/regression signal</code>\n"
+        "• <code>/regression all</code>\n\n"
         "<i>Scraping manual: <code>/admin_scrape</code> (solo admin)</i>"
     )
 
@@ -793,14 +806,36 @@ async def action_radar_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
 # Acción: Auditoría de regresión
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def action_regression_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+async def action_regression_audit(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    mode: str = DEFAULT_REGRESSION_MODE,
+) -> None:
+    mode = str(mode or DEFAULT_REGRESSION_MODE).lower().strip()
+
+    if mode not in REGRESSION_MODES:
+        help_text = (
+            "⚠️ Modo inválido para regression audit.\n\n"
+            "Usá:\n"
+            "• <code>/regression optimizer</code>\n"
+            "• <code>/regression execution</code>\n"
+            "• <code>/regression blocked</code>\n"
+            "• <code>/regression signal</code>\n"
+            "• <code>/regression all</code>"
+        )
+        await send_text(context, chat_id, help_text)
+        return
+
     report = await run_python_script(
         "scripts/run_regression_audit.py",
+        "--mode",
+        mode,
         "--days",
         "180",
         "--target",
         "directional",
         "--compact",
+        "--no-telegram",
         timeout=240,
     )
     await send_text(context, chat_id, report)
@@ -978,6 +1013,10 @@ CALLBACK_ALIASES: dict[str, str] = {
     "opportunities":    "radar",
     "opportunity_radar":"radar",
     "oportunidades":    "radar",
+    # Regression
+    "regression":       "regression_audit",
+    "regression_audit": "regression_audit",
+    "regression_opt":   "regression_audit",
     # Status
     "status":           "status",
     "health":           "status",
@@ -1073,8 +1112,91 @@ async def radar_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 async def status_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "status")
 
-async def regression_audit_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
-    await _dispatch_command(u, c, "regression_audit")
+async def regression_audit_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    chat_id = update.effective_chat.id
+
+    raw_mode = (
+        context.args[0].lower().strip()
+        if getattr(context, "args", None)
+        else DEFAULT_REGRESSION_MODE
+    )
+
+    aliases = {
+        "opt": "optimizer",
+        "optimizer": "optimizer",
+        "optim": "optimizer",
+        "exec": "execution",
+        "execution": "execution",
+        "real": "execution",
+        "blocked": "blocked",
+        "block": "blocked",
+        "guards": "blocked",
+        "signal": "signal",
+        "score": "signal",
+        "all": "all",
+        "global": "all",
+    }
+
+    mode = aliases.get(raw_mode, raw_mode)
+
+    loading = f"📈 Ejecutando auditoría de regresión: <b>{mode}</b>..."
+    await answer_loading(update, loading)
+
+    t0 = time.time()
+    logger.info("[BOT] regression_audit mode=%s chat_id=%s", mode, chat_id)
+
+    try:
+        await action_regression_audit(context, chat_id, mode=mode)
+        logger.info(
+            "[BOT] regression_audit mode=%s OK en %.2fs",
+            mode,
+            time.time() - t0,
+        )
+    except Exception as e:
+        logger.exception("[BOT] regression_audit mode=%s falló", mode)
+        await send_text(
+            context,
+            chat_id,
+            f"❌ Error en <b>regression {mode}</b>:\n<code>{e}</code>",
+        )
+    finally:
+        await send_menu(context, chat_id)
+
+
+async def regression_optimizer_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    context.args = ["optimizer"]
+    await regression_audit_handler(update, context)
+
+
+async def regression_execution_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    context.args = ["execution"]
+    await regression_audit_handler(update, context)
+
+
+async def regression_blocked_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    context.args = ["blocked"]
+    await regression_audit_handler(update, context)
+
+
+async def regression_signal_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    context.args = ["signal"]
+    await regression_audit_handler(update, context)
+
 
 async def radar_full_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "radar_full")

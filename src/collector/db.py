@@ -1,7 +1,7 @@
 """
 src/collector/db.py — Capa de persistencia: TimescaleDB via asyncpg.
 
-Tablas: portfolio_snapshots, positions, market_prices, raw_snapshots,
+Tablas: portfolio_snapshots, positions, market_prices, market_candles, raw_snapshots,
         decision_log, bot_users.
 
 Changelog v2:
@@ -22,8 +22,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+from pathlib import Path
 import uuid
 from typing import Optional
+from src.analysis.decision_engine import directional_return
+from src.collector.data.models import MarketCandle
 
 try:
     import asyncpg
@@ -50,134 +53,16 @@ YFINANCE_BLACKLIST: set[str] = {
 MAX_PRICE_USD = 5_000.0
 
 
-SCHEMA_SQL = """
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
 
-CREATE TABLE IF NOT EXISTS portfolio_snapshots (
-    snapshot_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    scraped_at        TIMESTAMPTZ NOT NULL,
-    total_value_ars   NUMERIC(20,4),
-    cash_ars          NUMERIC(20,4),
-    confidence_score  FLOAT,
-    dom_hash          TEXT,
-    raw_html_hash     TEXT,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
-CREATE TABLE IF NOT EXISTS positions (
-    id                  BIGSERIAL,
-    snapshot_id         UUID        NOT NULL REFERENCES portfolio_snapshots(snapshot_id) ON DELETE CASCADE,
-    scraped_at          TIMESTAMPTZ NOT NULL,
-    ticker              TEXT        NOT NULL,
-    asset_type          TEXT,
-    currency            TEXT,
-    quantity            NUMERIC(20,8),
-    avg_cost            NUMERIC(20,4),
-    current_price       NUMERIC(20,4),
-    market_value        NUMERIC(20,4),
-    unrealized_pnl      NUMERIC(20,4),
-    unrealized_pnl_pct  NUMERIC(10,6),
-    weight_in_portfolio NUMERIC(10,6),
-    sector              TEXT,
-    PRIMARY KEY (id, scraped_at),
-    UNIQUE (snapshot_id, ticker, scraped_at)
-);
+def _schema_sql() -> str:
+    return SCHEMA_PATH.read_text(encoding="utf-8")
 
-CREATE TABLE IF NOT EXISTS market_prices (
-    ts            TIMESTAMPTZ NOT NULL,
-    ticker        TEXT        NOT NULL,
-    asset_type    TEXT,
-    currency      TEXT,
-    last_price    NUMERIC(20,4),
-    change_pct_1d NUMERIC(10,6),
-    volume        NUMERIC(20,2),
-    UNIQUE (ts, ticker)
-);
-
-CREATE TABLE IF NOT EXISTS raw_snapshots (
-    snapshot_id UUID        NOT NULL REFERENCES portfolio_snapshots(snapshot_id) ON DELETE CASCADE,
-    scraped_at  TIMESTAMPTZ NOT NULL,
-    payload     JSONB       NOT NULL,
-    PRIMARY KEY (snapshot_id, scraped_at)
-);
-
-CREATE TABLE IF NOT EXISTS bot_users (
-    chat_id      BIGINT PRIMARY KEY,
-    cocos_user   TEXT,
-    cocos_pass   TEXT,
-    mfa_timeout  INTEGER NOT NULL DEFAULT 120,
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS decision_log (
-    id                BIGSERIAL    PRIMARY KEY,
-    decided_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    ticker            TEXT         NOT NULL,
-    decision          TEXT         NOT NULL,
-    final_score       FLOAT        NOT NULL,
-    confidence        FLOAT        NOT NULL,
-    layers            JSONB,
-    price_at_decision FLOAT,
-    vix_at_decision   FLOAT,
-    regime            TEXT,
-    outcome_5d        FLOAT,
-    outcome_10d       FLOAT,
-    outcome_20d       FLOAT,
-    outcome_filled_at TIMESTAMPTZ,
-    was_correct       BOOLEAN,
-    size_pct          FLOAT,
-    stop_loss_pct     FLOAT,
-    target_pct        FLOAT,
-    horizon_days      INTEGER,
-    rr_ratio          FLOAT,
-    -- trade_lifecycle columns (additive, NULL for legacy rows)
-    decision_type     TEXT,
-    signal_strength   TEXT,
-    stop_loss_price   FLOAT,
-    target_price      FLOAT,
-    exit_scope        TEXT,
-    exit_reason_rule  TEXT,
-    stop_policy       TEXT,
-    stop_source       TEXT,
-    trailing_active   BOOLEAN DEFAULT FALSE,
-    was_stopped       BOOLEAN,
-    exit_reason       TEXT,
-    closed_at         TIMESTAMPTZ,
-    close_price       FLOAT,
-    source            TEXT
-);
-"""
 
 # ── Migration SQL para decision_log (idempotente) ─────────────────────────────
 # Se corre en init_schema() además del DDL base.
 # Seguro de correr múltiples veces (IF NOT EXISTS / IF NOT EXISTS).
-_LIFECYCLE_MIGRATION_SQL = """
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS decision_type     TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS signal_strength   TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_loss_price   FLOAT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS target_price      FLOAT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_scope        TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_reason_rule  TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_policy       TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_source       TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS trailing_active   BOOLEAN DEFAULT FALSE;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS was_stopped       BOOLEAN;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_reason       TEXT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS closed_at         TIMESTAMPTZ;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS close_price       FLOAT;
-ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS source            TEXT;
-UPDATE decision_log
-SET decision_type = CASE
-    WHEN decision = 'BUY'  THEN 'BUY'
-    WHEN decision = 'SELL' THEN 'SELL_FULL'
-    WHEN decision = 'HOLD' THEN 'HOLD'
-    ELSE decision
-END
-WHERE decision_type IS NULL;
-"""
-
-
 class PortfolioDatabase:
     def __init__(self, dsn: str):
         self._dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
@@ -198,74 +83,15 @@ class PortfolioDatabase:
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
 
-        # DDL base
-        statements = [s.strip() for s in SCHEMA_SQL.split(";") if s.strip()]
+        schema_sql = _schema_sql()
         async with self._pool.acquire() as conn:
-            for stmt in statements:
-                try:
-                    await conn.execute(stmt)
-                except Exception as e:
-                    logger.debug(f"Schema stmt ignorado: {e!r}")
-
-        # Hypertables
-        hypertables = [
-            ("positions",    "scraped_at"),
-            ("market_prices","ts"),
-            ("raw_snapshots","scraped_at"),
-        ]
-        for table, col in hypertables:
             try:
-                async with self._pool.acquire() as conn:
-                    await conn.execute(
-                        f"SELECT create_hypertable('{table}', '{col}', if_not_exists => TRUE)"
-                    )
-            except Exception as e:
-                logger.debug(f"Hypertable {table} ignorado: {e!r}")
+                await conn.execute(schema_sql)
+            except Exception:
+                logger.exception("Schema init failed while executing init.sql")
+                raise
 
-        # Índices
-        indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_scraped_at ON portfolio_snapshots(scraped_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_positions_ticker ON positions(ticker, scraped_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_positions_snapshot_id ON positions(snapshot_id)",
-            "CREATE INDEX IF NOT EXISTS idx_market_prices_ticker ON market_prices(ticker, ts DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_raw_snapshots_scraped_at ON raw_snapshots(scraped_at DESC)",
-            "CREATE INDEX IF NOT EXISTS idx_decision_log_ticker ON decision_log(ticker)",
-            "CREATE INDEX IF NOT EXISTS idx_decision_log_decided_at ON decision_log(decided_at DESC)",
-            """
-            CREATE INDEX IF NOT EXISTS idx_decision_log_outcome
-            ON decision_log(decided_at DESC)
-            WHERE outcome_5d IS NOT NULL
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_decision_log_pending
-            ON decision_log(decided_at)
-            WHERE outcome_5d IS NULL
-            """,
-            """
-            CREATE INDEX IF NOT EXISTS idx_decision_log_stops
-            ON decision_log(decision, stop_loss_price, outcome_5d)
-            WHERE stop_loss_price IS NOT NULL AND outcome_5d IS NULL
-            """,
-        ]
-        for sql in indexes:
-            try:
-                async with self._pool.acquire() as conn:
-                    await conn.execute(sql)
-            except Exception as e:
-                logger.debug(f"Index ignorado: {e!r}")
-
-        # Migration trade_lifecycle (idempotente)
-        migration_stmts = [
-            s.strip() for s in _LIFECYCLE_MIGRATION_SQL.split(";") if s.strip()
-        ]
-        async with self._pool.acquire() as conn:
-            for stmt in migration_stmts:
-                try:
-                    await conn.execute(stmt)
-                except Exception as e:
-                    logger.debug(f"Migration stmt ignorado: {e!r}")
-
-        logger.info("Schema inicializado (incluyendo migration trade_lifecycle)")
+        logger.info("Schema inicializado desde init.sql")
 
     # ── Snapshot ──────────────────────────────────────────────────────────────
 
@@ -390,6 +216,52 @@ class PortfolioDatabase:
         logger.info(f"{len(rows)} precios de mercado guardados")
         return len(rows)
 
+    async def save_market_candles(self, candles: list[MarketCandle]) -> int:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        if not candles:
+            return 0
+
+        rows = [
+            (
+                c.ts,
+                c.ticker,
+                c.long_ticker,
+                c.asset_type.value,
+                c.currency.value,
+                c.venue,
+                c.interval,
+                c.open_price,
+                c.high_price,
+                c.low_price,
+                c.close_price,
+                c.volume,
+                c.source,
+            )
+            for c in candles
+        ]
+
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO market_candles (
+                    ts, ticker, long_ticker, asset_type, currency, venue, interval,
+                    open_price, high_price, low_price, close_price, volume, source
+                ) VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+                )
+                ON CONFLICT (ts, long_ticker, interval) DO UPDATE SET
+                    open_price  = EXCLUDED.open_price,
+                    high_price  = EXCLUDED.high_price,
+                    low_price   = EXCLUDED.low_price,
+                    close_price = EXCLUDED.close_price,
+                    volume      = EXCLUDED.volume,
+                    scraped_at  = NOW()
+                """,
+                rows,
+            )
+        return len(rows)
+
     # ── Queries ───────────────────────────────────────────────────────────────
 
     async def get_latest_snapshot(self) -> Optional[dict]:
@@ -400,6 +272,45 @@ class PortfolioDatabase:
                 "SELECT payload FROM raw_snapshots ORDER BY scraped_at DESC LIMIT 1"
             )
         return json.loads(row["payload"]) if row else None
+
+    async def get_market_candles(
+        self,
+        ticker: str,
+        *,
+        asset_type: Optional[str] = None,
+        interval: str = "1d",
+        limit: Optional[int] = None,
+    ) -> list[dict]:
+        if not self._pool:
+            return []
+
+        params = [ticker.upper(), interval]
+        filters = ["ticker = $1", "interval = $2"]
+
+        if asset_type:
+            params.append(asset_type.upper())
+            filters.append(f"asset_type = ${len(params)}")
+
+        limit_sql = ""
+        if limit is not None:
+            params.append(int(limit))
+            limit_sql = f"LIMIT ${len(params)}"
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    ts, ticker, long_ticker, asset_type, currency, venue, interval,
+                    open_price, high_price, low_price, close_price, volume, source
+                FROM market_candles
+                WHERE {' AND '.join(filters)}
+                ORDER BY ts DESC
+                {limit_sql}
+                """,
+                *params,
+            )
+
+        return [dict(row) for row in reversed(rows)]
 
     async def get_portfolio_history(self, limit: int = 60) -> list[dict]:
         """
@@ -441,14 +352,27 @@ class PortfolioDatabase:
         return [dict(r) for r in rows]
 
     async def get_cocos_universe(self) -> list[str]:
-        prices = await self.get_latest_market_prices()
+        prices = await self.get_cocos_universe_assets()
         tickers = sorted({
             row["ticker"].upper()
             for row in prices
-            if row["ticker"].upper() not in YFINANCE_BLACKLIST
         })
         logger.info(f"Universo Cocos: {len(tickers)} tickers disponibles")
         return tickers
+
+    async def get_cocos_universe_assets(self) -> list[dict]:
+        prices = await self.get_latest_market_prices()
+        assets = [
+            {
+                **row,
+                "ticker": row["ticker"].upper(),
+                "asset_type": (row.get("asset_type") or "").upper(),
+            }
+            for row in prices
+            if row["ticker"].upper() not in YFINANCE_BLACKLIST
+        ]
+        logger.info(f"Universo Cocos tipado: {len(assets)} activos disponibles")
+        return assets
 
     # ── Deduplicación ─────────────────────────────────────────────────────────
 
@@ -502,6 +426,7 @@ class PortfolioDatabase:
         now = datetime.now(timezone.utc)
 
         for r in rows:
+            # CONVENTION: SELL returns are positive-up.
             outcome   = float(r["outcome_5d"] or 0.0)
             stop      = float(r["stop_loss_pct"] or -0.08)
             target    = float(r["target_pct"] or 0.16)
@@ -509,15 +434,9 @@ class PortfolioDatabase:
             decided   = r["decided_at"]
             horizon   = int(r["horizon_days"] or 10)
 
-            # Corregir signo para SELL: el trader gana cuando el precio baja
-            if direction == "SELL":
-                outcome = -outcome
-                stop    = abs(stop)
-                target  = abs(target)
-
             if outcome >= target:
                 was_correct = True
-            elif outcome <= -abs(stop):
+            elif outcome <= stop:
                 was_correct = False
             elif (now - decided).days >= horizon:
                 was_correct = outcome > 0
@@ -586,8 +505,8 @@ class PortfolioDatabase:
             size      = float(r["size_pct"] or 0.05)
             direction = str(r["decision"]).upper()
 
-            # Retorno del trader: BUY gana si sube, SELL gana si baja
-            trader_return = outcome if direction == "BUY" else -outcome
+            # CONVENTION: SELL returns are positive-up.
+            trader_return = outcome
             equity       *= (1 + trader_return * size)
             n_total      += 1
 
@@ -774,7 +693,8 @@ class PortfolioDatabase:
             import asyncio
             import yfinance as yf
 
-            cutoff = datetime.now(timezone.utc) - timedelta(days=5)
+            maturity_cutoff = datetime.now(timezone.utc) - timedelta(days=5)
+            lookback_cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
             async with self._pool.acquire() as conn:
                 rows = await conn.fetch(
@@ -783,11 +703,13 @@ class PortfolioDatabase:
                     FROM decision_log
                     WHERE outcome_5d IS NULL
                       AND decided_at <= $1
+                      AND decided_at >= $2
                       AND decision != 'HOLD'
                     ORDER BY decided_at DESC
                     LIMIT 200
                     """,
-                    cutoff,
+                    maturity_cutoff,
+                    lookback_cutoff,
                 )
 
             if not rows:
@@ -852,7 +774,12 @@ class PortfolioDatabase:
                         if idx >= len(df):
                             idx = len(df) - 1
                         price_at_horizon = float(df.iloc[idx])
-                        outcomes[col] = (price_at_horizon - entry_f) / entry_f
+                        # CONVENTION: SELL returns are positive-up.
+                        outcomes[col] = directional_return(
+                            entry_f,
+                            price_at_horizon,
+                            direction,
+                        )
                     except Exception:
                         continue
 
@@ -860,13 +787,7 @@ class PortfolioDatabase:
                     continue
 
                 primary = outcomes.get("outcome_5d", outcomes.get("outcome_10d"))
-                was_correct = None
-                if primary is not None:
-                    if direction == "BUY":
-                        was_correct = primary > 0
-                    elif direction == "SELL":
-                        # Signo corregido: SELL gana si el precio bajó
-                        was_correct = primary < 0
+                was_correct = primary > 0 if primary is not None else None
 
                 try:
                     async with self._pool.acquire() as conn:
@@ -967,8 +888,8 @@ class PortfolioDatabase:
             )
 
         # ── Calcular retorno del trader con signo correcto ────────────────────
-        # BUY: ganas si el activo sube → trader_return = outcome_5d
-        # SELL: ganas si el activo baja → trader_return = -outcome_5d
+        # CONVENTION: SELL returns are positive-up.
+        # outcome_* ya se persiste como retorno direccional canonico.
         trader_returns = []
         by_ticker: dict = {}
         ret_10d_list    = []
@@ -980,9 +901,9 @@ class PortfolioDatabase:
             out10      = float(r["outcome_10d"]) if r["outcome_10d"] is not None else None
             out20      = float(r["outcome_20d"]) if r["outcome_20d"] is not None else None
 
-            trader_ret  = out5 if direction == "BUY" else -out5
-            trader_ret10 = (out10 if direction == "BUY" else -out10) if out10 is not None else None
-            trader_ret20 = (out20 if direction == "BUY" else -out20) if out20 is not None else None
+            trader_ret   = out5
+            trader_ret10 = out10
+            trader_ret20 = out20
 
             trader_returns.append(trader_ret)
             if trader_ret10 is not None:

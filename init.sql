@@ -2,7 +2,19 @@
 -- Idempotente: seguro de correr múltiples veces (IF NOT EXISTS en todo)
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+
+-- TimescaleDB es opcional: la nube puede correr sobre PostgreSQL comun.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_available_extensions
+        WHERE name = 'timescaledb'
+    ) THEN
+        CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+    END IF;
+END
+$$;
 
 -- ── portfolio_snapshots ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -36,7 +48,17 @@ CREATE TABLE IF NOT EXISTS positions (
     UNIQUE (snapshot_id, ticker, scraped_at)
 );
 
-SELECT create_hypertable('positions', 'scraped_at', if_not_exists => TRUE);
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_extension
+        WHERE extname = 'timescaledb'
+    ) THEN
+        PERFORM create_hypertable('positions', 'scraped_at', if_not_exists => TRUE);
+    END IF;
+END
+$$;
 
 -- ── market_prices (hypertable) ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS market_prices (
@@ -50,7 +72,49 @@ CREATE TABLE IF NOT EXISTS market_prices (
     UNIQUE (ts, ticker)
 );
 
-SELECT create_hypertable('market_prices', 'ts', if_not_exists => TRUE);
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_extension
+        WHERE extname = 'timescaledb'
+    ) THEN
+        PERFORM create_hypertable('market_prices', 'ts', if_not_exists => TRUE);
+    END IF;
+END
+$$;
+
+-- ── market_candles (hypertable) ───────────────────────────────────────────────
+-- Velas OHLCV locales de Cocos/BYMA para ACCIONES y CEDEARS.
+CREATE TABLE IF NOT EXISTS market_candles (
+    ts             TIMESTAMPTZ NOT NULL,
+    ticker         TEXT        NOT NULL,
+    long_ticker    TEXT        NOT NULL,
+    asset_type     TEXT        NOT NULL,
+    currency       TEXT        NOT NULL,
+    venue          TEXT        NOT NULL,
+    interval       TEXT        NOT NULL DEFAULT '1d',
+    open_price     NUMERIC(20,4),
+    high_price     NUMERIC(20,4),
+    low_price      NUMERIC(20,4),
+    close_price    NUMERIC(20,4),
+    volume         NUMERIC(20,4),
+    source         TEXT        NOT NULL DEFAULT 'COCOS',
+    scraped_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (ts, long_ticker, interval)
+);
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_extension
+        WHERE extname = 'timescaledb'
+    ) THEN
+        PERFORM create_hypertable('market_candles', 'ts', if_not_exists => TRUE);
+    END IF;
+END
+$$;
 
 -- ── raw_snapshots (hypertable) ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS raw_snapshots (
@@ -60,7 +124,17 @@ CREATE TABLE IF NOT EXISTS raw_snapshots (
     PRIMARY KEY (snapshot_id, scraped_at)
 );
 
-SELECT create_hypertable('raw_snapshots', 'scraped_at', if_not_exists => TRUE);
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_extension
+        WHERE extname = 'timescaledb'
+    ) THEN
+        PERFORM create_hypertable('raw_snapshots', 'scraped_at', if_not_exists => TRUE);
+    END IF;
+END
+$$;
 
 -- ── bot_users ─────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS bot_users (
@@ -77,6 +151,7 @@ CREATE TABLE IF NOT EXISTS bot_users (
 CREATE TABLE IF NOT EXISTS decision_log (
     id                BIGSERIAL    PRIMARY KEY,
     decided_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    decision_date     DATE         GENERATED ALWAYS AS ((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) STORED,
     ticker            TEXT         NOT NULL,
     -- Campo legacy: 'BUY' | 'SELL' | 'HOLD'
     -- Para semántica completa usar decision_type
@@ -139,7 +214,135 @@ CREATE TABLE IF NOT EXISTS decision_log (
     source            TEXT          -- 'signal' | 'optimizer'
 );
 
+-- FEATURE: ML - feature store experimental para entrenamiento e inferencia.
+CREATE TABLE IF NOT EXISTS ml_decision_features (
+    decision_log_id                  BIGINT PRIMARY KEY REFERENCES decision_log(id) ON DELETE CASCADE,
+    ticker                           TEXT NOT NULL,
+    captured_at                      TIMESTAMPTZ NOT NULL,
+    decision                         TEXT,
+    regime                           TEXT,
+    source                           TEXT,
+    final_score                      FLOAT,
+    confidence_score                 FLOAT,
+    prob_target_hit_prior            FLOAT,
+    expected_value_prior             FLOAT,
+    stop_loss_pct                    FLOAT,
+    target_pct                       FLOAT,
+    rr_ratio                         FLOAT,
+    horizon_days                     FLOAT,
+    size_pct                         FLOAT,
+    technical_score                  FLOAT,
+    rsi_14                           FLOAT,
+    macd_hist                        FLOAT,
+    bb_pos                           FLOAT,
+    atr_pct                          FLOAT,
+    distance_sma20_pct               FLOAT,
+    distance_sma50_pct               FLOAT,
+    distance_sma200_pct              FLOAT,
+    momentum_20d                     FLOAT,
+    momentum_60d                     FLOAT,
+    volatility_20d                   FLOAT,
+    drawdown_60d                     FLOAT,
+    macro_score                      FLOAT,
+    vix_level                        FLOAT,
+    spy_return_5d                    FLOAT,
+    spy_return_20d                   FLOAT,
+    dxy_return_20d                   FLOAT,
+    tnx_level                        FLOAT,
+    wti_return_20d                   FLOAT,
+    regime_code                      FLOAT,
+    cash_pct                         FLOAT,
+    portfolio_concentration_pct      FLOAT,
+    weight_in_portfolio_pct          FLOAT,
+    relative_strength_vs_spy_20d     FLOAT,
+    sector_score                     FLOAT,
+    sector_momentum_20d              FLOAT,
+    sector_relative_strength_20d     FLOAT,
+    label_target_hit                 INTEGER,
+    label_stop_hit                   INTEGER,
+    label_timeout                    INTEGER,
+    outcome_return_pct               FLOAT,
+    outcome_days                     INTEGER,
+    closed_at                        TIMESTAMPTZ
+);
+
+-- FEATURE: ML - registry experimental de modelos versionados.
+CREATE TABLE IF NOT EXISTS ml_model_registry (
+    id                         BIGSERIAL PRIMARY KEY,
+    model_type                 TEXT NOT NULL,
+    version                    TEXT NOT NULL,
+    trained_at                 TIMESTAMPTZ NOT NULL,
+    train_samples              INTEGER,
+    train_start                DATE,
+    train_end                  DATE,
+    val_samples                INTEGER,
+    val_start                  DATE,
+    val_end                    DATE,
+    brier_score                FLOAT,
+    roc_auc                    FLOAT,
+    precision_at_top25pct      FLOAT,
+    ev_mean                    FLOAT,
+    ev_positive_rate           FLOAT,
+    baseline_brier             FLOAT,
+    beats_baseline             BOOLEAN,
+    is_active                  BOOLEAN NOT NULL DEFAULT FALSE,
+    is_promoted                BOOLEAN NOT NULL DEFAULT FALSE,
+    artifact_path              TEXT,
+    feature_names              TEXT,
+    promotion_notes            TEXT,
+    UNIQUE (model_type, version)
+);
+
 -- ── Índices ───────────────────────────────────────────────────────────────────
+-- Migration para bases existentes:
+-- las columnas deben existir antes de crear indices que dependen de ellas.
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS size_pct          FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_loss_pct     FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS target_pct        FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS horizon_days      INTEGER;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS rr_ratio          FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS decision_date     DATE GENERATED ALWAYS AS ((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) STORED;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS decision_type     TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS signal_strength   TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_loss_price   FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS target_price      FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_scope        TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_reason_rule  TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_policy       TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_source       TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS trailing_active   BOOLEAN DEFAULT FALSE;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS was_stopped       BOOLEAN;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_reason       TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS closed_at         TIMESTAMPTZ;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS close_price       FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS source            TEXT;
+
+UPDATE decision_log
+SET decision_type = CASE
+    WHEN decision = 'BUY'  THEN 'BUY'
+    WHEN decision = 'SELL' THEN 'SELL_FULL'
+    WHEN decision = 'HOLD' THEN 'HOLD'
+    ELSE decision
+END
+WHERE decision_type IS NULL;
+
+-- Antes de imponer unicidad diaria, conservar solo la decision mas reciente.
+WITH ranked_daily_decisions AS (
+    SELECT
+        id,
+        ROW_NUMBER() OVER (
+            PARTITION BY ticker, decision_date, decision
+            ORDER BY decided_at DESC, id DESC
+        ) AS rn
+    FROM decision_log
+)
+DELETE FROM decision_log
+WHERE id IN (
+    SELECT id
+    FROM ranked_daily_decisions
+    WHERE rn > 1
+);
+
 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_scraped_at
     ON portfolio_snapshots(scraped_at DESC);
 
@@ -160,6 +363,9 @@ CREATE INDEX IF NOT EXISTS idx_decision_log_ticker
 
 CREATE INDEX IF NOT EXISTS idx_decision_log_decided_at
     ON decision_log(decided_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_log_unique_daily_action
+    ON decision_log(ticker, decision_date, decision);
 
 -- Índice para queries de performance (solo cerrados)
 CREATE INDEX IF NOT EXISTS idx_decision_log_outcome
@@ -183,6 +389,7 @@ ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_loss_pct     FLOAT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS target_pct        FLOAT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS horizon_days      INTEGER;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS rr_ratio          FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS decision_date     DATE GENERATED ALWAYS AS ((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) STORED;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS decision_type     TEXT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS signal_strength   TEXT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS stop_loss_price   FLOAT;

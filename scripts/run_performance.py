@@ -42,8 +42,14 @@ from src.core.config import get_config
 from src.core.logger import get_logger
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
+from src.analysis.decision_engine import directional_return
 
 logger = get_logger(__name__)
+
+
+def directional_return_for_report(entry_price: float, exit_price: float, decision: str) -> float:
+    """# CONVENTION: SELL returns are positive-up."""
+    return directional_return(entry_price, exit_price, decision)
 
 
 def _pct(x) -> str:

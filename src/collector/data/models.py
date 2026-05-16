@@ -99,3 +99,37 @@ class MarketAsset:
     change_pct_1d: Optional[float] = None
     volume: Optional[float] = None
     scraped_at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(frozen=True)
+class MarketCandle:
+    ticker: str
+    long_ticker: str
+    asset_type: AssetType
+    currency: Currency
+    venue: str
+    interval: str
+    ts: datetime
+    open_price: float
+    high_price: float
+    low_price: float
+    close_price: float
+    volume: float
+    source: str = "COCOS"
+
+    def to_dict(self) -> dict:
+        return {
+            "ticker": self.ticker,
+            "long_ticker": self.long_ticker,
+            "asset_type": self.asset_type.value,
+            "currency": self.currency.value,
+            "venue": self.venue,
+            "interval": self.interval,
+            "ts": self.ts.isoformat(),
+            "open_price": float(self.open_price),
+            "high_price": float(self.high_price),
+            "low_price": float(self.low_price),
+            "close_price": float(self.close_price),
+            "volume": float(self.volume),
+            "source": self.source,
+        }

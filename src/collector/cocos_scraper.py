@@ -542,7 +542,8 @@ class CocosCapitalScraper:
 
         # ── Estrategia 1: por elementos assetWrapper ──────
         rows = await self._page.query_selector_all("[class*='assetWrapper']")
-        logger.info(f"assetWrapper encontrados: {len(rows)}")
+        expected_positions = len(rows) if rows is not None else None
+        logger.info(f"assetWrapper encontrados: {expected_positions}")
 
         for row in rows:
             try:
@@ -635,7 +636,11 @@ class CocosCapitalScraper:
             ("min_positions",   len(positions) >= 1,                  2.0),
             ("prices_positive", all(p.current_price > 0 for p in positions), 3.0),
         ]
-        return positions, ConfidenceResult.compute(checks)
+        return positions, ConfidenceResult.compute(
+            checks,
+            expected_positions=expected_positions,
+            positions_parsed=len(positions),
+        )
 
     async def _extract_totals(self) -> tuple[Decimal, Decimal]:
         """

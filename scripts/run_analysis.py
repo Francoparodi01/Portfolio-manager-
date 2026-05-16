@@ -50,7 +50,11 @@ from src.core.config import get_config
 from src.core.logger import get_logger
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
-from src.analysis.technical import analyze_portfolio, fetch_history
+from src.analysis.technical import (
+    analyze_portfolio,
+    analyze_portfolio_from_frames,
+    fetch_history,
+)
 from src.analysis.macro import fetch_macro, score_macro_for_ticker, get_macro_regime
 from src.analysis.sentiment import fetch_sentiment
 from src.analysis.risk import build_portfolio_risk_report
@@ -70,6 +74,8 @@ from src.analysis.validators import (
     soft_validate,
     PlanValidationError,
 )
+from src.analysis.risk_levels import compute_risk_levels
+from src.collector.cocos_history import candles_to_frame
 
 logger = get_logger(__name__)
 
@@ -263,6 +269,14 @@ def _agreement_label(agreement: float) -> str:
     if agreement >= 0.45:
         return "PARCIAL"
     return "BAJO"
+
+
+def _count_assets_by_type(assets: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for asset in assets:
+        asset_type = str(asset.get("asset_type", "") or "UNKNOWN").upper()
+        counts[asset_type] = counts.get(asset_type, 0) + 1
+    return counts
 
 
 def _calculate_agreement_from_layers(
@@ -1026,7 +1040,7 @@ async def _save_optimizer_trades(
     """
     import yfinance as yf
     import pandas as _pd
-    from src.analysis.decision_engine import _normalize_regime, STOP_NORMAL, TARGET_RR, HORIZON_MED
+    from src.analysis.decision_engine import _normalize_regime, HORIZON_MED
 
     MIN_DELTA     = 0.03
     MIN_SCORE_ABS = 0.05
@@ -1112,20 +1126,18 @@ async def _save_optimizer_trades(
             )
             continue
 
-        if vix_f > 30:
-            stop = -0.05
-        elif vix_f > 25 or is_defensive:
-            stop = STOP_NORMAL * 1.25
-        elif vol > 0.60:
-            stop = -0.05
-        elif vol > 0.40:
-            stop = -0.07
-        else:
-            stop = STOP_NORMAL
-
-        stop_pct   = stop if direction == "BUY" else abs(stop)
-        target_pct = abs(stop) * TARGET_RR * (1 if direction == "BUY" else -1)
-        rr         = abs(target_pct) / abs(stop_pct) if stop_pct else TARGET_RR
+        # CONVENTION: SELL returns are positive-up.
+        risk_levels = compute_risk_levels(
+            entry_price=float(price) if price else 1.0,
+            signal_class=score,
+            action=direction,
+            regime=regime,
+            vix=vix_f,
+            vol_annual=vol,
+        )
+        stop_pct   = risk_levels.stop_pct
+        target_pct = risk_levels.target_pct
+        rr         = risk_levels.rr
 
         result_for_ticker = result_map.get(ticker)
 
@@ -1148,7 +1160,7 @@ async def _save_optimizer_trades(
             "conviction":    conv,
             "size_pct":      size_pct,
             "price":         float(price) if price else None,
-            "stop_loss_pct": stop_pct if direction == "BUY" else -abs(stop_pct),
+            "stop_loss_pct": stop_pct,
             "target_pct":    target_pct,
             "rr_ratio":      rr,
             "regime":        regime,
@@ -1746,6 +1758,29 @@ async def _load_portfolio(cfg):
         await db.close()
 
 
+async def _load_cocos_history_frames(cfg, positions: list[dict], limit: int = 260) -> dict:
+    """Carga historia local de Cocos desde DB para los tickers disponibles."""
+    frames = {}
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        for position in positions:
+            ticker = str(position.get("ticker", "") or "").upper()
+            if not ticker:
+                continue
+            rows = await db.get_market_candles(
+                ticker,
+                asset_type=position.get("asset_type"),
+                limit=limit,
+            )
+            frame = candles_to_frame(rows)
+            if len(frame) >= 60:
+                frames[ticker] = frame
+    finally:
+        await db.close()
+    return frames
+
+
 async def main(
     tickers_override: list[str],
     period:           str,
@@ -1776,11 +1811,24 @@ async def main(
 
     # ── 3. Técnico ─────────────────────────────────────────────────────────────
     logger.info("Calculando técnico...")
-    tech_signals = analyze_portfolio(tickers, period=period)
+    cocos_frames = await _load_cocos_history_frames(cfg, positions)
+    if cocos_frames:
+        logger.info(f"Historial Cocos disponible para {len(cocos_frames)}/{len(tickers)} tickers")
+
+    tech_signals = analyze_portfolio_from_frames(cocos_frames)
+    missing_tickers = [ticker for ticker in tickers if ticker not in cocos_frames]
+    if missing_tickers:
+        logger.warning(
+            "Historial Cocos faltante para %s; usando fallback legacy temporal",
+            missing_tickers,
+        )
+        tech_signals.extend(analyze_portfolio(missing_tickers, period=period))
     tech_map     = {s.ticker: s for s in tech_signals}
     prices_map   = {}
     for ticker in tickers:
-        df = fetch_history(ticker, period=period)
+        df = cocos_frames.get(ticker)
+        if df is None:
+            df = fetch_history(ticker, period=period)
         if df is not None and "Close" in df.columns:
             prices_map[ticker] = df["Close"].squeeze()
 
@@ -1852,14 +1900,20 @@ async def main(
     # ── 7. Universo Cocos ──────────────────────────────────────────────────────
     universe_results = []
     cocos_universe: list[str] = []
+    cocos_universe_assets: list[dict] = []
     try:
         db_u = PortfolioDatabase(cfg.database.url)
         await db_u.connect()
-        cocos_universe = await db_u.get_cocos_universe()
+        cocos_universe_assets = await db_u.get_cocos_universe_assets()
+        cocos_universe = [asset["ticker"] for asset in cocos_universe_assets]
         await db_u.close()
 
         owned_set        = {t.upper() for t in tickers}
-        universe_tickers = [t for t in cocos_universe if t.upper() not in owned_set]
+        universe_assets  = [
+            asset for asset in cocos_universe_assets
+            if asset["ticker"].upper() not in owned_set
+        ]
+        universe_tickers = [asset["ticker"] for asset in universe_assets]
 
         if not cocos_universe:
             logger.warning("Universo Cocos vacío — el scraper aún no pobló market_prices.")
@@ -1867,8 +1921,25 @@ async def main(
             logger.info("Universo Cocos: todos los tickers ya están en cartera.")
 
         if universe_tickers:
-            logger.info(f"Analizando universo: {len(universe_tickers)} tickers...")
-            u_tech_signals = analyze_portfolio(universe_tickers, period=period)
+            logger.info(
+                "Analizando universo Cocos: %s activos por segmento %s",
+                len(universe_tickers),
+                _count_assets_by_type(universe_assets),
+            )
+            universe_frames = await _load_cocos_history_frames(cfg, universe_assets)
+            logger.info(
+                "Historial Cocos disponible para universo: %s/%s tickers",
+                len(universe_frames),
+                len(universe_tickers),
+            )
+            u_tech_signals = analyze_portfolio_from_frames(universe_frames)
+            missing_universe = [ticker for ticker in universe_tickers if ticker not in universe_frames]
+            if missing_universe:
+                logger.warning(
+                    "Historial Cocos faltante para universo %s; usando fallback legacy temporal",
+                    missing_universe,
+                )
+                u_tech_signals.extend(analyze_portfolio(missing_universe, period=period))
             u_tech_map     = {s.ticker: s for s in u_tech_signals}
 
             u_sent_map = {}
@@ -1921,7 +1992,8 @@ async def main(
             macro_regime        = macro_regime,
             vix                 = macro_snap.vix,
             synthesis_results   = results,
-            market_assets       = [{"ticker": t} for t in cocos_universe],
+            market_assets       = cocos_universe_assets,
+            history_frames       = cocos_frames,
         )
         if rebalance_report:
             opt = rebalance_report.optimization

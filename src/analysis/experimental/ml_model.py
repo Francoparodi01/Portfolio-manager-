@@ -40,7 +40,7 @@ import pandas as pd
 from sklearn.metrics import brier_score_loss  
 
 from src.core.logger import get_logger
-from src.analysis.feature_builder import FEATURE_COLUMNS, LABEL_COLUMN
+from src.analysis.experimental.feature_builder import FEATURE_COLUMNS, LABEL_COLUMN
 
 logger = get_logger(__name__)
 

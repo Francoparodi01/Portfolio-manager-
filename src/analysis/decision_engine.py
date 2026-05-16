@@ -31,6 +31,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
+from src.analysis.risk_levels import compute_risk_levels
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +65,21 @@ TARGET_RR = 2.0
 HORIZON_SHORT = 5
 HORIZON_MED = 10
 HORIZON_LONG = 20
+
+
+def directional_return(entry_price: float, exit_price: float, decision: str) -> float:
+    """
+    Retorno direccional canonico del sistema.
+
+    # CONVENTION: SELL returns are positive-up.
+    BUY gana si el activo sube.
+    SELL gana si, luego de vender, el activo cae y se protege capital.
+    """
+    if not entry_price:
+        raise ValueError("entry_price debe ser distinto de cero")
+
+    asset_return = (float(exit_price) - float(entry_price)) / float(entry_price)
+    return asset_return if str(decision).upper() != "SELL" else -asset_return
 
 
 class SignalClass(str, Enum):
@@ -265,7 +282,7 @@ def make_decision(
     """
 
     ticker = str(ticker or "").upper().strip()
-    score = float(score or 0.0)
+    score = _score_from_layers(score, layers)
     conviction = _normalize_conviction(conviction)
     regime = _normalize_regime(regime)
     ic_regime = _normalize_ic_regime(ic_regime)
@@ -290,14 +307,16 @@ def make_decision(
     if has_position is None:
         has_position = bool(current_weight and current_weight > 0)
 
-    # Stops y targets estándar
-    stop_loss_pct, target_pct, default_rr = _risk_params(
+    risk_levels = compute_risk_levels(
+        entry_price=entry_price or 1.0,
+        signal_class=signal,
+        action="BUY" if score >= 0 else "SELL",
         regime=regime,
         vix=vix,
-        direction="BUY" if score >= 0 else "SELL",
     )
-
-    effective_rr = float(rr_ratio) if rr_ratio is not None else default_rr
+    stop_loss_pct = risk_levels.stop_pct
+    target_pct = risk_levels.target_pct
+    effective_rr = float(rr_ratio) if rr_ratio is not None else risk_levels.rr
 
     # ── Sin contexto operativo: no ejecutar ───────────────────────────────────
     if delta_weight is None:
@@ -559,31 +578,6 @@ def make_decisions_from_results(
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _risk_params(
-    regime: str,
-    vix: Optional[float],
-    direction: str,
-) -> tuple[float, float, float]:
-    regime = _normalize_regime(regime)
-    is_defensive = regime in {"RISK_OFF", "DEFENSIVE", "BLOCKED", "CAUTIOUS"}
-
-    if vix is not None and vix > 25:
-        stop = STOP_NORMAL * 1.25
-    elif is_defensive:
-        stop = STOP_CAUTIOUS
-    else:
-        stop = STOP_NORMAL
-
-    target = abs(stop) * TARGET_RR
-
-    if direction == "SELL":
-        # Para CEDEARs, SELL significa reducir, no short.
-        # No usamos stop/target como short en este módulo.
-        return stop, target, TARGET_RR
-
-    return stop, target, TARGET_RR
-
-
 def _horizon(score: float, conviction: float) -> int:
     score = abs(float(score or 0.0))
     conviction = _normalize_conviction(conviction)
@@ -646,6 +640,51 @@ def _normalize_conviction(x: Any) -> float:
         return max(0.0, min(1.0, x))
     except Exception:
         return 0.0
+
+
+def _score_from_layers(score: float, layers: Optional[Any]) -> float:
+    """
+    Calcula el score operativo desde capas explícitas cuando están disponibles.
+
+    Formatos soportados:
+      - {"technical": 0.12, "macro": -0.03}: aportes ya ponderados
+      - {"technical": {"raw_score": 0.4, "weight": 0.3}}: score crudo + peso
+      - objetos con atributo `weighted`, como LayerScore
+    """
+    weighted_values: list[float] = []
+
+    if isinstance(layers, dict):
+        layer_values = layers.values()
+    else:
+        layer_values = layers or []
+
+    for layer in layer_values:
+        try:
+            if isinstance(layer, dict):
+                if layer.get("weighted") is not None:
+                    weighted_values.append(float(layer["weighted"]))
+                    continue
+
+                raw_score = layer.get("raw_score", layer.get("score"))
+                weight = layer.get("weight")
+                if raw_score is not None and weight is not None:
+                    weighted_values.append(float(raw_score) * float(weight))
+                    continue
+
+            if isinstance(layer, (int, float)):
+                weighted_values.append(float(layer))
+                continue
+
+            weighted = getattr(layer, "weighted", None)
+            if weighted is not None:
+                weighted_values.append(float(weighted))
+        except (TypeError, ValueError):
+            continue
+
+    if not weighted_values:
+        return float(score or 0.0)
+
+    return max(-1.0, min(1.0, sum(weighted_values)))
 
 
 def _extract_price(result: Any) -> Optional[float]:

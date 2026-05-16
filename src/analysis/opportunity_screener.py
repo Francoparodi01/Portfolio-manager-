@@ -325,14 +325,20 @@ def _compute_screener_metrics(
     return m
 
 
-def screen_universe(tickers: list[str], period: str = "1y") -> list[ScreenerMetrics]:
+def screen_universe(
+    tickers: list[str],
+    period: str = "1y",
+    history_frames: Optional[dict[str, "pd.DataFrame"]] = None,
+) -> list[ScreenerMetrics]:
     from src.analysis.technical import fetch_history
 
     logger.info(f"Screener: evaluando {len(tickers)} tickers...")
 
     spy_ret_20d = qqq_ret_20d = 0.0
     for ref_ticker, varname in [(SPY_TICKER, "spy"), (QQQ_TICKER, "qqq")]:
-        df_ref = fetch_history(ref_ticker, period=period)
+        df_ref = (history_frames or {}).get(ref_ticker)
+        if df_ref is None:
+            df_ref = fetch_history(ref_ticker, period=period)
         if df_ref is not None and len(df_ref) >= 21:
             c = df_ref["Close"].squeeze()
             ret = float(c.iloc[-1] / c.iloc[-21] - 1)
@@ -348,7 +354,9 @@ def screen_universe(tickers: list[str], period: str = "1y") -> list[ScreenerMetr
     for ticker in tickers:
         if ticker in (SPY_TICKER, QQQ_TICKER):
             continue
-        df = fetch_history(ticker, period=period)
+        df = (history_frames or {}).get(ticker)
+        if df is None:
+            df = fetch_history(ticker, period=period)
         m  = _compute_screener_metrics(ticker, df, spy_ret_20d, qqq_ret_20d)
         results.append(m)
         if m.passes_screen:
@@ -873,14 +881,18 @@ def run_opportunity_analysis(
     min_score:           float = 0.0,
     min_rr:              float = 0.0,
     exclude_portfolio:   bool = True,
+    history_frames:      Optional[dict[str, "pd.DataFrame"]] = None,
 ) -> OpportunityReport:
-    from src.analysis.technical import fetch_history, analyze_portfolio
+    from src.analysis.technical import fetch_history, analyze_portfolio, analyze_portfolio_from_frames
     from src.analysis.macro import score_macro_for_ticker
     from src.analysis.sentiment import fetch_sentiment
     from src.analysis.synthesis import blend_scores
 
     portfolio_tickers = [p.get("ticker", "").upper() for p in portfolio_positions]
     portfolio_scores  = portfolio_scores or {}
+    if exclude_portfolio:
+        held = set(portfolio_tickers)
+        universe = [ticker for ticker in universe if ticker.upper() not in held]
 
     total_mv = sum(float(p.get("market_value", 0) or 0) for p in portfolio_positions)
     existing_alloc = {
@@ -902,7 +914,10 @@ def run_opportunity_analysis(
         gate_state=gate_state,
     )
 
-    screener_results = screen_universe(universe, period=period)
+    if history_frames is None:
+        screener_results = screen_universe(universe, period=period)
+    else:
+        screener_results = screen_universe(universe, period=period, history_frames=history_frames)
     passed = [m for m in screener_results if m.passes_screen]
     report.screened_count = len(passed)
     logger.info(f"Opportunity: {len(passed)} candidatos pasaron el screener")
@@ -910,7 +925,13 @@ def run_opportunity_analysis(
         return report
 
     passed_tickers = [m.ticker for m in passed]
-    tech_signals   = analyze_portfolio(passed_tickers, period=period)
+    frame_tickers  = [ticker for ticker in passed_tickers if ticker in (history_frames or {})]
+    tech_signals   = analyze_portfolio_from_frames(
+        {ticker: history_frames[ticker] for ticker in frame_tickers}
+    )
+    missing_tickers = [ticker for ticker in passed_tickers if ticker not in frame_tickers]
+    if missing_tickers:
+        tech_signals.extend(analyze_portfolio(missing_tickers, period=period))
     tech_map       = {s.ticker: s for s in tech_signals}
 
     top_tech_tickers = {
@@ -966,7 +987,9 @@ def run_opportunity_analysis(
         # Tech score raw para detección de contradicción
         tech_score_raw = float(getattr(tech, "score_raw", 0.0))
 
-        df       = fetch_history(ticker, period=period)
+        df       = (history_frames or {}).get(ticker)
+        if df is None:
+            df = fetch_history(ticker, period=period)
         asym     = _compute_asymmetry(ticker, df, screener_m)
         asym_lbl = _asymmetry_label(asym)
 

@@ -42,19 +42,63 @@ class DOMFingerprint:
 
 
 class ConfidenceResult:
-    def __init__(self, score: float, details: list):
+    def __init__(
+        self,
+        score: float,
+        details: list,
+        *,
+        expected_positions: Optional[int],
+        positions_parsed: int,
+        min_parse_ratio: float = 0.90,
+    ):
         self.score = score
         self.details = details
+        self.expected_positions = expected_positions
+        self.positions_parsed = positions_parsed
+        self.min_parse_ratio = min_parse_ratio
+
+    @property
+    def parsed_ratio(self) -> Optional[float]:
+        if self.expected_positions is None or self.expected_positions <= 0:
+            return None
+        return self.positions_parsed / self.expected_positions
+
+    @property
+    def ratio_is_acceptable(self) -> bool:
+        ratio = self.parsed_ratio
+        return ratio is not None and ratio >= self.min_parse_ratio
 
     def is_acceptable(self, min_score: float) -> bool:
-        return self.score >= min_score
+        return self.score >= min_score and self.ratio_is_acceptable
 
     def summary(self) -> str:
-        return ", ".join(f"{k}={'OK' if v else 'FAIL'}" for k, v, _ in self.details)
+        ratio = self.parsed_ratio
+        ratio_summary = (
+            "positions_ratio=UNKNOWN"
+            if ratio is None
+            else f"positions_ratio={ratio:.0%}"
+        )
+        checks_summary = ", ".join(
+            f"{k}={'OK' if v else 'FAIL'}" for k, v, _ in self.details
+        )
+        return f"{checks_summary}, {ratio_summary}"
 
     @classmethod
-    def compute(cls, checks: list[tuple[str, bool, float]]) -> "ConfidenceResult":
+    def compute(
+        cls,
+        checks: list[tuple[str, bool, float]],
+        *,
+        expected_positions: Optional[int],
+        positions_parsed: int,
+        min_parse_ratio: float = 0.90,
+    ) -> "ConfidenceResult":
         total_weight = sum(w for _, _, w in checks)
         earned = sum(w for _, ok, w in checks if ok)
         score = earned / total_weight if total_weight else 0.0
-        return cls(score=round(score, 4), details=checks)
+        return cls(
+            score=round(score, 4),
+            details=checks,
+            expected_positions=expected_positions,
+            positions_parsed=positions_parsed,
+            min_parse_ratio=min_parse_ratio,
+        )
