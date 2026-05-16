@@ -64,8 +64,8 @@ from src.analysis.execution_planner import (
     build_signals_from_synthesis,
     build_positions_from_snapshot,
     ExecutionPlan,
-    Action,
 )
+from src.analysis.enums import DecisionType
 from src.analysis.validators import (
     validate_execution_plan,
     validate_report_consistency,
@@ -1227,18 +1227,18 @@ async def _save_optimizer_trades(
 # RENDER — fuente única de verdad: ExecutionPlan
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _action_icon(action: Action | str) -> str:
+def _action_icon(action: DecisionType | str) -> str:
     m = {
-        Action.SELL_FULL:    "🔴",
-        Action.SELL_PARTIAL: "🔴",
-        Action.BUY:          "🟢",
-        Action.HOLD:         "🟡",
-        Action.WATCH:        "🔵",
-        Action.BLOCKED:      "⛔",
+        DecisionType.SELL_FULL:    "🔴",
+        DecisionType.SELL_PARTIAL: "🔴",
+        DecisionType.BUY:          "🟢",
+        DecisionType.HOLD:         "🟡",
+        DecisionType.WATCH:        "🔵",
+        DecisionType.BLOCKED:      "⛔",
     }
     if isinstance(action, str):
         try:
-            action = Action(action)
+            action = DecisionType(action)
         except ValueError:
             return "🟡"
     return m.get(action, "🟡")
@@ -1407,7 +1407,7 @@ def render_report(
                 f"-{_money_ars(o.amount_ars)}"
             )
 
-            if o.action == Action.SELL_FULL:
+            if o.action == DecisionType.SELL_FULL:
                 h.append("      → Liquidación total (target 0%)")
 
             step += 1
@@ -1479,12 +1479,12 @@ def render_report(
     decision_map = {d.ticker: d for d in (plan.decisions if plan else [])}
 
     action_priority = {
-        Action.SELL_FULL.value: 0,
-        Action.SELL_PARTIAL.value: 1,
-        Action.BUY.value: 2,
-        Action.BLOCKED.value: 3,
-        Action.WATCH.value: 4,
-        Action.HOLD.value: 5,
+        DecisionType.SELL_FULL.value: 0,
+        DecisionType.SELL_PARTIAL.value: 1,
+        DecisionType.BUY.value: 2,
+        DecisionType.BLOCKED.value: 3,
+        DecisionType.WATCH.value: 4,
+        DecisionType.HOLD.value: 5,
     }
 
     def _result_priority(r):
@@ -1508,7 +1508,7 @@ def render_report(
         cw = float(current_w.get(ticker, 0.0))
         tw = d.target_weight if d else cw
         action_str = d.action.value if d else "HOLD"
-        icon = _action_icon(d.action if d else Action.HOLD)
+        icon = _action_icon(d.action if d else DecisionType.HOLD)
 
         tech = _layer_weighted(r, "technical")
         macro = _layer_weighted(r, "macro")
@@ -1622,7 +1622,7 @@ def render_report(
         h.append("<b>Pesos objetivo:</b>")
 
         for d in sorted(plan.decisions, key=lambda x: x.ticker):
-            if d.action == Action.HOLD and abs(d.delta_weight) < 0.015:
+            if d.action == DecisionType.HOLD and abs(d.delta_weight) < 0.015:
                 continue
 
             arrow = "📈" if d.delta_weight > 0.03 else "📉" if d.delta_weight < -0.03 else "➡️"
@@ -2035,7 +2035,7 @@ async def main(
                 f"Decisions: "
                 + ", ".join(
                     f"{d.ticker}={d.action.value}" for d in decisions
-                    if d.action not in (Action.HOLD,)
+                    if d.action not in (DecisionType.HOLD,)
                 )
             )
 

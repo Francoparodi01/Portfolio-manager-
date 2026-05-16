@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from src.analysis.enums import DecisionType, DeprecatedEnumMeta
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,13 +78,23 @@ MAX_WEIGHT_HARD_CONC = 0.30   # concentración alta: permite vender aunque score
 # TIPOS
 # ══════════════════════════════════════════════════════════════════════════════
 
-class Action(str, Enum):
+class Action(str, Enum, metaclass=DeprecatedEnumMeta):
     BUY = "BUY"
     SELL_FULL = "SELL_FULL"
     SELL_PARTIAL = "SELL_PARTIAL"
     HOLD = "HOLD"
     WATCH = "WATCH"
     BLOCKED = "BLOCKED"
+
+    def to_decision_type(self) -> DecisionType:
+        return {
+            Action.BUY: DecisionType.BUY,
+            Action.SELL_FULL: DecisionType.SELL_FULL,
+            Action.SELL_PARTIAL: DecisionType.SELL_PARTIAL,
+            Action.HOLD: DecisionType.HOLD,
+            Action.WATCH: DecisionType.WATCH,
+            Action.BLOCKED: DecisionType.BLOCKED,
+        }[self]
 
 
 class OrderSide(str, Enum):
@@ -175,7 +187,7 @@ class DecisionIntent:
       - restricciones del gate
     """
     ticker: str
-    action: Action
+    action: DecisionType
     reason_primary: str
     reason_secondary: Optional[str]
     current_weight: float
@@ -194,7 +206,7 @@ class OrderIntent:
     """
     ticker: str
     side: OrderSide
-    action: Action
+    action: DecisionType
     amount_ars: float
     theoretical_ars: float
     quantity_est: float
@@ -343,14 +355,14 @@ def _buy_guard(
     w_cur: float,
     w_opt: float,
     theoretical_ars: float,
-) -> tuple[Action, str, str]:
+) -> tuple[DecisionType, str, str]:
     """
     Devuelve:
       action, reason_primary, reason_secondary
     """
     if score is None:
         return (
-            Action.BLOCKED,
+            DecisionType.BLOCKED,
             "Compra bloqueada: score no disponible",
             f"Optimizer sugería aumentar {w_cur:.1%} → {w_opt:.1%} "
             f"({theoretical_ars:,.0f} ARS), pero falta señal cuantitativa",
@@ -358,7 +370,7 @@ def _buy_guard(
 
     if score < SCORE_BUY_BLOCK_NEG:
         return (
-            Action.BLOCKED,
+            DecisionType.BLOCKED,
             f"Compra bloqueada por scorer negativo: {score:+.3f}",
             f"Optimizer sugería aumentar {w_cur:.1%} → {w_opt:.1%} "
             f"({theoretical_ars:,.0f} ARS), pero no pasa BUY_SCORE_GUARD",
@@ -366,14 +378,14 @@ def _buy_guard(
 
     if score < SCORE_BUY_MIN:
         return (
-            Action.WATCH,
+            DecisionType.WATCH,
             f"Compra en WATCH: señal insuficiente {score:+.3f}",
             f"Optimizer sugería aumentar {w_cur:.1%} → {w_opt:.1%} "
             f"({theoretical_ars:,.0f} ARS), pero BUY requiere score >= {SCORE_BUY_MIN:+.2f}",
         )
 
     return (
-        Action.BUY,
+        DecisionType.BUY,
         f"Aumentar posición: {w_cur:.1%} → {w_opt:.1%} ({(w_opt - w_cur):+.1%})",
         f"score {score:+.3f}",
     )
@@ -385,7 +397,7 @@ def _sell_guard(
     w_cur: float,
     w_opt: float,
     delta: float,
-) -> tuple[Action, str, str]:
+) -> tuple[DecisionType, str, str]:
     """
     Devuelve:
       action, reason_primary, reason_secondary
@@ -403,13 +415,13 @@ def _sell_guard(
     if score is None:
         if high_concentration:
             return (
-                Action.SELL_PARTIAL,
+                DecisionType.SELL_PARTIAL,
                 f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
                 "rebalanceo por concentración; score no disponible",
             )
 
         return (
-            Action.HOLD,
+            DecisionType.HOLD,
             "Venta bloqueada: score no disponible",
             f"Optimizer sugería reducir {w_cur:.1%} → {w_opt:.1%}, "
             "pero no hay señal suficiente ni concentración",
@@ -419,13 +431,13 @@ def _sell_guard(
     if score >= SCORE_NEU_HIGH:
         if hard_concentration:
             return (
-                Action.SELL_PARTIAL,
+                DecisionType.SELL_PARTIAL,
                 f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
                 f"rebalanceo por concentración ({w_cur:.1%}); score positivo {score:+.3f}",
             )
 
         return (
-            Action.HOLD,
+            DecisionType.HOLD,
             f"Venta bloqueada: score positivo {score:+.3f}",
             f"Optimizer sugería reducir {w_cur:.1%} → {w_opt:.1%}, "
             "pero la señal del activo es positiva y no hay concentración excesiva",
@@ -435,13 +447,13 @@ def _sell_guard(
     if rango == ScoreRange.NEUTRAL:
         if high_concentration:
             return (
-                Action.SELL_PARTIAL,
+                DecisionType.SELL_PARTIAL,
                 f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
                 f"rebalanceo por concentración ({w_cur:.1%}); score neutral/ruido {score:+.3f}",
             )
 
         return (
-            Action.HOLD,
+            DecisionType.HOLD,
             f"Venta bloqueada: score neutral/ruido {score:+.3f}",
             f"Optimizer sugería reducir {w_cur:.1%} → {w_opt:.1%}, "
             "pero una señal neutral no justifica operar",
@@ -451,13 +463,13 @@ def _sell_guard(
     if rango == ScoreRange.NEG_DEBIL:
         if abs(delta) >= 0.05 or high_concentration:
             return (
-                Action.SELL_PARTIAL,
+                DecisionType.SELL_PARTIAL,
                 f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
                 f"rebalanceo por señal negativa débil ({score:+.3f})",
             )
 
         return (
-            Action.HOLD,
+            DecisionType.HOLD,
             f"Venta bloqueada: señal negativa débil {score:+.3f}",
             f"Optimizer sugería reducir {w_cur:.1%} → {w_opt:.1%}, "
             "pero el delta no justifica costos/slippage",
@@ -465,7 +477,7 @@ def _sell_guard(
 
     # NEG_OPERABLE
     return (
-        Action.SELL_PARTIAL,
+        DecisionType.SELL_PARTIAL,
         f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
         f"rebalanceo por score negativo ({score:+.3f})",
     )
@@ -529,14 +541,14 @@ def derive_decision_intents(
             )
 
             # Si el guard permitió vender, respetar liquidación completa.
-            if action == Action.SELL_PARTIAL:
-                action = Action.SELL_FULL
+            if action == DecisionType.SELL_PARTIAL:
+                action = DecisionType.SELL_FULL
                 reason_primary = f"Target {w_opt:.1%} — liquidar posición completa"
 
         # ── SELL_PARTIAL ────────────────────────────────────────────────────
         elif delta < -min_weight_delta:
             if gate == "BLOCKED":
-                action = Action.BLOCKED
+                action = DecisionType.BLOCKED
                 reason_primary = f"Gate {gate} — venta parcial bloqueada"
                 reason_secondary = f"Delta objetivo: {delta:+.1%}"
             else:
@@ -551,7 +563,7 @@ def derive_decision_intents(
         # ── BUY ─────────────────────────────────────────────────────────────
         elif delta > min_weight_delta:
             if gate in ("BLOCKED", "CAUTIOUS"):
-                action = Action.BLOCKED
+                action = DecisionType.BLOCKED
                 reason_primary = f"Gate {gate} — compra bloqueada"
                 reason_secondary = f"Delta objetivo: {delta:+.1%} ({theoretical_ars:,.0f} ARS)"
             else:
@@ -565,11 +577,11 @@ def derive_decision_intents(
         # ── HOLD / WATCH por delta chico ────────────────────────────────────
         else:
             if sig and sig.score >= SCORE_BUY_MIN and sig.conviction >= 0.40:
-                action = Action.WATCH
+                action = DecisionType.WATCH
                 reason_primary = "Señal positiva — delta insuficiente para operar"
                 reason_secondary = f"score {sig.score:+.3f}, delta {delta:+.1%} < umbral"
             else:
-                action = Action.HOLD
+                action = DecisionType.HOLD
                 reason_primary = f"Sin ventaja operativa clara (delta {delta:+.1%})"
                 reason_secondary = None
 
@@ -587,12 +599,12 @@ def derive_decision_intents(
         ))
 
     priority_order = {
-        Action.SELL_FULL: 0,
-        Action.SELL_PARTIAL: 1,
-        Action.BUY: 2,
-        Action.BLOCKED: 3,
-        Action.WATCH: 4,
-        Action.HOLD: 5,
+        DecisionType.SELL_FULL: 0,
+        DecisionType.SELL_PARTIAL: 1,
+        DecisionType.BUY: 2,
+        DecisionType.BLOCKED: 3,
+        DecisionType.WATCH: 4,
+        DecisionType.HOLD: 5,
     }
 
     intents.sort(key=lambda x: priority_order.get(x.action, 9))
@@ -637,7 +649,7 @@ def reconcile_funding(
     # ── PASO 1: Ventas ejecutables ──────────────────────────────────────────
     sell_decisions = [
         d for d in decisions
-        if d.action in (Action.SELL_FULL, Action.SELL_PARTIAL)
+        if d.action in (DecisionType.SELL_FULL, DecisionType.SELL_PARTIAL)
     ]
 
     for d in sell_decisions:
@@ -662,7 +674,7 @@ def reconcile_funding(
             quantity_est=round(qty_est, 4),
             reference_price=ref_price,
             reason=d.reason_primary,
-            priority=0 if d.action == Action.SELL_FULL else 1,
+            priority=0 if d.action == DecisionType.SELL_FULL else 1,
             funded_by=[],
             partial=False,
         ))
@@ -679,7 +691,7 @@ def reconcile_funding(
     )
 
     # ── PASO 3: Compras core ejecutables ────────────────────────────────────
-    buy_decisions = [d for d in decisions if d.action == Action.BUY]
+    buy_decisions = [d for d in decisions if d.action == DecisionType.BUY]
     buy_decisions.sort(
         key=lambda d: (
             -(d.conviction or 0.0),
@@ -691,7 +703,8 @@ def reconcile_funding(
 
     for d in buy_decisions:
         wanted = d.theoretical_ars
-        executable = min(wanted, available)
+        max_affordable = available / (1 + cost_rate) if cost_rate >= 0 else available
+        executable = min(wanted, max_affordable)
 
         if executable < min_trade_ars:
             pending_buys.append(d.ticker)
@@ -752,7 +765,8 @@ def reconcile_funding(
                 )
                 continue
 
-            executable = min(wanted, available)
+            max_affordable = available / (1 + cost_rate) if cost_rate >= 0 else available
+            executable = min(wanted, max_affordable)
 
             if executable < min_trade_ars:
                 pending_buys.append(ticker)
@@ -764,7 +778,7 @@ def reconcile_funding(
             buy_orders.append(OrderIntent(
                 ticker=ticker,
                 side=OrderSide.BUY,
-                action=Action.BUY,
+                action=DecisionType.BUY,
                 amount_ars=round(executable, 0),
                 theoretical_ars=round(wanted, 0),
                 quantity_est=0.0,
@@ -784,7 +798,7 @@ def reconcile_funding(
 
     # ── PASO 5: Bloqueadas / WATCH ──────────────────────────────────────────
     for d in decisions:
-        if d.action in (Action.BLOCKED, Action.WATCH):
+        if d.action in (DecisionType.BLOCKED, DecisionType.WATCH):
             blocked_orders.append(OrderIntent(
                 ticker=d.ticker,
                 side=OrderSide.BUY if d.delta_weight > 0 else OrderSide.SELL,
@@ -812,8 +826,8 @@ def reconcile_funding(
     # ── PASO 7: Resumen ─────────────────────────────────────────────────────
     n_sells = len(sell_orders)
     n_buys = len(buy_orders)
-    n_blocked = len([o for o in blocked_orders if o.action == Action.BLOCKED])
-    n_watch = len([o for o in blocked_orders if o.action == Action.WATCH])
+    n_blocked = len([o for o in blocked_orders if o.action == DecisionType.BLOCKED])
+    n_watch = len([o for o in blocked_orders if o.action == DecisionType.WATCH])
 
     summary_parts = []
 

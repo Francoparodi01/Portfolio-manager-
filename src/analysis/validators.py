@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .execution_planner import ExecutionPlan, Action, OrderSide
+from .execution_planner import ExecutionPlan, OrderSide
+from .enums import DecisionType
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def validate_execution_plan(plan: ExecutionPlan) -> None:
 
     # 7. Un ticker con decision SELL_FULL no puede estar en buy_orders
     sell_full_tickers = {
-        d.ticker for d in plan.decisions if d.action == Action.SELL_FULL
+        d.ticker for d in plan.decisions if d.action == DecisionType.SELL_FULL
     }
     for o in plan.buy_orders:
         if o.ticker in sell_full_tickers:
@@ -102,7 +103,7 @@ def validate_execution_plan(plan: ExecutionPlan) -> None:
 
     # 8. Un ticker con target_weight=0 no puede tener action=HOLD en decisions
     for d in plan.decisions:
-        if d.target_weight <= 0.005 and d.current_weight > 0.005 and d.action == Action.HOLD:
+        if d.target_weight <= 0.005 and d.current_weight > 0.005 and d.action == DecisionType.HOLD:
             errors.append(
                 f"{d.ticker}: target={d.target_weight:.1%} ≈ 0 pero action=HOLD — "
                 f"debería ser SELL_FULL o SELL_PARTIAL"
@@ -205,7 +206,7 @@ def soft_validate(plan: ExecutionPlan) -> list[str]:
 
     # HOLD con target 0
     for d in plan.decisions:
-        if d.target_weight <= 0.005 and d.current_weight > 0.01 and d.action == Action.HOLD:
+        if d.target_weight <= 0.005 and d.current_weight > 0.01 and d.action == DecisionType.HOLD:
             warnings.append(
                 f"⚠️ {d.ticker}: target≈0 pero acción=HOLD — revisar clasificación"
             )

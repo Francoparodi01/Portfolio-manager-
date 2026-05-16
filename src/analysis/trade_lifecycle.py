@@ -36,6 +36,7 @@ from enum import Enum
 from typing import Optional
 
 from src.analysis.risk_levels import compute_risk_levels
+from src.analysis.enums import DecisionType
 
 logger = logging.getLogger(__name__)
 
@@ -53,37 +54,6 @@ HORIZON_DEFAULT    = 10     # días
 # ══════════════════════════════════════════════════════════════════════════════
 # ENUMS
 # ══════════════════════════════════════════════════════════════════════════════
-
-class DecisionType(str, Enum):
-    """
-    Tipo semántico de la decisión.
-    Reemplaza el campo `decision` libre (BUY/SELL) con categorías más precisas.
-    El campo `decision` original se mantiene en DB para compatibilidad hacia atrás.
-    """
-    BUY            = "BUY"            # compra por señal real del activo
-    BUY_REBALANCE  = "BUY_REBALANCE"  # aumento por optimizer, señal floja
-    SELL_PARTIAL   = "SELL_PARTIAL"   # recorte parcial
-    SELL_FULL      = "SELL_FULL"      # salida total
-    HOLD           = "HOLD"           # sin acción
-
-    def to_db_decision(self) -> str:
-        """Valor que va al campo legacy `decision` en decision_log."""
-        if self in (DecisionType.BUY, DecisionType.BUY_REBALANCE):
-            return "BUY"
-        if self in (DecisionType.SELL_PARTIAL, DecisionType.SELL_FULL):
-            return "SELL"
-        return "HOLD"
-
-    def display_label(self) -> str:
-        """Etiqueta para el reporte de Telegram."""
-        return {
-            DecisionType.BUY:           "COMPRA (señal real)",
-            DecisionType.BUY_REBALANCE: "AUMENTO POR REBALANCEO",
-            DecisionType.SELL_PARTIAL:  "VENTA PARCIAL",
-            DecisionType.SELL_FULL:     "VENTA TOTAL",
-            DecisionType.HOLD:          "MANTENER",
-        }.get(self, self.value)
-
 
 class SignalStrength(str, Enum):
     """Intensidad de la señal del activo."""

@@ -367,8 +367,9 @@ src/scheduler/
 ## Módulos de soporte y legado
 
 - `decision_engine.py`: conserva contratos y helpers usados por compatibilidad y auditoría.
-- `trade_lifecycle.py`: soporte de lifecycle y convención de riesgo, no fuente operativa principal.
-- `rotation_engine.py`: módulo heredado de rotación; el camino principal actual pasa por `execution_planner.py`.
+- `trade_lifecycle.py`: soporte auxiliar de lifecycle y convención de riesgo, aún no integrado como fuente operativa principal.
+- `rotation_engine.py`: eliminado; el camino principal de rotación y funding vive en `execution_planner.py`.
+- `core.credentials.py`: eliminado; la configuración activa usa `core.config` + `.env`.
 
 ## Deuda técnica conocida
 

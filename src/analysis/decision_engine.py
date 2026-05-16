@@ -32,6 +32,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from src.analysis.risk_levels import compute_risk_levels
+from src.analysis.enums import DecisionType, DeprecatedEnumMeta
 
 logger = logging.getLogger(__name__)
 
@@ -91,13 +92,23 @@ class SignalClass(str, Enum):
     POS_STRONG = "POS_FUERTE"
 
 
-class FinalAction(str, Enum):
+class FinalAction(str, Enum, metaclass=DeprecatedEnumMeta):
     BUY = "BUY"
     SELL = "SELL"
     HOLD = "HOLD"
     WATCH = "WATCH"
     SWAP_CANDIDATE = "SWAP_CANDIDATE"
     NO_ACTION = "NO_ACTION"
+
+    def to_decision_type(self) -> DecisionType:
+        return {
+            FinalAction.BUY: DecisionType.BUY,
+            FinalAction.SELL: DecisionType.SELL,
+            FinalAction.HOLD: DecisionType.HOLD,
+            FinalAction.WATCH: DecisionType.WATCH,
+            FinalAction.SWAP_CANDIDATE: DecisionType.SWAP_CANDIDATE,
+            FinalAction.NO_ACTION: DecisionType.NO_ACTION,
+        }[self]
 
 
 @dataclass
@@ -136,9 +147,9 @@ class DecisionOutput:
         Compatibilidad con código viejo.
         Devuelve BUY/SELL/HOLD aunque internamente exista WATCH/SWAP.
         """
-        if self.final_action == FinalAction.BUY.value:
+        if self.final_action == DecisionType.BUY.value:
             return "BUY"
-        if self.final_action == FinalAction.SELL.value:
+        if self.final_action == DecisionType.SELL.value:
             return "SELL"
         return "HOLD"
 
@@ -322,7 +333,7 @@ def make_decision(
     if delta_weight is None:
         return DecisionOutput(
             ticker=ticker,
-            final_action=FinalAction.WATCH.value if signal != SignalClass.NEUTRAL else FinalAction.HOLD.value,
+            final_action=DecisionType.WATCH.value if signal != SignalClass.NEUTRAL else DecisionType.HOLD.value,
             executable=False,
             score=score,
             conviction=conviction,
@@ -382,7 +393,7 @@ def make_decision(
         if blockers:
             return DecisionOutput(
                 ticker=ticker,
-                final_action=FinalAction.WATCH.value,
+                final_action=DecisionType.WATCH.value,
                 executable=False,
                 score=score,
                 conviction=conviction,
@@ -406,7 +417,7 @@ def make_decision(
 
         return DecisionOutput(
             ticker=ticker,
-            final_action=FinalAction.BUY.value,
+            final_action=DecisionType.BUY.value,
             executable=True,
             score=score,
             conviction=conviction,
@@ -450,7 +461,7 @@ def make_decision(
         if blockers:
             return DecisionOutput(
                 ticker=ticker,
-                final_action=FinalAction.HOLD.value,
+                final_action=DecisionType.HOLD.value,
                 executable=False,
                 score=score,
                 conviction=conviction,
@@ -474,7 +485,7 @@ def make_decision(
 
         return DecisionOutput(
             ticker=ticker,
-            final_action=FinalAction.SELL.value,
+            final_action=DecisionType.SELL.value,
             executable=True,
             score=score,
             conviction=conviction,
@@ -499,7 +510,7 @@ def make_decision(
     # delta 0
     return DecisionOutput(
         ticker=ticker,
-        final_action=FinalAction.HOLD.value,
+        final_action=DecisionType.HOLD.value,
         executable=False,
         score=score,
         conviction=conviction,
