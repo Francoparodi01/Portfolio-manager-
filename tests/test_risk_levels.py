@@ -112,6 +112,12 @@ class _FakeDatabase:
     async def get_pool(self):
         return self.pool
 
+    async def get_latest_market_prices(self):
+        return [{"ticker": "NVDA", "last_price": 100.0}]
+
+    async def get_market_candles(self, ticker, **_kwargs):
+        return []
+
     async def close(self):
         return None
 
@@ -162,3 +168,18 @@ def test_run_analysis_delegates_to_risk_levels():
 
     assert saved_ids == [1]
     mocked.assert_called_once()
+
+
+def test_load_internal_price_map_prefers_latest_market_prices():
+    cfg = SimpleNamespace(database=SimpleNamespace(url="postgresql://unused"))
+
+    with patch("scripts.run_analysis.PortfolioDatabase", _FakeDatabase):
+        prices = asyncio.run(
+            run_analysis._load_internal_price_map(
+                cfg,
+                ["NVDA"],
+                [{"ticker": "NVDA", "current_price": 95.0}],
+            )
+        )
+
+    assert prices == {"NVDA": 100.0}

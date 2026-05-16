@@ -201,6 +201,10 @@ class OpportunityCandidate:
     macro_score:         float = 0.0
     sentiment_score:     float = 0.0
     momentum_score:      float = 0.0
+    technical_candle_source_mode: str = "unknown"
+    technical_has_reconstructed_candles: bool = False
+    technical_candle_sources: tuple[str, ...] = field(default_factory=tuple)
+    technical_candle_source_counts: dict[str, int] = field(default_factory=dict)
     # Asimetría y edge
     asymmetry:           Optional[AsymmetryMetrics] = None
     asymmetry_label:     str   = ""
@@ -999,6 +1003,10 @@ def run_opportunity_analysis(
             sentiment_score     = sent_score,
             technical_score_raw = getattr(tech, "score_raw", 0.0),
             skip_sentiment      = no_sentiment,
+            technical_candle_source_mode=getattr(tech, "candle_source_mode", "unknown"),
+            technical_has_reconstructed_candles=getattr(tech, "has_reconstructed_candles", False),
+            technical_candle_sources=getattr(tech, "candle_sources", ()),
+            technical_candle_source_counts=getattr(tech, "candle_source_counts", {}),
         )
 
         final_score = synth.final_score * 0.80 + momentum_s * 0.20
@@ -1075,6 +1083,10 @@ def run_opportunity_analysis(
             macro_score          = round(float(macro_score), 4),
             sentiment_score      = round(float(sent_score), 4),
             momentum_score       = round(float(momentum_s), 4),
+            technical_candle_source_mode=getattr(tech, "candle_source_mode", "unknown"),
+            technical_has_reconstructed_candles=getattr(tech, "has_reconstructed_candles", False),
+            technical_candle_sources=tuple(getattr(tech, "candle_sources", ()) or ()),
+            technical_candle_source_counts=dict(getattr(tech, "candle_source_counts", {}) or {}),
             asymmetry            = asym,
             asymmetry_label      = asym_lbl,
             edge                 = edge,
@@ -1230,6 +1242,17 @@ def render_opportunity_report(
             f"Confirmar antes de entrar."
         )
 
+    def _technical_source_label(c: OpportunityCandidate) -> str:
+        mode = str(c.technical_candle_source_mode or "unknown")
+        counts = c.technical_candle_source_counts or {}
+        if not counts:
+            return mode
+        detail = ", ".join(
+            f"{source} {int(count)}"
+            for source, count in sorted(counts.items())
+        )
+        return f"{mode} ({detail})"
+
     def _swap_context(c: OpportunityCandidate) -> str:
         """Texto de contexto para swaps según su intensidad."""
         if not c.swap_vs or c.trade_type != TradeType.SWAP_CANDIDATE:
@@ -1297,6 +1320,7 @@ def render_opportunity_report(
             f"<code>técnico {c.tech_score:+.3f} | macro {c.macro_score:+.3f} | "
             f"momentum {c.momentum_score:+.3f} | sent {c.sentiment_score:+.3f}</code>"
         )
+        h.append(f"Fuente técnica: <b>{escape(_technical_source_label(c))}</b>")
 
         # Contradicción técnica — nota explícita
         tech_note = _tech_contradiction_note(c)
@@ -1374,6 +1398,7 @@ def render_opportunity_report(
             f"conv. {round(c.conviction * 100)}% | "
             f"{rr_str} | ${c.price_usd:.2f}{edge_str}{near_tag}"
         )
+        h.append(f"   Fuente técnica: <b>{escape(_technical_source_label(c))}</b>")
         # Contradicción técnica en compacto
         if c.tech_contradiction:
             h.append(

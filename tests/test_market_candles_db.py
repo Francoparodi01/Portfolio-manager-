@@ -64,6 +64,13 @@ class _BuilderConnection:
     async def executemany(self, _query, rows):
         self.saved_rows.extend(rows)
 
+    async def fetchrow(self, _query, *_params):
+        return {
+            "price_assets": 10,
+            "internal_candles": 9,
+            "missing_internal": 1,
+        }
+
 
 class _FakePool:
     def __init__(self):
@@ -104,3 +111,16 @@ def test_build_daily_candles_from_market_prices_uses_internal_snapshot_source():
     assert row[1] == "T"
     assert row[2] == "INTERNAL:CEDEAR:T:ARS"
     assert row[12] == "internal_snapshot"
+
+
+def test_get_daily_candle_build_status_reports_missing_internal():
+    from datetime import date
+
+    db = PortfolioDatabase("postgresql://unused")
+    db._pool = _BuilderPool()
+
+    status = asyncio.run(db.get_daily_candle_build_status(date(2026, 5, 15)))
+
+    assert status["price_assets"] == 10
+    assert status["internal_candles"] == 9
+    assert status["missing_internal"] == 1

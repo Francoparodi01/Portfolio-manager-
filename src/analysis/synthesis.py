@@ -61,6 +61,10 @@ class SynthesisResult:
     warnings: list = field(default_factory=list)
     conviction: float = 0.0       # = confidence (alias explícito para render)
     sentiment_active: bool = True
+    technical_candle_source_mode: str = "unknown"
+    technical_has_reconstructed_candles: bool = False
+    technical_candle_sources: tuple[str, ...] = field(default_factory=tuple)
+    technical_candle_source_counts: dict[str, int] = field(default_factory=dict)
 
     def to_telegram(self) -> str:
         icons = {"BUY": "🟢🟢", "ACCUMULATE": "🟢", "HOLD": "🟡", "REDUCE": "🔴", "SELL": "🔴🔴"}
@@ -134,7 +138,11 @@ def _compute_conviction(layers: list[LayerScore], final: float) -> float:
 def blend_scores(ticker: str, technical_signal: str, technical_strength: float,
                  macro_score: float, risk_position: dict, sentiment_score: float,
                  technical_score_raw: float = 0.0,
-                 skip_sentiment: bool = False) -> SynthesisResult:
+                 skip_sentiment: bool = False,
+                 technical_candle_source_mode: str = "unknown",
+                 technical_has_reconstructed_candles: bool = False,
+                 technical_candle_sources: tuple[str, ...] = (),
+                 technical_candle_source_counts: dict[str, int] | None = None) -> SynthesisResult:
     """
     Combina las 4 capas en un score final y toma la decisión.
 
@@ -227,6 +235,10 @@ def blend_scores(ticker: str, technical_signal: str, technical_strength: float,
         confidence=conviction, final_score=round(final, 4),
         position_size=round(float(np.clip(ps, 0, 0.25)), 4),
         layers=layers, conviction=conviction,
+        technical_candle_source_mode=technical_candle_source_mode,
+        technical_has_reconstructed_candles=technical_has_reconstructed_candles,
+        technical_candle_sources=tuple(technical_candle_sources or ()),
+        technical_candle_source_counts=dict(technical_candle_source_counts or {}),
     )
 
 

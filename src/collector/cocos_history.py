@@ -98,6 +98,7 @@ def candles_to_frame(candles):
     if not candles:
         frame = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume", "Source"])
         frame.attrs["candle_sources"] = ()
+        frame.attrs["candle_source_counts"] = {}
         frame.attrs["has_reconstructed_candles"] = False
         return frame
 
@@ -131,6 +132,11 @@ def candles_to_frame(candles):
         .sort_index()
     )
     sources = tuple(sorted(set(frame["Source"])))
+    source_counts = {
+        str(source): int(count)
+        for source, count in frame["Source"].value_counts().sort_index().items()
+    }
     frame.attrs["candle_sources"] = sources
+    frame.attrs["candle_source_counts"] = source_counts
     frame.attrs["has_reconstructed_candles"] = "internal_snapshot" in sources
     return frame

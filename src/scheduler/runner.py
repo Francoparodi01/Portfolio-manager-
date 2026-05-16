@@ -58,6 +58,7 @@ logger = get_logger(__name__)
 TIMEZONE = "America/Argentina/Buenos_Aires"
 ART_TZ = ZoneInfo(TIMEZONE)
 UTC = timezone.utc
+BUSINESS_DAY_CRON = "mon-fri"
 
 MARKET_OPEN_H, MARKET_OPEN_M = 10, 30
 MARKET_CLOSE_H, MARKET_CLOSE_M = 17, 0
@@ -123,6 +124,16 @@ def _should_scrape_market(now: datetime | None = None) -> bool:
 
 def _should_scrape_portfolio(now: datetime | None = None) -> bool:
     return True
+
+
+def _business_day_cron(hour: int, minute: int) -> CronTrigger:
+    """Cron automatico del scheduler: nunca dispara sabados ni domingos."""
+    return CronTrigger(
+        day_of_week=BUSINESS_DAY_CRON,
+        hour=hour,
+        minute=minute,
+        timezone=TIMEZONE,
+    )
 
 
 def _safe_float(value, default: float | None = None) -> float | None:
@@ -369,6 +380,34 @@ async def run_build_daily_candles() -> None:
         logger.info("build_daily_candles: %s velas internas guardadas", saved)
     except Exception as e:
         logger.error("build_daily_candles fallo: %s", e, exc_info=True)
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
+
+
+async def run_verify_daily_candles() -> None:
+    """Verifica cobertura diaria del pipeline market_prices -> internal_snapshot."""
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    try:
+        await db.connect()
+        status = await db.get_daily_candle_build_status()
+        logger.info(
+            "daily_candle_status %s: prices=%d internal=%d missing=%d",
+            status["business_day"],
+            status["price_assets"],
+            status["internal_candles"],
+            status["missing_internal"],
+        )
+        if status["price_assets"] > 0 and status["missing_internal"] > 0:
+            logger.warning(
+                "daily_candle_status incompleto: faltan %d velas internas",
+                status["missing_internal"],
+            )
+    except Exception as e:
+        logger.error("daily_candle_status fallo: %s", e, exc_info=True)
     finally:
         try:
             await db.close()
@@ -767,7 +806,7 @@ async def _scheduler_main() -> None:
 
     scheduler.add_job(
         run_scrape,
-        CronTrigger(hour=10, minute=30, timezone=TIMEZONE),
+        _business_day_cron(hour=10, minute=30),
         args=["10:30_PORTFOLIO"],
         id="portfolio_morning",
         name="Portfolio 10:30 ART",
@@ -776,7 +815,7 @@ async def _scheduler_main() -> None:
     )
     scheduler.add_job(
         start_intraday_loops,
-        CronTrigger(hour=10, minute=31, timezone=TIMEZONE),
+        _business_day_cron(hour=10, minute=31),
         id="intraday_start",
         name="Intraday start 10:31 ART",
         misfire_grace_time=300,
@@ -784,7 +823,7 @@ async def _scheduler_main() -> None:
     )
     scheduler.add_job(
         run_full,
-        CronTrigger(hour=17, minute=0, timezone=TIMEZONE),
+        _business_day_cron(hour=17, minute=0),
         args=["17:00_FULL"],
         id="portfolio_eod",
         name="Full 17:00 ART",
@@ -793,7 +832,7 @@ async def _scheduler_main() -> None:
     )
     scheduler.add_job(
         stop_intraday_loops,
-        CronTrigger(hour=17, minute=1, timezone=TIMEZONE),
+        _business_day_cron(hour=17, minute=1),
         id="intraday_stop",
         name="Intraday stop 17:01 ART",
         misfire_grace_time=300,
@@ -801,15 +840,23 @@ async def _scheduler_main() -> None:
     )
     scheduler.add_job(
         run_build_daily_candles,
-        CronTrigger(hour=17, minute=5, timezone=TIMEZONE),
+        _business_day_cron(hour=17, minute=5),
         id="build_daily_candles",
         name="Build daily internal candles 17:05 ART",
         misfire_grace_time=600,
         replace_existing=True,
     )
     scheduler.add_job(
+        run_verify_daily_candles,
+        _business_day_cron(hour=17, minute=10),
+        id="verify_daily_candles",
+        name="Verify daily internal candles 17:10 ART",
+        misfire_grace_time=600,
+        replace_existing=True,
+    )
+    scheduler.add_job(
         run_update_outcomes,
-        CronTrigger(hour=21, minute=30, timezone=TIMEZONE),
+        _business_day_cron(hour=21, minute=30),
         id="update_outcomes_daily",
         name="Update outcomes 21:30 ART",
         misfire_grace_time=600,

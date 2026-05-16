@@ -382,6 +382,18 @@ def _layer_weighted(result, name: str) -> float:
     return float(getattr(l, "weighted", 0.0)) if l else 0.0
 
 
+def _technical_source_label(result) -> str:
+    mode = str(getattr(result, "technical_candle_source_mode", "unknown") or "unknown")
+    counts = getattr(result, "technical_candle_source_counts", {}) or {}
+    if not counts:
+        return mode
+    detail = ", ".join(
+        f"{source} {int(count)}"
+        for source, count in sorted(counts.items())
+    )
+    return f"{mode} ({detail})"
+
+
 def _component_reason(result) -> tuple[str, str]:
     tech = _layer_weighted(result, "technical")
     macro = _layer_weighted(result, "macro")
@@ -615,6 +627,10 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
         payload["macro"] = {"weighted": 0.0, "raw": 0.0, "weight": 0.0, "reason": "result_missing"}
         payload["sentiment"] = {"weighted": 0.0, "raw": 0.0, "weight": 0.0, "reason": "result_missing"}
         payload["risk"] = {"weighted": 0.0, "raw": 0.0, "weight": 0.0, "reason": "result_missing"}
+        payload["technical_data_source_mode"] = "unknown"
+        payload["technical_has_reconstructed_candles"] = False
+        payload["technical_candle_sources"] = []
+        payload["technical_candle_source_counts"] = {}
         return payload
 
     payload["technical"] = _layer_payload("technical")
@@ -626,6 +642,18 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
     payload["decision_from_synthesis"] = str(getattr(result, "decision", "") or "")
     payload["confidence"] = _safe_float(
         getattr(result, "conviction", getattr(result, "confidence", 0.0))
+    )
+    payload["technical_data_source_mode"] = str(
+        getattr(result, "technical_candle_source_mode", "unknown") or "unknown"
+    )
+    payload["technical_has_reconstructed_candles"] = bool(
+        getattr(result, "technical_has_reconstructed_candles", False)
+    )
+    payload["technical_candle_sources"] = list(
+        getattr(result, "technical_candle_sources", ()) or ()
+    )
+    payload["technical_candle_source_counts"] = dict(
+        getattr(result, "technical_candle_source_counts", {}) or {}
     )
 
     return payload
@@ -1068,38 +1096,19 @@ async def _save_optimizer_trades(
         if str(getattr(r, "ticker", "") or "").strip()
     }
 
-    _tickers_to_price = list(current_w.keys())
-    price_map: dict[str, float | None] = {}
-    if _tickers_to_price:
-        import pandas as _pd
-        import yfinance as yf
-
-        try:
-            _raw = yf.download(
-                _tickers_to_price, period="5d",
-                progress=False, auto_adjust=True,
-            )["Close"]
-            if isinstance(_raw, _pd.Series):
-                _raw = _raw.to_frame(name=_tickers_to_price[0])
-            for _t in _tickers_to_price:
-                _col = _raw.get(_t) if hasattr(_raw, "get") else (
-                    _raw[_t] if _t in _raw.columns else None
-                )
-                if _col is not None and not _col.dropna().empty:
-                    price_map[_t] = float(_col.dropna().iloc[-1])
-                else:
-                    price_map[_t] = None
-                    logger.warning(f"price_usd: sin datos para {_t}")
-        except Exception as _e:
-            logger.warning(f"yfinance bulk price fetch error: {_e}")
-            price_map = {t: None for t in _tickers_to_price}
-
-    logger.info(
-        f"price_map USD: { {k: f'${v:.2f}' if v else 'None' for k,v in price_map.items()} }"
-    )
-
     trades_to_save = []
     trades = getattr(rebalance_report, "trades", []) or []
+    tickers_to_price = sorted({
+        str(getattr(tr, "ticker", "") or "").upper()
+        for tr in trades
+        if str(getattr(tr, "ticker", "") or "").strip()
+    })
+    price_map = await _load_internal_price_map(cfg, tickers_to_price, positions)
+
+    logger.info(
+        "price_map Cocos ARS: %s",
+        {k: f"${v:.2f}" if v else "None" for k, v in price_map.items()},
+    )
 
     for tr in trades:
         ticker  = str(getattr(tr, "ticker", "") or "").upper()
@@ -1221,6 +1230,48 @@ async def _save_optimizer_trades(
         logger.error(f"_save_optimizer_trades error: {e}", exc_info=True)
 
     return saved_ids
+
+
+async def _load_internal_price_map(
+    cfg,
+    tickers: list[str],
+    positions: list[dict],
+) -> dict[str, float | None]:
+    """Resuelve precios operativos desde fuentes propias Cocos, en ARS."""
+    wanted = {str(ticker or "").upper() for ticker in tickers if str(ticker or "").strip()}
+    if not wanted:
+        return {}
+
+    prices: dict[str, float | None] = {ticker: None for ticker in wanted}
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        latest_rows = await db.get_latest_market_prices()
+        for row in latest_rows:
+            ticker = str(row.get("ticker", "") or "").upper()
+            if ticker in wanted and row.get("last_price") is not None:
+                prices[ticker] = float(row["last_price"])
+
+        for position in positions or []:
+            ticker = str(position.get("ticker", "") or "").upper()
+            if ticker in wanted and prices.get(ticker) is None:
+                current_price = position.get("current_price")
+                if current_price is not None:
+                    prices[ticker] = float(current_price)
+
+        for ticker in sorted(wanted):
+            if prices.get(ticker) is not None:
+                continue
+            rows = await db.get_market_candles(ticker, limit=1)
+            if rows:
+                prices[ticker] = float(rows[-1]["close_price"])
+    finally:
+        await db.close()
+
+    missing = sorted(ticker for ticker, price in prices.items() if price is None)
+    if missing:
+        logger.warning("Sin precio Cocos disponible para %s", missing)
+    return prices
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1544,6 +1595,7 @@ def render_report(
             f"macro {macro:+.3f} | "
             f"sentiment {sent:+.3f}</code>"
         )
+        h.append(f"   Fuente técnica: <b>{escape(_technical_source_label(r))}</b>")
 
         h.append("")
 
@@ -1882,6 +1934,10 @@ async def main(
             risk_position     = risk_p,
             sentiment_score   = sent.score if sent else 0.0,
             technical_score_raw = getattr(tech, "score_raw", 0.0),
+            technical_candle_source_mode=getattr(tech, "candle_source_mode", "unknown"),
+            technical_has_reconstructed_candles=getattr(tech, "has_reconstructed_candles", False),
+            technical_candle_sources=getattr(tech, "candle_sources", ()),
+            technical_candle_source_counts=getattr(tech, "candle_source_counts", {}),
         )
 
         if not no_llm:
@@ -1974,6 +2030,10 @@ async def main(
                     },
                     sentiment_score     = u_sent.score if u_sent else 0.0,
                     technical_score_raw = getattr(u_tech, "score_raw", 0.0),
+                    technical_candle_source_mode=getattr(u_tech, "candle_source_mode", "unknown"),
+                    technical_has_reconstructed_candles=getattr(u_tech, "has_reconstructed_candles", False),
+                    technical_candle_sources=getattr(u_tech, "candle_sources", ()),
+                    technical_candle_source_counts=getattr(u_tech, "candle_source_counts", {}),
                 )
                 universe_results.append(u_result)
 

@@ -28,3 +28,5 @@ def test_technical_signal_marks_reconstructed_history():
     assert signal is not None
     assert signal.candle_source_mode == "reconstructed"
     assert signal.has_reconstructed_candles is True
+    assert signal.candle_sources == ("internal_snapshot",)
+    assert signal.candle_source_counts == {"internal_snapshot": 80}

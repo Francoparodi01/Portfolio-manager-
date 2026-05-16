@@ -48,10 +48,6 @@ YFINANCE_BLACKLIST: set[str] = {
     "YPFD",
 }
 
-# ── Guardia anti-ARS ──────────────────────────────────────────────────────────
-# Precios USD del universo Cocos nunca superan $5000.
-# Si price_at_decision > este umbral, fue guardado en ARS por error.
-MAX_PRICE_USD = 5_000.0
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
 
@@ -353,6 +349,49 @@ class PortfolioDatabase:
             saved,
         )
         return saved
+
+    async def get_daily_candle_build_status(
+        self,
+        business_day: Optional[date] = None,
+    ) -> dict:
+        """Resume cobertura diaria entre snapshots de precio y velas internas."""
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        business_day = business_day or datetime.now(ART_TZ).date()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                WITH price_assets AS (
+                    SELECT DISTINCT ticker
+                    FROM market_prices
+                    WHERE (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = $1
+                ),
+                candle_assets AS (
+                    SELECT DISTINCT ticker
+                    FROM market_candles
+                    WHERE (ts AT TIME ZONE 'UTC')::date = $1
+                      AND source = 'internal_snapshot'
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM price_assets) AS price_assets,
+                    (SELECT COUNT(*) FROM candle_assets) AS internal_candles,
+                    (
+                        SELECT COUNT(*)
+                        FROM price_assets p
+                        LEFT JOIN candle_assets c USING (ticker)
+                        WHERE c.ticker IS NULL
+                    ) AS missing_internal
+                """,
+                business_day,
+            )
+
+        return {
+            "business_day": business_day,
+            "price_assets": int(row["price_assets"] or 0),
+            "internal_candles": int(row["internal_candles"] or 0),
+            "missing_internal": int(row["missing_internal"] or 0),
+        }
 
     # ── Queries ───────────────────────────────────────────────────────────────
 
@@ -790,8 +829,8 @@ class PortfolioDatabase:
         outcome_5d / outcome_10d / outcome_20d / was_correct usando la serie
         canonica de market_candles.
 
-        GUARDIA ANTI-ARS: si price_at_decision > MAX_PRICE_USD el precio
-        fue guardado en ARS por error → se skipea con warning.
+        price_at_decision y market_candles usan la misma unidad operativa
+        proveniente de Cocos, por lo que no se aplica guardia USD/ARS.
         """
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
@@ -820,9 +859,8 @@ class PortfolioDatabase:
                 logger.info("update_outcomes: sin decisiones pendientes")
                 return 0
 
-            updated     = 0
-            skipped_ars = 0
-            now         = datetime.now(timezone.utc)
+            updated = 0
+            now     = datetime.now(timezone.utc)
 
             for row in rows:
                 ticker     = str(row["ticker"]).upper()
@@ -837,16 +875,6 @@ class PortfolioDatabase:
                     continue
 
                 entry_f = float(entry)
-
-                if entry_f > MAX_PRICE_USD:
-                    logger.warning(
-                        f"update_outcomes SKIP {ticker} id={row['id']}: "
-                        f"price_at_decision={entry_f:,.0f} parece ARS "
-                        f"(umbral USD={MAX_PRICE_USD:,.0f}). "
-                        f"Corregir con: python scripts/backfill_prices.py"
-                    )
-                    skipped_ars += 1
-                    continue
 
                 candles = await self.get_market_candles(ticker, limit=260)
                 if not candles:
@@ -904,16 +932,7 @@ class PortfolioDatabase:
                 except Exception as e:
                     logger.warning(f"update_outcomes write error {ticker}: {e}")
 
-            if skipped_ars:
-                logger.warning(
-                    f"update_outcomes: {skipped_ars} registros skipeados por precio ARS. "
-                    f"Correr: python scripts/backfill_prices.py"
-                )
-
-            logger.info(
-                f"update_outcomes: {updated}/{len(rows)} decisiones actualizadas"
-                + (f" | {skipped_ars} con precio ARS pendiente" if skipped_ars else "")
-            )
+            logger.info(f"update_outcomes: {updated}/{len(rows)} decisiones actualizadas")
             return updated
 
         except Exception as e:

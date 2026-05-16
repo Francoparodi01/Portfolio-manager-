@@ -42,6 +42,15 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _format_candle_source_label(mode: str, counts: dict[str, int] | None = None) -> str:
+    label = str(mode or "unknown")
+    counts = counts or {}
+    if not counts:
+        return label
+    detail = ", ".join(f"{source} {count}" for source, count in sorted(counts.items()))
+    return f"{label} ({detail})"
+
+
 # ── Dataclasses ────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -54,15 +63,22 @@ class Signal:
     price_usd: float
     candle_source_mode: str = "unknown"   # official | reconstructed | mixed | unknown
     has_reconstructed_candles: bool = False
+    candle_sources: tuple[str, ...] = field(default_factory=tuple)
+    candle_source_counts: dict[str, int] = field(default_factory=dict)
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_telegram(self) -> str:
         icon = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(self.signal, "⚪")
         bar  = "█" * int(self.strength * 5) + "░" * (5 - int(self.strength * 5))
         reasons_txt = "\n".join(f"  • {r}" for r in self.reasons)
+        source_txt = _format_candle_source_label(
+            self.candle_source_mode,
+            self.candle_source_counts,
+        )
         return (
             f"{icon} <b>{self.ticker}</b> — <b>{self.signal}</b>\n"
             f"Precio: <b>${self.price_usd:.2f}</b>  |  Fuerza: {bar} {self.strength:.0%}\n"
+            f"Fuente técnica: <b>{source_txt}</b>\n"
             f"{reasons_txt}"
         )
 
@@ -448,6 +464,7 @@ def analyze_ticker_from_frame(ticker: str, frame: "pd.DataFrame") -> Optional[Si
         return None
     signal = generate_signals(ind)
     sources = tuple(frame.attrs.get("candle_sources", ()))
+    source_counts = dict(frame.attrs.get("candle_source_counts", {}))
     has_reconstructed = bool(frame.attrs.get("has_reconstructed_candles", False))
     if sources == ("COCOS",):
         signal.candle_source_mode = "official"
@@ -456,6 +473,8 @@ def analyze_ticker_from_frame(ticker: str, frame: "pd.DataFrame") -> Optional[Si
     elif sources:
         signal.candle_source_mode = "mixed"
     signal.has_reconstructed_candles = has_reconstructed
+    signal.candle_sources = sources
+    signal.candle_source_counts = source_counts
     logger.info(f"{ticker}: {signal.signal} (fuerza={signal.strength:.0%}, score_reasons={len(signal.reasons)})")
     return signal
 

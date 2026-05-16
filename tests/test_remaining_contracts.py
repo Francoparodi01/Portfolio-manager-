@@ -75,6 +75,32 @@ async def _async_result(value):
     return value
 
 
+def test_update_outcomes_accepts_cocos_ars_prices():
+    now = datetime.now(timezone.utc)
+    recent_row = {
+        "id": 2,
+        "ticker": "T",
+        "price_at_decision": 12000.0,
+        "decided_at": now - timedelta(days=6),
+        "decision": "BUY",
+    }
+    conn = _OutcomeConnection(recent_row)
+    db = PortfolioDatabase("postgresql://unused")
+    db._pool = _OutcomePool(conn)
+    db.get_market_candles = lambda *_args, **_kwargs: _async_result(
+        [
+            {
+                "ts": now - timedelta(days=1),
+                "close_price": 12600.0,
+            }
+        ]
+    )
+
+    updated = asyncio.run(db.update_outcomes(lookback_days=7))
+
+    assert updated == 1
+
+
 def test_exclude_portfolio_removes_held_tickers():
     macro = SimpleNamespace(vix=None)
     seen_universe = []

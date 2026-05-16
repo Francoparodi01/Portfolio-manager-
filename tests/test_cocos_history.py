@@ -95,6 +95,7 @@ def test_candles_to_frame_preserves_ohlcv_columns():
     assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume", "Source"]
     assert frame.iloc[-1]["Close"] == 6990.0
     assert frame.attrs["candle_sources"] == ("COCOS",)
+    assert frame.attrs["candle_source_counts"] == {"COCOS": 2}
     assert frame.attrs["has_reconstructed_candles"] is False
 
 
