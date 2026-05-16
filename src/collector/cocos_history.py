@@ -96,7 +96,10 @@ def candles_to_frame(candles):
         raise ImportError("pandas requerido para convertir velas") from exc
 
     if not candles:
-        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        frame = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume", "Source"])
+        frame.attrs["candle_sources"] = ()
+        frame.attrs["has_reconstructed_candles"] = False
+        return frame
 
     rows = []
     for candle in candles:
@@ -112,9 +115,22 @@ def candles_to_frame(candles):
                 "Low": float(get("low_price")),
                 "Close": float(get("close_price")),
                 "Volume": float(get("volume")),
+                "Source": str(get("source") or "UNKNOWN"),
             }
         )
 
     frame = pd.DataFrame(rows)
     frame["ts"] = pd.to_datetime(frame["ts"], utc=True)
-    return frame.set_index("ts").sort_index()
+    frame["candle_day"] = frame["ts"].dt.date
+    frame["source_priority"] = frame["Source"].map({"COCOS": 0}).fillna(1)
+    frame = (
+        frame.sort_values(["candle_day", "source_priority", "ts"])
+        .drop_duplicates(subset=["candle_day"], keep="first")
+        .drop(columns=["candle_day", "source_priority"])
+        .set_index("ts")
+        .sort_index()
+    )
+    sources = tuple(sorted(set(frame["Source"])))
+    frame.attrs["candle_sources"] = sources
+    frame.attrs["has_reconstructed_candles"] = "internal_snapshot" in sources
+    return frame

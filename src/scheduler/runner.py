@@ -47,6 +47,7 @@ from src.core.config import get_config
 from src.core.logger import get_logger
 from src.core.redis_client import client as redis_client
 from src.collector.cocos_scraper import CocosCapitalScraper
+from src.collector.cocos_history import candles_to_frame
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
 
@@ -296,9 +297,12 @@ async def run_full(run_type: str = "FULL") -> dict:
             # Análisis técnico — no crítico, fallo no afecta el resultado principal
             if snapshot.positions:
                 try:
-                    from src.analysis.technical import analyze_portfolio, build_telegram_report
-                    tickers = [p.ticker for p in snapshot.positions]
-                    signals = analyze_portfolio(tickers, period="3mo")
+                    from src.analysis.technical import (
+                        analyze_portfolio_from_frames,
+                        build_telegram_report,
+                    )
+                    frames = await _load_canonical_history_frames(db, snapshot.positions)
+                    signals = analyze_portfolio_from_frames(frames)
                     report = build_telegram_report(signals, float(snapshot.total_value_ars))
                     notifier.send_raw(report)
                     logger.info("Análisis técnico: %d señales enviadas", len(signals))
@@ -326,6 +330,45 @@ async def run_update_outcomes() -> None:
         logger.info("update_outcomes: %s decisiones actualizadas", updated)
     except Exception as e:
         logger.error("update_outcomes falló: %s", e, exc_info=True)
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
+
+
+async def _load_canonical_history_frames(
+    db: PortfolioDatabase,
+    positions: list,
+    limit: int = 260,
+) -> dict:
+    frames = {}
+    for position in positions:
+        ticker = str(getattr(position, "ticker", "") or "").upper()
+        asset_type = getattr(getattr(position, "asset_type", None), "value", None)
+        if not ticker:
+            continue
+        rows = await db.get_market_candles(
+            ticker,
+            asset_type=asset_type,
+            limit=limit,
+        )
+        frame = candles_to_frame(rows)
+        if len(frame) >= 60:
+            frames[ticker] = frame
+    return frames
+
+
+async def run_build_daily_candles() -> None:
+    """Reconstruye la vela diaria propia desde market_prices. Solo DB, sin scraper."""
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    try:
+        await db.connect()
+        saved = await db.build_daily_candles_from_market_prices()
+        logger.info("build_daily_candles: %s velas internas guardadas", saved)
+    except Exception as e:
+        logger.error("build_daily_candles fallo: %s", e, exc_info=True)
     finally:
         try:
             await db.close()
@@ -754,6 +797,14 @@ async def _scheduler_main() -> None:
         id="intraday_stop",
         name="Intraday stop 17:01 ART",
         misfire_grace_time=300,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_build_daily_candles,
+        CronTrigger(hour=17, minute=5, timezone=TIMEZONE),
+        id="build_daily_candles",
+        name="Build daily internal candles 17:05 ART",
+        misfire_grace_time=600,
         replace_existing=True,
     )
     scheduler.add_job(

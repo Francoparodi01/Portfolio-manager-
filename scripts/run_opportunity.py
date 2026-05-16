@@ -31,6 +31,7 @@ from src.core.config import get_config
 from src.core.logger import get_logger
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
+from src.collector.cocos_history import candles_to_frame
 from src.analysis.macro import fetch_macro, get_macro_regime
 from src.analysis.opportunity_screener import (
     run_opportunity_analysis,
@@ -91,6 +92,34 @@ async def _load_portfolio_scores(cfg, tickers: list[str]) -> dict[str, float]:
     return scores
 
 
+async def _load_cocos_universe_assets(cfg) -> list[dict]:
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        return await db.get_cocos_universe_assets()
+    finally:
+        await db.close()
+
+
+async def _load_cocos_history_frames(cfg, assets: list[dict], limit: int = 260) -> dict:
+    frames = {}
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        for asset in assets:
+            rows = await db.get_market_candles(
+                asset["ticker"],
+                asset_type=asset.get("asset_type"),
+                limit=limit,
+            )
+            frame = candles_to_frame(rows)
+            if len(frame) >= 60:
+                frames[asset["ticker"]] = frame
+    finally:
+        await db.close()
+    return frames
+
+
 async def main(
     universe_override:  list[str],
     period:             str,
@@ -115,12 +144,21 @@ async def main(
         logger.info(f"Scores cargados para {list(portfolio_scores.keys())}")
 
     # ── 2. Universo ────────────────────────────────────────────────────────────
+    cocos_assets = await _load_cocos_universe_assets(cfg)
+    assets_by_ticker = {asset["ticker"]: asset for asset in cocos_assets}
+
     if universe_override:
         universe = [t.upper() for t in universe_override]
+        universe_assets = [
+            assets_by_ticker[ticker]
+            for ticker in universe
+            if ticker in assets_by_ticker
+        ]
         logger.info(f"Universo manual: {universe}")
     else:
-        universe = COCOS_UNIVERSE_DEFAULT
-        logger.info(f"Universo Cocos default: {len(universe)} tickers")
+        universe_assets = cocos_assets
+        universe = [asset["ticker"] for asset in universe_assets] or COCOS_UNIVERSE_DEFAULT
+        logger.info(f"Universo Cocos DB: {len(universe)} tickers")
 
     # Excluir lo que ya tenemos en cartera (por defecto siempre, a menos que --include-portfolio)
     if exclude_portfolio:
@@ -129,6 +167,18 @@ async def main(
     else:
         universe_filtered = universe
         logger.info(f"Universo final: {len(universe_filtered)} tickers (portfolio incluido)")
+
+    filtered_assets = [
+        asset
+        for asset in universe_assets
+        if asset["ticker"] in set(universe_filtered)
+    ]
+    history_frames = await _load_cocos_history_frames(cfg, filtered_assets)
+    logger.info(
+        "Historial Cocos disponible para oportunidades: %s/%s tickers",
+        len(history_frames),
+        len(universe_filtered),
+    )
 
     # ── 3. Macro ───────────────────────────────────────────────────────────────
     logger.info("Descargando macro...")
@@ -150,6 +200,7 @@ async def main(
         min_score           = min_score,
         min_rr              = min_rr,
         exclude_portfolio   = exclude_portfolio,
+        history_frames      = history_frames,
     )
 
     # ── 5. Render ──────────────────────────────────────────────────────────────

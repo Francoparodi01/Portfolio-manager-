@@ -52,7 +52,9 @@ async def _missing_history_assets(
 
 
 async def _main() -> None:
-    parser = argparse.ArgumentParser(description="Backfill batch de velas historicas Cocos")
+    parser = argparse.ArgumentParser(
+        description="Backfill manual/excepcional de velas historicas Cocos"
+    )
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
     parser.add_argument("--wait-ms", type=int, default=12000)
     parser.add_argument("--pause-ms", type=int, default=12000)

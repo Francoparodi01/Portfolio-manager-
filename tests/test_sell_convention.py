@@ -9,41 +9,6 @@ from src.analysis.decision_engine import directional_return
 from src.collector.db import PortfolioDatabase
 
 
-class _FakeIndex:
-    def searchsorted(self, target_date, side="left"):
-        return 0
-
-
-class _FakeSeries:
-    empty = False
-
-    def __init__(self, close_price: float):
-        self._close_price = close_price
-        self.index = _FakeIndex()
-
-    def __len__(self):
-        return 1
-
-    @property
-    def iloc(self):
-        return self
-
-    def __getitem__(self, index):
-        return self._close_price
-
-
-class _FakeDownloadResult:
-    def __init__(self, close_price: float):
-        self._series = _FakeSeries(close_price)
-
-    def __getitem__(self, key):
-        assert key == "Close"
-        return self
-
-    def squeeze(self):
-        return self._series
-
-
 class _FakeConnection:
     def __init__(self, row):
         self.row = row
@@ -89,15 +54,13 @@ def test_sell_persisted_sign_matches_convention(monkeypatch):
     )
     db = PortfolioDatabase("postgresql://unused")
     db._pool = _FakePool(conn)
-
-    monkeypatch.setitem(
-        __import__("sys").modules,
-        "yfinance",
-        type(
-            "YF",
-            (),
-            {"download": staticmethod(lambda *args, **kwargs: _FakeDownloadResult(90.0))},
-        )(),
+    db.get_market_candles = lambda *_args, **_kwargs: _async_result(
+        [
+            {
+                "ts": decided_at + timedelta(days=5),
+                "close_price": 90.0,
+            }
+        ]
     )
 
     updated = asyncio.run(db.update_outcomes(lookback_days=30))
@@ -105,6 +68,10 @@ def test_sell_persisted_sign_matches_convention(monkeypatch):
     assert updated == 1
     persisted = conn.execute_calls[0]
     assert persisted[2] == pytest.approx(0.10)
+
+
+async def _async_result(value):
+    return value
 
 
 def test_no_sign_inversion_across_modules():

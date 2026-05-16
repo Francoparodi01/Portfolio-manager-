@@ -58,13 +58,19 @@ def _pct(x) -> str:
     return f"{float(x):+.1%}"
 
 
-def _ev_label(ev: float | None) -> str:
+def _ev_label(ev: float | None, *, historical_only: bool = False) -> str:
     if ev is None:
         return "SIN DATOS"
     if ev > 0.02:
+        if historical_only:
+            return "✅ POSITIVO — histórico favorable, ejecución aún por validar"
         return "✅ POSITIVO — el sistema tiene edge real"
     if ev > 0:
+        if historical_only:
+            return "🟡 MARGINAL — histórico levemente favorable, seguir midiendo"
         return "🟡 MARGINAL — edge pequeño, seguir midiendo"
+    if historical_only:
+        return "❌ NEGATIVO — histórico sin edge demostrado"
     return "❌ NEGATIVO — el sistema no tiene edge demostrado"
 
 
@@ -123,6 +129,44 @@ def _dataset_group_note(dataset_stats: list[dict]) -> str:
         )
 
     return "Lectura: dataset operativo iniciado; todavía faltan outcomes 5D/10D/20D."
+
+
+def _ev_scope(dataset_stats: list[dict]) -> tuple[str, str]:
+    """
+    Distingue si el EV agregado todavía es principalmente histórico o si ya
+    cuenta con outcomes operativos aprobados.
+    """
+    execution_with_outcome = 0
+    optimizer_with_outcome = 0
+
+    for row in dataset_stats:
+        source = str(row.get("source") or "").lower()
+        status = str(row.get("status") or "").upper()
+        decision_type = str(row.get("decision_type") or "").lower()
+        con_5d = int(row.get("con_5d") or 0)
+
+        if source == "execution_plan" and status in ("APPROVED", "EXECUTED"):
+            execution_with_outcome += con_5d
+
+        if source == "optimizer" or status == "THEORETICAL" or decision_type == "theoretical":
+            optimizer_with_outcome += con_5d
+
+    if execution_with_outcome == 0 and optimizer_with_outcome > 0:
+        return (
+            "EV histórico agregado",
+            "Todavía no mide performance de ejecución real; esa lectura vive en Execution Audit.",
+        )
+
+    if execution_with_outcome > 0:
+        return (
+            "EV agregado",
+            "Incluye outcomes operativos; contrastalo con Execution Audit para aislar ejecución real.",
+        )
+
+    return (
+        "EV agregado",
+        "Aún no hay suficiente evidencia para separar histórico y ejecución.",
+    )
 
 
 async def _get_decision_dataset_stats(
@@ -232,6 +276,8 @@ def render_performance_report(stats: dict) -> str:
     winners = stats.get("winners", 0)
     losers = stats.get("losers", 0)
 
+    ev_title, ev_note = _ev_scope(stats.get("dataset_stats", []))
+
     lines = header + dataset_lines + [
         "<b>MÉTRICAS PRINCIPALES (horizonte 5d)</b>",
         f"   Win rate:   <b>{win_rate:.0%}</b>  ({winners}W / {losers}L)"
@@ -239,8 +285,9 @@ def render_performance_report(stats: dict) -> str:
         f"   Avg win:    <b>{_pct(avg_win)}</b>",
         f"   Avg loss:   <b>{_pct(avg_loss)}</b>",
         "",
-        f"   <b>EV: {_pct(ev)}</b>",
-        f"   {_ev_label(ev)}",
+        f"   <b>{ev_title}: {_pct(ev)}</b>",
+        f"   {_ev_label(ev, historical_only=(ev_title == 'EV histórico agregado'))}",
+        f"   <i>{escape(ev_note)}</i>",
         "",
         "<b>RETORNOS POR HORIZONTE</b>",
         f"   5d:   {_pct(stats.get('avg_return_5d'))}",
@@ -329,11 +376,18 @@ def render_performance_report(stats: dict) -> str:
                 f"<code>{p['outcome']:+.1%}</code> → equity {p['equity']:.1f}"
             )
 
+    footer_edge_note = (
+        "<i>EV histórico &gt; 0 sugiere edge del modelo en backtest/outcomes acumulados; "
+        "no prueba por sí solo edge de ejecución.</i>"
+        if ev_title == "EV histórico agregado"
+        else "<i>EV &gt; 0 sugiere edge; confirmarlo contra Execution Audit antes de llamarlo edge operativo.</i>"
+    )
+
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "<i>EV = (win_rate × avg_win) − (loss_rate × avg_loss)</i>",
-        "<i>Si EV &gt; 0 → el sistema tiene edge real. Si no → es ruido.</i>",
+        footer_edge_note,
         "<i>Separar dataset operativo evita mezclar optimizer teórico con ejecución real.</i>",
     ]
 

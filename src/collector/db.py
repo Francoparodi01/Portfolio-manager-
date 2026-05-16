@@ -19,14 +19,15 @@ Changelog v2:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
 import uuid
 from typing import Optional
+from zoneinfo import ZoneInfo
 from src.analysis.decision_engine import directional_return
-from src.collector.data.models import MarketCandle
+from src.collector.data.models import AssetType, Currency, MarketCandle
 
 try:
     import asyncpg
@@ -51,6 +52,7 @@ YFINANCE_BLACKLIST: set[str] = {
 # Precios USD del universo Cocos nunca superan $5000.
 # Si price_at_decision > este umbral, fue guardado en ARS por error.
 MAX_PRICE_USD = 5_000.0
+ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
@@ -262,6 +264,96 @@ class PortfolioDatabase:
             )
         return len(rows)
 
+    async def build_daily_candles_from_market_prices(
+        self,
+        business_day: Optional[date] = None,
+    ) -> int:
+        """
+        Reconstruye una vela diaria por activo desde snapshots intradiarios propios.
+
+        Las velas oficiales de Cocos se conservan aparte. La lectura operativa
+        decide luego cual usar para cada dia y prioriza COCOS sobre internal_snapshot.
+        """
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        business_day = business_day or datetime.now(ART_TZ).date()
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH ranked AS (
+                    SELECT
+                        ticker,
+                        asset_type,
+                        currency,
+                        last_price,
+                        COALESCE(volume, 0) AS volume,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY ticker, asset_type, currency
+                            ORDER BY ts ASC
+                        ) AS first_rank,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY ticker, asset_type, currency
+                            ORDER BY ts DESC
+                        ) AS last_rank
+                    FROM market_prices
+                    WHERE (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = $1
+                      AND last_price IS NOT NULL
+                )
+                SELECT
+                    ticker,
+                    asset_type,
+                    currency,
+                    MAX(last_price) FILTER (WHERE first_rank = 1) AS open_price,
+                    MAX(last_price) AS high_price,
+                    MIN(last_price) AS low_price,
+                    MAX(last_price) FILTER (WHERE last_rank = 1) AS close_price,
+                    COALESCE(MAX(volume), 0) AS volume
+                FROM ranked
+                GROUP BY ticker, asset_type, currency
+                ORDER BY ticker
+                """,
+                business_day,
+            )
+
+        candles = [
+            MarketCandle(
+                ticker=str(row["ticker"]).upper(),
+                long_ticker=(
+                    "INTERNAL:"
+                    f"{str(row['asset_type']).upper()}:"
+                    f"{str(row['ticker']).upper()}:"
+                    f"{str(row['currency']).upper()}"
+                ),
+                asset_type=AssetType(str(row["asset_type"]).upper()),
+                currency=Currency(str(row["currency"]).upper()),
+                venue="BYMA",
+                interval="1d",
+                ts=datetime(
+                    business_day.year,
+                    business_day.month,
+                    business_day.day,
+                    tzinfo=timezone.utc,
+                ),
+                open_price=float(row["open_price"]),
+                high_price=float(row["high_price"]),
+                low_price=float(row["low_price"]),
+                close_price=float(row["close_price"]),
+                volume=float(row["volume"] or 0),
+                source="internal_snapshot",
+            )
+            for row in rows
+        ]
+
+        saved = await self.save_market_candles(candles)
+        logger.info(
+            "Velas internas reconstruidas para %s: %d",
+            business_day.isoformat(),
+            saved,
+        )
+        return saved
+
     # ── Queries ───────────────────────────────────────────────────────────────
 
     async def get_latest_snapshot(self) -> Optional[dict]:
@@ -299,11 +391,25 @@ class PortfolioDatabase:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
+                WITH ranked AS (
+                    SELECT
+                        ts, ticker, long_ticker, asset_type, currency, venue, interval,
+                        open_price, high_price, low_price, close_price, volume, source,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY (ts AT TIME ZONE 'UTC')::date
+                            ORDER BY
+                                CASE WHEN source = 'COCOS' THEN 0 ELSE 1 END,
+                                scraped_at DESC,
+                                ts DESC
+                        ) AS source_rank
+                    FROM market_candles
+                    WHERE {' AND '.join(filters)}
+                )
                 SELECT
                     ts, ticker, long_ticker, asset_type, currency, venue, interval,
                     open_price, high_price, low_price, close_price, volume, source
-                FROM market_candles
-                WHERE {' AND '.join(filters)}
+                FROM ranked
+                WHERE source_rank = 1
                 ORDER BY ts DESC
                 {limit_sql}
                 """,
@@ -681,7 +787,8 @@ class PortfolioDatabase:
     async def update_outcomes(self, lookback_days: int = 30) -> int:
         """
         Busca decisiones sin outcome donde han pasado >=5 días y llena
-        outcome_5d / outcome_10d / outcome_20d / was_correct usando yfinance.
+        outcome_5d / outcome_10d / outcome_20d / was_correct usando la serie
+        canonica de market_candles.
 
         GUARDIA ANTI-ARS: si price_at_decision > MAX_PRICE_USD el precio
         fue guardado en ARS por error → se skipea con warning.
@@ -690,9 +797,6 @@ class PortfolioDatabase:
             raise RuntimeError("Llamar connect() primero")
 
         try:
-            import asyncio
-            import yfinance as yf
-
             maturity_cutoff = datetime.now(timezone.utc) - timedelta(days=5)
             lookback_cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
@@ -744,20 +848,8 @@ class PortfolioDatabase:
                     skipped_ars += 1
                     continue
 
-                try:
-                    df = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda t=ticker, d=decided_at: yf.download(
-                            t,
-                            start=d.strftime("%Y-%m-%d"),
-                            progress=False,
-                            auto_adjust=True,
-                        )["Close"].squeeze()
-                    )
-                    if df is None or df.empty:
-                        continue
-                except Exception as e:
-                    logger.debug(f"update_outcomes yfinance {ticker}: {e}")
+                candles = await self.get_market_candles(ticker, limit=260)
+                if not candles:
                     continue
 
                 outcomes = {}
@@ -766,22 +858,22 @@ class PortfolioDatabase:
                     (10, "outcome_10d"),
                     (20, "outcome_20d"),
                 ]:
-                    target_date = (decided_at + timedelta(days=horizon)).replace(tzinfo=None)
-                    if target_date > now.replace(tzinfo=None):
+                    target_date = decided_at + timedelta(days=horizon)
+                    if target_date > now:
                         continue
-                    try:
-                        idx = df.index.searchsorted(target_date, side="left")
-                        if idx >= len(df):
-                            idx = len(df) - 1
-                        price_at_horizon = float(df.iloc[idx])
-                        # CONVENTION: SELL returns are positive-up.
-                        outcomes[col] = directional_return(
-                            entry_f,
-                            price_at_horizon,
-                            direction,
-                        )
-                    except Exception:
+                    eligible = [
+                        candle for candle in candles
+                        if candle["ts"] >= target_date
+                    ]
+                    if not eligible:
                         continue
+                    price_at_horizon = float(eligible[0]["close_price"])
+                    # CONVENTION: SELL returns are positive-up.
+                    outcomes[col] = directional_return(
+                        entry_f,
+                        price_at_horizon,
+                        direction,
+                    )
 
                 if not outcomes:
                     continue
@@ -824,9 +916,6 @@ class PortfolioDatabase:
             )
             return updated
 
-        except ImportError:
-            logger.error("update_outcomes requiere yfinance: pip install yfinance")
-            return 0
         except Exception as e:
             logger.error(f"update_outcomes: {e}", exc_info=True)
             return 0

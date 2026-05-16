@@ -51,9 +51,7 @@ from src.core.logger import get_logger
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
 from src.analysis.technical import (
-    analyze_portfolio,
     analyze_portfolio_from_frames,
-    fetch_history,
 )
 from src.analysis.macro import fetch_macro, score_macro_for_ticker, get_macro_regime
 from src.analysis.sentiment import fetch_sentiment
@@ -1038,8 +1036,6 @@ async def _save_optimizer_trades(
       vol ticker > 40%  → -7%
       normal            → -8%
     """
-    import yfinance as yf
-    import pandas as _pd
     from src.analysis.decision_engine import _normalize_regime, HORIZON_MED
 
     MIN_DELTA     = 0.03
@@ -1075,6 +1071,9 @@ async def _save_optimizer_trades(
     _tickers_to_price = list(current_w.keys())
     price_map: dict[str, float | None] = {}
     if _tickers_to_price:
+        import pandas as _pd
+        import yfinance as yf
+
         try:
             _raw = yf.download(
                 _tickers_to_price, period="5d",
@@ -1254,6 +1253,7 @@ def render_report(
     rebalance_report,
     positions:        list,
     universe_results: list,
+    external_universe_tickers: list[str] | None = None,
     ic_metrics:       dict | None = None,
     execution_plan:   ExecutionPlan | None = None,
 ) -> str:
@@ -1719,6 +1719,13 @@ def render_report(
         if len(radar) > len(shown_radar):
             h.append(f"  <i>+{len(radar) - len(shown_radar)} más en /radar</i>")
 
+    external_universe_tickers = external_universe_tickers or []
+    if external_universe_tickers:
+        h.append(
+            f"🌐 <b>{len(external_universe_tickers)} tickers EXTERNO</b>: "
+            "sin velas Cocos suficientes para considerarlos operables."
+        )
+
     h.append("")
 
     # ── VEREDICTO FINAL — derivado EXCLUSIVAMENTE del ExecutionPlan ───────────
@@ -1819,16 +1826,13 @@ async def main(
     missing_tickers = [ticker for ticker in tickers if ticker not in cocos_frames]
     if missing_tickers:
         logger.warning(
-            "Historial Cocos faltante para %s; usando fallback legacy temporal",
+            "Historial canonico faltante para %s; se omite tecnico operativo",
             missing_tickers,
         )
-        tech_signals.extend(analyze_portfolio(missing_tickers, period=period))
     tech_map     = {s.ticker: s for s in tech_signals}
     prices_map   = {}
     for ticker in tickers:
         df = cocos_frames.get(ticker)
-        if df is None:
-            df = fetch_history(ticker, period=period)
         if df is not None and "Close" in df.columns:
             prices_map[ticker] = df["Close"].squeeze()
 
@@ -1899,6 +1903,7 @@ async def main(
 
     # ── 7. Universo Cocos ──────────────────────────────────────────────────────
     universe_results = []
+    external_universe_tickers: list[str] = []
     cocos_universe: list[str] = []
     cocos_universe_assets: list[dict] = []
     try:
@@ -1936,10 +1941,10 @@ async def main(
             missing_universe = [ticker for ticker in universe_tickers if ticker not in universe_frames]
             if missing_universe:
                 logger.warning(
-                    "Historial Cocos faltante para universo %s; usando fallback legacy temporal",
+                    "Historial Cocos faltante para universo %s; quedan EXTERNO / no operables",
                     missing_universe,
                 )
-                u_tech_signals.extend(analyze_portfolio(missing_universe, period=period))
+                external_universe_tickers = missing_universe
             u_tech_map     = {s.ticker: s for s in u_tech_signals}
 
             u_sent_map = {}
@@ -2119,6 +2124,7 @@ async def main(
         rebalance_report = rebalance_report,
         positions        = positions,
         universe_results = universe_results,
+        external_universe_tickers = external_universe_tickers,
         ic_metrics       = ic_metrics,
         execution_plan   = execution_plan,
     )

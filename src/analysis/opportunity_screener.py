@@ -48,6 +48,7 @@ class CandidateStatus(str, Enum):
     VIGILANCIA_B      = "VIGILANCIA_B"    # mejor que holdings, sin setup
     VIGILANCIA_C      = "VIGILANCIA_C"    # solo observación pasiva
     NO_OPERABLE       = "NO_OPERABLE"     # R/R inválido o deficiente
+    EXTERNO           = "EXTERNO"         # fuera del universo operable por falta de velas Cocos
     DESCARTAR         = "DESCARTAR"
 
 
@@ -245,6 +246,7 @@ class OpportunityReport:
     swap_candidatos:     list[OpportunityCandidate] = field(default_factory=list)
     en_vigilancia:       list[OpportunityCandidate] = field(default_factory=list)
     no_operables:        list[OpportunityCandidate] = field(default_factory=list)
+    externos:            list[OpportunityCandidate] = field(default_factory=list)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -330,15 +332,11 @@ def screen_universe(
     period: str = "1y",
     history_frames: Optional[dict[str, "pd.DataFrame"]] = None,
 ) -> list[ScreenerMetrics]:
-    from src.analysis.technical import fetch_history
-
     logger.info(f"Screener: evaluando {len(tickers)} tickers...")
 
     spy_ret_20d = qqq_ret_20d = 0.0
     for ref_ticker, varname in [(SPY_TICKER, "spy"), (QQQ_TICKER, "qqq")]:
         df_ref = (history_frames or {}).get(ref_ticker)
-        if df_ref is None:
-            df_ref = fetch_history(ref_ticker, period=period)
         if df_ref is not None and len(df_ref) >= 21:
             c = df_ref["Close"].squeeze()
             ret = float(c.iloc[-1] / c.iloc[-21] - 1)
@@ -356,7 +354,14 @@ def screen_universe(
             continue
         df = (history_frames or {}).get(ticker)
         if df is None:
-            df = fetch_history(ticker, period=period)
+            m = ScreenerMetrics(
+                ticker=ticker,
+                passes_screen=False,
+                fail_reason="sin velas Cocos suficientes",
+            )
+            results.append(m)
+            logger.debug(f"Screener FAIL {ticker}: {m.fail_reason}")
+            continue
         m  = _compute_screener_metrics(ticker, df, spy_ret_20d, qqq_ret_20d)
         results.append(m)
         if m.passes_screen:
@@ -883,7 +888,7 @@ def run_opportunity_analysis(
     exclude_portfolio:   bool = True,
     history_frames:      Optional[dict[str, "pd.DataFrame"]] = None,
 ) -> OpportunityReport:
-    from src.analysis.technical import fetch_history, analyze_portfolio, analyze_portfolio_from_frames
+    from src.analysis.technical import analyze_portfolio_from_frames
     from src.analysis.macro import score_macro_for_ticker
     from src.analysis.sentiment import fetch_sentiment
     from src.analysis.synthesis import blend_scores
@@ -918,10 +923,32 @@ def run_opportunity_analysis(
         screener_results = screen_universe(universe, period=period)
     else:
         screener_results = screen_universe(universe, period=period, history_frames=history_frames)
+
+    external_tickers = {
+        metric.ticker
+        for metric in screener_results
+        if metric.fail_reason == "sin velas Cocos suficientes"
+    }
+    external_candidates = [
+        OpportunityCandidate(
+            ticker=ticker,
+            status=CandidateStatus.EXTERNO,
+            trade_type=TradeType.WATCHLIST,
+            final_score=0.0,
+            conviction=0.0,
+            why_not_now="sin velas Cocos suficientes",
+            action_concreta="No operar",
+            alerts=["Sin velas Cocos suficientes para evaluar operabilidad"],
+        )
+        for ticker in sorted(external_tickers)
+    ]
+
     passed = [m for m in screener_results if m.passes_screen]
     report.screened_count = len(passed)
     logger.info(f"Opportunity: {len(passed)} candidatos pasaron el screener")
     if not passed:
+        report.candidates = external_candidates
+        report.externos = external_candidates
         return report
 
     passed_tickers = [m.ticker for m in passed]
@@ -929,9 +956,6 @@ def run_opportunity_analysis(
     tech_signals   = analyze_portfolio_from_frames(
         {ticker: history_frames[ticker] for ticker in frame_tickers}
     )
-    missing_tickers = [ticker for ticker in passed_tickers if ticker not in frame_tickers]
-    if missing_tickers:
-        tech_signals.extend(analyze_portfolio(missing_tickers, period=period))
     tech_map       = {s.ticker: s for s in tech_signals}
 
     top_tech_tickers = {
@@ -988,8 +1012,6 @@ def run_opportunity_analysis(
         tech_score_raw = float(getattr(tech, "score_raw", 0.0))
 
         df       = (history_frames or {}).get(ticker)
-        if df is None:
-            df = fetch_history(ticker, period=period)
         asym     = _compute_asymmetry(ticker, df, screener_m)
         asym_lbl = _asymmetry_label(asym)
 
@@ -1123,7 +1145,7 @@ def run_opportunity_analysis(
     candidates.sort(key=_rank_key, reverse=True)
     candidates = candidates[:max_candidates]
 
-    report.candidates        = candidates
+    report.candidates        = candidates + external_candidates
     report.comprable_ahora   = [c for c in candidates if c.status == CandidateStatus.COMPRABLE_AHORA]
     report.compra_habilitada = [c for c in candidates if c.status == CandidateStatus.COMPRA_HABILITADA]
     report.swap_candidatos   = [c for c in candidates if c.status == CandidateStatus.SWAP_CANDIDATO]
@@ -1132,6 +1154,7 @@ def run_opportunity_analysis(
         if c.status in (CandidateStatus.VIGILANCIA_A, CandidateStatus.VIGILANCIA_B, CandidateStatus.VIGILANCIA_C)
     ]
     report.no_operables      = [c for c in candidates if c.status == CandidateStatus.NO_OPERABLE]
+    report.externos           = external_candidates
 
     logger.info(
         f"Opportunity: "
@@ -1139,7 +1162,8 @@ def run_opportunity_analysis(
         f"{len(report.compra_habilitada)} habilitadas | "
         f"{len(report.swap_candidatos)} swaps | "
         f"{len(report.en_vigilancia)} vigilancia | "
-        f"{len(report.no_operables)} no operables"
+        f"{len(report.no_operables)} no operables | "
+        f"{len(report.externos)} externos"
     )
     return report
 
@@ -1466,6 +1490,16 @@ def render_opportunity_report(
                 h.append(f"   ⚠️ {escape(c.asymmetry.rr_alert)}")
             h.append(f"   🎯 {escape(c.action_concreta)}")
             h.append("")
+
+    # ── EXTERNOS ──────────────────────────────────────────────────────────────
+    if report.externos:
+        h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        h.append(f"🌐 <b>EXTERNOS / SIN HISTÓRICO COCOS ({len(report.externos)})</b>")
+        h.append("<i>No se evalúan como operables hasta tener velas Cocos suficientes.</i>")
+        h.append("")
+        for c in report.externos:
+            h.append(f"  <b>{c.ticker}</b>: sin velas Cocos suficientes")
+        h.append("")
 
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<i>Sistema cuantitativo multicapa — no es asesoramiento financiero</i>")

@@ -7,8 +7,6 @@ import os
 import sys
 from pathlib import Path
 
-from playwright.async_api import async_playwright
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.collector.cocos_history import (
@@ -35,6 +33,8 @@ async def capture_history(
     cdp_url: str,
     wait_ms: int,
 ) -> list[dict]:
+    from playwright.async_api import async_playwright
+
     asset_type = asset_type_from_market(market)
     batches = []
 
@@ -70,7 +70,9 @@ async def capture_history(
 
 
 async def _main() -> None:
-    parser = argparse.ArgumentParser(description="Captura velas historicas Cocos desde Chrome real")
+    parser = argparse.ArgumentParser(
+        description="Captura manual/excepcional de velas historicas Cocos desde Chrome real"
+    )
     parser.add_argument("market", choices=["ACCIONES", "CEDEARS"])
     parser.add_argument("ticker")
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")

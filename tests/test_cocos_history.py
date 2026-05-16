@@ -92,5 +92,36 @@ def test_candles_to_frame_preserves_ohlcv_columns():
 
     frame = candles_to_frame(candles)
 
-    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume"]
+    assert list(frame.columns) == ["Open", "High", "Low", "Close", "Volume", "Source"]
     assert frame.iloc[-1]["Close"] == 6990.0
+    assert frame.attrs["candle_sources"] == ("COCOS",)
+    assert frame.attrs["has_reconstructed_candles"] is False
+
+
+def test_candles_to_frame_prefers_official_cocos_over_internal_same_day():
+    candles = [
+        {
+            "ts": datetime(2026, 5, 15, tzinfo=timezone.utc),
+            "open_price": 100,
+            "high_price": 105,
+            "low_price": 95,
+            "close_price": 101,
+            "volume": 10,
+            "source": "internal_snapshot",
+        },
+        {
+            "ts": datetime(2026, 5, 15, tzinfo=timezone.utc),
+            "open_price": 110,
+            "high_price": 115,
+            "low_price": 108,
+            "close_price": 112,
+            "volume": 20,
+            "source": "COCOS",
+        },
+    ]
+
+    frame = candles_to_frame(candles)
+
+    assert len(frame) == 1
+    assert frame.iloc[0]["Close"] == 112.0
+    assert frame.iloc[0]["Source"] == "COCOS"

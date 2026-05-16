@@ -1,182 +1,269 @@
-# ARQUITECTURA DEL SISTEMA
+# Arquitectura
 
-### Cocos Copilot — Diseño técnico y decisiones de arquitectura
+## Propósito
 
----
+Cocos Copilot transforma datos observados de una cartera real en decisiones auditables. La arquitectura está pensada para que cada etapa tenga una fuente de verdad clara y para que una sugerencia cuantitativa no se convierta automáticamente en una orden.
 
-## Visión general
+## Principios
 
-Cocos Copilot está organizado como un sistema cuantitativo modular que transforma datos reales de portfolio en decisiones auditables.
+1. El scraper observa; no decide.
+2. El optimizer propone targets teóricos; no decide ejecución.
+3. El Execution Planner es la fuente de verdad operativa.
+4. Los reportes deben distinguir datos observados, hipótesis y ejecución real.
+5. Los instrumentos operables se evalúan con datos de Cocos; el contexto macro puede seguir siendo global.
 
-El sistema se compone de cuatro bloques principales:
-
-- **Scheduler / Monitor** → mantiene datos frescos, outcomes y alertas.
-- **Portfolio Analyzer** → analiza cartera actual.
-- **Opportunity Radar** → busca oportunidades externas.
-- **Execution Planner / Rotation Engine** → traduce targets en acciones ejecutables, bloqueadas o en observación.
-
-Los pipelines pueden ejecutarse desde CLI o desde el bot de Telegram.
-
----
-
-## Principio de arquitectura
-
-La regla central del sistema es:
+## Vista general
 
 ```text
-El optimizer propone targets teóricos.
-El Execution Planner decide si esos targets son operables.
-El renderer solo muestra el Execution Plan como fuente de verdad operativa.
+                 Cocos Capital
+                  /        \
+                 /          \
+      portfolio + market     páginas por ticker
+             |                    |
+             v                    v
+ portfolio_snapshots        market_candles
+ positions                  (COCOS + internal_snapshot)
+ market_prices --------------^
+      \                      /
+       \                    /
+        +--> run_analysis.py
+               |
+               +--> technical / macro / risk / sentiment
+               +--> synthesis
+               +--> optimizer
+               +--> execution_planner
+               +--> decision_log
+               +--> render
 ```
 
-Esto evita que el sistema opere por ruido o por obedecer ciegamente al optimizer.
+## Infraestructura
 
----
-
-## Infraestructura Docker
-
-| Contenedor | Imagen | Responsabilidad |
+| Servicio | Contenedor | Responsabilidad |
 |---|---|---|
-| `cocos_db` | `timescale/timescaledb:pg16` | Persistencia time-series: snapshots, posiciones, precios y decisiones |
-| `cocos_scraper` | Python + Playwright | Scraping, scheduler y pipelines batch |
-| `cocos_telegram_bot` | Python | Bot interactivo, comandos y ejecución desde Telegram |
+| `db` | `cocos_db` | PostgreSQL / TimescaleDB local opcional |
+| `scheduler` | `cocos_scheduler` | scraping programado, loops intradía, outcomes |
+| `telegram_bot` | `cocos_telegram_bot` | interfaz de usuario y ejecución de comandos |
 
-Redis se utiliza como canal opcional para heartbeats, estado del monitor, flags y coordinación de eventos.
+`db` vive bajo el perfil `localdb`. Si `DATABASE_URL` apunta a una base externa, pueden levantarse solo `scheduler` y `telegram_bot`.
 
----
+Redis es auxiliar. Se usa para MFA manual, heartbeats y flags, pero la lógica principal no depende de él para persistir decisiones.
 
-## Roles principales
+## Fuentes de datos
 
-```text
-runner.py
-  ├─ run_scrape()
-  ├─ run_full()
-  ├─ update_outcomes()
-  ├─ intraday market loop
-  └─ risk guard
+### 1. Portfolio
 
-run_analysis.py
-  ├─ macro
-  ├─ technical
-  ├─ risk
-  ├─ synthesis
-  ├─ optimizer
-  ├─ execution_planner
-  ├─ decision_log
-  └─ render Telegram
+Origen:
 
-telegram_bot.py
-  ├─ /portfolio
-  ├─ /analisis → run_analysis.py
-  ├─ /radar → run_opportunity.py
-  ├─ /performance → run_performance.py
-  ├─ /resumen → weekly_summary.py
-  └─ /status
-```
+- `https://app.cocos.capital/capital-portfolio`
 
----
+Persistencia:
 
-## Flujo general
+- `portfolio_snapshots`
+- `positions`
+- `raw_snapshots`
 
-```text
-Cocos Capital
-  ↓
-Scraper Playwright
-  ↓
-TimescaleDB
-  ↓
-run_analysis.py
-  ↓
-Technical + Macro + Risk + Sentiment
-  ↓
-Synthesis
-  ↓
-Optimizer
-  ↓
-Execution Planner
-  ↓
-Decision Log
-  ↓
-Telegram / CLI report
-```
+Uso:
 
----
+- cartera actual;
+- cash;
+- composición histórica;
+- contexto para risk y planner.
 
-## Scheduler / monitor
+### 2. Universo global de mercado
 
-`src/scheduler/runner.py` mantiene vivo al sistema.
+Origen:
 
-Responsabilidades:
+- `https://app.cocos.capital/market/ACCIONES`
+- `https://app.cocos.capital/market/CEDEARS`
 
-- Scrape programado de portfolio.
-- Scrape programado de mercado.
-- Loop intradía de precios.
-- Refresh periódico de portfolio.
-- Update diario de outcomes.
-- Risk guard por DB.
-- Heartbeats y estado del monitor.
+Persistencia:
 
-Tareas programadas orientativas:
+- `market_prices`
 
-| Horario ART | Acción |
+Uso:
+
+- descubrir universo;
+- conservar `asset_type`;
+- conocer último precio y variación diaria.
+
+`market_prices` no reemplaza una serie OHLCV histórica. Es un snapshot de mercado.
+
+### 3. Serie canónica de velas
+
+Fuentes físicas:
+
+- backfill inicial oficial desde página individual del ticker + request `historic-data-extended`;
+- reconstrucción diaria propia desde snapshots de `market_prices`.
+
+Persistencia:
+
+- `market_candles`
+
+Uso:
+
+- técnico;
+- optimizer;
+- radar;
+- futuros modelos cuantitativos.
+
+Captura:
+
+- `scripts/capture_cocos_history.py`: un ticker;
+- `scripts/backfill_cocos_history.py`: lote de activos faltantes;
+- `scripts/import_cocos_history.py`: carga de JSON a DB.
+
+Regla canónica:
+
+- la DB puede conservar velas oficiales y reconstruidas;
+- la lectura operativa devuelve una sola serie por ticker/día;
+- si ambas existen, gana `COCOS`;
+- `internal_snapshot` se usa solo cuando falta la oficial.
+
+Estado actual:
+
+- el backfill oficial inicial queda congelado;
+- el scheduler reconstruye una vela diaria interna desde `market_prices`;
+- las capturas de `historic-data-extended` quedan manuales/excepcionales;
+- el radar externo es estricto: si un ticker no tiene historia canónica suficiente, queda `EXTERNO`.
+
+### 4. Contexto macro
+
+Origen:
+
+- `analysis/macro.py`;
+- `yfinance` para referencias globales;
+- APIs locales para variables argentinas cuando están disponibles.
+
+Uso:
+
+- régimen de mercado;
+- VIX;
+- tasas;
+- petróleo;
+- dólar;
+- variables argentinas.
+
+Esto es deliberadamente distinto de usar Yahoo para el histórico de cada instrumento operable.
+
+## Segmentación ACCIONES / CEDEARS
+
+La segmentación no es decorativa. Atraviesa el modelo de datos y el análisis:
+
+| Segmento | Significado |
 |---|---|
-| 10:30 | Scrape de portfolio |
-| 10:31 | Inicio de loops intradía |
-| 17:00 | Scrape completo EOD |
-| 17:01 | Stop loops intradía |
-| 21:30 | Update outcomes |
+| `ACCION` | acción argentina |
+| `CEDEAR` | certificado local de activo extranjero |
 
-El scheduler no reemplaza a `run_analysis.py`: mantiene datos frescos y riesgo monitoreado, pero el análisis cuantitativo completo se ejecuta por `/analisis` o CLI.
+Campos donde se preserva:
 
----
+- `market_prices.asset_type`
+- `market_candles.asset_type`
+- universe loading en `db.py`
+- carga de frames en análisis y radar.
 
-## Bot de Telegram
+La evaluación macro puede ser global, pero el comportamiento de los segmentos no se asume idéntico.
 
-`scripts/telegram_bot.py` es la interfaz del sistema.
+## Pipelines activos
 
-Responsabilidades:
+### `scripts/run_analysis.py`
 
-- Mostrar menú principal.
-- Ejecutar scripts por comando.
-- Mostrar reportes en Telegram.
-- Separar comandos principales de comandos admin.
-- Compactar el radar para no romper mensajes largos.
-- Mostrar `/portfolio` limpio y sin P&L dudoso.
+Pipeline principal de cartera:
 
-El bot no debe contener lógica cuantitativa. Debe actuar como router:
+| Paso | Resultado |
+|---|---|
+| cargar snapshot | posiciones y cash |
+| cargar velas canónicas | frames históricos por ticker |
+| macro | régimen y variables globales |
+| técnico | señales por activo |
+| riesgo | vol, sizing, warnings |
+| síntesis | score final multicapa |
+| universo Cocos | radar compacto externo |
+| optimizer | targets teóricos |
+| execution planner | órdenes o bloqueos |
+| decision log | memoria auditable |
+| IC | poder predictivo histórico |
+| render | salida HTML para Telegram / stdout |
+
+Notas:
+
+- cartera actual lee la serie canónica y conoce si la historia es oficial, reconstruida o mixta;
+- si falta historia canónica suficiente para un holding, se omite técnico operativo para ese activo;
+- universo externo ya no cae a Yahoo: sin Cocos queda `EXTERNO`.
+
+### `scripts/run_opportunity.py`
+
+Pipeline de radar completo:
+
+- carga universo tipado desde DB;
+- carga velas de `market_candles`;
+- filtra holdings si corresponde;
+- clasifica candidatos;
+- separa `COMPRABLE_AHORA`, `COMPRA_HABILITADA`, `SWAP_CANDIDATO`, vigilancia, `NO_OPERABLE` y `EXTERNO`.
+
+### `scripts/run_performance.py`
+
+Pipeline de auditoría:
+
+- actualiza outcomes elegibles;
+- resume dataset por `source`, `status` y `decision_type`;
+- calcula win rate, EV, retornos y curva de equity;
+- separa `EV histórico agregado` de evidencia de ejecución real.
+
+### `src/scheduler/runner.py`
+
+Responsabilidades programadas:
+
+| Hora ART | Acción |
+|---|---|
+| 10:30 | scrape de portfolio |
+| 10:31 | inicio de loops intradía |
+| 17:00 | scrape completo: portfolio + market global |
+| 17:01 | fin de loops intradía |
+| 17:05 | construcción de vela diaria interna |
+| 21:30 | update de outcomes |
+
+El scheduler hoy mantiene:
+
+- snapshots de portfolio;
+- precios globales de mercado;
+- actualización de outcomes;
+- continuidad diaria de `market_candles` desde snapshots propios.
+
+## Núcleo de decisión
+
+### Síntesis
+
+`synthesis.py` combina capas:
+
+- técnico;
+- macro;
+- riesgo;
+- sentiment opcional.
+
+El resultado conserva contribuciones por capa para que luego puedan auditarse.
+
+### Risk levels
+
+`risk_levels.py` centraliza:
+
+- stop;
+- target;
+- risk/reward.
+
+La convención de retornos SELL es direccional:
 
 ```text
-comando → script → output → Telegram
+si después de SELL el activo cae, el retorno direccional es positivo;
+si sube, es negativo.
 ```
 
----
+### Optimizer
 
-## Pipeline de análisis de cartera
+`optimizer.py` produce pesos objetivo teóricos. Puede usar histórico Cocos inyectado y aplica restricciones de concentración/régimen.
 
-`run_analysis.py` ejecuta estas etapas:
+### Execution Planner
 
-| Etapa | Módulo | Output |
-|---|---|---|
-| 1. Cargar posiciones | `collector/db.py` | Último snapshot de cartera |
-| 2. Macro | `analysis/macro.py` | VIX, S&P 500, petróleo, tasas, variables locales |
-| 3. Técnico | `analysis/technical.py` | Señales por ticker, strength, score y razones |
-| 4. Riesgo | `analysis/risk.py` | Volatilidad, sizing, drawdown y risk gate |
-| 5. Sentiment | `analysis/sentiment.py` | Score RSS por ticker, opcional |
-| 6. Síntesis | `analysis/synthesis.py` | Score final, capas y decisión preliminar |
-| 7. Universo Cocos | `technical.py` + `synthesis.py` | Análisis de tickers fuera de cartera |
-| 8. Optimizer | `analysis/optimizer.py` | Pesos objetivo teóricos |
-| 9. Execution Planner | `analysis/execution_planner.py` | Órdenes ejecutables, bloqueadas o WATCH |
-| 10. Decision Log | `run_analysis.py` + DB | Registro de decisiones y contexto |
-| 11. IC histórico | DB / decision log | Pearson IC y Rank IC |
-| 12. Render | `run_analysis.py` | HTML para Telegram / stdout |
-
----
-
-## Execution Planner
-
-El Execution Planner es la capa que convierte targets teóricos del optimizer en un plan operativo.
-
-Puede generar:
+`execution_planner.py` convierte targets en acciones operables:
 
 - `BUY`
 - `SELL_PARTIAL`
@@ -185,300 +272,108 @@ Puede generar:
 - `WATCH`
 - `BLOCKED`
 
-### Guards principales
+Guards centrales:
 
-#### BUY_SCORE_GUARD
+- no comprar señal negativa;
+- no operar señal débil;
+- no vender automáticamente un activo con señal positiva si no hay razón de riesgo;
+- no gastar cash inexistente.
 
-Bloquea compras con score negativo.
+## Radar de oportunidades
 
-```text
-BUY si score < -0.01 → BLOCKED
-```
+El radar externo usa:
 
-#### TRADE_QUALITY_GUARD
+1. screener de liquidez, tendencia, volatilidad y fuerza relativa;
+2. score multicapa;
+3. asimetría y risk/reward;
+4. comparación contra cartera;
+5. clasificación final.
 
-Evita operar señales débiles.
+Clasificaciones:
 
-```text
-BUY requiere score >= +0.08
-score positivo débil → WATCH
-score neutral → HOLD / no operar
-```
-
-#### Sell protection
-
-Evita vender posiciones con score positivo salvo concentración o riesgo claro.
-
-```text
-Optimizer quiere vender + score positivo + sin concentración → HOLD
-```
-
-#### Neutral guard
-
-Una señal neutral no justifica operar.
-
-```text
-score entre -0.05 y +0.05 → señal neutral / ruido
-```
-
----
-
-## Score, señal y alineación de capas
-
-El reporte separa tres conceptos:
-
-| Concepto | Qué representa |
+| Estado | Significado |
 |---|---|
-| Score | Magnitud y dirección cuantitativa |
-| Señal | Interpretación operativa del score |
-| Alineación de capas | Coincidencia entre técnico, macro, sentiment y otras capas |
+| `COMPRABLE_AHORA` | setup completo |
+| `COMPRA_HABILITADA` | señal buena con alguna reserva |
+| `SWAP_CANDIDATO` | mejora relativa contra un holding |
+| `VIGILANCIA_A/B/C` | interés decreciente |
+| `NO_OPERABLE` | señal presente pero setup inválido |
+| `EXTERNO` | no hay velas Cocos suficientes para evaluar |
 
-Ejemplo:
+`C.I.` se conserva como caso `EXTERNO`: la ruta de Cocos no entrega histórico utilizable.
 
-```text
-Score: +0.048
-Señal: NEUTRAL / RUIDO
-Alineación: ALTA
-Acción: WATCH
-```
-
-La alineación puede ser alta aunque el score no sea operable. Por eso no se usa como sinónimo de convicción de compra.
-
----
-
-## Information Coefficient
-
-El IC mide si los scores históricos tuvieron relación con retornos posteriores.
-
-| IC absoluto | Interpretación |
-|---|---|
-| < 0.02 | Nulo |
-| 0.02 – 0.05 | Débil |
-| 0.05 – 0.10 | Moderado |
-| > 0.10 | Fuerte |
-
-Si el IC viene negativo, el reporte marca un régimen de cautela:
-
-```text
-Régimen IC: CAUTELA ALTA
-IC negativo fuerte: evitar rotaciones con señales débiles.
-```
-
-Por ahora el IC se usa como explicación del régimen de confianza. Puede pasar a modificar thresholds en iteraciones futuras.
-
----
-
-## Risk Gate
-
-El Risk Gate define el espacio operativo antes de cualquier cálculo de pesos.
-
-| Estado | Condición orientativa | Comportamiento |
-|---|---|---|
-| NORMAL | Mercado estable | Opera con restricciones normales |
-| CAUTIOUS | VIX alto, drawdown o régimen defensivo | Bloquea compras nuevas o reduce agresividad |
-| BLOCKED | Riesgo extremo | Solo reducciones / stops de emergencia |
-
----
-
-## Optimizer
-
-El optimizer genera pesos objetivo teóricos.
-
-Métodos:
-
-- Black-Litterman, cuando está disponible.
-- Fallback por mínima varianza / heurísticas internas.
-- Restricciones por risk gate y límites de concentración.
-
-Importante:
-
-```text
-Los pesos del optimizer son informativos.
-La acción real sale del Execution Planner.
-```
-
----
-
-## Opportunity Radar
-
-El radar busca candidatos externos fuera de la cartera actual.
-
-Etapas:
-
-1. Screener básico de liquidez, precio, volatilidad y tendencia.
-2. Score técnico/macro/riesgo/sentiment.
-3. Cálculo de asimetría riesgo/retorno.
-4. Clasificación:
-   - compra fuerte,
-   - vigilancia,
-   - observación,
-   - descartar.
-
-El radar del análisis semanal se muestra compacto para no romper el mensaje de Telegram. El detalle completo vive en `/radar`.
-
----
-
-## Decision Memory
-
-Cada decisión relevante se registra en `decision_log` con:
-
-- ticker,
-- decisión,
-- score,
-- alineación/confidence,
-- capas,
-- precio al decidir,
-- VIX,
-- régimen,
-- size,
-- stop,
-- target,
-- horizonte.
-
-Luego se calculan outcomes a 5, 10 y 20 días para evaluar performance.
-
-Métricas principales:
-
-- Win rate.
-- Expected Value.
-- Avg win / avg loss.
-- IC y Rank IC.
-- Equity curve.
-- Max drawdown.
-
----
-
-## Módulos legacy / soporte / experimental
-
-### `decision_engine.py`
-
-Módulo de soporte/legacy.
-
-Conserva constantes y helpers de sizing, stop, target, horizonte y normalización de régimen usados por `decision_log` y reportes históricos.
-
-La decisión operativa actual del MVP no sale de este archivo. La fuente de verdad operativa es `execution_planner.py`.
-
-### `feature_builder.py` y `ml_model.py`
-
-Capa experimental/post-MVP para ML.
-
-No forman parte del runtime MVP actual. Si se conservan, deberían vivir en:
-
-```text
-src/analysis/experimental/
-```
-
-No conviene agregar `lightgbm`, `scikit-learn` o `joblib` al `requirements.txt` hasta activar esa capa.
-
----
-
-## Esquema de base de datos
+## Persistencia
 
 Tablas principales:
 
 | Tabla | Uso |
 |---|---|
-| `portfolio_snapshots` | Snapshots históricos del portfolio |
-| `positions` | Posiciones asociadas a cada snapshot |
-| `market_prices` | Precios de mercado por ticker |
-| `raw_snapshots` | Payload completo de scraping |
-| `decision_log` | Registro de decisiones y outcomes |
+| `portfolio_snapshots` | snapshots históricos de cartera |
+| `positions` | posiciones por snapshot |
+| `market_prices` | snapshots globales de mercado |
+| `market_candles` | velas OHLCV oficiales Cocos + velas reconstruidas internas |
+| `raw_snapshots` | payloads crudos |
+| `decision_log` | decisiones, capas, outcomes y auditoría |
+| `bot_users` | usuarios del bot |
+| `ml_decision_features` | stub de capa ML |
+| `ml_model_registry` | stub de capa ML |
 
-La base usa TimescaleDB para datos time-series.
+Protecciones importantes:
 
----
+- claves únicas por snapshot/posición;
+- unicidad de velas por `(ts, long_ticker, interval)`;
+- unicidad de decisiones diarias equivalentes en `decision_log`;
+- DDL concentrado en `init.sql`.
 
-## Estructura del proyecto
-
-```text
-cocos_copilot/
-├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-├── init.sql
-├── README.md
-├── ARQUITECTURA.md
-├── COMANDOS.md
-│
-├── scripts/
-│   ├── run_analysis.py
-│   ├── run_opportunity.py
-│   ├── run_performance.py
-│   ├── update_outcomes.py
-│   ├── weekly_summary.py
-│   ├── run_once.py
-│   └── telegram_bot.py
-│
-└── src/
-    ├── core/
-    │   ├── config.py
-    │   ├── logger.py
-    │   ├── redis_client.py
-    │   └── credentials.py
-    │
-    ├── collector/
-    │   ├── cocos_scraper.py
-    │   ├── db.py
-    │   └── notifier.py
-    │
-    ├── scheduler/
-    │   └── runner.py
-    │
-    └── analysis/
-        ├── technical.py
-        ├── macro.py
-        ├── risk.py
-        ├── sentiment.py
-        ├── synthesis.py
-        ├── optimizer.py
-        ├── execution_planner.py
-        ├── validators.py
-        ├── trade_lifecycle.py
-        ├── decision_engine.py
-        ├── decision_memory.py
-        ├── opportunity_screener.py
-        ├── rotation_engine.py
-        └── experimental/
-            ├── feature_builder.py
-            └── ml_model.py
-```
-
----
-
-## Requirements actuales
-
-Para el MVP actual, las dependencias principales son:
-
-- Playwright
-- python-telegram-bot
-- Redis
-- asyncpg
-- requests / aiohttp
-- python-dotenv
-- cryptography
-- pyotp
-- pandas / numpy / yfinance
-- ta
-- scipy
-- apscheduler
-- python-dateutil / pytz
-
-La capa ML experimental no debería inflar `requirements.txt` hasta estar activada.
-
----
-
-## Archivos locales y secretos
-
-No deberían subirse al repositorio:
+## Módulos
 
 ```text
-.env
-secret_key/
-secrets/
-logs/
-screenshots/
-models/
-venv/
+scripts/
+  run_analysis.py
+  run_opportunity.py
+  run_performance.py
+  run_once.py
+  weekly_summary.py
+  update_outcomes.py
+  capture_cocos_history.py
+  backfill_cocos_history.py
+  import_cocos_history.py
+  telegram_bot.py
+
+src/collector/
+  cocos_scraper.py
+  cocos_history.py
+  db.py
+  notifier.py
+
+src/analysis/
+  technical.py
+  macro.py
+  risk.py
+  risk_levels.py
+  synthesis.py
+  optimizer.py
+  execution_planner.py
+  opportunity_screener.py
+  trade_lifecycle.py
+  decision_engine.py
+  regression_audit.py
+  validators.py
+
+src/scheduler/
+  runner.py
 ```
 
-Estos archivos/carpetas deben estar cubiertos por `.gitignore`.
+## Módulos de soporte y legado
+
+- `decision_engine.py`: conserva contratos y helpers usados por compatibilidad y auditoría.
+- `trade_lifecycle.py`: soporte de lifecycle y convención de riesgo, no fuente operativa principal.
+- `rotation_engine.py`: módulo heredado de rotación; el camino principal actual pasa por `execution_planner.py`.
+
+## Deuda técnica conocida
+
+- monitorear calidad de velas `internal_snapshot`;
+- definir política de refresco manual/excepcional para altas nuevas o reparaciones;
+- terminar de decidir el destino de módulos huérfanos heredados;
+- migrar usos de `datetime.utcnow()` a fechas timezone-aware;
+- seguir acumulando outcomes de ejecución real antes de sacar conclusiones fuertes.

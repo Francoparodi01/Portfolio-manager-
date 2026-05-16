@@ -7,41 +7,6 @@ from src.analysis.opportunity_screener import run_opportunity_analysis
 from src.collector.db import PortfolioDatabase
 
 
-class _FakeClose:
-    empty = False
-
-    class _Index:
-        @staticmethod
-        def searchsorted(_target_date, side="left"):
-            return 0
-
-    index = _Index()
-
-    class _ILoc:
-        @staticmethod
-        def __getitem__(_idx):
-            return 110.0
-
-    iloc = _ILoc()
-
-    def __len__(self):
-        return 1
-
-
-class _FakeFrame:
-    def __getitem__(self, _key):
-        return self
-
-    def squeeze(self):
-        return _FakeClose()
-
-
-class _FakeYFinance:
-    @staticmethod
-    def download(*_args, **_kwargs):
-        return _FakeFrame()
-
-
 class _OutcomeConnection:
     def __init__(self, recent_row):
         self.recent_row = recent_row
@@ -89,14 +54,25 @@ def test_update_outcomes_respects_lookback():
     conn = _OutcomeConnection(recent_row)
     db = PortfolioDatabase("postgresql://unused")
     db._pool = _OutcomePool(conn)
+    db.get_market_candles = lambda *_args, **_kwargs: _async_result(
+        [
+            {
+                "ts": now - timedelta(days=1),
+                "close_price": 110.0,
+            }
+        ]
+    )
 
-    with patch.dict("sys.modules", {"yfinance": _FakeYFinance()}):
-        updated = asyncio.run(db.update_outcomes(lookback_days=7))
+    updated = asyncio.run(db.update_outcomes(lookback_days=7))
 
     assert updated == 1
     assert len(conn.updates) == 1
     _, lookback_cutoff = conn.fetch_params
     assert recent_row["decided_at"] >= lookback_cutoff
+
+
+async def _async_result(value):
+    return value
 
 
 def test_exclude_portfolio_removes_held_tickers():
@@ -148,3 +124,45 @@ def test_screen_universe_prefers_history_frames(monkeypatch):
 
     assert len(results) == 1
     assert results[0].ticker == "AAPL"
+
+
+def test_screen_universe_strict_cocos_does_not_fetch_missing_frames(monkeypatch):
+    import pandas as pd
+    from src.analysis.opportunity_screener import screen_universe
+
+    frame = pd.DataFrame(
+        {
+            "Close": [100 + i for i in range(260)],
+            "High": [101 + i for i in range(260)],
+            "Low": [99 + i for i in range(260)],
+            "Volume": [1_000_000 for _ in range(260)],
+        }
+    )
+
+    def fail_fetch_history(*_args, **_kwargs):
+        raise AssertionError("legacy fetch should not run for missing Cocos frames")
+
+    monkeypatch.setattr("src.analysis.technical.fetch_history", fail_fetch_history)
+
+    results = screen_universe(["AAPL"], history_frames={"SPY": frame, "QQQ": frame})
+
+    assert len(results) == 1
+    assert results[0].ticker == "AAPL"
+    assert results[0].passes_screen is False
+    assert results[0].fail_reason == "sin velas Cocos suficientes"
+
+
+def test_screen_universe_without_frames_stays_canonical(monkeypatch):
+    from src.analysis.opportunity_screener import screen_universe
+
+    def fail_fetch_history(*_args, **_kwargs):
+        raise AssertionError("legacy fetch should not run without canonical frames")
+
+    monkeypatch.setattr("src.analysis.technical.fetch_history", fail_fetch_history)
+
+    results = screen_universe(["AAPL"])
+
+    assert len(results) == 1
+    assert results[0].ticker == "AAPL"
+    assert results[0].passes_screen is False
+    assert results[0].fail_reason == "sin velas Cocos suficientes"

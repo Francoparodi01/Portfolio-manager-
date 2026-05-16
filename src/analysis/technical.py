@@ -52,6 +52,8 @@ class Signal:
     score_raw: float      # score sin clampear (-9 a +9) para síntesis
     reasons: list[str]
     price_usd: float
+    candle_source_mode: str = "unknown"   # official | reconstructed | mixed | unknown
+    has_reconstructed_candles: bool = False
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_telegram(self) -> str:
@@ -445,6 +447,15 @@ def analyze_ticker_from_frame(ticker: str, frame: "pd.DataFrame") -> Optional[Si
     if ind is None:
         return None
     signal = generate_signals(ind)
+    sources = tuple(frame.attrs.get("candle_sources", ()))
+    has_reconstructed = bool(frame.attrs.get("has_reconstructed_candles", False))
+    if sources == ("COCOS",):
+        signal.candle_source_mode = "official"
+    elif sources == ("internal_snapshot",):
+        signal.candle_source_mode = "reconstructed"
+    elif sources:
+        signal.candle_source_mode = "mixed"
+    signal.has_reconstructed_candles = has_reconstructed
     logger.info(f"{ticker}: {signal.signal} (fuerza={signal.strength:.0%}, score_reasons={len(signal.reasons)})")
     return signal
 
@@ -473,3 +484,15 @@ def analyze_portfolio_from_frames(frames: dict[str, "pd.DataFrame"]) -> list[Sig
             logger.error(f"Error analizando {ticker}: {e}")
     priority = {"BUY": 0, "SELL": 1, "HOLD": 2}
     return sorted(signals, key=lambda s: (priority.get(s.signal, 3), -s.strength))
+
+
+def build_telegram_report(signals: list[Signal], total_value_ars: float) -> str:
+    """Render compacto para el scheduler diario."""
+    if not signals:
+        return "Análisis técnico: sin señales operativas disponibles."
+    blocks = "\n\n".join(signal.to_telegram() for signal in signals)
+    return (
+        f"<b>Análisis técnico</b>\n"
+        f"Valor cartera: <b>${total_value_ars:,.0f} ARS</b>\n\n"
+        f"{blocks}"
+    )
