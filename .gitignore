@@ -15,6 +15,7 @@ logs/
 screenshots/
 models/
 *.log
+tests/
 
 # Python
 .pytest_cache/
