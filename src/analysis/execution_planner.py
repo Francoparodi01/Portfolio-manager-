@@ -278,6 +278,11 @@ class ExecutionPlan:
             return "Sistema bloqueado por gate de riesgo — solo stops de emergencia."
 
         if not self.has_orders:
+            if self.pending_buys:
+                return (
+                    "Hay señales de compra, pero no hay cash ni ventas "
+                    "suficientes para financiarlas hoy — mantener o evaluar swaps."
+                )
             return (
                 "Mantener y observar — el optimizer sugirió cambios, "
                 "pero la calidad de señal no justifica operar."
@@ -708,13 +713,22 @@ def reconcile_funding(
 
         if executable < min_trade_ars:
             pending_buys.append(d.ticker)
+            d.action = DecisionType.WATCH
 
             if executable > 0:
+                d.reason_secondary = (
+                    f"Señal positiva, pero solo hay ${executable:,.0f} ejecutables "
+                    f"(< mínimo ${min_trade_ars:,.0f}); requiere más funding"
+                )
                 warnings.append(
                     f"{d.ticker}: compra reducida a ${executable:,.0f} "
                     f"(< mínimo ${min_trade_ars:,.0f}) — queda pendiente"
                 )
             else:
+                d.reason_secondary = (
+                    f"Señal positiva sin cash disponible; requiere venta financiadora o swap "
+                    f"para habilitar los ${wanted:,.0f} teóricos"
+                )
                 warnings.append(
                     f"{d.ticker}: sin cash para ejecutar compra "
                     f"(quería ${wanted:,.0f}) — queda pendiente"
@@ -770,6 +784,18 @@ def reconcile_funding(
 
             if executable < min_trade_ars:
                 pending_buys.append(ticker)
+                blocked_orders.append(OrderIntent(
+                    ticker=ticker,
+                    side=OrderSide.BUY,
+                    action=DecisionType.WATCH,
+                    amount_ars=0.0,
+                    theoretical_ars=round(wanted, 0),
+                    quantity_est=0.0,
+                    reference_price=0.0,
+                    reason="Sin cash disponible; requiere venta financiadora o swap",
+                    priority=3,
+                    funded_by=list(sell_tickers),
+                ))
                 continue
 
             is_partial = executable < wanted - 1
@@ -807,7 +833,7 @@ def reconcile_funding(
                 theoretical_ars=d.theoretical_ars,
                 quantity_est=0.0,
                 reference_price=0.0,
-                reason=d.reason_primary,
+                reason=d.reason_secondary or d.reason_primary,
                 priority=9,
             ))
 

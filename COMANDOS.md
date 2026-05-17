@@ -183,6 +183,22 @@ El reporte distingue:
 - `Execution Audit`;
 - `Blocked Audit`.
 
+### Fills reales del broker
+
+```bash
+docker compose exec scheduler python scripts/import_broker_fills.py /app/logs/fills.csv
+docker compose exec scheduler python scripts/import_broker_fills.py /app/logs/fills.csv --source manual_import --max-age-days 3
+```
+
+Columnas esperadas del CSV:
+
+```text
+external_fill_id,executed_at,ticker,side,quantity,avg_fill_price,gross_amount_ars,fees_ars
+```
+
+La importación guarda `broker_fills` y reconcilia contra decisiones `execution_plan / APPROVED`.
+Solo un fill confirmado promueve una decisión a `EXECUTED`.
+
 ### Outcomes
 
 ```bash

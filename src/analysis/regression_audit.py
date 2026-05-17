@@ -16,7 +16,7 @@ Sirve para responder:
         ¿Los targets / rotaciones teóricas del optimizer tenían buen outcome?
 
     3. Execution Audit:
-        ¿Las órdenes aprobadas / ejecutables funcionaron?
+        ¿Los fills reales confirmados funcionaron?
 
     4. Blocked Audit:
         ¿Los guards bloquearon bien o fueron demasiado conservadores?
@@ -36,9 +36,7 @@ Targets:
         outcome_Xd tal como está guardado.
 
     directional:
-        BUY  -> outcome_Xd
-        SELL -> -outcome_Xd
-        SELL_PARTIAL / SELL_FULL -> -outcome_Xd
+        outcome_Xd canonico ya viene ajustado por la direccion.
 """
 
 from __future__ import annotations
@@ -69,7 +67,7 @@ VALID_MODES = ("signal", "optimizer", "execution", "blocked", "all")
 MODE_TITLES = {
     "signal": "SIGNAL AUDIT — ¿el score predice retornos?",
     "optimizer": "OPTIMIZER AUDIT — ¿los targets teóricos funcionaron?",
-    "execution": "EXECUTION AUDIT — ¿las órdenes aprobadas funcionaron?",
+    "execution": "EXECUTION AUDIT — ¿los fills reales funcionaron?",
     "blocked": "BLOCKED AUDIT — ¿los guards bloquearon bien?",
     "all": "AUDIT GLOBAL — mezcla exploratoria",
 }
@@ -84,8 +82,8 @@ MODE_READINGS = {
         "y detectar si el planner bloquea ideas buenas, pero no mide performance operativa real."
     ),
     "execution": (
-        "Este modo mide órdenes aprobadas/ejecutables por el sistema. "
-        "Es la métrica más cercana a performance operativa real."
+        "Este modo mide fills reales confirmados contra el planner. "
+        "Es la métrica operativa validada."
     ),
     "blocked": (
         "Este modo mide operaciones rechazadas por guards. Si los outcomes son positivos "
@@ -189,7 +187,8 @@ async def load_decision_log(
     No usa precios históricos crudos.
     Usa los resultados ya calculados por update_outcomes / decision_log.
     """
-    conn = await asyncpg.connect(database_url)
+    dsn = database_url.replace("postgresql+asyncpg://", "postgresql://")
+    conn = await asyncpg.connect(dsn)
 
     try:
         cols = await _get_existing_columns(conn, "decision_log")
@@ -213,6 +212,7 @@ async def load_decision_log(
             "outcome_5d",
             "outcome_10d",
             "outcome_20d",
+            "outcome_basis",
             "was_correct",
             "guard_triggered",
             "block_reason",
@@ -243,10 +243,17 @@ async def load_decision_log(
         else:
             cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
 
+        outcome_filter = (
+            "AND outcome_basis = 'canonical_cocos'"
+            if "outcome_basis" in cols
+            else ""
+        )
+
         query = f"""
             SELECT {", ".join(selected)}
             FROM decision_log
             WHERE decided_at >= $1
+            {outcome_filter}
             ORDER BY decided_at ASC
         """
 
@@ -279,7 +286,15 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
     if "decision" in out.columns:
         out["decision"] = out["decision"].astype(str).str.upper().str.strip()
 
-    for col in ["source", "decision_type", "status", "block_reason", "ticker", "regime"]:
+    for col in [
+        "source",
+        "decision_type",
+        "status",
+        "block_reason",
+        "ticker",
+        "regime",
+        "outcome_basis",
+    ]:
         if col in out.columns:
             out[col] = out[col].astype(str).str.strip()
 
@@ -511,7 +526,7 @@ def apply_audit_mode_filter(
         Ideas teóricas del optimizer.
 
     execution:
-        Solo órdenes finales aprobadas/ejecutadas.
+        Solo fills reales confirmados por broker.
         NO incluye BLOCKED aunque source sea execution_plan.
 
     blocked:
@@ -548,13 +563,7 @@ def apply_audit_mode_filter(
         return out[mask].copy(), warnings
 
     if mode == "execution":
-        mask = (
-            out["decision_type"].eq("executable")
-            | out["status"].isin(["APPROVED", "EXECUTED"])
-        )
-
-        if "is_executable" in out.columns:
-            mask = mask | out["is_executable"].fillna(False).astype(bool)
+        mask = out["status"].eq("EXECUTED")
 
         # Protección extra: excluir explícitamente bloqueados.
         mask = mask & ~out["status"].eq("BLOCKED")
@@ -594,8 +603,7 @@ def prepare_model_frame(
         target = outcome_Xd
 
     directional:
-        BUY  => outcome_Xd
-        SELL => -outcome_Xd
+        outcome_Xd canonico ya viene ajustado por direccion.
     """
     warnings: list[str] = []
 
@@ -626,18 +634,9 @@ def prepare_model_frame(
 
         def directional(row) -> float:
             val = row.get(raw_col)
-            dec = str(row.get("decision", "")).upper()
-
             if pd.isna(val):
                 return np.nan
-
-            if dec == "BUY":
-                return float(val)
-
-            if dec in ("SELL", "SELL_PARTIAL", "SELL_FULL"):
-                return -float(val)
-
-            return np.nan
+            return float(val)
 
         out[target_col] = out.apply(directional, axis=1)
 
@@ -1228,163 +1227,132 @@ def _mode_reading(mode: str) -> str:
     return MODE_READINGS.get((mode or "optimizer").lower(), "")
 
 
-def render_regression_audit_compact(report: RegressionAuditReport) -> str:
-    """
-    Render compacto para Telegram.
-    """
-    lines: list[str] = []
+_MATURITY_SHORT = {
+    "EXPLORATORIO": "EXPL",
+    "PRELIMINAR": "PREL",
+    "ÚTIL": "UTIL",
+    "ROBUSTO": "ROB",
+}
 
-    title_target = (
-        "RETORNO DIRECCIONAL"
-        if report.target_mode == "directional"
-        else "RETORNO BRUTO"
-    )
 
-    mode = (report.mode or "optimizer").lower()
-    mode_title = _mode_title(mode)
+def _fmt_float(value: Optional[float], digits: int, *, signed: bool = False) -> str:
+    if value is None:
+        return "-"
+    prefix = "+" if signed else ""
+    return format(value, f"{prefix}.{digits}f")
 
-    lines.append(f"📈 <b>REGRESSION AUDIT — {mode_title}</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🎯 Target: <b>{title_target}</b>")
-    lines.append(
-        f"📦 Filas: <b>{report.rows_loaded}</b> | "
-        f"Obs usadas: <b>{report.rows_usable}</b>"
-    )
-    lines.append(f"💸 Costo mínimo: <b>{report.cost_threshold:.2%}</b>")
 
-    if report.actions_used:
-        lines.append(f"🔎 Acciones: <code>{', '.join(report.actions_used)}</code>")
+def _fmt_pct(value: Optional[float], digits: int = 2, *, signed: bool = False) -> str:
+    if value is None:
+        return "-"
+    prefix = "+" if signed else ""
+    return format(value, f"{prefix}.{digits}%")
 
-    if report.source_counts:
-        compact_sources = ", ".join(
-            f"{k}:{v}" for k, v in sorted(report.source_counts.items())
+
+def _kv_counts(counts: dict[str, int]) -> str:
+    return " | ".join(f"{k}:{v}" for k, v in sorted(counts.items())) or "-"
+
+
+def _render_overview_table(report: RegressionAuditReport) -> list[str]:
+    target = "DIRECCIONAL" if report.target_mode == "directional" else "BRUTO"
+    actions = ", ".join(report.actions_used) if report.actions_used else "-"
+
+    rows = [
+        f"{'Target':<12}{target:<18}{'Costo':<12}{report.cost_threshold:.2%}",
+        f"{'Filas':<12}{report.rows_loaded:<18}{'Obs usadas':<12}{report.rows_usable}",
+        f"{'Acciones':<12}{actions}",
+        f"{'Fuentes':<12}{_kv_counts(report.source_counts)}",
+        f"{'Status':<12}{_kv_counts(report.status_counts)}",
+    ]
+    return ["<pre>", *rows, "</pre>"]
+
+
+def _render_model_scorecard(report: RegressionAuditReport) -> list[str]:
+    if not report.models:
+        return ["⚠️ No hay suficientes datos cerrados para correr regresión."]
+
+    rows = [
+        f"{'Hz':<4}{'Modelo':<16}{'n':>3} {'R2':>6} {'RMSE':>7} {'IC':>7} "
+        f"{'Coef':>8} {'p':>6} {'Ret@.08':>8} {'Mad':>5}"
+    ]
+
+    for model in report.models:
+        maturity, _ = sample_maturity(model.n)
+        rows.append(
+            f"{model.horizon:<4}"
+            f"{model.model_name:<16}"
+            f"{model.n:>3} "
+            f"{_fmt_float(model.r2, 3):>6} "
+            f"{_fmt_pct(model.rmse):>7} "
+            f"{_fmt_float(model.ic, 3, signed=True):>7} "
+            f"{_fmt_float(model.score_coef, 4, signed=True):>8} "
+            f"{_fmt_float(model.score_pvalue, 3):>6} "
+            f"{_fmt_pct(model.expected_return_at_buy_min_008, signed=True):>8} "
+            f"{_MATURITY_SHORT.get(maturity, maturity[:4]):>5}"
         )
-        lines.append(f"🧾 Sources: <code>{compact_sources}</code>")
 
-    reading = _mode_reading(mode)
-    if reading:
-        lines.append("")
-        lines.append(f"ℹ️ {reading}")
+    return ["<pre>", *rows, "</pre>"]
 
-    # Warning compacto por layers
-    has_layer_warning = any(
-        "está todo en 0" in w
-        for w in report.warnings or []
-    )
 
-    if has_layer_warning:
-        lines.append("")
-        lines.append(
-            "⚠️ Capas técnicas/macro/riesgo aún no disponibles en decisiones viejas."
-        )
+def _render_bucket_scorecard(
+    report: RegressionAuditReport,
+    *,
+    compact: bool,
+) -> list[str]:
+    wanted_compact = {
+        "NEG_FUERTE",
+        "NEG_OPERABLE",
+        "POS_DEBIL",
+        "POS_OPERABLE",
+        "POS_FUERTE",
+    }
+    rows = [
+        f"{'Hz':<4}{'Bucket':<15}{'n':>3} {'AvgScore':>9} "
+        f"{'Target':>8} {'Hit':>6} {'Conf':<10}"
+    ]
 
-    # Buscar baseline 5d
-    baseline_5d = next(
-        (
-            m for m in report.models
-            if m.horizon == "5d" and m.model_name == "baseline_score"
-        ),
-        None,
-    )
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("<b>HORIZONTE 5D</b>")
-
-    if baseline_5d is None:
-        lines.append("⚠️ Sin modelo baseline 5D disponible.")
-    elif baseline_5d.r2 is None:
-        lines.append(
-            f"⚠️ Sin modelo: {' | '.join(baseline_5d.notes)}"
-        )
-    else:
-        maturity, maturity_msg = sample_maturity(baseline_5d.n)
-
-        lines.append(
-            f"n={baseline_5d.n} | "
-            f"R² <b>{baseline_5d.r2:.3f}</b> | "
-            f"RMSE {baseline_5d.rmse:.2%}"
-        )
-        lines.append(f"Madurez: <b>{maturity}</b> — {maturity_msg}")
-
-        if baseline_5d.ic is not None:
-            lines.append(
-                f"IC score/target: <code>{baseline_5d.ic:+.3f}</code>"
-            )
-
-        if baseline_5d.score_coef is not None:
-            ptxt = (
-                f" | p={baseline_5d.score_pvalue:.3f}"
-                if baseline_5d.score_pvalue is not None
-                else ""
-            )
-            lines.append(
-                f"Coef score: <code>{baseline_5d.score_coef:+.4f}</code>{ptxt}"
-            )
-
-        if baseline_5d.expected_return_at_buy_min_008 is not None:
-            lines.append(
-                f"Score +0.08 → ret esperado "
-                f"<b>{baseline_5d.expected_return_at_buy_min_008:+.2%}</b>"
-            )
-
-        if baseline_5d.suggested_buy_threshold is not None:
-            lines.append(
-                f"Umbral estimado para cubrir costo: "
-                f"<b>{baseline_5d.suggested_buy_threshold:+.3f}</b>"
-            )
-        elif baseline_5d.threshold_reason:
-            lines.append(
-                f"Umbral estimado no usable: <b>{baseline_5d.threshold_reason}</b>"
-            )
-
-    # Buckets 5D compactos
-    bucket = report.bucket_tables.get("5d")
-
-    if bucket is not None and not bucket.empty:
-        lines.append("")
-        lines.append("<b>Buckets 5D</b>")
-
-        wanted = {
-            "NEG_FUERTE",
-            "NEG_OPERABLE",
-            "POS_DEBIL",
-            "POS_OPERABLE",
-            "POS_FUERTE",
-        }
+    for horizon, bucket in report.bucket_tables.items():
+        if compact and horizon != "5d":
+            continue
+        if bucket is None or bucket.empty:
+            continue
 
         for _, row in bucket.iterrows():
             bucket_name = str(row["bucket"])
-
-            if bucket_name not in wanted:
+            if compact and bucket_name not in wanted_compact:
                 continue
-
             if int(row["n"]) == 0:
                 continue
-
-            lines.append(
-                f"  {bucket_name}: n={int(row['n'])} | "
-                f"target {row['avg_return']:+.2%} | "
-                f"hit {row['hit_rate']:.0%} | "
-                f"conf {row.get('reliability', '—')}"
+            rows.append(
+                f"{horizon:<4}"
+                f"{bucket_name:<15}"
+                f"{int(row['n']):>3} "
+                f"{_fmt_float(float(row['avg_score']), 3, signed=True):>9} "
+                f"{_fmt_pct(float(row['avg_return']), signed=True):>8} "
+                f"{_fmt_pct(float(row['hit_rate']), digits=0):>6} "
+                f"{str(row.get('reliability', '-')):<10}"
             )
 
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("<b>LECTURA</b>")
+    if len(rows) == 1:
+        return []
 
-    for line in _build_human_reading(report):
-        lines.append(line)
-
-    lines.append("")
-    lines.append(
-        "<i>Auditoría auxiliar — no genera órdenes ni reemplaza al Execution Planner.</i>"
-    )
-
-    return "\n".join(lines)
+    return ["<pre>", *rows, "</pre>"]
 
 
-def render_regression_audit(report: RegressionAuditReport) -> str:
+def _dedup_model_notes(report: RegressionAuditReport) -> list[str]:
+    notes: list[str] = []
+    for model in report.models:
+        for note in model.notes:
+            if note not in notes:
+                notes.append(note)
+    return notes
+
+
+def _render_regression_audit_aligned(
+    report: RegressionAuditReport,
+    *,
+    compact: bool,
+) -> str:
     lines: list[str] = []
 
     title_target = (
@@ -1398,141 +1366,41 @@ def render_regression_audit(report: RegressionAuditReport) -> str:
 
     lines.append(f"📈 <b>REGRESSION AUDIT — {mode_title}</b>")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🕐 {report.generated_at.astimezone().strftime('%d/%m/%Y %H:%M')}")
-    lines.append(f"🎯 Target: <b>{title_target}</b>")
-    lines.append(f"📦 Filas cargadas: <b>{report.rows_loaded}</b>")
-    lines.append(f"🧪 Observaciones usadas acumuladas: <b>{report.rows_usable}</b>")
-    lines.append(f"💸 Costo mínimo a cubrir: <b>{report.cost_threshold:.2%}</b>")
+    if not compact:
+        lines.append(f"🕐 {report.generated_at.astimezone().strftime('%d/%m/%Y %H:%M')}")
+    lines.append(f"🎯 <b>{title_target}</b>")
+    lines.extend(_render_overview_table(report))
 
     reading = _mode_reading(mode)
     if reading:
         lines.append(f"ℹ️ {reading}")
-
-    if report.actions_used:
-        lines.append(f"🔎 Acciones incluidas: <code>{', '.join(report.actions_used)}</code>")
-
-    if report.source_counts:
-        lines.append("")
-        lines.append("<b>Fuentes cargadas</b>")
-        for k, v in sorted(report.source_counts.items()):
-            lines.append(f"• {k}: {v}")
-
-    if report.status_counts:
-        lines.append("")
-        lines.append("<b>Status cargados</b>")
-        for k, v in sorted(report.status_counts.items()):
-            lines.append(f"• {k}: {v}")
-
-    if report.target_mode == "directional":
-        lines.append("Direccional: BUY usa outcome; SELL invierte el signo del outcome.")
 
     if report.warnings:
         lines.append("")
         lines.append("⚠️ <b>Warnings</b>")
-        for w in report.warnings[:8]:
+        max_warnings = 3 if compact else 8
+        for w in report.warnings[:max_warnings]:
             lines.append(f"• {w}")
 
     lines.append("")
 
-    if not report.models:
-        lines.append("⚠️ No hay suficientes datos cerrados para correr regresión.")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<b>RESUMEN DE MODELOS</b>")
+    lines.extend(_render_model_scorecard(report))
+
+    bucket_lines = _render_bucket_scorecard(report, compact=compact)
+    if bucket_lines:
         lines.append("")
-        lines.append("<i>Necesitás más decisiones con outcome_5d / outcome_10d / outcome_20d poblados.</i>")
-        return "\n".join(lines)
+        lines.append("<b>BUCKETS POR SCORE</b>")
+        lines.extend(bucket_lines)
 
-    by_horizon: dict[str, list[RegressionModelResult]] = {}
-    for m in report.models:
-        by_horizon.setdefault(m.horizon, []).append(m)
-
-    for horizon, models in by_horizon.items():
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"<b>HORIZONTE {horizon.upper()}</b>")
-
-        for m in models:
+    if not compact:
+        notes = _dedup_model_notes(report)
+        if notes:
             lines.append("")
-            lines.append(f"Modelo: <b>{m.model_name}</b>")
-            lines.append(f"Target col: <code>{m.target_col}</code>")
-            lines.append(f"Features: <code>{', '.join(m.features) if m.features else '—'}</code>")
-            lines.append(f"n={m.n}")
-
-            maturity, maturity_msg = sample_maturity(m.n)
-            lines.append(f"Madurez estadística: <b>{maturity}</b> — {maturity_msg}")
-
-            if m.r2 is None:
-                lines.append("⚠️ Sin modelo: " + " | ".join(m.notes))
-                continue
-
-            lines.append(
-                f"R²: <b>{m.r2:.3f}</b>"
-                + (f" | Adj R²: {m.adj_r2:.3f}" if m.adj_r2 is not None else "")
-                + (f" | RMSE: {m.rmse:.2%}" if m.rmse is not None else "")
-            )
-
-            if m.ic is not None:
-                lines.append(f"IC simple score/target: <code>{m.ic:+.3f}</code>")
-
-            if m.intercept is not None:
-                lines.append(f"Intercept: <code>{m.intercept:+.4f}</code>")
-
-            if m.score_coef is not None:
-                pv = ""
-                if m.score_pvalue is not None:
-                    pv = f" | p={m.score_pvalue:.3f}"
-
-                lines.append(
-                    f"Coef final_score: <code>{m.score_coef:+.4f}</code>{pv}"
-                )
-
-            layer_coefs = {
-                k: v
-                for k, v in m.coefficients.items()
-                if k != "final_score"
-            }
-
-            if layer_coefs:
-                lines.append("Coef features:")
-                for k, v in layer_coefs.items():
-                    ptxt = ""
-                    if k in m.pvalues:
-                        ptxt = f" p={m.pvalues[k]:.3f}"
-                    lines.append(f"  {k}: <code>{v:+.4f}</code>{ptxt}")
-
-            if m.expected_return_at_buy_min_008 is not None:
-                lines.append(
-                    f"Ret esperado con score +0.08: "
-                    f"<b>{m.expected_return_at_buy_min_008:+.2%}</b>"
-                )
-
-            if m.suggested_buy_threshold is not None:
-                lines.append(
-                    f"Umbral score estimado para cubrir costo: "
-                    f"<b>{m.suggested_buy_threshold:+.3f}</b>"
-                )
-            elif m.threshold_reason:
-                lines.append(
-                    f"Umbral score estimado no usable: "
-                    f"<b>{m.threshold_reason}</b>"
-                )
-            else:
-                lines.append("Umbral score estimado: <b>N/A</b>")
-
-            for note in m.notes:
+            lines.append("<b>Notas diagnósticas</b>")
+            for note in notes[:10]:
                 lines.append(f"• {note}")
-
-        bucket = report.bucket_tables.get(horizon)
-        if bucket is not None and not bucket.empty:
-            lines.append("")
-            lines.append("<b>Buckets por score</b>")
-            for _, row in bucket.iterrows():
-                if int(row["n"]) == 0:
-                    continue
-                lines.append(
-                    f"  {row['bucket']}: n={int(row['n'])} | "
-                    f"avg score {row['avg_score']:+.3f} | "
-                    f"target {row['avg_return']:+.2%} | "
-                    f"hit {row['hit_rate']:.0%} | "
-                    f"conf {row.get('reliability', '—')}"
-                )
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -1543,6 +1411,16 @@ def render_regression_audit(report: RegressionAuditReport) -> str:
     lines.append("<i>Auditoría estadística auxiliar — no genera órdenes ni reemplaza al Execution Planner.</i>")
 
     return "\n".join(lines)
+
+
+def render_regression_audit_compact(report: RegressionAuditReport) -> str:
+    """Render compacto, alineado y apto para Telegram."""
+    return _render_regression_audit_aligned(report, compact=True)
+
+
+def render_regression_audit(report: RegressionAuditReport) -> str:
+    """Render completo en una sola salida alineada."""
+    return _render_regression_audit_aligned(report, compact=False)
 
 
 def _build_human_reading(report: RegressionAuditReport) -> list[str]:
@@ -1587,7 +1465,7 @@ def _build_human_reading(report: RegressionAuditReport) -> list[str]:
         )
     elif mode == "execution":
         lines.append(
-            "Este resultado mide decisiones aprobadas/ejecutables. Es la lectura operativa más importante."
+            "Este resultado mide fills reales confirmados. Es la lectura operativa validada."
         )
     elif mode == "blocked":
         lines.append(

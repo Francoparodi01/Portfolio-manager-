@@ -67,7 +67,7 @@ def test_render_performance_mentions_execution_when_present():
             [
                 {
                     "source": "execution_plan",
-                    "status": "APPROVED",
+                    "status": "EXECUTED",
                     "decision_type": "executable",
                     "decision": "BUY",
                     "n": 4,
@@ -81,3 +81,48 @@ def test_render_performance_mentions_execution_when_present():
 
     assert "EV agregado" in report
     assert "Execution Audit" in report
+
+
+def test_render_performance_does_not_call_approved_plan_real_execution():
+    report = render_performance_report(
+        _base_stats(
+            [
+                {
+                    "source": "execution_plan",
+                    "status": "APPROVED",
+                    "decision_type": "executable",
+                    "decision": "BUY",
+                    "n": 4,
+                    "con_5d": 4,
+                    "con_10d": 2,
+                    "con_20d": 1,
+                }
+            ]
+        )
+    )
+
+    assert "fills reales confirmados" not in report
+    assert "planes aprobados" in report
+
+
+def test_render_performance_calls_out_legacy_external_rows():
+    report = render_performance_report(
+        _base_stats(
+            [
+                {
+                    "source": "optimizer",
+                    "status": "THEORETICAL",
+                    "decision_type": "theoretical",
+                    "decision": "BUY",
+                    "n": 10,
+                    "con_5d": 0,
+                    "con_10d": 0,
+                    "con_20d": 0,
+                    "legacy_external": 10,
+                }
+            ]
+        )
+    )
+
+    assert "legacy 10" in report
+    assert "10 eventos legacy_external quedan fuera" in report

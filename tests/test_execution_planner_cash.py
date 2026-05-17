@@ -67,3 +67,23 @@ def test_sell_proceeds_fund_buys():
     assert plan.net_sell_ars > 0
     assert plan.gross_buy_ars <= plan.net_sell_ars
     assert plan.cash_after >= 0
+
+
+def test_unfunded_buy_is_watch_not_buy():
+    plan = reconcile_funding(
+        decisions=[
+            _decision("AAPL", DecisionType.BUY, 80_000),
+        ],
+        current_positions={},
+        cash_before=0,
+        portfolio_value_ars=1_000_000,
+        gate="NORMAL",
+        min_trade_ars=1,
+    )
+
+    assert plan.buy_orders == []
+    assert plan.pending_buys == ["AAPL"]
+    assert plan.decisions[0].action == DecisionType.WATCH
+    assert "sin cash disponible" in (plan.decisions[0].reason_secondary or "").lower()
+    assert "sin cash disponible" in plan.blocked_orders[0].reason.lower()
+    assert "mantener o evaluar swaps" in plan.verdict().lower()

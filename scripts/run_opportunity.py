@@ -173,6 +173,10 @@ async def main(
         for asset in universe_assets
         if asset["ticker"] in set(universe_filtered)
     ]
+    asset_types = {
+        asset["ticker"]: asset.get("asset_type", "UNKNOWN")
+        for asset in filtered_assets
+    }
     history_frames = await _load_cocos_history_frames(cfg, filtered_assets)
     logger.info(
         "Historial Cocos disponible para oportunidades: %s/%s tickers",
@@ -201,6 +205,8 @@ async def main(
         min_rr              = min_rr,
         exclude_portfolio   = exclude_portfolio,
         history_frames      = history_frames,
+        asset_types          = asset_types,
+        available_cash_ars  = cash_ars,
     )
 
     # ── 5. Render ──────────────────────────────────────────────────────────────

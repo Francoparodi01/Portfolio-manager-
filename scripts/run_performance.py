@@ -10,7 +10,8 @@ Incluye:
 
 Esto permite distinguir:
     optimizer / THEORETICAL  → ideas teóricas del optimizer
-    execution_plan / APPROVED → órdenes aprobadas reales
+    execution_plan / APPROVED → planes aprobados por el planner
+    execution_plan / EXECUTED → fills reales confirmados del broker
     execution_plan / BLOCKED  → señales bloqueadas por guards/funding
 
 Output:
@@ -91,7 +92,8 @@ def _dataset_group_note(dataset_stats: list[dict]) -> str:
     if not dataset_stats:
         return "Sin eventos de decision_log para este período."
 
-    execution_with_outcome = 0
+    executed_with_outcome = 0
+    approved_with_outcome = 0
     blocked_with_outcome = 0
     optimizer_with_outcome = 0
 
@@ -101,8 +103,11 @@ def _dataset_group_note(dataset_stats: list[dict]) -> str:
         decision_type = str(row.get("decision_type") or "").lower()
         con_5d = int(row.get("con_5d") or 0)
 
-        if source == "execution_plan" and status in ("APPROVED", "EXECUTED"):
-            execution_with_outcome += con_5d
+        if source == "execution_plan" and status == "EXECUTED":
+            executed_with_outcome += con_5d
+
+        if source == "execution_plan" and status == "APPROVED":
+            approved_with_outcome += con_5d
 
         if source == "execution_plan" and (status == "BLOCKED" or decision_type == "blocked"):
             blocked_with_outcome += con_5d
@@ -110,16 +115,22 @@ def _dataset_group_note(dataset_stats: list[dict]) -> str:
         if source == "optimizer" or status == "THEORETICAL" or decision_type == "theoretical":
             optimizer_with_outcome += con_5d
 
-    if execution_with_outcome == 0 and optimizer_with_outcome > 0:
+    if executed_with_outcome == 0 and approved_with_outcome > 0:
+        return (
+            "Lectura: ya hay outcomes de planes aprobados, "
+            "pero todavía no son fills reales validados por broker."
+        )
+
+    if executed_with_outcome == 0 and optimizer_with_outcome > 0:
         return (
             "Lectura: el EV actual corresponde principalmente a histórico/optimizer. "
             "El Execution Audit todavía está acumulando outcomes."
         )
 
-    if execution_with_outcome > 0:
+    if executed_with_outcome > 0:
         return (
-            "Lectura: ya hay outcomes de órdenes aprobadas. "
-            "El Execution Audit empieza a medir performance operativa real."
+            "Lectura: ya hay outcomes de fills reales confirmados. "
+            "El Execution Audit empieza a medir performance operativa validada."
         )
 
     if blocked_with_outcome > 0:
@@ -136,7 +147,7 @@ def _ev_scope(dataset_stats: list[dict]) -> tuple[str, str]:
     Distingue si el EV agregado todavía es principalmente histórico o si ya
     cuenta con outcomes operativos aprobados.
     """
-    execution_with_outcome = 0
+    executed_with_outcome = 0
     optimizer_with_outcome = 0
 
     for row in dataset_stats:
@@ -145,22 +156,22 @@ def _ev_scope(dataset_stats: list[dict]) -> tuple[str, str]:
         decision_type = str(row.get("decision_type") or "").lower()
         con_5d = int(row.get("con_5d") or 0)
 
-        if source == "execution_plan" and status in ("APPROVED", "EXECUTED"):
-            execution_with_outcome += con_5d
+        if source == "execution_plan" and status == "EXECUTED":
+            executed_with_outcome += con_5d
 
         if source == "optimizer" or status == "THEORETICAL" or decision_type == "theoretical":
             optimizer_with_outcome += con_5d
 
-    if execution_with_outcome == 0 and optimizer_with_outcome > 0:
+    if executed_with_outcome == 0 and optimizer_with_outcome > 0:
         return (
             "EV histórico agregado",
             "Todavía no mide performance de ejecución real; esa lectura vive en Execution Audit.",
         )
 
-    if execution_with_outcome > 0:
+    if executed_with_outcome > 0:
         return (
             "EV agregado",
-            "Incluye outcomes operativos; contrastalo con Execution Audit para aislar ejecución real.",
+            "Incluye fills reales confirmados; contrastalo con Execution Audit para aislar ejecución real.",
         )
 
     return (
@@ -192,9 +203,18 @@ async def _get_decision_dataset_stats(
                 COALESCE(decision_type, 'unknown') AS decision_type,
                 decision,
                 COUNT(*) AS n,
-                COUNT(outcome_5d) AS con_5d,
-                COUNT(outcome_10d) AS con_10d,
-                COUNT(outcome_20d) AS con_20d
+                COUNT(outcome_5d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                ) AS con_5d,
+                COUNT(outcome_10d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                ) AS con_10d,
+                COUNT(outcome_20d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                ) AS con_20d,
+                COUNT(*) FILTER (
+                    WHERE outcome_basis = 'legacy_external'
+                ) AS legacy_external
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
             GROUP BY 1,2,3,4
@@ -224,11 +244,22 @@ def render_dataset_operativo(stats: dict) -> list[str]:
         con_5d = int(row.get("con_5d") or 0)
         con_10d = int(row.get("con_10d") or 0)
         con_20d = int(row.get("con_20d") or 0)
+        legacy_external = int(row.get("legacy_external") or 0)
 
-        lines.append(
+        line = (
             f"   • <code>{label}</code>: "
             f"<b>{n}</b> eventos | "
             f"5D {con_5d} | 10D {con_10d} | 20D {con_20d}"
+        )
+        if legacy_external:
+            line += f" | legacy {legacy_external}"
+        lines.append(line)
+
+    legacy_total = sum(int(row.get("legacy_external") or 0) for row in dataset_stats)
+    if legacy_total:
+        lines.append(
+            "   ℹ️ "
+            f"{legacy_total} eventos legacy_external quedan fuera de métricas canónicas."
         )
 
     note = _dataset_group_note(dataset_stats)

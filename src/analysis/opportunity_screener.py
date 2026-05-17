@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
+from src.analysis.execution_planner import MIN_TRADE_ARS
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -67,7 +69,7 @@ class EdgeLabel(str, Enum):
 
 
 # ── Screener ──────────────────────────────────────────────────────────────────
-MIN_AVG_VOLUME     = 500_000
+MIN_AVG_TURNOVER_ARS = 100_000_000
 MIN_PRICE_USD      = 3.0
 RS_MIN_VS_SPY      = -0.10
 MAX_ANNUAL_VOL     = 1.20
@@ -150,13 +152,16 @@ SECTOR_MAP: dict[str, list[str]] = {
 @dataclass
 class ScreenerMetrics:
     ticker:             str
+    asset_type:         str   = "UNKNOWN"
     price:              float = 0.0
     avg_volume:         float = 0.0
+    avg_turnover_ars:   float = 0.0
     annual_vol:         float = 0.0
     dist_from_high_6m:  float = 0.0
     dist_from_low_6m:   float = 0.0
     rs_vs_spy_20d:      float = 0.0
     rs_vs_qqq_20d:      float = 0.0
+    rs_benchmark_ticker: str  = ""
     momentum_20d:       float = 0.0
     momentum_60d:       float = 0.0
     rsi:                float = 50.0
@@ -241,7 +246,10 @@ class OpportunityReport:
     generated_at:        datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     universe_size:       int   = 0
     screened_count:      int   = 0
+    ranked_count:        int   = 0
+    displayed_count:     int   = 0
     gate_state:          str   = "NORMAL"
+    available_cash_ars:  float = 0.0
     vix_level:           Optional[float] = None
     macro_regime:        dict  = field(default_factory=dict)
     candidates:          list[OpportunityCandidate] = field(default_factory=list)
@@ -260,10 +268,11 @@ class OpportunityReport:
 def _compute_screener_metrics(
     ticker: str,
     df: "pd.DataFrame",
-    spy_ret_20d: float,
-    qqq_ret_20d: float,
+    spy_ret_20d: Optional[float],
+    qqq_ret_20d: Optional[float],
+    asset_type: str = "UNKNOWN",
 ) -> ScreenerMetrics:
-    m = ScreenerMetrics(ticker=ticker)
+    m = ScreenerMetrics(ticker=ticker, asset_type=(asset_type or "UNKNOWN").upper())
     if df is None or len(df) < 40:
         m.fail_reason = "datos insuficientes"
         return m
@@ -274,6 +283,8 @@ def _compute_screener_metrics(
     m.price = float(close.iloc[-1])
     if volume is not None and len(volume) > 0:
         m.avg_volume = float(volume.tail(20).mean())
+        avg_close = float(close.tail(20).mean())
+        m.avg_turnover_ars = m.avg_volume * avg_close
 
     rets = close.pct_change().dropna()
     if len(rets) > 20:
@@ -292,8 +303,16 @@ def _compute_screener_metrics(
     if len(close) >= 61:
         m.momentum_60d = float(close.iloc[-1] / close.iloc[-61] - 1)
 
-    m.rs_vs_spy_20d = m.momentum_20d - spy_ret_20d
-    m.rs_vs_qqq_20d = m.momentum_20d - qqq_ret_20d
+    if qqq_ret_20d is not None:
+        m.rs_vs_qqq_20d = m.momentum_20d - qqq_ret_20d
+
+    if m.asset_type != "ACCION":
+        if spy_ret_20d is not None:
+            m.rs_benchmark_ticker = SPY_TICKER
+            m.rs_vs_spy_20d = m.momentum_20d - spy_ret_20d
+        elif qqq_ret_20d is not None:
+            m.rs_benchmark_ticker = QQQ_TICKER
+            m.rs_vs_spy_20d = m.momentum_20d - qqq_ret_20d
 
     if len(rets) >= 14:
         gains  = rets.clip(lower=0).tail(14).mean()
@@ -308,8 +327,8 @@ def _compute_screener_metrics(
     if m.price < MIN_PRICE_USD:
         m.fail_reason = f"precio bajo (${m.price:.2f})"
         return m
-    if m.avg_volume > 0 and m.avg_volume < MIN_AVG_VOLUME:
-        m.fail_reason = f"volumen bajo ({m.avg_volume:,.0f})"
+    if 0 < m.avg_turnover_ars < MIN_AVG_TURNOVER_ARS:
+        m.fail_reason = f"monto operado bajo (${m.avg_turnover_ars:,.0f} ARS/día)"
         return m
     if m.annual_vol > MAX_ANNUAL_VOL:
         m.fail_reason = f"volatilidad extrema ({m.annual_vol:.0%})"
@@ -323,8 +342,8 @@ def _compute_screener_metrics(
     if m.dist_from_low_6m < MIN_DIST_FROM_LOW:
         m.fail_reason = f"en mínimos recientes ({m.dist_from_low_6m:.0%})"
         return m
-    if m.rs_vs_spy_20d < RS_MIN_VS_SPY:
-        m.fail_reason = f"RS débil vs SPY ({m.rs_vs_spy_20d:+.1%})"
+    if m.rs_benchmark_ticker and m.rs_vs_spy_20d < RS_MIN_VS_SPY:
+        m.fail_reason = f"RS débil vs {m.rs_benchmark_ticker} ({m.rs_vs_spy_20d:+.1%})"
         return m
 
     m.passes_screen = True
@@ -335,10 +354,12 @@ def screen_universe(
     tickers: list[str],
     period: str = "1y",
     history_frames: Optional[dict[str, "pd.DataFrame"]] = None,
+    asset_types: Optional[dict[str, str]] = None,
 ) -> list[ScreenerMetrics]:
     logger.info(f"Screener: evaluando {len(tickers)} tickers...")
 
-    spy_ret_20d = qqq_ret_20d = 0.0
+    spy_ret_20d: Optional[float] = None
+    qqq_ret_20d: Optional[float] = None
     for ref_ticker, varname in [(SPY_TICKER, "spy"), (QQQ_TICKER, "qqq")]:
         df_ref = (history_frames or {}).get(ref_ticker)
         if df_ref is not None and len(df_ref) >= 21:
@@ -349,7 +370,14 @@ def screen_universe(
             else:
                 qqq_ret_20d = ret
 
-    logger.info(f"Referencias: SPY 20d={spy_ret_20d:+.1%} | QQQ 20d={qqq_ret_20d:+.1%}")
+    def _fmt_ref(value: Optional[float]) -> str:
+        return f"{value:+.1%}" if value is not None else "n/d"
+
+    logger.info(
+        "Referencias: SPY 20d=%s | QQQ 20d=%s",
+        _fmt_ref(spy_ret_20d),
+        _fmt_ref(qqq_ret_20d),
+    )
 
     results = []
     passed  = 0
@@ -366,7 +394,13 @@ def screen_universe(
             results.append(m)
             logger.debug(f"Screener FAIL {ticker}: {m.fail_reason}")
             continue
-        m  = _compute_screener_metrics(ticker, df, spy_ret_20d, qqq_ret_20d)
+        m  = _compute_screener_metrics(
+            ticker,
+            df,
+            spy_ret_20d,
+            qqq_ret_20d,
+            asset_type=(asset_types or {}).get(ticker, "UNKNOWN"),
+        )
         results.append(m)
         if m.passes_screen:
             passed += 1
@@ -777,6 +811,28 @@ def _determine_trade_type(
     return TradeType.NEW_ENTRY
 
 
+def _apply_cash_constraint(
+    candidate: OpportunityCandidate,
+    available_cash_ars: float,
+) -> OpportunityCandidate:
+    if (
+        float(available_cash_ars or 0.0) < MIN_TRADE_ARS
+        and candidate.trade_type != TradeType.SWAP_CANDIDATE
+        and candidate.status in (
+            CandidateStatus.COMPRABLE_AHORA,
+            CandidateStatus.COMPRA_HABILITADA,
+        )
+    ):
+        candidate.status = CandidateStatus.VIGILANCIA_A
+        candidate.action_concreta = "Esperar funding o evaluar swap"
+        cash_reason = "sin cash ejecutable; requiere funding o swap"
+        candidate.why_not_now = (
+            f"{candidate.why_not_now}; {cash_reason}"
+            if candidate.why_not_now else cash_reason
+        )
+    return candidate
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CAPA 4 — ENTRY ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -787,8 +843,10 @@ def _build_entry_reasons(
 ) -> list[str]:
     reasons = []
     m = screener
-    if m.rs_vs_spy_20d > 0.05:
-        reasons.append(f"RS fuerte vs SPY ({m.rs_vs_spy_20d:+.1%} en 20d)")
+    if m.rs_benchmark_ticker and m.rs_vs_spy_20d > 0.05:
+        reasons.append(
+            f"RS fuerte vs {m.rs_benchmark_ticker} ({m.rs_vs_spy_20d:+.1%} en 20d)"
+        )
     if m.momentum_60d > 0.10:
         reasons.append(f"Momentum de 60 días positivo ({m.momentum_60d:+.1%})")
     if m.above_sma200 and m.above_sma50:
@@ -818,8 +876,10 @@ def _build_invalidation(
         inv.append(f"Cierre por debajo de ${stop_price:.2f} (stop {c.asymmetry.stop_loss_pct:.0%})")
     if screener.above_sma50:
         inv.append("Pérdida de la SMA50 como soporte")
-    if screener.rs_vs_spy_20d > 0:
-        inv.append("Deterioro de la RS vs SPY por más de 2 semanas")
+    if screener.rs_benchmark_ticker and screener.rs_vs_spy_20d > 0:
+        inv.append(
+            f"Deterioro de la RS vs {screener.rs_benchmark_ticker} por más de 2 semanas"
+        )
     inv.append("VIX > 30 o SP500 en corrección > 10%")
     return inv[:4]
 
@@ -891,6 +951,8 @@ def run_opportunity_analysis(
     min_rr:              float = 0.0,
     exclude_portfolio:   bool = True,
     history_frames:      Optional[dict[str, "pd.DataFrame"]] = None,
+    asset_types:          Optional[dict[str, str]] = None,
+    available_cash_ars:  float = 0.0,
 ) -> OpportunityReport:
     from src.analysis.technical import analyze_portfolio_from_frames
     from src.analysis.macro import score_macro_for_ticker
@@ -921,12 +983,15 @@ def run_opportunity_analysis(
         macro_regime=macro_regime,
         vix_level=vix,
         gate_state=gate_state,
+        available_cash_ars=max(float(available_cash_ars or 0.0), 0.0),
     )
 
-    if history_frames is None:
-        screener_results = screen_universe(universe, period=period)
-    else:
-        screener_results = screen_universe(universe, period=period, history_frames=history_frames)
+    screen_kwargs = {"period": period}
+    if history_frames is not None:
+        screen_kwargs["history_frames"] = history_frames
+    if asset_types is not None:
+        screen_kwargs["asset_types"] = asset_types
+    screener_results = screen_universe(universe, **screen_kwargs)
 
     external_tickers = {
         metric.ticker
@@ -1106,6 +1171,8 @@ def run_opportunity_analysis(
             alerts               = alerts,
         )
 
+        cand = _apply_cash_constraint(cand, report.available_cash_ars)
+
         if asym.atr_pct > 0:
             cand.entry_zone_low  = round(screener_m.price * (1 - asym.atr_pct * 0.5), 2)
             cand.entry_zone_high = round(screener_m.price * (1 + asym.atr_pct * 0.3), 2)
@@ -1155,7 +1222,9 @@ def run_opportunity_analysis(
         return priority * 10 + base_score * edge_mult
 
     candidates.sort(key=_rank_key, reverse=True)
+    report.ranked_count = len(candidates)
     candidates = candidates[:max_candidates]
+    report.displayed_count = len(candidates)
 
     report.candidates        = candidates + external_candidates
     report.comprable_ahora   = [c for c in candidates if c.status == CandidateStatus.COMPRABLE_AHORA]
@@ -1278,12 +1347,22 @@ def render_opportunity_report(
     h.append("🔭 <b>RADAR DE OPORTUNIDADES</b>")
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} ART")
-    h.append(
+    funnel = (
         f"🔍 Universo: {report.universe_size} tickers → "
-        f"{report.screened_count} pasaron el screener"
+        f"{report.screened_count} pasaron screener"
     )
+    if report.ranked_count:
+        funnel += f" → {report.ranked_count} ideas rankeadas"
+        if report.displayed_count < report.ranked_count:
+            funnel += f" → top {report.displayed_count} mostradas"
+    elif report.screened_count:
+        funnel += " → 0 ideas rankeadas"
+    h.append(funnel)
     gate_icon = {"NORMAL": "✅", "CAUTIOUS": "⚠️", "BLOCKED": "🔴"}.get(report.gate_state, "⚪")
     h.append(f"{gate_icon} Gate: <b>{report.gate_state}</b>")
+    h.append(f"💵 Cash libre: <b>{_money(report.available_cash_ars)}</b>")
+    if report.available_cash_ars < MIN_TRADE_ARS:
+        h.append("   Sin cash ejecutable: nuevas entradas solo via funding o swap.")
     if report.vix_level:
         h.append(f"   VIX: {report.vix_level:.1f}")
     h.append("")

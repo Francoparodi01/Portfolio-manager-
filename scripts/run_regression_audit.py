@@ -33,8 +33,8 @@ Modos de auditoría:
         aunque el Execution Planner luego los bloquee.
 
     execution:
-        Evalúa órdenes aprobadas/ejecutables por el Execution Planner.
-        Esta es la auditoría más cercana a performance operativa real.
+        Evalúa fills reales confirmados contra el Execution Planner.
+        Esta es la auditoría operativa validada.
 
     blocked:
         Evalúa ideas bloqueadas por guards.
@@ -48,8 +48,7 @@ Targets:
         Usa outcome_Xd tal como está guardado.
 
     directional:
-        BUY  -> outcome_Xd
-        SELL -> -outcome_Xd
+        outcome_Xd canonico ya viene ajustado por direccion.
 
 Uso:
     python scripts/run_regression_audit.py --mode signal
@@ -139,7 +138,7 @@ async def main() -> None:
             "Tipo de auditoría. "
             "signal = score general; "
             "optimizer = ideas teóricas del optimizer; "
-            "execution = órdenes aprobadas/ejecutables; "
+            "execution = fills reales confirmados; "
             "blocked = ideas bloqueadas por guards; "
             "all = mezcla exploratoria. "
             "Default: optimizer"

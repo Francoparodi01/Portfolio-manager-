@@ -52,10 +52,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 try:
     from src.core.config import get_config
     from src.core.logger import get_logger
+    from src.core.portfolio_cache import get_cached_live_portfolio
     from src.collector.db import PortfolioDatabase
 except Exception:
     get_config = None
     get_logger = None
+    get_cached_live_portfolio = None
     PortfolioDatabase = None
 
 
@@ -204,6 +206,18 @@ def _is_market_hours_now() -> bool:
     now = datetime.now(tz=TZ)
     mins = now.hour * 60 + now.minute
     return 10 * 60 + 30 <= mins < 17 * 60
+
+
+def _freshness_badge(minutes: Optional[float], *, business_day: bool) -> tuple[str, str]:
+    if minutes is None:
+        return "⚪", ""
+    if not business_day and minutes <= 3 * 24 * 60:
+        return "📅", " <i>(esperable sin rueda)</i>"
+    if minutes <= 90:
+        return "🟢", ""
+    if minutes <= 360:
+        return "🟡", ""
+    return "🔴", ""
 
 
 def split_message(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> list[str]:
@@ -364,7 +378,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("💼 Portfolio",        callback_data="portfolio"),
-            InlineKeyboardButton("🧠 Análisis semanal", callback_data="weekly_analysis"),
+            InlineKeyboardButton("🧠 Plan de cartera", callback_data="weekly_analysis"),
         ],
         [
             InlineKeyboardButton("📅 Resumen semanal",  callback_data="weekly_summary"),
@@ -385,11 +399,11 @@ def menu_text() -> str:
         "🤖 <b>Cocos Copilot</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "💼 <b>Portfolio</b> — último snapshot de la cartera\n"
-        "🧠 <b>Análisis semanal</b> — plan de rotación completo\n"
+        "🧠 <b>Plan de cartera</b> — rotación y acciones sugeridas\n"
         "📅 <b>Resumen semanal</b> — performance de la semana\n"
-        "📊 <b>Performance</b> — win rate, EV y dataset operativo\n"
-        "📈 <b>Regression</b> — auditoría optimizer/execution/blocked\n"
-        "🔭 <b>Radar</b> — oportunidades del universo\n"
+        "📊 <b>Performance</b> — métricas canónicas y dataset operativo\n"
+        "📈 <b>Regression</b> — auditoría estadística\n"
+        "🔭 <b>Radar</b> — oportunidades operables del universo\n"
         "🩺 <b>Status</b> — estado del sistema y DB\n\n"
         "<b>Regresión:</b>\n"
         "• <code>/regression</code> → optimizer\n"
@@ -487,13 +501,17 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         return
 
     cfg = get_config()
-    db  = PortfolioDatabase(cfg.database.url)
+    snap = await get_cached_live_portfolio() if get_cached_live_portfolio else None
+    valuation_mode = str((snap or {}).get("valuation_mode", "snapshot"))
 
-    await db.connect()
-    try:
-        snap = await db.get_latest_snapshot()
-    finally:
-        await db.close()
+    if not snap:
+        db  = PortfolioDatabase(cfg.database.url)
+        await db.connect()
+        try:
+            snap = await db.get_latest_snapshot()
+        finally:
+            await db.close()
+        valuation_mode = "snapshot"
 
     if not snap:
         await send_text(
@@ -530,7 +548,11 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
     total_account = total_invested + cash
 
     # Timestamp
-    ts_raw       = snap.get("scraped_at") or snap.get("timestamp") or snap.get("created_at")
+    ts_raw       = (
+        snap.get("generated_at")
+        if valuation_mode == "live_market_prices"
+        else snap.get("scraped_at") or snap.get("timestamp") or snap.get("created_at")
+    )
     age_text, _  = _age_label(ts_raw)
     ts_exact     = _fmt_dt_art(ts_raw)
 
@@ -571,6 +593,9 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         f"💵 Cash disponible <b>{_money(cash)}</b>  ({_pct(cash_pct)})",
         f"📦 {len(positions)} posiciones  ·  {conc_icon} Concentración {conc_lbl}",
     ]
+
+    if valuation_mode == "live_market_prices":
+        lines.append("⚡ Valuación live estimada con market_prices.")
 
     if not positions:
         lines += [
@@ -653,20 +678,13 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
     text = re.sub(r"</?code>", "", text)
     text = text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
 
-    header_match = re.search(
-        r"🔍 Universo:\s*(.+?)\n✅ Gate:\s*(.+?)\n\s*VIX:\s*([0-9.]+)",
-        text,
-        re.DOTALL,
-    )
+    universe_match = re.search(r"^🔍 Universo:\s*(.+)$", text, re.MULTILINE)
+    gate_match = re.search(r"^(?:✅|⚠️|🔴|⚪)\s*Gate:\s*(.+)$", text, re.MULTILINE)
+    vix_match = re.search(r"^\s*VIX:\s*([0-9.]+)$", text, re.MULTILINE)
 
-    if header_match:
-        universe = header_match.group(1).strip()
-        gate = header_match.group(2).strip()
-        vix = header_match.group(3).strip()
-    else:
-        universe = "—"
-        gate = "—"
-        vix = "—"
+    universe = universe_match.group(1).strip() if universe_match else "—"
+    gate = gate_match.group(1).strip() if gate_match else "—"
+    vix = vix_match.group(1).strip() if vix_match else "—"
 
     # Detectar bloques por ticker: líneas tipo "━━ KKR ━━ ..."
     ticker_blocks = re.split(r"\n(?=━━\s+[A-Z0-9.-]+\s+━━)", text)
@@ -696,7 +714,7 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
 
         action_text = action.group(1).strip() if action else "—"
 
-        if compete:
+        if compete and "vs " not in action_text.lower():
             action_text += f" ({compete.group(1)})"
 
         items.append({
@@ -885,19 +903,12 @@ async def action_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Non
                 age_text, mins = _age_label(ts_raw)
                 ts_exact       = _fmt_dt_art(ts_raw)
 
-                if mins is None:
-                    snap_icon = "⚪"
-                elif mins <= 90:
-                    snap_icon = "🟢"
-                elif mins <= 360:
-                    snap_icon = "🟡"
-                else:
-                    snap_icon = "🔴"
+                snap_icon, snap_suffix = _freshness_badge(mins, business_day=business)
 
                 total = _to_float(snap.get("total_value_ars", 0))
                 n_pos = len(snap.get("positions") or [])
                 lines += [
-                    f"{snap_icon} Último snapshot: <b>{age_text}</b>",
+                    f"{snap_icon} Último snapshot: <b>{age_text}</b>{snap_suffix}",
                     f"   {ts_exact}",
                     f"   Portfolio: <b>{_money(total)}</b>  ·  {n_pos} posiciones",
                     "",
@@ -926,8 +937,11 @@ async def action_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Non
                         )
                         mkt_ts = row["latest_ts"] if row else None
                     age_text_mkt, mins_mkt = _age_label(mkt_ts)
-                    mkt_icon2 = "🟢" if (mins_mkt or 9999) <= 90 else ("🟡" if (mins_mkt or 9999) <= 360 else "🔴")
-                    lines.append(f"{mkt_icon2} Market data: <b>{age_text_mkt}</b>")
+                    mkt_icon2, mkt_suffix = _freshness_badge(
+                        mins_mkt,
+                        business_day=business,
+                    )
+                    lines.append(f"{mkt_icon2} Market data: <b>{age_text_mkt}</b>{mkt_suffix}")
                     lines.append(f"   {_fmt_dt_art(mkt_ts)}")
             finally:
                 await db.close()
@@ -1024,7 +1038,7 @@ CALLBACK_ALIASES: dict[str, str] = {
 
 ACTION_LOADING_TEXT: dict[str, str] = {
     "portfolio":     "💼 Leyendo último portfolio...",
-    "analysis":      "🧠 Generando análisis semanal...",
+    "analysis":      "🧠 Generando plan de cartera...",
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
     "radar":         "🔭 Generando radar de oportunidades...",

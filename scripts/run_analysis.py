@@ -64,6 +64,7 @@ from src.analysis.execution_planner import (
     build_signals_from_synthesis,
     build_positions_from_snapshot,
     ExecutionPlan,
+    MIN_TRADE_ARS,
 )
 from src.analysis.enums import DecisionType
 from src.analysis.validators import (
@@ -394,6 +395,23 @@ def _technical_source_label(result) -> str:
     return f"{mode} ({detail})"
 
 
+def _technical_source_summary(results) -> str:
+    counts: dict[str, int] = {}
+    for result in results or []:
+        mode = str(
+            getattr(result, "technical_candle_source_mode", "unknown") or "unknown"
+        )
+        counts[mode] = counts.get(mode, 0) + 1
+
+    if not counts:
+        return "sin datos"
+
+    return " | ".join(
+        f"{mode} {count}"
+        for mode, count in sorted(counts.items())
+    )
+
+
 def _component_reason(result) -> tuple[str, str]:
     tech = _layer_weighted(result, "technical")
     macro = _layer_weighted(result, "macro")
@@ -446,6 +464,84 @@ def _component_reason(result) -> tuple[str, str]:
         motivo = "sin ventaja clara"
 
     return lectura, motivo
+
+
+def _append_ic_section(h: list[str], ic_metrics: dict | None) -> None:
+    ic_data = ic_metrics or {}
+    if not ic_data.get("has_data"):
+        return
+
+    h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    h.append("<b>DIAGNÓSTICO DEL SISTEMA</b>")
+
+    by_h = ic_data.get("by_horizon", {}) or {}
+    ic_5d = None
+    ic_10d = None
+
+    for hz in ("5d", "10d", "20d"):
+        v = by_h.get(hz, {})
+        n_obs = int(v.get("n_obs", 0) or 0)
+        n_tk = int(v.get("n_tickers", 0) or 0)
+        ic = v.get("ic", None)
+        ric = v.get("rank_ic", None)
+
+        if ic is None or n_obs < 5:
+            continue
+
+        if hz == "5d":
+            ic_5d = ic
+        elif hz == "10d":
+            ic_10d = ic
+
+        q = v.get("quality", "NULO")
+        h.append(
+            f"{hz}: IC <code>{ic:+.3f}</code> | "
+            f"Rank IC <code>{(ric or 0.0):+.3f}</code> | "
+            f"n={n_obs} ({n_tk} tickers) | <b>{q}</b>"
+        )
+
+    ic_regime = _build_ic_text_regime(ic_5d=ic_5d, ic_10d=ic_10d)
+    h.append(
+        f"{ic_regime.icon} Régimen IC: <b>{ic_regime.label}</b> — "
+        f"{escape(ic_regime.note)}"
+    )
+    h.append("")
+
+
+def _result_map(results) -> dict[str, object]:
+    return {
+        str(getattr(result, "ticker", "")).upper(): result
+        for result in (results or [])
+        if str(getattr(result, "ticker", "") or "").strip()
+    }
+
+
+def _best_non_executable_candidate(plan, results):
+    if not plan:
+        return None, None
+
+    by_ticker = _result_map(results)
+    candidates = []
+
+    for order in getattr(plan, "blocked_orders", []) or []:
+        ticker = str(getattr(order, "ticker", "") or "").upper()
+        result = by_ticker.get(ticker)
+        score = (
+            float(
+                getattr(result, "final_score", getattr(result, "score", 0.0))
+                or 0.0
+            )
+            if result is not None
+            else 0.0
+        )
+        candidates.append((score, order, result))
+
+    if not candidates:
+        return None, None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, order, result = candidates[0]
+    return order, result
 
 
 def _current_weights(positions: list[dict], total_ars: float) -> dict[str, float]:
@@ -1312,77 +1408,28 @@ def render_report(
     gate = plan.gate if plan else "NORMAL"
     h = []
 
+    result_by_ticker = _result_map(results)
+
     # ── Header ────────────────────────────────────────────────────────────────
     h.append("🧠 <b>ANÁLISIS SEMANAL — SISTEMA CUANTITATIVO</b>")
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} ART")
-    h.append(f"💼 Portfolio: <b>{_money_ars(total_ars)}</b>")
+    h.append(
+        f"💼 Portfolio: <b>{_money_ars(total_ars)}</b> | "
+        f"Cash libre: <b>{_money_ars(cash_ars)}</b>"
+    )
     h.append("")
 
-    # ── RESUMEN EJECUTIVO ─────────────────────────────────────────────────────
-    h.append("<b>RESUMEN EJECUTIVO</b>")
+    # ── DECISIÓN DE HOY — desde ExecutionPlan, nunca desde optimizer ──────────
+    h.append("<b>DECISIÓN DE HOY</b>")
 
     if gate == "BLOCKED":
-        h.append("🔴 Sistema en modo bloqueado — solo se ejecutan stops urgentes.")
+        h.append("🔴 <b>NO OPERAR / DEFENSIVO</b>")
+        h.append("   Sistema bloqueado: solo se permitirían stops urgentes.")
     elif gate in ("CAUTIOUS", "DEFENSIVE"):
-        h.append("⚠️ Mercado en modo defensivo — VIX elevado o régimen risk-off.")
+        h.append("⚠️ Mercado en modo defensivo — priorizar reducción de riesgo.")
     else:
-        h.append("✅ Régimen operativo normal — sistema operando sin restricciones.")
-
-    if plan:
-        h.append(plan.summary)
-
-        for w in plan.warnings[:3]:
-            h.append(f"⚠️ {escape(w)}")
-    else:
-        h.append("Sin plan de ejecución disponible.")
-
-    h.append("")
-
-    # ── INFORMATION COEFFICIENT ────────────────────────────────────────────────
-    ic_data = ic_metrics or {}
-
-    if ic_data.get("has_data"):
-        h.append("<b>INFORMATION COEFFICIENT (IC)</b>")
-
-        by_h = ic_data.get("by_horizon", {}) or {}
-        ic_5d = None
-        ic_10d = None
-
-        for hz in ("5d", "10d", "20d"):
-            v = by_h.get(hz, {})
-            n_obs = int(v.get("n_obs", 0) or 0)
-            n_tk = int(v.get("n_tickers", 0) or 0)
-            ic = v.get("ic", None)
-            ric = v.get("rank_ic", None)
-
-            if ic is None or n_obs < 5:
-                continue
-
-            if hz == "5d":
-                ic_5d = ic
-            elif hz == "10d":
-                ic_10d = ic
-
-            q = v.get("quality", "NULO")
-
-            h.append(
-                f"{hz}: IC <code>{ic:+.3f}</code> | "
-                f"Rank IC <code>{(ric or 0.0):+.3f}</code> | "
-                f"n={n_obs} ({n_tk} tickers) | <b>{q}</b>"
-            )
-
-        ic_regime = _build_ic_text_regime(ic_5d=ic_5d, ic_10d=ic_10d)
-
-        h.append("IC > 0 indica poder predictivo direccional.")
-        h.append(
-            f"{ic_regime.icon} Régimen IC: <b>{ic_regime.label}</b> — "
-            f"{escape(ic_regime.note)}"
-        )
-        h.append("")
-
-    # ── ACCIÓN PRINCIPAL — desde plan.main_action, NUNCA del optimizer ────────
-    h.append("<b>ACCIÓN PRINCIPAL</b>")
+        h.append("✅ Régimen operativo normal.")
 
     if plan and plan.main_action:
         main_order = plan.main_action
@@ -1394,15 +1441,29 @@ def render_report(
             f"{icon} <b>{verb} {main_order.ticker} "
             f"({_money_ars(main_order.amount_ars)}){partial_tag}</b>"
         )
-        h.append(f"   {escape(main_order.reason)}")
 
         d = next((x for x in plan.decisions if x.ticker == main_order.ticker), None)
+        result = result_by_ticker.get(main_order.ticker)
 
         if d:
             h.append(
-                f"   Peso actual: <b>{_pct(d.current_weight)}</b> → "
-                f"objetivo: <b>{_pct(d.target_weight)}</b>"
+                f"   Recomendación: "
+                f"{'reducir' if main_order.side.value == 'SELL' else 'aumentar'} "
+                f"exposición de <b>{_pct(d.current_weight)}</b> a "
+                f"<b>{_pct(d.target_weight)}</b>."
             )
+
+        if result is not None:
+            tech = _layer_weighted(result, "technical")
+            macro = _layer_weighted(result, "macro")
+            sent = _layer_weighted(result, "sentiment")
+            score = float(
+                getattr(result, "final_score", getattr(result, "score", 0.0))
+                or 0.0
+            )
+            h.append(f"   {_render_signal_line(score, tech, macro, sent)}")
+
+        h.append(f"   Motivo: {escape(main_order.reason)}")
 
         if main_order.partial and main_order.theoretical_ars > main_order.amount_ars:
             h.append(
@@ -1411,31 +1472,69 @@ def render_report(
                 f"(completar cuando haya más funding)"
             )
     else:
-        h.append("🟡 <b>SIN ACCIÓN ACTIVA</b>")
+        h.append("🟡 <b>MANTENER / NO COMPRAR HOY</b>")
         h.append("   No hay órdenes ejecutables en este momento.")
+
+        blocked_order, blocked_result = _best_non_executable_candidate(plan, results)
+        if blocked_order is not None and blocked_result is not None:
+            score = float(
+                getattr(
+                    blocked_result,
+                    "final_score",
+                    getattr(blocked_result, "score", 0.0),
+                )
+                or 0.0
+            )
+            d = next(
+                (
+                    item
+                    for item in (getattr(plan, "decisions", []) or [])
+                    if item.ticker == blocked_order.ticker
+                ),
+                None,
+            )
+            weight_text = (
+                f" | peso {_pct(d.current_weight)} → {_pct(d.target_weight)}"
+                if d is not None
+                else ""
+            )
+            h.append(
+                f"   Mejor señal interna: <b>{blocked_order.ticker}</b> — "
+                f"score <code>{score:+.3f}</code> | "
+                f"<b>{_classify_signal_label(score)}</b>{weight_text}"
+            )
+            h.append(f"   Motivo de no ejecución: {escape(blocked_order.reason)}")
+
+        if plan and plan.cash_after < MIN_TRADE_ARS:
+            h.append(
+                f"   Cash libre: <b>{_money_ars(plan.cash_after)}</b>; "
+                f"mínimo por orden: <b>{_money_ars(MIN_TRADE_ARS)}</b>."
+            )
+            h.append("   Próximo paso: esperar funding o evaluar swap financiado.")
+        elif plan and plan.pending_buys:
+            h.append("   Próximo paso: esperar funding o evaluar swap financiado.")
 
     h.append("")
 
-    # ── RESULTADO ESPERADO — del plan cash accounting ─────────────────────────
-    h.append("💵 <b>Resultado esperado</b>")
+    # ── EJECUCIÓN — cash accounting + órdenes ─────────────────────────────────
+    h.append("<b>EJECUCIÓN</b>")
 
     if plan:
-        h.append(f"   Ventas: <b>{_money_ars(plan.gross_sell_ars)}</b>")
-
-        if gate in ("CAUTIOUS", "BLOCKED") and plan.gross_sell_ars > 0:
-            h.append(
-                f"   Compras: <b>$0 ARS</b> "
-                f"(gate {gate} — solo reducciones activas)"
-            )
-        else:
-            h.append(f"   Compras: <b>{_money_ars(plan.gross_buy_ars)}</b>")
+        purchases = (
+            "$0 ARS"
+            if gate in ("CAUTIOUS", "BLOCKED") and plan.gross_sell_ars > 0
+            else _money_ars(plan.gross_buy_ars)
+        )
+        h.append(
+            f"   Ventas: <b>{_money_ars(plan.gross_sell_ars)}</b> | "
+            f"Compras: <b>{purchases}</b> | "
+            f"Cash post-plan: <b>{_money_ars(plan.cash_after)}</b>"
+        )
 
         total_fees = plan.fee_sell_ars + plan.fee_buy_ars
 
         if total_fees > 500:
             h.append(f"   Fees estimados: {_money_ars(total_fees)}")
-
-        h.append(f"   Cash luego del ajuste: <b>{_money_ars(plan.cash_after)}</b>")
 
         if plan.pending_buys:
             h.append(
@@ -1444,11 +1543,8 @@ def render_report(
     else:
         h.append(f"   Sin plan disponible — cash actual: {_money_ars(cash_ars)}")
 
-    h.append("")
-
-    # ── PLAN DE ROTACIÓN — SOLO sell_orders + buy_orders del plan ─────────────
     if plan and (plan.sell_orders or plan.buy_orders):
-        h.append("📋 <b>PLAN DE ROTACIÓN</b>")
+        h.append("   Plan operativo:")
 
         step = 1
 
@@ -1478,52 +1574,32 @@ def render_report(
         if plan.cash_after > 5_000:
             h.append(f"   → Cash remanente: {_money_ars(plan.cash_after)}")
 
-        if plan.blocked_orders:
-            h.append("")
-            h.append("   🚫 <b>Bloqueadas / WATCH por guardias:</b>")
+    elif plan and not plan.blocked_orders:
+        h.append("   Sin órdenes ejecutables hoy.")
 
-            for o in plan.blocked_orders[:3]:
-                action_name = o.action.value if hasattr(o.action, "value") else str(o.action)
-                icon = "🔵" if action_name == "WATCH" else "⛔"
+    elif plan and gate in ("CAUTIOUS", "BLOCKED") and plan.gross_sell_ars > 0:
+        h.append(
+            f"   Gate {gate} activo: los {_money_ars(plan.gross_sell_ars)} "
+            f"de ventas quedan en cash."
+        )
 
-                h.append(
-                    f"      {icon} {o.ticker}: {action_name} — "
-                    f"{_money_ars(o.theoretical_ars)} teórico — "
-                    f"{escape(o.reason)}"
-                )
-
-        h.append("")
-
-    elif plan and plan.blocked_orders:
-        h.append("📋 <b>PLAN DE ROTACIÓN</b>")
-        h.append("   Sin órdenes ejecutables.")
-
-        h.append("")
-        h.append("   🚫 <b>Bloqueadas / WATCH por guardias:</b>")
-
-        for o in plan.blocked_orders[:5]:
+    if plan and plan.blocked_orders:
+        h.append("   🚫 No ejecutables hoy:")
+        for o in plan.blocked_orders[:4]:
             action_name = o.action.value if hasattr(o.action, "value") else str(o.action)
             icon = "🔵" if action_name == "WATCH" else "⛔"
-
             h.append(
                 f"      {icon} {o.ticker}: {action_name} — "
                 f"{_money_ars(o.theoretical_ars)} teórico — "
                 f"{escape(o.reason)}"
             )
 
-        h.append("")
-
-    elif plan and gate in ("CAUTIOUS", "BLOCKED") and plan.gross_sell_ars > 0:
-        h.append("📋 <b>PLAN DE ROTACIÓN</b>")
-        h.append(
-            f"   Gate {gate} activo: los {_money_ars(plan.gross_sell_ars)} "
-            f"de ventas quedan en cash."
-        )
-        h.append("")
+    h.append("")
 
     # ── CARTERA ACTUAL — señal del activo + decisión de cartera separadas ─────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append("<b>CARTERA ACTUAL</b>")
+    h.append("<b>LECTURA DE CARTERA</b>")
+    h.append(f"Historia técnica: <b>{escape(_technical_source_summary(results))}</b>")
     h.append("")
 
     current_w = _current_weights(positions, total_ars)
@@ -1578,24 +1654,30 @@ def render_report(
 
                     break
 
-        h.append(f"{icon} <b>{ticker}</b> → <b>{action_str}</b>{ars_str}")
-
+        signal_label = _classify_signal_label(score)
         h.append(
-            f"   {_render_signal_line(score, tech, macro, sent)} | "
-            f"Peso: {_pct(cw)} → {_pct(tw)}"
+            f"{icon} <b>{ticker}</b> → <b>{action_str}</b>{ars_str} | "
+            f"score <code>{score:+.3f}</code> | <b>{signal_label}</b> | "
+            f"peso {_pct(cw)} → {_pct(tw)}"
         )
 
         if d and d.reason_secondary:
-            h.append(f"   {escape(d.reason_secondary)}.")
+            h.append(f"   Motivo: {escape(d.reason_secondary)}.")
         else:
-            h.append(f"   {escape(lectura)}.")
+            h.append(f"   Lectura: {escape(lectura)}.")
 
-        h.append(
-            f"   <code>técnico {tech:+.3f} | "
-            f"macro {macro:+.3f} | "
-            f"sentiment {sent:+.3f}</code>"
+        if action_str != DecisionType.HOLD.value:
+            h.append(
+                f"   Capas: <code>técnico {tech:+.3f} | "
+                f"macro {macro:+.3f} | "
+                f"sentiment {sent:+.3f}</code>"
+            )
+
+        source_mode = str(
+            getattr(r, "technical_candle_source_mode", "unknown") or "unknown"
         )
-        h.append(f"   Fuente técnica: <b>{escape(_technical_source_label(r))}</b>")
+        if source_mode != "official":
+            h.append(f"   Fuente técnica: <b>{escape(_technical_source_label(r))}</b>")
 
         h.append("")
 
@@ -1646,6 +1728,8 @@ def render_report(
 
     h.append(f"Gate actual: <b>{escape(gate)}</b>")
     h.append("")
+
+    _append_ic_section(h, ic_metrics)
 
     # ── OPTIMIZER — bloque INFORMATIVO ────────────────────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -1744,9 +1828,14 @@ def render_report(
         strong = [x for x in shown_radar if x["tier"] == 0]
         watch = [x for x in shown_radar if x["tier"] == 1]
         obs = [x for x in shown_radar if x["tier"] == 2]
+        available_for_new_entries = plan.cash_after if plan else cash_ars
 
         if strong:
-            h.append("🟢🟢 <b>Compras fuertes</b>")
+            if available_for_new_entries >= MIN_TRADE_ARS:
+                h.append("🟢🟢 <b>Compras fuertes</b>")
+            else:
+                h.append("🟢🟢 <b>Candidatos fuertes sin funding</b>")
+                h.append("   Sin cash libre: solo vía swap o venta financiadora.")
             for x in strong:
                 h.append(
                     f"   <b>{x['ticker']}</b>: score <code>{x['score']:+.3f}</code>"
@@ -1780,18 +1869,6 @@ def render_report(
 
     h.append("")
 
-    # ── VEREDICTO FINAL — derivado EXCLUSIVAMENTE del ExecutionPlan ───────────
-    h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append("<b>VEREDICTO FINAL</b>")
-
-    if plan:
-        h.append(plan.verdict())
-    elif gate == "BLOCKED":
-        h.append("Sistema bloqueado por gate de riesgo — solo stops de emergencia.")
-    else:
-        h.append("Sin plan de ejecución disponible — mantener y observar.")
-
-    h.append("")
     h.append("<i>Sistema cuantitativo multicapa — no es asesoramiento financiero</i>")
 
     return "\n".join(h)

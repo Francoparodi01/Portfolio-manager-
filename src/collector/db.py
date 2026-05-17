@@ -27,6 +27,8 @@ import uuid
 from typing import Optional
 from zoneinfo import ZoneInfo
 from src.analysis.decision_engine import directional_return
+from src.analysis.fill_reconciliation import ExecutionCandidate, choose_execution_candidate
+from src.collector.broker_fills import BrokerFill, serialize_raw_payload
 from src.collector.data.models import AssetType, Currency, MarketCandle
 
 try:
@@ -49,6 +51,10 @@ YFINANCE_BLACKLIST: set[str] = {
 }
 
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+CANONICAL_OUTCOME_BASIS = "canonical_cocos"
+LEGACY_EXTERNAL_OUTCOME_BASIS = "legacy_external"
+MIN_COMPATIBLE_PRICE_RATIO = 0.5
+MAX_COMPATIBLE_PRICE_RATIO = 2.0
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
@@ -559,6 +565,7 @@ class PortfolioDatabase:
                 WHERE decided_at >= $1
                   AND outcome_5d IS NOT NULL
                   AND was_correct IS NULL
+                  AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
                 """,
                 cutoff,
@@ -632,6 +639,7 @@ class PortfolioDatabase:
                 WHERE decided_at >= $1
                   AND outcome_5d IS NOT NULL
                   AND was_correct IS NOT NULL
+                  AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
                 ORDER BY decided_at ASC
                 """,
@@ -693,6 +701,196 @@ class PortfolioDatabase:
 
     async def get_pool(self):
         return self._pool
+
+    async def save_broker_fills(self, fills: list[BrokerFill]) -> int:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        if not fills:
+            return 0
+
+        rows = [
+            (
+                fill.source,
+                fill.external_fill_id,
+                fill.executed_at,
+                fill.ticker.upper(),
+                fill.side.upper(),
+                float(fill.quantity),
+                float(fill.avg_fill_price),
+                float(fill.gross_amount_ars)
+                if fill.gross_amount_ars is not None
+                else None,
+                float(fill.fees_ars) if fill.fees_ars is not None else None,
+                serialize_raw_payload(fill.raw_payload),
+            )
+            for fill in fills
+        ]
+
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO broker_fills (
+                    source,
+                    external_fill_id,
+                    executed_at,
+                    ticker,
+                    side,
+                    quantity,
+                    avg_fill_price,
+                    gross_amount_ars,
+                    fees_ars,
+                    raw_payload
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+                ON CONFLICT (source, external_fill_id) DO UPDATE SET
+                    executed_at      = EXCLUDED.executed_at,
+                    ticker           = EXCLUDED.ticker,
+                    side             = EXCLUDED.side,
+                    quantity         = EXCLUDED.quantity,
+                    avg_fill_price   = EXCLUDED.avg_fill_price,
+                    gross_amount_ars = EXCLUDED.gross_amount_ars,
+                    fees_ars         = EXCLUDED.fees_ars,
+                    raw_payload      = EXCLUDED.raw_payload
+                """,
+                rows,
+            )
+
+        logger.info("%s broker fills guardados", len(rows))
+        return len(rows)
+
+    async def reconcile_broker_fills(self, max_age_days: int = 3) -> int:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        async with self._pool.acquire() as conn:
+            fill_rows = await conn.fetch(
+                """
+                SELECT
+                    id,
+                    source,
+                    external_fill_id,
+                    executed_at,
+                    ticker,
+                    side,
+                    quantity,
+                    avg_fill_price,
+                    gross_amount_ars,
+                    fees_ars,
+                    raw_payload
+                FROM broker_fills
+                WHERE decision_log_id IS NULL
+                ORDER BY executed_at ASC, id ASC
+                """
+            )
+
+            candidate_rows = await conn.fetch(
+                """
+                SELECT
+                    id,
+                    ticker,
+                    decision,
+                    decided_at,
+                    status,
+                    theoretical_amount_ars
+                FROM decision_log
+                WHERE COALESCE(source, layers->>'source') = 'execution_plan'
+                  AND COALESCE(status, '') = 'APPROVED'
+                ORDER BY decided_at ASC, id ASC
+                """
+            )
+
+            candidates = [
+                ExecutionCandidate(
+                    id=int(row["id"]),
+                    ticker=str(row["ticker"]),
+                    decision=str(row["decision"]),
+                    decided_at=row["decided_at"],
+                    status=str(row["status"]),
+                    theoretical_amount_ars=(
+                        float(row["theoretical_amount_ars"])
+                        if row["theoretical_amount_ars"] is not None
+                        else None
+                    ),
+                )
+                for row in candidate_rows
+            ]
+
+            updated = 0
+            for row in fill_rows:
+                fill = BrokerFill(
+                    external_fill_id=str(row["external_fill_id"]),
+                    executed_at=row["executed_at"],
+                    ticker=str(row["ticker"]),
+                    side=str(row["side"]),
+                    quantity=float(row["quantity"]),
+                    avg_fill_price=float(row["avg_fill_price"]),
+                    gross_amount_ars=(
+                        float(row["gross_amount_ars"])
+                        if row["gross_amount_ars"] is not None
+                        else None
+                    ),
+                    fees_ars=(
+                        float(row["fees_ars"])
+                        if row["fees_ars"] is not None
+                        else None
+                    ),
+                    source=str(row["source"]),
+                    raw_payload=dict(row["raw_payload"] or {}),
+                )
+                candidate = choose_execution_candidate(
+                    fill,
+                    candidates,
+                    max_age=timedelta(days=max_age_days),
+                )
+                if candidate is None:
+                    continue
+
+                executed_amount = (
+                    fill.gross_amount_ars
+                    if fill.gross_amount_ars is not None
+                    else fill.quantity * fill.avg_fill_price
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE broker_fills
+                    SET decision_log_id = $2,
+                        reconciled_at = NOW()
+                    WHERE id = $1
+                    """,
+                    int(row["id"]),
+                    candidate.id,
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE decision_log
+                    SET status = 'EXECUTED',
+                        executed_amount_ars = $2,
+                        layers = COALESCE(layers, '{}'::jsonb) || $3::jsonb
+                    WHERE id = $1
+                    """,
+                    candidate.id,
+                    float(executed_amount),
+                    json.dumps(
+                        {
+                            "broker_fill": {
+                                "source": fill.source,
+                                "external_fill_id": fill.external_fill_id,
+                                "executed_at": fill.executed_at.isoformat(),
+                                "quantity": fill.quantity,
+                                "avg_fill_price": fill.avg_fill_price,
+                                "gross_amount_ars": executed_amount,
+                                "fees_ars": fill.fees_ars,
+                            }
+                        }
+                    ),
+                )
+                updated += 1
+                candidates = [item for item in candidates if item.id != candidate.id]
+
+        logger.info("broker fills reconciliados: %s", updated)
+        return updated
 
     # ── Decision Engine ───────────────────────────────────────────────────────
 
@@ -823,6 +1021,71 @@ class PortfolioDatabase:
             logger.error(f"save_trade_decision: {e}", exc_info=True)
             return None
 
+    async def _compute_directional_outcomes(
+        self,
+        *,
+        entry_price: float,
+        decided_at: datetime,
+        direction: str,
+        now: datetime,
+        candles: list[dict],
+    ) -> dict[str, float]:
+        outcomes: dict[str, float] = {}
+
+        for horizon, col in [
+            (5, "outcome_5d"),
+            (10, "outcome_10d"),
+            (20, "outcome_20d"),
+        ]:
+            target_date = decided_at + timedelta(days=horizon)
+            if target_date > now:
+                continue
+            eligible = [
+                candle for candle in candles
+                if candle["ts"] >= target_date
+            ]
+            if not eligible:
+                continue
+            price_at_horizon = float(eligible[0]["close_price"])
+            # CONVENTION: SELL returns are positive-up.
+            outcomes[col] = directional_return(
+                entry_price,
+                price_at_horizon,
+                direction,
+            )
+
+        return outcomes
+
+    def _assess_outcome_basis(
+        self,
+        *,
+        entry_price: float,
+        decided_at: datetime,
+        candles: list[dict],
+    ) -> tuple[str, Optional[float]]:
+        """
+        Decide whether decision_log and market_candles use the same price basis.
+
+        Current production candles are Cocos/BYMA prices. Some historical rows
+        were persisted with legacy external prices in another unit; those rows
+        stay traceable, but must not feed canonical metrics.
+        """
+        eligible = [
+            candle
+            for candle in candles
+            if candle["ts"] >= decided_at and candle.get("close_price") is not None
+        ]
+        if not eligible or entry_price <= 0:
+            return LEGACY_EXTERNAL_OUTCOME_BASIS, None
+
+        reference_price = float(eligible[0]["close_price"])
+        ratio = reference_price / float(entry_price)
+
+        if MIN_COMPATIBLE_PRICE_RATIO <= ratio <= MAX_COMPATIBLE_PRICE_RATIO:
+            return CANONICAL_OUTCOME_BASIS, ratio
+
+        return LEGACY_EXTERNAL_OUTCOME_BASIS, ratio
+
     async def update_outcomes(self, lookback_days: int = 30) -> int:
         """
         Busca decisiones sin outcome donde han pasado >=5 días y llena
@@ -845,6 +1108,9 @@ class PortfolioDatabase:
                     SELECT id, ticker, price_at_decision, decided_at, decision
                     FROM decision_log
                     WHERE outcome_5d IS NULL
+                      AND COALESCE(outcome_basis, '') <> 'legacy_external'
+                      AND price_at_decision IS NOT NULL
+                      AND price_at_decision > 0
                       AND decided_at <= $1
                       AND decided_at >= $2
                       AND decision != 'HOLD'
@@ -878,30 +1144,58 @@ class PortfolioDatabase:
 
                 candles = await self.get_market_candles(ticker, limit=260)
                 if not candles:
+                    async with self._pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            UPDATE decision_log SET
+                                outcome_basis       = $2,
+                                outcome_basis_ratio = NULL
+                            WHERE id = $1
+                            """,
+                            row["id"],
+                            LEGACY_EXTERNAL_OUTCOME_BASIS,
+                        )
+                    logger.warning(
+                        "update_outcomes SKIP %s id=%s: sin velas canonicas",
+                        ticker,
+                        row["id"],
+                    )
                     continue
 
-                outcomes = {}
-                for horizon, col in [
-                    (5,  "outcome_5d"),
-                    (10, "outcome_10d"),
-                    (20, "outcome_20d"),
-                ]:
-                    target_date = decided_at + timedelta(days=horizon)
-                    if target_date > now:
-                        continue
-                    eligible = [
-                        candle for candle in candles
-                        if candle["ts"] >= target_date
-                    ]
-                    if not eligible:
-                        continue
-                    price_at_horizon = float(eligible[0]["close_price"])
-                    # CONVENTION: SELL returns are positive-up.
-                    outcomes[col] = directional_return(
-                        entry_f,
-                        price_at_horizon,
-                        direction,
+                outcome_basis, basis_ratio = self._assess_outcome_basis(
+                    entry_price=entry_f,
+                    decided_at=decided_at,
+                    candles=candles,
+                )
+                if outcome_basis != CANONICAL_OUTCOME_BASIS:
+                    async with self._pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            UPDATE decision_log SET
+                                outcome_basis       = $2,
+                                outcome_basis_ratio = $3
+                            WHERE id = $1
+                            """,
+                            row["id"],
+                            outcome_basis,
+                            basis_ratio,
+                        )
+                    logger.warning(
+                        "update_outcomes SKIP %s id=%s: basis=%s ratio=%s",
+                        ticker,
+                        row["id"],
+                        outcome_basis,
+                        basis_ratio,
                     )
+                    continue
+
+                outcomes = await self._compute_directional_outcomes(
+                    entry_price=entry_f,
+                    decided_at=decided_at,
+                    direction=direction,
+                    now=now,
+                    candles=candles,
+                )
 
                 if not outcomes:
                     continue
@@ -918,7 +1212,9 @@ class PortfolioDatabase:
                                 outcome_10d       = COALESCE($3, outcome_10d),
                                 outcome_20d       = COALESCE($4, outcome_20d),
                                 was_correct       = COALESCE($5, was_correct),
-                                outcome_filled_at = NOW()
+                                outcome_filled_at = NOW(),
+                                outcome_basis       = $6,
+                                outcome_basis_ratio = $7
                             WHERE id = $1
                             """,
                             row["id"],
@@ -926,6 +1222,8 @@ class PortfolioDatabase:
                             outcomes.get("outcome_10d"),
                             outcomes.get("outcome_20d"),
                             was_correct,
+                            outcome_basis,
+                            basis_ratio,
                         )
                     updated += 1
                     logger.debug(f"outcome actualizado: {ticker} id={row['id']} {outcomes}")
@@ -938,6 +1236,158 @@ class PortfolioDatabase:
         except Exception as e:
             logger.error(f"update_outcomes: {e}", exc_info=True)
             return 0
+
+    async def recompute_outcomes(self, lookback_days: Optional[int] = None) -> int:
+        """
+        Recalcula outcomes ya persistidos desde la serie canónica de market_candles.
+
+        Se usa para migraciones de convención o backfills de historia. A diferencia
+        de update_outcomes(), sobrescribe valores existentes para dejar toda la
+        muestra bajo las mismas reglas actuales.
+        """
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        maturity_cutoff = datetime.now(timezone.utc) - timedelta(days=5)
+        lookback_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=lookback_days)
+            if lookback_days is not None
+            else datetime(1970, 1, 1, tzinfo=timezone.utc)
+        )
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, ticker, price_at_decision, decided_at, decision
+                FROM decision_log
+                WHERE decided_at <= $1
+                  AND decided_at >= $2
+                  AND decision IN ('BUY', 'SELL')
+                ORDER BY decided_at ASC
+                """,
+                maturity_cutoff,
+                lookback_cutoff,
+            )
+
+        if not rows:
+            logger.info("recompute_outcomes: sin decisiones elegibles")
+            return 0
+
+        updated = 0
+        now = datetime.now(timezone.utc)
+
+        for row in rows:
+            ticker = str(row["ticker"]).upper()
+            entry = row["price_at_decision"]
+            decided_at = row["decided_at"]
+            direction = str(row["decision"]).upper()
+
+            if not entry or float(entry) <= 0:
+                logger.debug(
+                    "recompute_outcomes SKIP %s id=%s: sin precio de entrada",
+                    ticker,
+                    row["id"],
+                )
+                continue
+
+            candles = await self.get_market_candles(ticker, limit=260)
+            if not candles:
+                async with self._pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE decision_log SET
+                            outcome_5d          = NULL,
+                            outcome_10d         = NULL,
+                            outcome_20d         = NULL,
+                            was_correct         = NULL,
+                            outcome_filled_at   = NULL,
+                            outcome_basis       = $2,
+                            outcome_basis_ratio = NULL
+                        WHERE id = $1
+                        """,
+                        row["id"],
+                        LEGACY_EXTERNAL_OUTCOME_BASIS,
+                    )
+                logger.warning(
+                    "recompute_outcomes CLEAR %s id=%s: sin velas canonicas",
+                    ticker,
+                    row["id"],
+                )
+                continue
+
+            outcome_basis, basis_ratio = self._assess_outcome_basis(
+                entry_price=float(entry),
+                decided_at=decided_at,
+                candles=candles,
+            )
+            if outcome_basis != CANONICAL_OUTCOME_BASIS:
+                async with self._pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE decision_log SET
+                            outcome_5d          = NULL,
+                            outcome_10d         = NULL,
+                            outcome_20d         = NULL,
+                            was_correct         = NULL,
+                            outcome_filled_at   = NULL,
+                            outcome_basis       = $2,
+                            outcome_basis_ratio = $3
+                        WHERE id = $1
+                        """,
+                        row["id"],
+                        outcome_basis,
+                        basis_ratio,
+                    )
+                logger.warning(
+                    "recompute_outcomes CLEAR %s id=%s: basis=%s ratio=%s",
+                    ticker,
+                    row["id"],
+                    outcome_basis,
+                    basis_ratio,
+                )
+                continue
+
+            outcomes = await self._compute_directional_outcomes(
+                entry_price=float(entry),
+                decided_at=decided_at,
+                direction=direction,
+                now=now,
+                candles=candles,
+            )
+            if not outcomes:
+                continue
+
+            primary = outcomes.get("outcome_5d", outcomes.get("outcome_10d"))
+            was_correct = primary > 0 if primary is not None else None
+
+            try:
+                async with self._pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE decision_log SET
+                            outcome_5d        = $2,
+                            outcome_10d       = $3,
+                            outcome_20d       = $4,
+                            was_correct       = $5,
+                            outcome_filled_at = NOW(),
+                            outcome_basis       = $6,
+                            outcome_basis_ratio = $7
+                        WHERE id = $1
+                        """,
+                        row["id"],
+                        outcomes.get("outcome_5d"),
+                        outcomes.get("outcome_10d"),
+                        outcomes.get("outcome_20d"),
+                        was_correct,
+                        outcome_basis,
+                        basis_ratio,
+                    )
+                updated += 1
+            except Exception as e:
+                logger.warning("recompute_outcomes write error %s: %s", ticker, e)
+
+        logger.info("recompute_outcomes: %s/%s decisiones recalculadas", updated, len(rows))
+        return updated
 
     async def get_performance_stats(self, lookback_days: int = 90) -> dict:
         """
@@ -966,6 +1416,7 @@ class PortfolioDatabase:
                 WHERE decided_at >= $1
                   AND outcome_5d IS NOT NULL
                   AND was_correct IS NOT NULL
+                  AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
                 ORDER BY decided_at ASC
                 """,
@@ -977,6 +1428,9 @@ class PortfolioDatabase:
                 SELECT COUNT(*)
                 FROM decision_log
                 WHERE outcome_5d IS NULL
+                  AND COALESCE(outcome_basis, '') <> 'legacy_external'
+                  AND price_at_decision IS NOT NULL
+                  AND price_at_decision > 0
                   AND decision IN ('BUY', 'SELL')
                   AND decided_at >= $1
                 """,
@@ -990,6 +1444,7 @@ class PortfolioDatabase:
                        size_pct, stop_loss_pct, target_pct, decision_type
                 FROM decision_log
                 WHERE decision IN ('BUY', 'SELL')
+                  AND COALESCE(outcome_basis, '') <> 'legacy_external'
                 ORDER BY decided_at DESC
                 LIMIT 8
                 """

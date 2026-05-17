@@ -207,7 +207,16 @@ Pipeline de auditoría:
 - actualiza outcomes elegibles;
 - resume dataset por `source`, `status` y `decision_type`;
 - calcula win rate, EV, retornos y curva de equity;
-- separa `EV histórico agregado` de evidencia de ejecución real.
+- separa `EV histórico agregado`, planes aprobados y fills reales confirmados.
+
+### `scripts/import_broker_fills.py`
+
+Pipeline manual de reconciliación:
+
+- importa fills reales confirmados desde CSV;
+- persiste `broker_fills`;
+- busca una decisión `execution_plan / APPROVED` compatible;
+- la promociona a `EXECUTED` solo cuando existe evidencia externa real.
 
 ### `src/scheduler/runner.py`
 
@@ -314,6 +323,7 @@ Tablas principales:
 | `market_candles` | velas OHLCV oficiales Cocos + velas reconstruidas internas |
 | `raw_snapshots` | payloads crudos |
 | `decision_log` | decisiones, capas, outcomes y auditoría |
+| `broker_fills` | fills reales confirmados e importados para reconciliación |
 | `bot_users` | usuarios del bot |
 | `ml_decision_features` | stub de capa ML |
 | `ml_model_registry` | stub de capa ML |
@@ -323,6 +333,7 @@ Protecciones importantes:
 - claves únicas por snapshot/posición;
 - unicidad de velas por `(ts, long_ticker, interval)`;
 - unicidad de decisiones diarias equivalentes en `decision_log`;
+- unicidad de fills por `(source, external_fill_id)`;
 - DDL concentrado en `init.sql`.
 
 ## Módulos
@@ -332,6 +343,7 @@ scripts/
   run_analysis.py
   run_opportunity.py
   run_performance.py
+  import_broker_fills.py
   run_once.py
   weekly_summary.py
   update_outcomes.py

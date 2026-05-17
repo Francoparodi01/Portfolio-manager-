@@ -171,6 +171,11 @@ CREATE TABLE IF NOT EXISTS decision_log (
     outcome_20d       FLOAT,
     outcome_filled_at TIMESTAMPTZ,
     was_correct       BOOLEAN,
+    -- Outcome basis:
+    --   canonical_cocos = comparable with the canonical market_candles series
+    --   legacy_external = legacy row stored in another price basis
+    outcome_basis       TEXT,
+    outcome_basis_ratio FLOAT,
 
     -- Sizing y riesgo básico
     size_pct          FLOAT,
@@ -211,7 +216,39 @@ CREATE TABLE IF NOT EXISTS decision_log (
     close_price       FLOAT,        -- precio de cierre efectivo
 
     -- Origen de la decisión
-    source            TEXT          -- 'signal' | 'optimizer'
+    source            TEXT,         -- 'signal' | 'optimizer' | 'execution_plan'
+
+    -- Auditoría operativa: planner vs ejecución real
+    status                 TEXT,    -- THEORETICAL | APPROVED | BLOCKED | EXECUTED | SKIPPED
+    block_reason           TEXT,
+    theoretical_amount_ars FLOAT,
+    executed_amount_ars    FLOAT,
+    current_weight         FLOAT,
+    target_weight          FLOAT,
+    delta_weight           FLOAT,
+    is_executable          BOOLEAN,
+    was_blocked            BOOLEAN
+);
+
+-- ── broker_fills ──────────────────────────────────────────────────────────────
+-- Fills reales confirmados por broker. Hoy entran por import manual; la tabla
+-- queda lista para una fuente automática futura si aparece una API confiable.
+CREATE TABLE IF NOT EXISTS broker_fills (
+    id               BIGSERIAL     PRIMARY KEY,
+    source           TEXT          NOT NULL DEFAULT 'manual_import',
+    external_fill_id TEXT          NOT NULL,
+    executed_at      TIMESTAMPTZ   NOT NULL,
+    ticker           TEXT          NOT NULL,
+    side             TEXT          NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    quantity         NUMERIC(20,8) NOT NULL,
+    avg_fill_price   NUMERIC(20,4) NOT NULL,
+    gross_amount_ars NUMERIC(20,4),
+    fees_ars         NUMERIC(20,4),
+    raw_payload      JSONB,
+    decision_log_id  BIGINT REFERENCES decision_log(id) ON DELETE SET NULL,
+    reconciled_at    TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source, external_fill_id)
 );
 
 -- FEATURE: ML - feature store experimental para entrenamiento e inferencia.
@@ -316,6 +353,17 @@ ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_reason       TEXT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS closed_at         TIMESTAMPTZ;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS close_price       FLOAT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS source            TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS status                 TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS block_reason           TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS theoretical_amount_ars FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executed_amount_ars    FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS current_weight         FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS target_weight          FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS delta_weight           FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS is_executable          BOOLEAN;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS was_blocked            BOOLEAN;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis          TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis_ratio    FLOAT;
 
 UPDATE decision_log
 SET decision_type = CASE
@@ -370,17 +418,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_log_unique_daily_action
 -- Índice para queries de performance (solo cerrados)
 CREATE INDEX IF NOT EXISTS idx_decision_log_outcome
     ON decision_log(decided_at DESC)
-    WHERE outcome_5d IS NOT NULL;
+    WHERE outcome_5d IS NOT NULL
+      AND outcome_basis = 'canonical_cocos';
 
 -- Índice para update_outcomes (pendientes)
 CREATE INDEX IF NOT EXISTS idx_decision_log_pending
     ON decision_log(decided_at)
-    WHERE outcome_5d IS NULL;
+    WHERE outcome_5d IS NULL
+      AND COALESCE(outcome_basis, '') <> 'legacy_external';
 
 -- Índice para check_stop_activations (trades abiertos con stop definido)
 CREATE INDEX IF NOT EXISTS idx_decision_log_stops
     ON decision_log(decision, stop_loss_price, outcome_5d)
     WHERE stop_loss_price IS NOT NULL AND outcome_5d IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_broker_fills_executed_at
+    ON broker_fills(executed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_broker_fills_ticker_side
+    ON broker_fills(ticker, side, executed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_broker_fills_decision_log_id
+    ON broker_fills(decision_log_id);
 
 -- ── Migration para bases existentes ───────────────────────────────────────────
 -- Si la tabla decision_log ya existe sin las columnas nuevas, agregar:
@@ -404,6 +463,17 @@ ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS exit_reason       TEXT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS closed_at         TIMESTAMPTZ;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS close_price       FLOAT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS source            TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS status                 TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS block_reason           TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS theoretical_amount_ars FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executed_amount_ars    FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS current_weight         FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS target_weight          FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS delta_weight           FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS is_executable          BOOLEAN;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS was_blocked            BOOLEAN;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis          TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis_ratio    FLOAT;
 
 -- Rellenar decision_type para filas legacy
 UPDATE decision_log

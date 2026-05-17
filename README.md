@@ -22,7 +22,7 @@ El sistema ya puede:
 - convertir esos targets en `BUY`, `SELL`, `HOLD`, `WATCH` o bloqueos mediante el Execution Planner;
 - ejecutar un radar externo de oportunidades;
 - clasificar como `EXTERNO` cualquier ticker sin velas Cocos suficientes;
-- registrar decisiones y calcular outcomes, IC, EV, win rate y curva de equity;
+- registrar decisiones, reconciliar fills reales importados y calcular outcomes, IC, EV, win rate y curva de equity;
 - operar por CLI o Telegram;
 - mantener portfolio, mercado y outcomes con scheduler.
 
@@ -181,13 +181,12 @@ Las decisiones guardadas en `decision_log` se auditan con:
 El reporte de performance distingue explícitamente:
 
 - **EV histórico agregado**: evidencia acumulada del modelo;
-- **Execution Audit**: evidencia de órdenes realmente aprobadas o ejecutadas.
+- **Execution Audit**: evidencia de fills reales confirmados; los planes aprobados quedan separados.
 
 ## Limitaciones actuales
 
 - No ejecuta órdenes automáticamente.
-- No valida fills reales del broker.
-- El histórico Cocos todavía necesita un job incremental automático diario.
+- Valida fills reales solo cuando se importan y reconcilian; la captura automática desde Cocos queda pendiente de una fuente estable.
 - El camino operativo ya es canónico: sin historia suficiente en `market_candles`, no se reabre un fallback silencioso a otra fuente.
 - El dataset de ejecución real todavía está madurando.
 - `C.I.` se conserva como `EXTERNO`: la ruta de Cocos no entrega velas utilizables.

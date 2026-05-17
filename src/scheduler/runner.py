@@ -30,6 +30,7 @@ Coordinación de scraper:
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import time
 from dataclasses import dataclass
@@ -45,10 +46,21 @@ except ImportError:
 
 from src.core.config import get_config
 from src.core.logger import get_logger
+from src.core.portfolio_cache import (
+    cache_live_portfolio,
+    cache_portfolio_snapshot,
+    get_cached_portfolio_snapshot,
+)
 from src.core.redis_client import client as redis_client
 from src.collector.cocos_scraper import CocosCapitalScraper
 from src.collector.cocos_history import candles_to_frame
 from src.collector.db import PortfolioDatabase
+from src.collector.live_portfolio import (
+    PortfolioMoveAlert,
+    build_live_portfolio,
+    render_live_portfolio_alert,
+    select_portfolio_move_alerts,
+)
 from src.collector.notifier import TelegramNotifier
 
 logger = get_logger(__name__)
@@ -65,8 +77,14 @@ MARKET_CLOSE_H, MARKET_CLOSE_M = 17, 0
 
 MARKET_POLL_SECONDS = 90       # frecuencia del loop de mercado
 RISK_POLL_SECONDS = 60         # frecuencia del risk guard
-PORTFOLIO_REFRESH_SECONDS = 180          # en rueda: cada 3 min, dentro del loop de mercado
-PORTFOLIO_OFFHOURS_REFRESH_SECONDS = 3600  # fuera de rueda / finde: cada 60 min # cada ~10 min, dentro del loop de mercado
+PORTFOLIO_REFRESH_SECONDS = int(os.getenv("PORTFOLIO_REFRESH_SECONDS", "300"))
+PORTFOLIO_OFFHOURS_REFRESH_SECONDS = 3600
+PORTFOLIO_CACHE_TTL_SECONDS = int(os.getenv("PORTFOLIO_CACHE_TTL_SECONDS", "600"))
+PORTFOLIO_LIVE_POLL_SECONDS = int(os.getenv("PORTFOLIO_LIVE_POLL_SECONDS", "60"))
+PORTFOLIO_ALERT_MAJOR_PCT = float(os.getenv("PORTFOLIO_ALERT_MAJOR_PCT", "0.03"))
+PORTFOLIO_ALERT_WEIGHTED_PCT = float(os.getenv("PORTFOLIO_ALERT_WEIGHTED_PCT", "0.02"))
+PORTFOLIO_ALERT_MIN_WEIGHT = float(os.getenv("PORTFOLIO_ALERT_MIN_WEIGHT", "0.10"))
+PORTFOLIO_ALERT_TTL_SECONDS = int(os.getenv("PORTFOLIO_ALERT_TTL_SECONDS", "86400"))
 
 WARNING_PCT = -0.04
 CRITICAL_PCT = -0.06
@@ -78,6 +96,7 @@ MARKET_HEARTBEAT_KEY = "cocos:monitor:market:last_tick"
 RISK_HEARTBEAT_KEY = "cocos:monitor:risk:last_check"
 MONITOR_STATE_KEY = "cocos:monitor:state"
 BOT_BUSY_KEY = "cocos:bot:busy"
+PORTFOLIO_ALERT_KEY_PREFIX = "cocos:portfolio:alert"
 
 # Lock en proceso: garantiza un único scraper activo a la vez.
 # Se crea la primera vez que se usa (dentro del event loop).
@@ -183,6 +202,13 @@ async def _is_bot_busy() -> bool:
     return bool(await _redis_get(BOT_BUSY_KEY))
 
 
+async def _cache_snapshot(snapshot) -> None:
+    await cache_portfolio_snapshot(
+        snapshot.to_dict(),
+        ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
+    )
+
+
 # ─── Jobs programados ──────────────────────────────────────────────────────────
 
 async def run_scrape(run_type: str = "SCHEDULED") -> dict:
@@ -217,6 +243,7 @@ async def run_scrape(run_type: str = "SCHEDULED") -> dict:
                 await scraper.login()
                 snapshot = await scraper.scrape_portfolio()
                 sid = await db.save_snapshot(snapshot)
+                await _cache_snapshot(snapshot)
 
             result.update(
                 success=True,
@@ -279,6 +306,7 @@ async def run_full(run_type: str = "FULL") -> dict:
 
                 snapshot = await scraper.scrape_portfolio()
                 await db.save_snapshot(snapshot)
+                await _cache_snapshot(snapshot)
 
                 acciones = await scraper.scrape_market("ACCIONES")
                 cedears = await scraper.scrape_market("CEDEARS")
@@ -453,6 +481,7 @@ class IntradayManager:
         )
         self._scraper_task: asyncio.Task | None = None
         self._risk_task: asyncio.Task | None = None
+        self._portfolio_live_task: asyncio.Task | None = None
         self._running = False
         self._last_alert_sent: dict[str, datetime] = {}
 
@@ -471,21 +500,32 @@ class IntradayManager:
         self._risk_task = asyncio.create_task(
             self._risk_guard_loop(), name="intraday_risk_guard"
         )
+        self._portfolio_live_task = asyncio.create_task(
+            self._portfolio_live_loop(), name="intraday_portfolio_live"
+        )
         await _set_monitor_state("running")
         logger.info("IntradayManager: loops intradía iniciados")
         try:
             self.notifier.send_raw(
                 "🟢 <b>Monitoreo intradía iniciado</b>\n"
-                "Mercado cada 90s · Portfolio cada 10min · Risk guard cada 60s."
+                "Mercado cada 90s · Portfolio cada 5min · Live cache cada 60s · Risk guard cada 60s."
             )
         except Exception as e:
             logger.warning("No se pudo notificar inicio de monitoreo: %s", e)
 
     async def stop(self) -> None:
         self._running = False
-        tasks = [t for t in (self._scraper_task, self._risk_task) if t is not None]
+        tasks = [
+            t for t in (
+                self._scraper_task,
+                self._risk_task,
+                self._portfolio_live_task,
+            )
+            if t is not None
+        ]
         self._scraper_task = None
         self._risk_task = None
+        self._portfolio_live_task = None
 
         for t in tasks:
             t.cancel()
@@ -572,6 +612,7 @@ class IntradayManager:
                             if should_refresh_portfolio:
                                 snapshot = await scraper.scrape_portfolio()
                                 await db.save_snapshot(snapshot)
+                                await _cache_snapshot(snapshot)
                                 last_portfolio_ts = time.monotonic()
                                 logger.info(
                                     "Scraper loop: portfolio guardado · %d posiciones · conf %.2f",
@@ -651,6 +692,86 @@ class IntradayManager:
                     pass
 
             await asyncio.sleep(RISK_POLL_SECONDS)
+
+    async def _portfolio_live_loop(self) -> None:
+        """
+        Recalcula una valuacion live del portfolio con market_prices.
+        No usa Playwright: posiciones/cash salen del ultimo snapshot real cacheado.
+        """
+        while self._running:
+            if not _is_market_window():
+                await asyncio.sleep(30)
+                continue
+
+            db = PortfolioDatabase(self.cfg.database.url)
+            try:
+                await db.connect()
+                snapshot = await get_cached_portfolio_snapshot()
+                if snapshot is None:
+                    snapshot = await db.get_latest_snapshot()
+                    if snapshot:
+                        await cache_portfolio_snapshot(
+                            snapshot,
+                            ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
+                        )
+
+                if not snapshot:
+                    logger.info("Portfolio live: sin snapshot disponible")
+                    await asyncio.sleep(PORTFOLIO_LIVE_POLL_SECONDS)
+                    continue
+
+                latest_prices = await db.get_latest_market_prices()
+                live_portfolio = build_live_portfolio(snapshot, latest_prices)
+                await cache_live_portfolio(
+                    live_portfolio,
+                    ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
+                )
+
+                alerts = select_portfolio_move_alerts(
+                    live_portfolio,
+                    major_abs_pct=PORTFOLIO_ALERT_MAJOR_PCT,
+                    weighted_abs_pct=PORTFOLIO_ALERT_WEIGHTED_PCT,
+                    min_weight=PORTFOLIO_ALERT_MIN_WEIGHT,
+                )
+                unseen_alerts = [
+                    alert for alert in alerts
+                    if not await self._portfolio_alert_seen(alert)
+                ]
+
+                if unseen_alerts:
+                    if await _is_bot_busy():
+                        logger.info(
+                            "Portfolio live: bot busy, postergando %d alerta(s)",
+                            len(unseen_alerts),
+                        )
+                    else:
+                        sent = self.notifier.send_raw(
+                            render_live_portfolio_alert(unseen_alerts, live_portfolio)
+                        )
+                        if sent:
+                            for alert in unseen_alerts:
+                                await self._mark_portfolio_alert(alert)
+                            logger.info(
+                                "Portfolio live: %d alerta(s) enviadas",
+                                len(unseen_alerts),
+                            )
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "Portfolio live loop error (reintentara en %ds): %s",
+                    PORTFOLIO_LIVE_POLL_SECONDS,
+                    exc,
+                    exc_info=True,
+                )
+            finally:
+                try:
+                    await db.close()
+                except Exception:
+                    pass
+
+            await asyncio.sleep(PORTFOLIO_LIVE_POLL_SECONDS)
 
     @staticmethod
     async def _resolve_pool(db: PortfolioDatabase):
@@ -779,6 +900,24 @@ class IntradayManager:
             )
         except Exception as e:
             logger.warning("No se pudo enviar alerta Telegram: %s", e)
+
+    async def _portfolio_alert_seen(self, alert: PortfolioMoveAlert) -> bool:
+        return bool(await _redis_get(self._portfolio_alert_key(alert)))
+
+    async def _mark_portfolio_alert(self, alert: PortfolioMoveAlert) -> None:
+        await _redis_set(
+            self._portfolio_alert_key(alert),
+            f"{alert.change_pct_1d:+.6f}",
+            ex=PORTFOLIO_ALERT_TTL_SECONDS,
+        )
+
+    @staticmethod
+    def _portfolio_alert_key(alert: PortfolioMoveAlert) -> str:
+        business_day = _now_art().strftime("%Y%m%d")
+        return (
+            f"{PORTFOLIO_ALERT_KEY_PREFIX}:{business_day}:"
+            f"{alert.ticker}:{alert.direction}:{alert.level}"
+        )
 
 
 # ─── Wrappers de start/stop para APScheduler ───────────────────────────────────
