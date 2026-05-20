@@ -1,0 +1,72 @@
+name: cocos_copilot_multiuser
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    container_name: cocos_mu_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: portfolio
+      POSTGRES_PASSWORD: portfolio_secret
+      POSTGRES_DB: portfolio
+    ports:
+      - "55432:5432"
+    volumes:
+      - multiuser_postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portfolio -d portfolio"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: cocos_mu_redis
+    restart: unless-stopped
+    ports:
+      - "56379:6379"
+    volumes:
+      - multiuser_redis_data:/data
+
+  scheduler:
+    build: .
+    container_name: cocos_mu_scheduler
+    restart: "no"
+    env_file:
+      - .env.multiuser.local
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
+      - multiuser_secrets_data:/app/secrets
+    command: ["python", "-m", "src.scheduler.runner"]
+    environment:
+      TZ: America/Argentina/Buenos_Aires
+
+  telegram_bot:
+    build: .
+    container_name: cocos_mu_telegram_bot
+    restart: "no"
+    env_file:
+      - .env.multiuser.local
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./logs:/app/logs
+      - multiuser_secrets_data:/app/secrets
+    command: ["python", "scripts/telegram_bot.py"]
+    environment:
+      TZ: America/Argentina/Buenos_Aires
+
+volumes:
+  multiuser_postgres_data:
+  multiuser_redis_data:
+  multiuser_secrets_data:

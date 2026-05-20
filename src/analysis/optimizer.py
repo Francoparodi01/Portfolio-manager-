@@ -284,13 +284,16 @@ def _apply_risk_gate_to_trades(
 def _fetch_returns(tickers: list[str], history_frames: Optional[dict[str, object]] = None):
     try:
         import pandas as pd
-        from src.analysis.technical import fetch_history
 
         data = {}
         for ticker in tickers:
             df = (history_frames or {}).get(ticker)
             if df is None:
-                df = fetch_history(ticker, period=HISTORY_PERIOD)
+                logger.warning(
+                    "Optimizer: %s sin historia Cocos canónica; excluido",
+                    ticker,
+                )
+                continue
             if df is None or "Close" not in df.columns:
                 continue
             prices = df["Close"].squeeze()

@@ -4,8 +4,7 @@ src/scheduler/runner.py
 Scheduler principal para Cocos Copilot.
 
 Qué hace:
-  - 10:30 ART → run_scrape("10:30_PORTFOLIO")
-  - 10:31 ART → inicia loops intradía
+  - 10:31 ART → scrape mercado + portfolio, envia apertura e inicia loops intradia
   - 17:00 ART → run_full("17:00_FULL")
   - 17:01 ART → detiene loops intradía
   - 21:30 ART → run_update_outcomes()
@@ -46,6 +45,7 @@ except ImportError:
 
 from src.core.config import get_config
 from src.core.logger import get_logger
+from src.core.market_calendar import is_trading_day, market_closed_reason
 from src.core.portfolio_cache import (
     cache_live_portfolio,
     cache_portfolio_snapshot,
@@ -59,6 +59,7 @@ from src.collector.live_portfolio import (
     PortfolioMoveAlert,
     build_live_portfolio,
     render_live_portfolio_alert,
+    render_opening_portfolio_report,
     select_portfolio_move_alerts,
 )
 from src.collector.notifier import TelegramNotifier
@@ -120,7 +121,7 @@ def _now_art() -> datetime:
 
 def _is_business_day(now: datetime | None = None) -> bool:
     now = now or _now_art()
-    return now.weekday() < 5  # 0=lunes, 6=domingo
+    return is_trading_day(now)
 
 
 def _is_market_hours(now: datetime | None = None) -> bool:
@@ -146,7 +147,7 @@ def _should_scrape_portfolio(now: datetime | None = None) -> bool:
 
 
 def _business_day_cron(hour: int, minute: int) -> CronTrigger:
-    """Cron automatico del scheduler: nunca dispara sabados ni domingos."""
+    """Cron automatico: dispara lunes-viernes; cada job filtra feriados."""
     return CronTrigger(
         day_of_week=BUSINESS_DAY_CRON,
         hour=hour,
@@ -287,6 +288,12 @@ async def run_full(run_type: str = "FULL") -> dict:
 
     logger.info("=== run_full [%s] iniciando ===", run_type)
     result: dict = {"success": False, "run_type": run_type}
+    now = _now_art()
+    if not _is_business_day(now):
+        reason = market_closed_reason(now) or "mercado cerrado"
+        logger.info("run_full [%s] omitido: %s", run_type, reason)
+        result.update(skipped="market_closed", reason=reason)
+        return result
 
     lock = _get_scraper_lock()
     if lock.locked():
@@ -359,8 +366,99 @@ async def run_full(run_type: str = "FULL") -> dict:
     return result
 
 
+async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO") -> dict:
+    """
+    Primera foto operativa de la rueda: mercado + portfolio + valuacion live.
+
+    El objetivo es enviar una devolucion clara de apertura usando el mismo
+    estandar de datos que el resto del sistema: precios desde market_prices y
+    posiciones/cash desde un snapshot real de Cocos.
+    """
+    now = _now_art()
+    if not _is_business_day(now):
+        reason = market_closed_reason(now) or "mercado cerrado"
+        logger.info("run_opening_portfolio_report [%s] omitido: %s", run_type, reason)
+        return {
+            "success": False,
+            "run_type": run_type,
+            "skipped": "market_closed",
+            "reason": reason,
+        }
+
+    cfg = get_config()
+    notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
+    db = PortfolioDatabase(cfg.database.url)
+    result: dict = {"success": False, "run_type": run_type}
+
+    logger.info("=== run_opening_portfolio_report [%s] iniciando ===", run_type)
+
+    lock = _get_scraper_lock()
+    if lock.locked():
+        logger.warning(
+            "run_opening_portfolio_report [%s]: scraper ocupado — abortando",
+            run_type,
+        )
+        result["aborted"] = "scraper_busy"
+        return result
+
+    async with lock:
+        await _redis_set(SCRAPER_LOCK_KEY, f"opening_portfolio:{run_type}", ex=300)
+        try:
+            await db.connect()
+            async with CocosCapitalScraper(cfg.scraper) as scraper:
+                await scraper.login()
+
+                acciones = await scraper.scrape_market("ACCIONES")
+                cedears = await scraper.scrape_market("CEDEARS")
+                if acciones or cedears:
+                    await db.save_market_prices(acciones + cedears)
+                    await _heartbeat(MARKET_HEARTBEAT_KEY)
+
+                snapshot = await scraper.scrape_portfolio()
+                await db.save_snapshot(snapshot)
+                snapshot_payload = snapshot.to_dict()
+                await _cache_snapshot(snapshot)
+
+            latest_prices = await db.get_latest_market_prices()
+            live_portfolio = build_live_portfolio(snapshot_payload, latest_prices)
+            await cache_live_portfolio(
+                live_portfolio,
+                ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
+            )
+
+            notifier.send_raw(render_opening_portfolio_report(live_portfolio))
+            result.update(
+                success=True,
+                positions=len(snapshot.positions),
+                acciones=len(acciones),
+                cedears=len(cedears),
+                price_coverage=live_portfolio.get("price_coverage_count", 0),
+            )
+            logger.info(
+                "opening portfolio ok: %d posiciones · cobertura %s/%s · %dA + %dC",
+                len(snapshot.positions),
+                live_portfolio.get("price_coverage_count", 0),
+                live_portfolio.get("positions_count", 0),
+                len(acciones),
+                len(cedears),
+            )
+        except Exception as e:
+            logger.error("run_opening_portfolio_report [%s] falló: %s", run_type, e, exc_info=True)
+            notifier.notify_critical_error(run_type, str(e))
+            result["error"] = str(e)
+        finally:
+            await _redis_delete(SCRAPER_LOCK_KEY)
+            await db.close()
+
+    return result
+
+
 async def run_update_outcomes() -> None:
     """Actualiza outcomes de decisiones pasadas. Solo DB, sin scraper."""
+    if not _is_business_day():
+        logger.info("update_outcomes omitido: %s", market_closed_reason() or "mercado cerrado")
+        return
+
     cfg = get_config()
     db = PortfolioDatabase(cfg.database.url)
     try:
@@ -400,6 +498,10 @@ async def _load_canonical_history_frames(
 
 async def run_build_daily_candles() -> None:
     """Reconstruye la vela diaria propia desde market_prices. Solo DB, sin scraper."""
+    if not _is_business_day():
+        logger.info("build_daily_candles omitido: %s", market_closed_reason() or "mercado cerrado")
+        return
+
     cfg = get_config()
     db = PortfolioDatabase(cfg.database.url)
     try:
@@ -417,6 +519,10 @@ async def run_build_daily_candles() -> None:
 
 async def run_verify_daily_candles() -> None:
     """Verifica cobertura diaria del pipeline market_prices -> internal_snapshot."""
+    if not _is_business_day():
+        logger.info("daily_candle_status omitido: %s", market_closed_reason() or "mercado cerrado")
+        return
+
     cfg = get_config()
     db = PortfolioDatabase(cfg.database.url)
     try:
@@ -937,6 +1043,18 @@ async def stop_intraday_loops() -> None:
 
 # ─── Scheduler principal ───────────────────────────────────────────────────────
 
+async def run_opening_portfolio_report_then_start_intraday() -> None:
+    """
+    Apertura coordinada: una sola sesion de scraping para mercado + portfolio,
+    y el loop intradia arranca apenas termina esa foto inicial.
+    """
+    result = await run_opening_portfolio_report("10:31_OPENING_PORTFOLIO")
+    if result.get("skipped") == "market_closed":
+        logger.info("Apertura intradia omitida: %s", result.get("reason"))
+        return
+    await start_intraday_loops()
+
+
 async def _scheduler_main() -> None:
     if not HAS_APSCHEDULER:
         raise ImportError("apscheduler no instalado: pip install apscheduler>=3.10")
@@ -944,19 +1062,10 @@ async def _scheduler_main() -> None:
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
     scheduler.add_job(
-        run_scrape,
-        _business_day_cron(hour=10, minute=30),
-        args=["10:30_PORTFOLIO"],
-        id="portfolio_morning",
-        name="Portfolio 10:30 ART",
-        misfire_grace_time=300,
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        start_intraday_loops,
+        run_opening_portfolio_report_then_start_intraday,
         _business_day_cron(hour=10, minute=31),
-        id="intraday_start",
-        name="Intraday start 10:31 ART",
+        id="opening_portfolio_report",
+        name="Opening portfolio + intraday 10:31 ART",
         misfire_grace_time=300,
         replace_existing=True,
     )
@@ -1004,7 +1113,7 @@ async def _scheduler_main() -> None:
 
     scheduler.start()
     logger.info(
-        "Scheduler activo — 10:30 scrape · 10:31 intraday on · 17:00 full · 17:01 intraday off · 21:30 outcomes"
+        "Scheduler activo — 10:31 apertura portfolio + intraday on · 17:00 full · 17:01 intraday off · 21:30 outcomes"
     )
 
     # Si arrancamos durante rueda, iniciar loops de inmediato

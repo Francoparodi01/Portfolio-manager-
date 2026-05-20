@@ -99,15 +99,40 @@ class TelegramMFA:
     Manda un mensaje pidiendo el código y hace polling hasta recibirlo.
     """
 
-    def __init__(self, bot_token: str, chat_id: str, timeout: int = 180):
+    def __init__(
+        self,
+        bot_token: str,
+        chat_id: str,
+        timeout: int = 180,
+        *,
+        send_enabled: bool = False,
+    ):
         self._token = bot_token
         self._chat_id = chat_id
         self._timeout = timeout
         self._base = f"https://api.telegram.org/bot{bot_token}"
+        self._send_enabled = send_enabled
 
     def send(self, message: str) -> bool:
-        logger.info("Telegram MFA silenciado: %s", message[:80].replace("\n", " "))
-        return True
+        if not self._send_enabled:
+            logger.info("Telegram MFA silenciado: %s", message[:80].replace("\n", " "))
+            return True
+        try:
+            response = requests.post(
+                f"{self._base}/sendMessage",
+                json={
+                    "chat_id": self._chat_id,
+                    "text": message,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            return True
+        except Exception as exc:
+            logger.warning("No pude enviar prompt MFA por Telegram: %s", exc)
+            return False
 
     async def wait_for_code(self) -> Optional[str]:
         """
@@ -193,6 +218,7 @@ class CocosCapitalScraper:
 
     def __init__(self, config: Optional[ScraperConfig] = None):
         self._cfg = config or get_config().scraper
+        self._session_file = Path(self._cfg.session_file)
         self._cache = ScraperCache(self._cfg.cache_ttl_seconds)
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
@@ -208,15 +234,16 @@ class CocosCapitalScraper:
                 self._cfg.telegram_bot_token,
                 self._cfg.telegram_chat_id,
                 self._cfg.telegram_mfa_timeout,
+                send_enabled=self._cfg.telegram_mfa_prompt_enabled,
             )
 
     async def __aenter__(self) -> "CocosCapitalScraper":
         await self._init_browser()
 
-        if Path(SESSION_FILE).exists():
+        if self._session_file.exists():
             logger.info("Cargando sesión Playwright guardada")
             self.context = await self._browser.new_context(
-                storage_state=SESSION_FILE
+                storage_state=str(self._session_file)
             )
         else:
             logger.info("No hay sesión guardada, creando contexto nuevo")
@@ -453,7 +480,8 @@ class CocosCapitalScraper:
 
             self._is_logged_in = True
             logger.info("Login con MFA confirmado")
-            await self.context.storage_state(path=SESSION_FILE)
+            self._session_file.parent.mkdir(parents=True, exist_ok=True)
+            await self.context.storage_state(path=str(self._session_file))
             logger.info("Sesion Playwright guardada")
             return True
 

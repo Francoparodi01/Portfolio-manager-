@@ -13,6 +13,12 @@ PORTFOLIO_SNAPSHOT_CACHE_KEY = "cocos:portfolio:snapshot"
 PORTFOLIO_LIVE_CACHE_KEY = "cocos:portfolio:live"
 
 
+def _portfolio_key(prefix: str, owner_chat_id: Optional[int] = None) -> str:
+    if owner_chat_id is None:
+        return prefix
+    return f"{prefix}:{int(owner_chat_id)}"
+
+
 async def _set_json(key: str, payload: dict, ttl_seconds: int) -> bool:
     try:
         await redis_client.set(key, json.dumps(payload, ensure_ascii=False), ex=ttl_seconds)
@@ -33,17 +39,41 @@ async def _get_json(key: str) -> Optional[dict]:
         return None
 
 
-async def cache_portfolio_snapshot(snapshot: dict, ttl_seconds: int = 600) -> bool:
-    return await _set_json(PORTFOLIO_SNAPSHOT_CACHE_KEY, snapshot, ttl_seconds)
+async def cache_portfolio_snapshot(
+    snapshot: dict,
+    ttl_seconds: int = 600,
+    *,
+    owner_chat_id: Optional[int] = None,
+) -> bool:
+    return await _set_json(
+        _portfolio_key(PORTFOLIO_SNAPSHOT_CACHE_KEY, owner_chat_id),
+        snapshot,
+        ttl_seconds,
+    )
 
 
-async def get_cached_portfolio_snapshot() -> Optional[dict]:
-    return await _get_json(PORTFOLIO_SNAPSHOT_CACHE_KEY)
+async def get_cached_portfolio_snapshot(
+    *,
+    owner_chat_id: Optional[int] = None,
+) -> Optional[dict]:
+    return await _get_json(_portfolio_key(PORTFOLIO_SNAPSHOT_CACHE_KEY, owner_chat_id))
 
 
-async def cache_live_portfolio(portfolio: dict, ttl_seconds: int = 600) -> bool:
-    return await _set_json(PORTFOLIO_LIVE_CACHE_KEY, portfolio, ttl_seconds)
+async def cache_live_portfolio(
+    portfolio: dict,
+    ttl_seconds: int = 600,
+    *,
+    owner_chat_id: Optional[int] = None,
+) -> bool:
+    return await _set_json(
+        _portfolio_key(PORTFOLIO_LIVE_CACHE_KEY, owner_chat_id),
+        portfolio,
+        ttl_seconds,
+    )
 
 
-async def get_cached_live_portfolio() -> Optional[dict]:
-    return await _get_json(PORTFOLIO_LIVE_CACHE_KEY)
+async def get_cached_live_portfolio(
+    *,
+    owner_chat_id: Optional[int] = None,
+) -> Optional[dict]:
+    return await _get_json(_portfolio_key(PORTFOLIO_LIVE_CACHE_KEY, owner_chat_id))

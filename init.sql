@@ -19,6 +19,7 @@ $$;
 -- ── portfolio_snapshots ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     snapshot_id      UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_chat_id    BIGINT,
     scraped_at       TIMESTAMPTZ NOT NULL,
     total_value_ars  NUMERIC(20,4),
     cash_ars         NUMERIC(20,4),
@@ -138,11 +139,19 @@ $$;
 
 -- ── bot_users ─────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS bot_users (
-    chat_id      BIGINT PRIMARY KEY,
-    cocos_user   TEXT,
-    cocos_pass   TEXT,
-    mfa_timeout  INTEGER NOT NULL DEFAULT 120,
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    chat_id                      BIGINT PRIMARY KEY,
+    telegram_username            TEXT,
+    display_name                 TEXT,
+    cocos_user                   TEXT, -- legacy plaintext column; do not use for new writes
+    cocos_pass                   TEXT, -- legacy plaintext column; do not use for new writes
+    cocos_user_ciphertext        TEXT,
+    cocos_pass_ciphertext        TEXT,
+    credentials_key_version      INTEGER NOT NULL DEFAULT 1,
+    credentials_last_verified_at TIMESTAMPTZ,
+    mfa_timeout                  INTEGER NOT NULL DEFAULT 120,
+    is_active                    BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ── decision_log ──────────────────────────────────────────────────────────────
@@ -150,6 +159,7 @@ CREATE TABLE IF NOT EXISTS bot_users (
 -- Columnas base + columnas trade_lifecycle agregadas de forma additive.
 CREATE TABLE IF NOT EXISTS decision_log (
     id                BIGSERIAL    PRIMARY KEY,
+    owner_chat_id     BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE,
     decided_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     decision_date     DATE         GENERATED ALWAYS AS ((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) STORED,
     ticker            TEXT         NOT NULL,
@@ -245,6 +255,7 @@ CREATE TABLE IF NOT EXISTS broker_fills (
     gross_amount_ars NUMERIC(20,4),
     fees_ars         NUMERIC(20,4),
     raw_payload      JSONB,
+    owner_chat_id    BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE,
     decision_log_id  BIGINT REFERENCES decision_log(id) ON DELETE SET NULL,
     reconciled_at    TIMESTAMPTZ,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -364,6 +375,17 @@ ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS is_executable          BOOLEAN
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS was_blocked            BOOLEAN;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis          TEXT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis_ratio    FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS owner_chat_id          BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS owner_chat_id   BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS telegram_username            TEXT;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS display_name                 TEXT;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS cocos_user_ciphertext        TEXT;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS cocos_pass_ciphertext        TEXT;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS credentials_key_version      INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS credentials_last_verified_at TIMESTAMPTZ;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS is_active                    BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE broker_fills ADD COLUMN IF NOT EXISTS owner_chat_id           BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
 
 UPDATE decision_log
 SET decision_type = CASE
@@ -394,6 +416,9 @@ WHERE id IN (
 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_scraped_at
     ON portfolio_snapshots(scraped_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_owner_scraped_at
+    ON portfolio_snapshots(owner_chat_id, scraped_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_positions_ticker
     ON positions(ticker, scraped_at DESC);
 
@@ -409,11 +434,15 @@ CREATE INDEX IF NOT EXISTS idx_raw_snapshots_scraped_at
 CREATE INDEX IF NOT EXISTS idx_decision_log_ticker
     ON decision_log(ticker);
 
+CREATE INDEX IF NOT EXISTS idx_decision_log_owner_decided_at
+    ON decision_log(owner_chat_id, decided_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_decision_log_decided_at
     ON decision_log(decided_at DESC);
 
+DROP INDEX IF EXISTS idx_decision_log_unique_daily_action;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_log_unique_daily_action
-    ON decision_log(ticker, decision_date, decision);
+    ON decision_log(COALESCE(owner_chat_id, 0), ticker, decision_date, decision);
 
 -- Índice para queries de performance (solo cerrados)
 CREATE INDEX IF NOT EXISTS idx_decision_log_outcome
@@ -440,6 +469,9 @@ CREATE INDEX IF NOT EXISTS idx_broker_fills_ticker_side
 
 CREATE INDEX IF NOT EXISTS idx_broker_fills_decision_log_id
     ON broker_fills(decision_log_id);
+
+CREATE INDEX IF NOT EXISTS idx_broker_fills_owner_executed_at
+    ON broker_fills(owner_chat_id, executed_at DESC);
 
 -- ── Migration para bases existentes ───────────────────────────────────────────
 -- Si la tabla decision_log ya existe sin las columnas nuevas, agregar:
@@ -474,6 +506,17 @@ ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS is_executable          BOOLEAN
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS was_blocked            BOOLEAN;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis          TEXT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis_ratio    FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS owner_chat_id          BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS owner_chat_id   BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS telegram_username            TEXT;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS display_name                 TEXT;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS cocos_user_ciphertext        TEXT;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS cocos_pass_ciphertext        TEXT;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS credentials_key_version      INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS credentials_last_verified_at TIMESTAMPTZ;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS is_active                    BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE broker_fills ADD COLUMN IF NOT EXISTS owner_chat_id           BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
 
 -- Rellenar decision_type para filas legacy
 UPDATE decision_log

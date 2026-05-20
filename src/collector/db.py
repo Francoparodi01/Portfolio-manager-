@@ -30,6 +30,7 @@ from src.analysis.decision_engine import directional_return
 from src.analysis.fill_reconciliation import ExecutionCandidate, choose_execution_candidate
 from src.collector.broker_fills import BrokerFill, serialize_raw_payload
 from src.collector.data.models import AssetType, Currency, MarketCandle
+from src.core.credentials import CredentialCipher, UserCredentials
 
 try:
     import asyncpg
@@ -38,17 +39,6 @@ except ImportError:
     HAS_ASYNCPG = False
 
 logger = logging.getLogger(__name__)
-
-# ── Tickers que yfinance no puede descargar con el símbolo de Cocos ───────────
-YFINANCE_BLACKLIST: set[str] = {
-    "BRKB",
-    "COME", "CRES",
-    "DESP",
-    "IRSA",
-    "PAMP", "TECO2", "TGSU2", "TXAR", "TXR",
-    "VALE3",
-    "YPFD",
-}
 
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 CANONICAL_OUTCOME_BASIS = "canonical_cocos"
@@ -97,6 +87,82 @@ class PortfolioDatabase:
 
         logger.info("Schema inicializado desde init.sql")
 
+    async def upsert_bot_user_credentials(
+        self,
+        *,
+        chat_id: int,
+        credentials: UserCredentials,
+        cipher: CredentialCipher,
+        telegram_username: Optional[str] = None,
+        display_name: Optional[str] = None,
+        mfa_timeout: int = 120,
+    ) -> None:
+        """Store only encrypted Cocos credentials for a Telegram user."""
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        encrypted_user, encrypted_pass = cipher.encrypt_credentials(credentials)
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO bot_users (
+                    chat_id,
+                    telegram_username,
+                    display_name,
+                    cocos_user_ciphertext,
+                    cocos_pass_ciphertext,
+                    mfa_timeout,
+                    updated_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,NOW())
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    telegram_username     = EXCLUDED.telegram_username,
+                    display_name          = EXCLUDED.display_name,
+                    cocos_user_ciphertext = EXCLUDED.cocos_user_ciphertext,
+                    cocos_pass_ciphertext = EXCLUDED.cocos_pass_ciphertext,
+                    mfa_timeout           = EXCLUDED.mfa_timeout,
+                    is_active             = TRUE,
+                    updated_at            = NOW()
+                """,
+                int(chat_id),
+                telegram_username,
+                display_name,
+                encrypted_user,
+                encrypted_pass,
+                int(mfa_timeout),
+            )
+
+    async def get_bot_user_credentials(
+        self,
+        *,
+        chat_id: int,
+        cipher: CredentialCipher,
+    ) -> Optional[UserCredentials]:
+        """Load and decrypt credentials; plaintext legacy columns are ignored."""
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT cocos_user_ciphertext, cocos_pass_ciphertext
+                FROM bot_users
+                WHERE chat_id = $1
+                  AND is_active = TRUE
+                """,
+                int(chat_id),
+            )
+
+        if not row:
+            return None
+        if not row["cocos_user_ciphertext"] or not row["cocos_pass_ciphertext"]:
+            return None
+
+        return cipher.decrypt_credentials(
+            row["cocos_user_ciphertext"],
+            row["cocos_pass_ciphertext"],
+        )
+
     # ── Snapshot ──────────────────────────────────────────────────────────────
 
     async def save_snapshot(self, snapshot) -> uuid.UUID:
@@ -107,13 +173,19 @@ class PortfolioDatabase:
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                asset_type_map = await self._market_asset_types_for_tickers(
+                    conn,
+                    [p.ticker for p in snapshot.positions],
+                )
+
                 await conn.execute(
                     """
                     INSERT INTO portfolio_snapshots
-                        (snapshot_id, scraped_at, total_value_ars, cash_ars,
+                        (snapshot_id, owner_chat_id, scraped_at, total_value_ars, cash_ars,
                          confidence_score, dom_hash, raw_html_hash)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                     ON CONFLICT (snapshot_id) DO UPDATE SET
+                        owner_chat_id    = EXCLUDED.owner_chat_id,
                         scraped_at       = EXCLUDED.scraped_at,
                         total_value_ars  = EXCLUDED.total_value_ars,
                         cash_ars         = EXCLUDED.cash_ars,
@@ -122,6 +194,7 @@ class PortfolioDatabase:
                         raw_html_hash    = EXCLUDED.raw_html_hash
                     """,
                     sid,
+                    snapshot.owner_chat_id,
                     snapshot.scraped_at,
                     float(snapshot.total_value_ars),
                     float(snapshot.cash_ars),
@@ -136,7 +209,7 @@ class PortfolioDatabase:
                             sid,
                             snapshot.scraped_at,
                             p.ticker,
-                            p.asset_type.value,
+                            asset_type_map.get(str(p.ticker).upper(), p.asset_type.value),
                             p.currency.value,
                             float(p.quantity),
                             float(p.avg_cost),
@@ -178,11 +251,50 @@ class PortfolioDatabase:
                     """,
                     sid,
                     snapshot.scraped_at,
-                    json.dumps(snapshot.to_dict()),
+                    json.dumps(
+                        self._snapshot_payload_with_asset_types(snapshot, asset_type_map)
+                    ),
                 )
 
         logger.info(f"Snapshot {sid} guardado ({len(snapshot.positions)} posiciones)")
         return sid
+
+    async def _market_asset_types_for_tickers(self, conn, tickers: list[str]) -> dict[str, str]:
+        normalized = sorted({
+            str(ticker or "").upper()
+            for ticker in tickers or []
+            if str(ticker or "").strip()
+        })
+        if not normalized:
+            return {}
+
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (ticker) ticker, asset_type
+            FROM market_prices
+            WHERE ticker = ANY($1::text[])
+            ORDER BY ticker, ts DESC
+            """,
+            normalized,
+        )
+        result: dict[str, str] = {}
+        for row in rows:
+            item = dict(row)
+            ticker = str(item.get("ticker", "") or "").upper()
+            asset_type = str(item.get("asset_type", "") or "").upper()
+            if ticker and asset_type:
+                result[ticker] = asset_type
+        return result
+
+    @staticmethod
+    def _snapshot_payload_with_asset_types(snapshot, asset_type_map: dict[str, str]) -> dict:
+        payload = snapshot.to_dict()
+        for position in payload.get("positions", []) or []:
+            ticker = str(position.get("ticker", "") or "").upper()
+            if ticker in asset_type_map:
+                position["asset_type"] = asset_type_map[ticker]
+                position["asset_type_source"] = "market_prices"
+        return payload
 
     async def save_market_prices(self, assets: list) -> int:
         if not assets or not self._pool:
@@ -401,13 +513,26 @@ class PortfolioDatabase:
 
     # ── Queries ───────────────────────────────────────────────────────────────
 
-    async def get_latest_snapshot(self) -> Optional[dict]:
+    async def get_latest_snapshot(self, owner_chat_id: Optional[int] = None) -> Optional[dict]:
         if not self._pool:
             return None
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT payload FROM raw_snapshots ORDER BY scraped_at DESC LIMIT 1"
-            )
+            if owner_chat_id is None:
+                row = await conn.fetchrow(
+                    "SELECT payload FROM raw_snapshots ORDER BY scraped_at DESC LIMIT 1"
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT r.payload
+                    FROM raw_snapshots r
+                    JOIN portfolio_snapshots p USING (snapshot_id)
+                    WHERE p.owner_chat_id = $1
+                    ORDER BY r.scraped_at DESC
+                    LIMIT 1
+                    """,
+                    owner_chat_id,
+                )
         return json.loads(row["payload"]) if row else None
 
     async def get_market_candles(
@@ -463,7 +588,11 @@ class PortfolioDatabase:
 
         return [dict(row) for row in reversed(rows)]
 
-    async def get_portfolio_history(self, limit: int = 60) -> list[dict]:
+    async def get_portfolio_history(
+        self,
+        limit: int = 60,
+        owner_chat_id: Optional[int] = None,
+    ) -> list[dict]:
         """
         Retorna snapshots recientes con posiciones incluidas, leídos desde raw_snapshots.
         Devuelve en orden cronológico ascendente (el más antiguo primero).
@@ -471,15 +600,29 @@ class PortfolioDatabase:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT payload
-                FROM raw_snapshots
-                ORDER BY scraped_at DESC
-                LIMIT $1
-                """,
-                limit,
-            )
+            if owner_chat_id is None:
+                rows = await conn.fetch(
+                    """
+                    SELECT payload
+                    FROM raw_snapshots
+                    ORDER BY scraped_at DESC
+                    LIMIT $1
+                    """,
+                    limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT r.payload
+                    FROM raw_snapshots r
+                    JOIN portfolio_snapshots p USING (snapshot_id)
+                    WHERE p.owner_chat_id = $1
+                    ORDER BY r.scraped_at DESC
+                    LIMIT $2
+                    """,
+                    owner_chat_id,
+                    limit,
+                )
         result = []
         for r in reversed(rows):
             try:
@@ -520,7 +663,6 @@ class PortfolioDatabase:
                 "asset_type": (row.get("asset_type") or "").upper(),
             }
             for row in prices
-            if row["ticker"].upper() not in YFINANCE_BLACKLIST
         ]
         logger.info(f"Universo Cocos tipado: {len(assets)} activos disponibles")
         return assets
@@ -548,7 +690,11 @@ class PortfolioDatabase:
 
     # ── Cierre de trades ──────────────────────────────────────────────────────
 
-    async def close_expired_trades(self, lookback_days: int = 30) -> int:
+    async def close_expired_trades(
+        self,
+        lookback_days: int = 30,
+        owner_chat_id: Optional[int] = None,
+    ) -> int:
         if not self._pool:
             return 0
 
@@ -563,12 +709,14 @@ class PortfolioDatabase:
                        was_correct
                 FROM decision_log
                 WHERE decided_at >= $1
+                  AND ($2::bigint IS NULL OR owner_chat_id = $2)
                   AND outcome_5d IS NOT NULL
                   AND was_correct IS NULL
                   AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
                 """,
                 cutoff,
+                owner_chat_id,
             )
 
         if not rows:
@@ -615,7 +763,11 @@ class PortfolioDatabase:
 
     # ── Equity curve ──────────────────────────────────────────────────────────
 
-    async def get_equity_curve(self, lookback_days: int = 90) -> list[dict]:
+    async def get_equity_curve(
+        self,
+        lookback_days: int = 90,
+        owner_chat_id: Optional[int] = None,
+    ) -> list[dict]:
         """
         Equity curve sobre trades cerrados (outcome_5d AND was_correct NOT NULL).
         Corrige signo de SELL: el trader gana cuando el precio baja.
@@ -637,6 +789,7 @@ class PortfolioDatabase:
                     was_correct
                 FROM decision_log
                 WHERE decided_at >= $1
+                  AND ($2::bigint IS NULL OR owner_chat_id = $2)
                   AND outcome_5d IS NOT NULL
                   AND was_correct IS NOT NULL
                   AND outcome_basis = 'canonical_cocos'
@@ -644,6 +797,7 @@ class PortfolioDatabase:
                 ORDER BY decided_at ASC
                 """,
                 cutoff,
+                owner_chat_id,
             )
 
         if not rows:
@@ -675,10 +829,23 @@ class PortfolioDatabase:
 
         return points
 
-    async def get_performance_stats_v2(self, lookback_days: int = 90) -> dict:
-        await self.close_expired_trades(lookback_days=lookback_days)
-        stats = await self.get_performance_stats(lookback_days=lookback_days)
-        curve = await self.get_equity_curve(lookback_days=lookback_days)
+    async def get_performance_stats_v2(
+        self,
+        lookback_days: int = 90,
+        owner_chat_id: Optional[int] = None,
+    ) -> dict:
+        await self.close_expired_trades(
+            lookback_days=lookback_days,
+            owner_chat_id=owner_chat_id,
+        )
+        stats = await self.get_performance_stats(
+            lookback_days=lookback_days,
+            owner_chat_id=owner_chat_id,
+        )
+        curve = await self.get_equity_curve(
+            lookback_days=lookback_days,
+            owner_chat_id=owner_chat_id,
+        )
         stats["equity_curve"] = curve
 
         if curve:
@@ -1086,7 +1253,11 @@ class PortfolioDatabase:
 
         return LEGACY_EXTERNAL_OUTCOME_BASIS, ratio
 
-    async def update_outcomes(self, lookback_days: int = 30) -> int:
+    async def update_outcomes(
+        self,
+        lookback_days: int = 30,
+        owner_chat_id: Optional[int] = None,
+    ) -> int:
         """
         Busca decisiones sin outcome donde han pasado >=5 días y llena
         outcome_5d / outcome_10d / outcome_20d / was_correct usando la serie
@@ -1103,23 +1274,44 @@ class PortfolioDatabase:
             lookback_cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
             async with self._pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """
-                    SELECT id, ticker, price_at_decision, decided_at, decision
-                    FROM decision_log
-                    WHERE outcome_5d IS NULL
-                      AND COALESCE(outcome_basis, '') <> 'legacy_external'
-                      AND price_at_decision IS NOT NULL
-                      AND price_at_decision > 0
-                      AND decided_at <= $1
-                      AND decided_at >= $2
-                      AND decision != 'HOLD'
-                    ORDER BY decided_at DESC
-                    LIMIT 200
-                    """,
-                    maturity_cutoff,
-                    lookback_cutoff,
-                )
+                if owner_chat_id is None:
+                    rows = await conn.fetch(
+                        """
+                        SELECT id, ticker, price_at_decision, decided_at, decision
+                        FROM decision_log
+                        WHERE outcome_5d IS NULL
+                          AND COALESCE(outcome_basis, '') <> 'legacy_external'
+                          AND price_at_decision IS NOT NULL
+                          AND price_at_decision > 0
+                          AND decided_at <= $1
+                          AND decided_at >= $2
+                          AND decision != 'HOLD'
+                        ORDER BY decided_at DESC
+                        LIMIT 200
+                        """,
+                        maturity_cutoff,
+                        lookback_cutoff,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        """
+                        SELECT id, ticker, price_at_decision, decided_at, decision
+                        FROM decision_log
+                        WHERE outcome_5d IS NULL
+                          AND owner_chat_id = $3
+                          AND COALESCE(outcome_basis, '') <> 'legacy_external'
+                          AND price_at_decision IS NOT NULL
+                          AND price_at_decision > 0
+                          AND decided_at <= $1
+                          AND decided_at >= $2
+                          AND decision != 'HOLD'
+                        ORDER BY decided_at DESC
+                        LIMIT 200
+                        """,
+                        maturity_cutoff,
+                        lookback_cutoff,
+                        owner_chat_id,
+                    )
 
             if not rows:
                 logger.info("update_outcomes: sin decisiones pendientes")
@@ -1389,7 +1581,11 @@ class PortfolioDatabase:
         logger.info("recompute_outcomes: %s/%s decisiones recalculadas", updated, len(rows))
         return updated
 
-    async def get_performance_stats(self, lookback_days: int = 90) -> dict:
+    async def get_performance_stats(
+        self,
+        lookback_days: int = 90,
+        owner_chat_id: Optional[int] = None,
+    ) -> dict:
         """
         Métricas de performance sobre trades CERRADOS.
 
@@ -1414,6 +1610,7 @@ class PortfolioDatabase:
                     was_correct, size_pct
                 FROM decision_log
                 WHERE decided_at >= $1
+                  AND ($2::bigint IS NULL OR owner_chat_id = $2)
                   AND outcome_5d IS NOT NULL
                   AND was_correct IS NOT NULL
                   AND outcome_basis = 'canonical_cocos'
@@ -1421,6 +1618,7 @@ class PortfolioDatabase:
                 ORDER BY decided_at ASC
                 """,
                 cutoff,
+                owner_chat_id,
             )
 
             pending_count = await conn.fetchval(
@@ -1428,6 +1626,7 @@ class PortfolioDatabase:
                 SELECT COUNT(*)
                 FROM decision_log
                 WHERE outcome_5d IS NULL
+                  AND ($2::bigint IS NULL OR owner_chat_id = $2)
                   AND COALESCE(outcome_basis, '') <> 'legacy_external'
                   AND price_at_decision IS NOT NULL
                   AND price_at_decision > 0
@@ -1435,6 +1634,7 @@ class PortfolioDatabase:
                   AND decided_at >= $1
                 """,
                 cutoff,
+                owner_chat_id,
             )
 
             recent_rows = await conn.fetch(
@@ -1444,10 +1644,12 @@ class PortfolioDatabase:
                        size_pct, stop_loss_pct, target_pct, decision_type
                 FROM decision_log
                 WHERE decision IN ('BUY', 'SELL')
+                  AND ($1::bigint IS NULL OR owner_chat_id = $1)
                   AND COALESCE(outcome_basis, '') <> 'legacy_external'
                 ORDER BY decided_at DESC
                 LIMIT 8
-                """
+                """,
+                owner_chat_id,
             )
 
         # ── Calcular retorno del trader con signo correcto ────────────────────

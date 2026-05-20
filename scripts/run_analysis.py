@@ -75,6 +75,11 @@ from src.analysis.validators import (
 )
 from src.analysis.risk_levels import compute_risk_levels
 from src.collector.cocos_history import candles_to_frame
+from src.collector.portfolio_quality import (
+    PRICE_STATUS_FRESH,
+    enrich_positions_with_market_metadata,
+    is_position_operable,
+)
 
 logger = get_logger(__name__)
 
@@ -583,7 +588,10 @@ def _extract_conviction(result) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _compute_information_coefficient(
-    cfg, tickers: list[str], lookback_days: int = 180
+    cfg,
+    tickers: list[str],
+    lookback_days: int = 180,
+    owner_chat_id: int | None = None,
 ) -> dict:
     db = PortfolioDatabase(cfg.database.url)
     cutoff = datetime.now() - timedelta(days=lookback_days)
@@ -605,18 +613,21 @@ async def _compute_information_coefficient(
                     FROM decision_log
                     WHERE decided_at >= $1
                       AND ticker = ANY($2::text[])
+                      AND ($3::bigint IS NULL OR owner_chat_id = $3)
                       AND decision != 'HOLD'
                     """,
-                    cutoff, ticker_filter,
+                    cutoff, ticker_filter, owner_chat_id,
                 )
             else:
                 rows = await conn.fetch(
                     """
                     SELECT ticker, final_score, outcome_5d, outcome_10d, outcome_20d
                     FROM decision_log
-                    WHERE decided_at >= $1 AND decision != 'HOLD'
+                    WHERE decided_at >= $1
+                      AND ($2::bigint IS NULL OR owner_chat_id = $2)
+                      AND decision != 'HOLD'
                     """,
-                    cutoff,
+                    cutoff, owner_chat_id,
                 )
 
         for hz in horizons:
@@ -766,6 +777,7 @@ async def _save_execution_plan_events(
     macro_snap,
     macro_regime,
     total_ars: float,
+    owner_chat_id: int | None = None,
 ) -> list[int]:
     """
     Guarda eventos del ExecutionPlan en decision_log.
@@ -953,14 +965,13 @@ async def _save_execution_plan_events(
             FROM decision_log
             WHERE ticker = $1
               AND decision = $2
-              AND COALESCE(source, layers->>'source') = 'execution_plan'
-              AND COALESCE(status, '') = $3
-              AND decided_at > NOW() - INTERVAL '20 hours'
+              AND decision_date = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+              AND COALESCE(owner_chat_id, 0) = COALESCE($3::bigint, 0)
             LIMIT 1
             """,
             ticker,
             decision,
-            status,
+            owner_chat_id,
         )
 
         if exists:
@@ -979,6 +990,7 @@ async def _save_execution_plan_events(
         row = await conn.fetchrow(
             """
             INSERT INTO decision_log (
+                owner_chat_id,
                 decided_at,
                 ticker,
                 decision,
@@ -1006,16 +1018,18 @@ async def _save_execution_plan_events(
                 was_blocked
             )
             VALUES (
-                $1, $2, $3, $4, $5,
-                $6::jsonb,
-                $7, $8, $9,
-                $10, $11, $12, $13, $14,
-                $15, $16, $17, $18,
-                $19, $20, $21, $22, $23,
-                $24, $25
+                $1,
+                $2, $3, $4, $5, $6,
+                $7::jsonb,
+                $8, $9, $10,
+                $11, $12, $13, $14, $15,
+                $16, $17, $18, $19,
+                $20, $21, $22, $23, $24,
+                $25, $26
             )
             RETURNING id
             """,
+            owner_chat_id,
             datetime.now(timezone.utc),
             ticker,
             decision,
@@ -1144,6 +1158,7 @@ async def _save_optimizer_trades(
     macro_snap,
     macro_regime,
     total_ars: float,
+    owner_chat_id: int | None = None,
 ) -> list[int]:
     """
     Traduce los trades del optimizer (delta de pesos) en decisiones BUY/SELL
@@ -1289,10 +1304,11 @@ async def _save_optimizer_trades(
                     SELECT 1 FROM decision_log
                     WHERE ticker   = $1
                       AND decision = $2
+                      AND ($3::bigint IS NULL OR owner_chat_id = $3)
                       AND decided_at > NOW() - INTERVAL '20 hours'
                     LIMIT 1
                     """,
-                    t["ticker"], t["direction"],
+                    t["ticker"], t["direction"], owner_chat_id,
                 )
                 if exists:
                     logger.info(f"Dedup: {t['direction']} {t['ticker']} ya existe hoy — skip")
@@ -1301,14 +1317,14 @@ async def _save_optimizer_trades(
                 row = await conn.fetchrow(
                     """
                     INSERT INTO decision_log (
-                        decided_at, ticker, decision, final_score, confidence,
+                        owner_chat_id, decided_at, ticker, decision, final_score, confidence,
                         layers, price_at_decision, vix_at_decision, regime,
                         size_pct, stop_loss_pct, target_pct, horizon_days, rr_ratio
                     ) VALUES (
-                        $1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14
+                        $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15
                     ) RETURNING id
                     """,
-                    t["decided_at"], t["ticker"], t["direction"],
+                    owner_chat_id, t["decided_at"], t["ticker"], t["direction"],
                     t["score"], t["conviction"],
                     _json.dumps(t["layers"]),
                     t["price"], t["vix"], t["regime"],
@@ -1350,6 +1366,8 @@ async def _load_internal_price_map(
 
         for position in positions or []:
             ticker = str(position.get("ticker", "") or "").upper()
+            if not is_position_operable(position):
+                continue
             if ticker in wanted and prices.get(ticker) is None:
                 current_price = position.get("current_price")
                 if current_price is not None:
@@ -1600,6 +1618,17 @@ def render_report(
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>LECTURA DE CARTERA</b>")
     h.append(f"Historia técnica: <b>{escape(_technical_source_summary(results))}</b>")
+    stale_positions = [
+        p for p in (positions or [])
+        if str(p.get("market_data_status", PRICE_STATUS_FRESH)).upper() != PRICE_STATUS_FRESH
+    ]
+    if stale_positions:
+        stale_txt = ", ".join(
+            f"{escape(str(p.get('ticker', '?')).upper())} "
+            f"({escape(str(p.get('market_data_reason', 'precio no fresco')))})"
+            for p in stale_positions[:6]
+        )
+        h.append(f"Datos no operables: <b>{stale_txt}</b>")
     h.append("")
 
     current_w = _current_weights(positions, total_ars)
@@ -1877,18 +1906,25 @@ def render_report(
 # PIPELINE PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _load_portfolio(cfg):
+async def _load_portfolio(cfg, owner_chat_id: int | None = None):
     db = PortfolioDatabase(cfg.database.url)
     await db.connect()
     try:
-        snap = await db.get_latest_snapshot()
+        snap = await db.get_latest_snapshot(owner_chat_id=owner_chat_id)
         if not snap:
             logger.error("Sin snapshots en DB — correr scraper primero")
             sys.exit(1)
         positions = snap.get("positions", [])
+        try:
+            positions = enrich_positions_with_market_metadata(
+                positions,
+                await db.get_latest_market_prices(),
+            )
+        except Exception as exc:
+            logger.warning("No se pudo auditar frescura de portfolio: %s", exc)
         total_ars = float(snap.get("total_value_ars", 0))
         cash_ars  = float(snap.get("cash_ars", 0))
-        history   = await db.get_portfolio_history(limit=60)
+        history   = await db.get_portfolio_history(limit=60, owner_chat_id=owner_chat_id)
         return positions, total_ars, cash_ars, history
     finally:
         await db.close()
@@ -1903,6 +1939,13 @@ async def _load_cocos_history_frames(cfg, positions: list[dict], limit: int = 26
         for position in positions:
             ticker = str(position.get("ticker", "") or "").upper()
             if not ticker:
+                continue
+            if not is_position_operable(position):
+                logger.warning(
+                    "Ticker %s no operable para técnico: %s",
+                    ticker,
+                    position.get("market_data_reason", "precio no fresco"),
+                )
                 continue
             rows = await db.get_market_candles(
                 ticker,
@@ -1924,6 +1967,7 @@ async def main(
     no_llm:           bool,
     no_sentiment:     bool,
     no_optimizer:     bool = False,
+    owner_chat_id:    int | None = None,
 ):
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
@@ -1934,7 +1978,10 @@ async def main(
         total_ars = cash_ars = 0.0
         history   = []
     else:
-        positions, total_ars, cash_ars, history = await _load_portfolio(cfg)
+        positions, total_ars, cash_ars, history = await _load_portfolio(
+            cfg,
+            owner_chat_id=owner_chat_id,
+        )
 
     tickers = [p["ticker"] for p in positions]
     logger.info(f"Pipeline: {tickers} | periodo={period}")
@@ -2127,8 +2174,13 @@ async def main(
     rebalance_report = None
     if not no_optimizer and results:
         logger.info("Ejecutando Portfolio Optimizer...")
+        optimizer_positions = [
+            p for p in (positions or [])
+            if is_position_operable(p)
+            and str(p.get("ticker", "") or "").upper() in tech_map
+        ]
         rebalance_report = run_optimizer(
-            current_positions   = positions,
+            current_positions   = optimizer_positions,
             portfolio_value_ars = total_ars,
             cash_ars            = cash_ars,
             macro_regime        = macro_regime,
@@ -2232,6 +2284,7 @@ async def main(
                 macro_snap=macro_snap,
                 macro_regime=macro_regime,
                 total_ars=total_ars,
+                owner_chat_id=owner_chat_id,
             )
             logger.info(f"Eventos ExecutionPlan guardados en DB: ids={saved}")
         except Exception as e:
@@ -2241,7 +2294,10 @@ async def main(
 
     # ── 10. Information Coefficient ────────────────────────────────────────────
     ic_metrics = await _compute_information_coefficient(
-        cfg, tickers=tickers, lookback_days=180
+        cfg,
+        tickers=tickers,
+        lookback_days=180,
+        owner_chat_id=owner_chat_id,
     )
     p_h  = ic_metrics.get("primary_horizon", "5d")
     p_ic = ic_metrics.get("primary_ic", None)
@@ -2290,12 +2346,13 @@ async def main(
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Pipeline cuantitativo Cocos")
     p.add_argument("--tickers",      nargs="+", default=[])
-    p.add_argument("--period",       default="6mo",
+    p.add_argument("--period",       default="1y",
                    choices=["1mo", "3mo", "6mo", "1y", "2y"])
     p.add_argument("--no-telegram",  action="store_true")
     p.add_argument("--no-llm",       action="store_true")
     p.add_argument("--no-sentiment", action="store_true")
     p.add_argument("--no-optimizer", action="store_true")
+    p.add_argument("--owner-chat-id", type=int, default=None)
     args = p.parse_args()
     asyncio.run(main(
         tickers_override = args.tickers,
@@ -2304,4 +2361,5 @@ if __name__ == "__main__":
         no_llm           = args.no_llm,
         no_sentiment     = args.no_sentiment,
         no_optimizer     = args.no_optimizer,
+        owner_chat_id    = args.owner_chat_id,
     ))

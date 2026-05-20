@@ -38,12 +38,14 @@ async def _missing_history_assets(
     assets: list[dict],
     *,
     min_rows: int,
+    interval: str = "1d",
 ) -> list[dict]:
     missing = []
     for asset in assets:
         rows = await db.get_market_candles(
             asset["ticker"],
             asset_type=asset["asset_type"],
+            interval=interval,
             limit=min_rows,
         )
         if len(rows) < min_rows:
@@ -57,12 +59,16 @@ async def _main() -> None:
     )
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
     parser.add_argument("--wait-ms", type=int, default=12000)
+    parser.add_argument("--chart-range", help="Rango visible del chart, por ejemplo 5y")
+    parser.add_argument("--range-wait-ms", type=int, default=18000)
+    parser.add_argument("--interval", default="1d", help="Intervalo a consultar/importar. Default: 1d")
     parser.add_argument("--pause-ms", type=int, default=12000)
     parser.add_argument("--min-rows", type=int, default=60)
     parser.add_argument("--output-dir", type=Path, default=Path("logs"))
     parser.add_argument("--all", action="store_true", help="Recapturar aun si ya hay historia")
     parser.add_argument("--import-db", action="store_true", help="Importar cada captura al terminar")
     args = parser.parse_args()
+    interval = args.interval
 
     cfg = get_config()
     db = PortfolioDatabase(cfg.database.url)
@@ -73,6 +79,7 @@ async def _main() -> None:
             db,
             assets,
             min_rows=args.min_rows,
+            interval=interval,
         )
 
         args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -88,6 +95,9 @@ async def _main() -> None:
                     ticker=ticker,
                     cdp_url=args.cdp_url,
                     wait_ms=args.wait_ms,
+                    chart_range=args.chart_range,
+                    range_wait_ms=args.range_wait_ms,
+                    interval=interval,
                 )
             except RuntimeError as exc:
                 print(f"{index}/{len(targets)} {asset['asset_type']} {ticker}: ERROR {exc}")

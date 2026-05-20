@@ -26,28 +26,41 @@ def _market_url(market: str, ticker: str) -> str:
     return f"https://app.cocos.capital/market/{market.upper()}/{ticker.upper()}"
 
 
-async def capture_history(
+async def _click_chart_range(page, label: str) -> None:
+    for frame in page.frames:
+        if "charting_library" not in frame.url:
+            continue
+        locator = frame.get_by_text(label, exact=True)
+        if await locator.count() > 0:
+            await locator.first.click(timeout=10_000, force=True)
+            return
+    raise RuntimeError(f"No se encontro el selector de rango del grafico: {label}")
+
+
+async def capture_history_from_page(
+    page,
     *,
     market: str,
     ticker: str,
-    cdp_url: str,
     wait_ms: int,
+    chart_range: str | None = None,
+    range_wait_ms: int = 18000,
+    interval: str = "1d",
 ) -> list[dict]:
-    from playwright.async_api import async_playwright
-
     asset_type = asset_type_from_market(market)
     batches = []
+    collect_enabled = {"value": chart_range is None}
 
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.connect_over_cdp(cdp_url)
-        context = browser.contexts[0]
-        page = await context.new_page()
-
-        async def on_response(response):
-            if "historic-data-extended" not in response.url:
-                return
+    async def on_response(response):
+        if not collect_enabled["value"]:
+            return
+        if "historic-data-extended" not in response.url:
+            return
+        try:
             payload = await response.json()
             long_ticker = long_ticker_from_history_url(response.url)
+            if not long_ticker.upper().startswith(f"{ticker.upper()}-"):
+                return
             batches.append(
                 parse_history_payload(
                     payload,
@@ -55,18 +68,59 @@ async def capture_history(
                     long_ticker=long_ticker,
                     asset_type=asset_type,
                     currency=currency_from_long_ticker(long_ticker),
+                    interval=interval,
                 )
             )
+        except Exception:
+            return
 
-        page.on("response", on_response)
-        await page.goto(_market_url(market, ticker), wait_until="domcontentloaded")
+    page.on("response", on_response)
+    await page.goto(_market_url(market, ticker), wait_until="domcontentloaded")
+
+    if chart_range:
         await page.wait_for_timeout(wait_ms)
-        if _is_rate_limited_page(await page.content()):
-            raise RuntimeError("Cocos rate limit detectado (Cloudflare 1015)")
+        batches.clear()
+        collect_enabled["value"] = True
+        await _click_chart_range(page, chart_range)
+        await page.wait_for_timeout(range_wait_ms)
+    else:
+        await page.wait_for_timeout(wait_ms)
+
+    if _is_rate_limited_page(await page.content()):
+        raise RuntimeError("Cocos rate limit detectado (Cloudflare 1015)")
+
+    return [candle.to_dict() for candle in merge_candle_batches(batches)]
+
+
+async def capture_history(
+    *,
+    market: str,
+    ticker: str,
+    cdp_url: str,
+    wait_ms: int,
+    chart_range: str | None = None,
+    range_wait_ms: int = 18000,
+    interval: str = "1d",
+) -> list[dict]:
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.connect_over_cdp(cdp_url)
+        context = browser.contexts[0]
+        page = await context.new_page()
+        candles = await capture_history_from_page(
+            page,
+            market=market,
+            ticker=ticker,
+            wait_ms=wait_ms,
+            chart_range=chart_range,
+            range_wait_ms=range_wait_ms,
+            interval=interval,
+        )
         await page.close()
         await browser.close()
 
-    return [candle.to_dict() for candle in merge_candle_batches(batches)]
+    return candles
 
 
 async def _main() -> None:
@@ -77,6 +131,9 @@ async def _main() -> None:
     parser.add_argument("ticker")
     parser.add_argument("--cdp-url", default="http://127.0.0.1:9222")
     parser.add_argument("--wait-ms", type=int, default=12000)
+    parser.add_argument("--chart-range", help="Rango visible del chart, por ejemplo 5y")
+    parser.add_argument("--range-wait-ms", type=int, default=18000)
+    parser.add_argument("--interval", default="1d", help="Intervalo a persistir. Default: 1d")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -85,6 +142,9 @@ async def _main() -> None:
         ticker=args.ticker,
         cdp_url=args.cdp_url,
         wait_ms=args.wait_ms,
+        chart_range=args.chart_range,
+        range_wait_ms=args.range_wait_ms,
+        interval=args.interval,
     )
     output = json.dumps(candles, ensure_ascii=False, indent=2)
     if args.output:

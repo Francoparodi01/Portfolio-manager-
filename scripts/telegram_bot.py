@@ -9,6 +9,7 @@ Menú principal:
   - Radar
   - Performance
   - Status
+  - Configuración (solo multiusuario)
 
 Scraping manual:
   - Removido del menú principal
@@ -24,9 +25,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shlex
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -40,6 +43,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -51,13 +56,26 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
     from src.core.config import get_config
+    from src.core.credentials import CredentialCipher, UserCredentials
     from src.core.logger import get_logger
-    from src.core.portfolio_cache import get_cached_live_portfolio
+    from src.core.market_calendar import is_trading_day
+    from src.core.portfolio_cache import (
+        cache_portfolio_snapshot,
+        get_cached_live_portfolio,
+    )
+    from src.core.redis_client import client as redis_client
+    from src.collector.cocos_scraper import CocosCapitalScraper
     from src.collector.db import PortfolioDatabase
 except Exception:
     get_config = None
+    CredentialCipher = None
+    UserCredentials = None
     get_logger = None
+    is_trading_day = None
+    cache_portfolio_snapshot = None
     get_cached_live_portfolio = None
+    redis_client = None
+    CocosCapitalScraper = None
     PortfolioDatabase = None
 
 
@@ -85,6 +103,12 @@ COMMAND_TIMEOUT_SECONDS = 300
 
 REGRESSION_MODES = {"optimizer", "execution", "blocked", "signal", "all"}
 DEFAULT_REGRESSION_MODE = "optimizer"
+SETTINGS_STATE_KEY = "settings_state"
+SETTINGS_USERNAME_KEY = "settings_username"
+SETTINGS_AWAIT_USERNAME = "await_username"
+SETTINGS_AWAIT_PASSWORD = "await_password"
+PORTFOLIO_SYNC_PENDING_KEY = "portfolio_sync_pending"
+NO_AUTO_MENU_ACTIONS = {"settings", "settings_reconfigure"}
 
 ADMIN_CHAT_IDS: set[int] = {
     int(x)
@@ -117,6 +141,29 @@ def is_admin(chat_id: int) -> bool:
         logger.warning("[BOT] ADMIN_CHAT_IDS no configurado — admin bloqueado")
         return False
     return int(chat_id) in ADMIN_CHAT_IDS
+
+
+def _multiuser_enabled() -> bool:
+    if not get_config:
+        return False
+    try:
+        return bool(getattr(get_config(), "multiuser_enabled", False))
+    except Exception:
+        logger.exception("[BOT] No pude leer MULTIUSER_ENABLED")
+        return False
+
+
+def _clear_settings_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(SETTINGS_STATE_KEY, None)
+    context.user_data.pop(SETTINGS_USERNAME_KEY, None)
+
+
+def _user_session_file(chat_id: int) -> str:
+    return f"/app/secrets/cocos_session_{int(chat_id)}.json"
+
+
+def _owner_cli_args(chat_id: int) -> list[str]:
+    return ["--owner-chat-id", str(chat_id)] if _multiuser_enabled() else []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,7 +246,10 @@ def _age_label(value) -> tuple[str, Optional[float]]:
 
 
 def _is_business_day_now() -> bool:
-    return datetime.now(tz=TZ).weekday() < 5
+    now = datetime.now(tz=TZ)
+    if is_trading_day is None:
+        return now.weekday() < 5
+    return is_trading_day(now)
 
 
 def _is_market_hours_now() -> bool:
@@ -285,6 +335,15 @@ async def answer_loading(update: Update, text: str) -> None:
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
+
+
+async def _delete_incoming_message(update: Update) -> None:
+    if not update.message:
+        return
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,7 +434,7 @@ async def run_first_existing_script(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+    rows = [
         [
             InlineKeyboardButton("💼 Portfolio",        callback_data="portfolio"),
             InlineKeyboardButton("🧠 Plan de cartera", callback_data="weekly_analysis"),
@@ -388,13 +447,22 @@ def main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📈 Regression",       callback_data="regression_audit"),
             InlineKeyboardButton("🔭 Radar",            callback_data="radar"),
         ],
-        [
-            InlineKeyboardButton("🩺 Status",           callback_data="status"),
-        ],
-    ])
+    ]
+    final_row = [InlineKeyboardButton("🩺 Status", callback_data="status")]
+    if _multiuser_enabled():
+        final_row.append(
+            InlineKeyboardButton("⚙️ Configuración", callback_data="settings")
+        )
+    rows.append(final_row)
+    return InlineKeyboardMarkup(rows)
 
 
 def menu_text() -> str:
+    settings_line = (
+        "⚙️ <b>Configuración</b> — cuenta y credenciales\n"
+        if _multiuser_enabled()
+        else ""
+    )
     return (
         "🤖 <b>Cocos Copilot</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -404,7 +472,8 @@ def menu_text() -> str:
         "📊 <b>Performance</b> — métricas canónicas y dataset operativo\n"
         "📈 <b>Regression</b> — auditoría estadística\n"
         "🔭 <b>Radar</b> — oportunidades operables del universo\n"
-        "🩺 <b>Status</b> — estado del sistema y DB\n\n"
+        "🩺 <b>Status</b> — estado del sistema y DB\n"
+        f"{settings_line}\n"
         "<b>Regresión:</b>\n"
         "• <code>/regression</code> → optimizer\n"
         "• <code>/regression execution</code>\n"
@@ -501,19 +570,32 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         return
 
     cfg = get_config()
-    snap = await get_cached_live_portfolio() if get_cached_live_portfolio else None
+    owner_chat_id = chat_id if getattr(cfg, "multiuser_enabled", False) else None
+    snap = (
+        await get_cached_live_portfolio(owner_chat_id=owner_chat_id)
+        if get_cached_live_portfolio
+        else None
+    )
     valuation_mode = str((snap or {}).get("valuation_mode", "snapshot"))
 
     if not snap:
         db  = PortfolioDatabase(cfg.database.url)
         await db.connect()
         try:
-            snap = await db.get_latest_snapshot()
+            snap = await db.get_latest_snapshot(owner_chat_id=owner_chat_id)
         finally:
             await db.close()
         valuation_mode = "snapshot"
 
     if not snap:
+        if getattr(cfg, "multiuser_enabled", False):
+            started = await _start_user_portfolio_sync_if_possible(
+                context,
+                chat_id,
+                reason="No había snapshot privado todavía.",
+            )
+            if started:
+                return
         await send_text(
             context,
             chat_id,
@@ -540,12 +622,24 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         reverse=True,
     )
 
-    total_invested = sum(
+    positions_total = sum(
         _to_float(p.get("market_value", 0))
         for p in positions
     )
 
-    total_account = total_invested + cash
+    reported_total = _to_float(snap.get("total_value_ars", 0))
+    reported_invested = _to_float(snap.get("invested_ars", 0))
+
+    if valuation_mode == "live_market_prices":
+        total_invested = reported_invested if reported_invested > 0 else positions_total
+        total_account = reported_total if reported_total > 0 else total_invested + cash
+        total_label = "Total live"
+        invested_label = "Invertido live"
+    else:
+        total_invested = reported_total if reported_total > 0 else positions_total
+        total_account = total_invested + cash
+        total_label = "Tenencia Cocos"
+        invested_label = "Cuenta estimada"
 
     # Timestamp
     ts_raw       = (
@@ -588,8 +682,8 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🕐 {ts_exact}  ·  {age_text}",
         "",
-        f"💰 Total cuenta    <b>{_money(total_account)}</b>",
-        f"📈 Invertido       <b>{_money(total_invested)}</b>  ({_pct(inv_pct)})",
+        f"💰 {total_label} <b>{_money(total_invested)}</b>  ({_pct(inv_pct)})",
+        f"📈 {invested_label} <b>{_money(total_account)}</b>",
         f"💵 Cash disponible <b>{_money(cash)}</b>  ({_pct(cash_pct)})",
         f"📦 {len(positions)} posiciones  ·  {conc_icon} Concentración {conc_lbl}",
     ]
@@ -628,7 +722,10 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
 
 async def action_weekly_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_python_script(
-        "scripts/weekly_summary.py", "--no-telegram", timeout=120,
+        "scripts/weekly_summary.py",
+        "--no-telegram",
+        *_owner_cli_args(chat_id),
+        timeout=120,
     )
     await send_text(context, chat_id, report)
 
@@ -638,12 +735,13 @@ async def action_weekly_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    owner_args = _owner_cli_args(chat_id)
     report = await run_first_existing_script(
         [
-            ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--no-sentiment"],
-            ["scripts/run_analysis.py", "--no-llm", "--no-sentiment"],
-            ["scripts/run_analysis.py", "--no-telegram"],
-            ["scripts/run_analysis.py"],
+            ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--no-sentiment", *owner_args],
+            ["scripts/run_analysis.py", "--no-llm", "--no-sentiment", *owner_args],
+            ["scripts/run_analysis.py", "--no-telegram", *owner_args],
+            ["scripts/run_analysis.py", *owner_args],
         ],
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
@@ -656,7 +754,12 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
 
 async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_python_script(
-        "scripts/run_performance.py", "--days", "90", "--no-telegram", timeout=240,
+        "scripts/run_performance.py",
+        "--days",
+        "90",
+        "--no-telegram",
+        *_owner_cli_args(chat_id),
+        timeout=240,
     )
     await send_text(context, chat_id, report)
 
@@ -775,11 +878,12 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
                 "--no-telegram",
                 "--no-sentiment",
                 "--period",
-                "6mo",
+                "1y",
                 "--top",
                 "6",
                 "--min-score",
                 "0.10",
+                *_owner_cli_args(chat_id),
             ],
         ],
         timeout=180,
@@ -789,7 +893,7 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
         report = (
             "⚠️ Radar sin output.\n"
             "Runner esperado:\n"
-            "<code>scripts/run_opportunity.py --no-telegram --no-sentiment --period 6mo --top 6 --min-score 0.10</code>"
+            "<code>scripts/run_opportunity.py --no-telegram --no-sentiment --period 1y --top 6 --min-score 0.10</code>"
         )
     else:
         report = compact_radar_report(report, max_items=6)
@@ -958,6 +1062,359 @@ async def action_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Non
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Acción: Configuración
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def action_settings(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    *,
+    force_reconfigure: bool = False,
+) -> None:
+    if not _multiuser_enabled():
+        await send_text(
+            context,
+            chat_id,
+            "⚙️ <b>CONFIGURACIÓN</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "La configuración multiusuario no está habilitada en este entorno.",
+        )
+        return
+
+    account_state = "sin credenciales vinculadas"
+    key_state = "configurada"
+    can_start_setup = True
+    has_credentials = False
+
+    if not (PortfolioDatabase and CredentialCipher and UserCredentials and get_config):
+        account_state = "estado no disponible"
+        key_state = "no disponible"
+        can_start_setup = False
+    else:
+        try:
+            cipher = CredentialCipher.from_env()
+            cfg = get_config()
+            db = PortfolioDatabase(cfg.database.url)
+            await db.connect()
+            try:
+                credentials = await db.get_bot_user_credentials(
+                    chat_id=chat_id,
+                    cipher=cipher,
+                )
+            finally:
+                await db.close()
+            account_state = (
+                "credenciales vinculadas"
+                if credentials
+                else "sin credenciales vinculadas"
+            )
+            has_credentials = bool(credentials)
+        except Exception as exc:
+            logger.warning("[BOT] No pude leer configuración de chat_id=%s: %s", chat_id, exc)
+            account_state = "estado no disponible"
+            key_state = "no disponible"
+            can_start_setup = False
+
+    should_start_setup = can_start_setup and (
+        force_reconfigure or not has_credentials
+    )
+
+    if should_start_setup:
+        context.user_data[SETTINGS_STATE_KEY] = SETTINGS_AWAIT_USERNAME
+        context.user_data.pop(SETTINGS_USERNAME_KEY, None)
+    else:
+        _clear_settings_state(context)
+
+    if should_start_setup:
+        next_step = (
+            "Enviame ahora tu <b>usuario o email de Cocos</b>.\n"
+            "Después te voy a pedir la contraseña.\n"
+            "Podés cancelar con <code>/cancelar</code>."
+        )
+    elif has_credentials:
+        next_step = (
+            "Tu cuenta ya está vinculada.\n"
+            "Para reemplazar credenciales, usá <code>/reconfigurar</code>."
+        )
+    else:
+        next_step = "No puedo iniciar el alta hasta corregir la configuración del entorno."
+
+    await send_text(
+        context,
+        chat_id,
+        "⚙️ <b>CONFIGURACIÓN</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Cuenta Cocos: <b>{account_state}</b>\n"
+        f"🔐 Cifrado local: <b>{key_state}</b>\n\n"
+        "Este entorno usa cuentas separadas por usuario y no expone secretos en pantalla.\n\n"
+        + next_step,
+    )
+
+
+async def action_reconfigure_settings(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+) -> None:
+    await action_settings(context, chat_id, force_reconfigure=True)
+
+
+async def settings_text_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not update.message or not update.effective_chat:
+        return
+    if not _multiuser_enabled():
+        return
+
+    text = str(update.message.text or "")
+    state = context.user_data.get(SETTINGS_STATE_KEY)
+    if state not in {SETTINGS_AWAIT_USERNAME, SETTINGS_AWAIT_PASSWORD}:
+        if (
+            context.user_data.get(PORTFOLIO_SYNC_PENDING_KEY)
+            and re.fullmatch(r"\d{6}", text.strip())
+            and redis_client is not None
+        ):
+            await _delete_incoming_message(update)
+            try:
+                await redis_client.lpush(f"mfa:{update.effective_chat.id}", text.strip())
+                await send_text(
+                    context,
+                    update.effective_chat.id,
+                    "🔐 Código MFA recibido. Sigo con la sincronización del portfolio.",
+                )
+            except Exception as exc:
+                logger.warning("[BOT] No pude encolar MFA de chat_id=%s: %s", update.effective_chat.id, exc)
+                await send_text(
+                    context,
+                    update.effective_chat.id,
+                    "⚠️ No pude registrar el código MFA. Reintentá en unos segundos.",
+                )
+        return
+
+    await _delete_incoming_message(update)
+
+    if state == SETTINGS_AWAIT_USERNAME:
+        username = text.strip()
+        if not username:
+            await send_text(
+                context,
+                update.effective_chat.id,
+                "Necesito un usuario o email no vacío. Enviamelo de nuevo o usá <code>/cancelar</code>.",
+            )
+            return
+
+        context.user_data[SETTINGS_USERNAME_KEY] = username
+        context.user_data[SETTINGS_STATE_KEY] = SETTINGS_AWAIT_PASSWORD
+        await send_text(
+            context,
+            update.effective_chat.id,
+            "Perfecto. Ahora enviame la <b>contraseña de Cocos</b>.\n"
+            "La voy a cifrar antes de guardarla y voy a borrar este mensaje del chat cuando Telegram lo permita.",
+        )
+        return
+
+    password = text
+    if not password:
+        await send_text(
+            context,
+            update.effective_chat.id,
+            "La contraseña no puede estar vacía. Enviamela de nuevo o usá <code>/cancelar</code>.",
+        )
+        return
+
+    username = context.user_data.get(SETTINGS_USERNAME_KEY)
+    if not username:
+        _clear_settings_state(context)
+        await send_text(
+            context,
+            update.effective_chat.id,
+            "Perdí el usuario durante el alta. Abrí <code>/configuracion</code> y lo retomamos desde cero.",
+        )
+        await send_menu(context, update.effective_chat.id)
+        return
+
+    if not (PortfolioDatabase and CredentialCipher and UserCredentials and get_config):
+        await send_text(
+            context,
+            update.effective_chat.id,
+            "No puedo guardar credenciales en este entorno ahora mismo.",
+        )
+        return
+
+    try:
+        cipher = CredentialCipher.from_env()
+        cfg = get_config()
+        db = PortfolioDatabase(cfg.database.url)
+        await db.connect()
+        try:
+            await db.upsert_bot_user_credentials(
+                chat_id=update.effective_chat.id,
+                credentials=UserCredentials(username=username, password=password),
+                cipher=cipher,
+                telegram_username=getattr(update.effective_user, "username", None),
+                display_name=getattr(update.effective_user, "full_name", None),
+            )
+        finally:
+            await db.close()
+    except Exception as exc:
+        logger.warning(
+            "[BOT] No pude guardar credenciales de chat_id=%s: %s",
+            update.effective_chat.id,
+            exc,
+        )
+        await send_text(
+            context,
+            update.effective_chat.id,
+            "No pude guardar la cuenta todavía. Revisá la configuración del sandbox y enviame la contraseña otra vez.",
+        )
+        return
+
+    _clear_settings_state(context)
+    await send_text(
+        context,
+        update.effective_chat.id,
+        "✅ Cuenta Cocos vinculada y guardada cifrada.\n"
+        "Desde acá ya podemos usar este chat como identidad separada dentro del sandbox multiusuario.",
+    )
+    started = await _start_user_portfolio_sync_if_possible(
+        context,
+        update.effective_chat.id,
+        reason="Cuenta recién vinculada.",
+    )
+    if not started:
+        await send_menu(context, update.effective_chat.id)
+
+
+async def _load_user_credentials(chat_id: int) -> Optional[UserCredentials]:
+    if not (PortfolioDatabase and CredentialCipher and get_config):
+        return None
+
+    cipher = CredentialCipher.from_env()
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        return await db.get_bot_user_credentials(chat_id=chat_id, cipher=cipher)
+    finally:
+        await db.close()
+
+
+async def _start_user_portfolio_sync_if_possible(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    *,
+    reason: str,
+) -> bool:
+    if not _multiuser_enabled():
+        return False
+    if context.user_data.get(PORTFOLIO_SYNC_PENDING_KEY):
+        await send_text(
+            context,
+            chat_id,
+            "📥 Ya estoy sincronizando tu portfolio inicial.",
+        )
+        return True
+
+    try:
+        credentials = await _load_user_credentials(chat_id)
+    except Exception as exc:
+        logger.warning("[BOT] No pude leer credenciales para sync chat_id=%s: %s", chat_id, exc)
+        credentials = None
+
+    if not credentials:
+        await send_text(
+            context,
+            chat_id,
+            "⚠️ Todavía no hay credenciales vinculadas para traer tu portfolio.\n"
+            "Abrí <code>/configuracion</code> para cargarlas.",
+        )
+        return False
+
+    if not getattr(context, "application", None):
+        await send_text(
+            context,
+            chat_id,
+            "⚠️ No pude iniciar la sincronización automática en este contexto.",
+        )
+        return False
+
+    context.user_data[PORTFOLIO_SYNC_PENDING_KEY] = True
+    await send_text(
+        context,
+        chat_id,
+        "📥 Voy a traer tu portfolio inicial ahora.\n"
+        f"<i>{reason}</i>\n"
+        "Esto sí corre aunque sea fin de semana, porque solo consulta tu cartera privada.\n"
+        "Si Cocos pide MFA, te voy a pedir el código de 6 dígitos por este chat.",
+    )
+    context.application.create_task(
+        _sync_user_portfolio_once(context, chat_id, credentials)
+    )
+    return True
+
+
+async def _sync_user_portfolio_once(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    credentials: UserCredentials,
+) -> None:
+    try:
+        if not (
+            get_config
+            and PortfolioDatabase
+            and CocosCapitalScraper
+            and cache_portfolio_snapshot
+        ):
+            raise RuntimeError("dependencias de scrape no disponibles")
+
+        cfg = get_config()
+        user_scraper_cfg = replace(
+            cfg.scraper,
+            username=credentials.username,
+            password=credentials.password,
+            telegram_chat_id=str(chat_id),
+            telegram_enabled=bool(cfg.scraper.telegram_bot_token),
+            telegram_mfa_prompt_enabled=True,
+            session_file=_user_session_file(chat_id),
+        )
+
+        db = PortfolioDatabase(cfg.database.url)
+        await db.connect()
+        try:
+            async with CocosCapitalScraper(user_scraper_cfg) as scraper:
+                await scraper.login()
+                snapshot = await scraper.scrape_portfolio()
+
+            snapshot.owner_chat_id = chat_id
+            await db.save_snapshot(snapshot)
+            await cache_portfolio_snapshot(
+                snapshot.to_dict(),
+                owner_chat_id=chat_id,
+            )
+        finally:
+            await db.close()
+
+        await send_text(
+            context,
+            chat_id,
+            "✅ Portfolio inicial sincronizado.",
+        )
+        await action_portfolio(context, chat_id)
+    except Exception as exc:
+        logger.exception("[BOT] Sync inicial de portfolio falló para chat_id=%s", chat_id)
+        await send_text(
+            context,
+            chat_id,
+            "❌ No pude sincronizar tu portfolio inicial.\n"
+            f"<code>{exc}</code>",
+        )
+    finally:
+        context.user_data.pop(PORTFOLIO_SYNC_PENDING_KEY, None)
+        await send_menu(context, chat_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Acción: Admin scrape
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1034,6 +1491,10 @@ CALLBACK_ALIASES: dict[str, str] = {
     # Status
     "status":           "status",
     "health":           "status",
+    # Configuración
+    "settings":         "settings",
+    "config":           "settings",
+    "configuracion":    "settings",
 }
 
 ACTION_LOADING_TEXT: dict[str, str] = {
@@ -1045,6 +1506,8 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "radar_full":    "🔭 Generando radar completo...",
     "regression_audit": "📈 Ejecutando auditoría de regresión...",
     "status":        "🩺 Verificando estado del sistema...",
+    "settings":      "⚙️ Abriendo configuración...",
+    "settings_reconfigure": "⚙️ Preparando reconfiguración...",
 }
 
 
@@ -1058,6 +1521,8 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "radar_full": action_radar_full,
         "regression_audit": action_regression_audit,
         "status":         action_status,
+        "settings":       action_settings,
+        "settings_reconfigure": action_reconfigure_settings,
     }
     fn = dispatch.get(action)
     if fn:
@@ -1105,7 +1570,8 @@ async def _dispatch_command(
             f"❌ Error en <b>{action}</b>:\n<code>{e}</code>",
         )
     finally:
-        await send_menu(context, chat_id)
+        if action not in NO_AUTO_MENU_ACTIONS:
+            await send_menu(context, chat_id)
 
 
 async def portfolio_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1125,6 +1591,27 @@ async def radar_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def status_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "status")
+
+async def settings_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "settings")
+
+
+async def reconfigure_settings_handler(
+    u: Update,
+    c: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    await _dispatch_command(u, c, "settings_reconfigure")
+
+
+async def cancel_settings_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not update.effective_chat:
+        return
+    _clear_settings_state(context)
+    await send_text(context, update.effective_chat.id, "Configuración cancelada.")
+    await send_menu(context, update.effective_chat.id)
 
 async def regression_audit_handler(
     update: Update,
@@ -1314,6 +1801,13 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("regression", regression_audit_handler))
     app.add_handler(CommandHandler("regression_audit", regression_audit_handler))
     app.add_handler(CommandHandler("status",           status_handler))
+    app.add_handler(CommandHandler("configuracion",    settings_handler))
+    app.add_handler(CommandHandler("settings",         settings_handler))
+    app.add_handler(CommandHandler("reconfigurar",     reconfigure_settings_handler))
+    app.add_handler(CommandHandler("reconfigure",      reconfigure_settings_handler))
+    app.add_handler(CommandHandler("cancelar",         cancel_settings_handler))
+    app.add_handler(CommandHandler("cancel",           cancel_settings_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, settings_text_handler))
 
     # Admin
     app.add_handler(CommandHandler("admin_scrape",              admin_scrape_handler))

@@ -21,6 +21,8 @@ class ScraperConfig:
     cache_ttl_seconds: int = 300
     min_confidence_score: float = 0.5
     dom_hash_tolerance: float = 0.7
+    session_file: str = "/app/secrets/cocos_session.json"
+    telegram_mfa_prompt_enabled: bool = False
 
     # Credenciales Cocos
     username: str = ""
@@ -49,6 +51,7 @@ class DatabaseConfig:
 class AppConfig:
     scraper: ScraperConfig = field(default_factory=ScraperConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    multiuser_enabled: bool = False
 
 
 _config: Optional[AppConfig] = None
@@ -93,5 +96,6 @@ def get_config() -> AppConfig:
                 "postgresql+asyncpg://portfolio:portfolio_secret@db:5432/portfolio",
             )
         ),
+        multiuser_enabled=os.environ.get("MULTIUSER_ENABLED", "false").lower() == "true",
     )
     return _config

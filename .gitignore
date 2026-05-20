@@ -1,5 +1,6 @@
 # Entorno local
 .env
+.env.*.local
 venv/
 __pycache__/
 *.pyc
@@ -7,6 +8,7 @@ __pycache__/
 # Secretos
 secret_key/
 secrets/
+secrets_multiuser/
 *.key
 *.pem
 

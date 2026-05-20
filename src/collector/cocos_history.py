@@ -22,19 +22,31 @@ def parse_history_payload(
         raise ValueError("payload historico de Cocos sin estado OK")
 
     required = ("t", "o", "h", "l", "c", "v")
-    lengths = {key: len(payload.get(key, [])) for key in required}
+    arrays = {key: payload.get(key) or [] for key in required}
+    lengths = {key: len(arrays[key]) for key in required}
     if len(set(lengths.values())) != 1:
         raise ValueError(f"payload historico desalineado: {lengths}")
 
     candles: list[MarketCandle] = []
     for ts, open_, high, low, close, volume in zip(
-        payload["t"],
-        payload["o"],
-        payload["h"],
-        payload["l"],
-        payload["c"],
-        payload["v"],
+        arrays["t"],
+        arrays["o"],
+        arrays["h"],
+        arrays["l"],
+        arrays["c"],
+        arrays["v"],
     ):
+        if any(value is None for value in (ts, open_, high, low, close, volume)):
+            continue
+        try:
+            parsed_ts = int(ts)
+            parsed_open = float(open_)
+            parsed_high = float(high)
+            parsed_low = float(low)
+            parsed_close = float(close)
+            parsed_volume = float(volume)
+        except (TypeError, ValueError):
+            continue
         candles.append(
             MarketCandle(
                 ticker=ticker.upper(),
@@ -43,12 +55,12 @@ def parse_history_payload(
                 currency=currency,
                 venue=venue,
                 interval=interval,
-                ts=datetime.fromtimestamp(int(ts), tz=timezone.utc),
-                open_price=float(open_),
-                high_price=float(high),
-                low_price=float(low),
-                close_price=float(close),
-                volume=float(volume),
+                ts=datetime.fromtimestamp(parsed_ts, tz=timezone.utc),
+                open_price=parsed_open,
+                high_price=parsed_high,
+                low_price=parsed_low,
+                close_price=parsed_close,
+                volume=parsed_volume,
             )
         )
     return candles

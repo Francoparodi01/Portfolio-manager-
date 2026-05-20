@@ -1,0 +1,101 @@
+{
+  "market": "BYMA",
+  "timezone": "America/Argentina/Buenos_Aires",
+  "closures": [
+    {
+      "date": "2026-01-01",
+      "name": "Ano nuevo",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-02-16",
+      "name": "Carnaval",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-02-17",
+      "name": "Carnaval",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-03-23",
+      "name": "Dia no laborable",
+      "category": "no_laborable"
+    },
+    {
+      "date": "2026-03-24",
+      "name": "Dia Nacional de la Memoria por la Verdad y la Justicia",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-04-02",
+      "name": "Dia del Veterano y de los Caidos en la Guerra de Malvinas",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-04-03",
+      "name": "Viernes Santo",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-05-01",
+      "name": "Dia del Trabajador",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-05-25",
+      "name": "Dia de la Revolucion de Mayo",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-06-15",
+      "name": "Paso a la Inmortalidad del General Martin Guemes",
+      "category": "feriado_trasladable"
+    },
+    {
+      "date": "2026-06-20",
+      "name": "Paso a la Inmortalidad del General Manuel Belgrano",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-07-09",
+      "name": "Dia de la Independencia",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-07-10",
+      "name": "Dia no laborable",
+      "category": "no_laborable"
+    },
+    {
+      "date": "2026-08-17",
+      "name": "Paso a la Inmortalidad del Gral. Jose de San Martin",
+      "category": "feriado_trasladable"
+    },
+    {
+      "date": "2026-10-12",
+      "name": "Dia del Respeto a la Diversidad Cultural",
+      "category": "feriado_trasladable"
+    },
+    {
+      "date": "2026-11-23",
+      "name": "Dia de la Soberania Nacional",
+      "category": "feriado_trasladable"
+    },
+    {
+      "date": "2026-12-07",
+      "name": "Dia no laborable",
+      "category": "no_laborable"
+    },
+    {
+      "date": "2026-12-08",
+      "name": "Dia de la Inmaculada Concepcion de Maria",
+      "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-12-25",
+      "name": "Navidad",
+      "category": "feriado_inamovible"
+    }
+  ]
+}

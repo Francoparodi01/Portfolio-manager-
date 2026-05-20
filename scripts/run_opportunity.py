@@ -32,6 +32,7 @@ from src.core.logger import get_logger
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
 from src.collector.cocos_history import candles_to_frame
+from src.collector.portfolio_quality import enrich_positions_with_market_metadata
 from src.analysis.macro import fetch_macro, get_macro_regime
 from src.analysis.opportunity_screener import (
     run_opportunity_analysis,
@@ -42,17 +43,24 @@ from src.analysis.opportunity_screener import (
 logger = get_logger(__name__)
 
 
-async def _load_portfolio(cfg):
+async def _load_portfolio(cfg, owner_chat_id: int | None = None):
     """Carga posiciones actuales y scores del pipeline si existen."""
     db = PortfolioDatabase(cfg.database.url)
     await db.connect()
     try:
-        snap = await db.get_latest_snapshot()
+        snap = await db.get_latest_snapshot(owner_chat_id=owner_chat_id)
         if not snap:
             logger.warning("Sin snapshots en DB — corriendo sin contexto de cartera")
             return [], 0.0, 0.0
 
         positions = snap.get("positions", [])
+        try:
+            positions = enrich_positions_with_market_metadata(
+                positions,
+                await db.get_latest_market_prices(),
+            )
+        except Exception as exc:
+            logger.warning("No se pudo auditar frescura de portfolio: %s", exc)
         total_ars = float(snap.get("total_value_ars", 0))
         cash_ars  = float(snap.get("cash_ars", 0))
         return positions, total_ars, cash_ars
@@ -60,7 +68,11 @@ async def _load_portfolio(cfg):
         await db.close()
 
 
-async def _load_portfolio_scores(cfg, tickers: list[str]) -> dict[str, float]:
+async def _load_portfolio_scores(
+    cfg,
+    tickers: list[str],
+    owner_chat_id: int | None = None,
+) -> dict[str, float]:
     """
     Intenta cargar los scores más recientes del decision_log para tickers del portfolio.
     Esto permite comparar candidatos nuevos vs posiciones actuales.
@@ -77,9 +89,11 @@ async def _load_portfolio_scores(cfg, tickers: list[str]) -> dict[str, float]:
                     SELECT DISTINCT ON (ticker) ticker, final_score
                     FROM decision_log
                     WHERE ticker = ANY($1::text[])
+                      AND ($2::bigint IS NULL OR owner_chat_id = $2)
                     ORDER BY ticker, decided_at DESC
                     """,
                     [t.upper() for t in tickers],
+                    owner_chat_id,
                 )
             scores = {r["ticker"]: float(r["final_score"]) for r in rows}
     except Exception as e:
@@ -129,17 +143,25 @@ async def main(
     min_score:          float = 0.0,
     min_rr:             float = 0.0,
     exclude_portfolio:  bool = True,
+    owner_chat_id:      int | None = None,
 ):
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
 
     # ── 1. Portfolio actual ────────────────────────────────────────────────────
-    positions, total_ars, cash_ars = await _load_portfolio(cfg)
+    positions, total_ars, cash_ars = await _load_portfolio(
+        cfg,
+        owner_chat_id=owner_chat_id,
+    )
     portfolio_tickers = [p.get("ticker", "").upper() for p in positions]
     logger.info(f"Portfolio actual: {portfolio_tickers} | ${total_ars:,.0f} ARS")
 
     # Scores del pipeline de cartera (para comparación)
-    portfolio_scores = await _load_portfolio_scores(cfg, portfolio_tickers)
+    portfolio_scores = await _load_portfolio_scores(
+        cfg,
+        portfolio_tickers,
+        owner_chat_id=owner_chat_id,
+    )
     if portfolio_scores:
         logger.info(f"Scores cargados para {list(portfolio_scores.keys())}")
 
@@ -242,6 +264,7 @@ if __name__ == "__main__":
                    help="R/R mínimo para aparecer en el reporte (ej: 1.5)")
     p.add_argument("--include-portfolio",action="store_true",
                    help="Incluir tickers del portfolio en el análisis (default: excluidos)")
+    p.add_argument("--owner-chat-id", type=int, default=None)
     args = p.parse_args()
 
     # --top es alias de --max
@@ -256,4 +279,5 @@ if __name__ == "__main__":
         min_score          = args.min_score,
         min_rr             = args.min_rr,
         exclude_portfolio  = not args.include_portfolio,
+        owner_chat_id      = args.owner_chat_id,
     ))

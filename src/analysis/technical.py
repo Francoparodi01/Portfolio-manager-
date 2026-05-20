@@ -110,7 +110,7 @@ class IndicatorSnapshot:
 
 # ── Descarga ───────────────────────────────────────────────────────────────────
 
-def fetch_history(ticker: str, period: str = "6mo",
+def fetch_history(ticker: str, period: str = "1y",
                   interval: str = "1d") -> Optional["pd.DataFrame"]:
     if not HAS_YFINANCE:
         raise ImportError("yfinance no instalado")
@@ -446,7 +446,7 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
 
 # ── Pipeline público ───────────────────────────────────────────────────────────
 
-def analyze_ticker(ticker: str, period: str = "6mo") -> Optional[Signal]:
+def analyze_ticker(ticker: str, period: str = "1y") -> Optional[Signal]:
     df = fetch_history(ticker, period=period)
     if df is None:
         return None
@@ -479,7 +479,7 @@ def analyze_ticker_from_frame(ticker: str, frame: "pd.DataFrame") -> Optional[Si
     return signal
 
 
-def analyze_portfolio(tickers: list[str], period: str = "6mo") -> list[Signal]:
+def analyze_portfolio(tickers: list[str], period: str = "1y") -> list[Signal]:
     signals = []
     for ticker in tickers:
         try:

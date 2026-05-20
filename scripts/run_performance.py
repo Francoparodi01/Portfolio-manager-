@@ -183,6 +183,7 @@ def _ev_scope(dataset_stats: list[dict]) -> tuple[str, str]:
 async def _get_decision_dataset_stats(
     db: PortfolioDatabase,
     lookback_days: int = 90,
+    owner_chat_id: int | None = None,
 ) -> list[dict]:
     """
     Resume decision_log por source/status/decision_type/decision.
@@ -217,10 +218,12 @@ async def _get_decision_dataset_stats(
                 ) AS legacy_external
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND ($2::bigint IS NULL OR owner_chat_id = $2)
             GROUP BY 1,2,3,4
             ORDER BY 1,2,3,4
             """,
             lookback_days,
+            owner_chat_id,
         )
 
     return [dict(r) for r in rows]
@@ -275,6 +278,7 @@ def render_performance_report(stats: dict) -> str:
     total = stats.get("total_trades", 0)
     pending = stats.get("pending", 0)
     days = stats.get("lookback_days", 90)
+    owner_chat_id = stats.get("owner_chat_id")
 
     header = [
         "📊 <b>PERFORMANCE DEL SISTEMA</b>",
@@ -294,6 +298,9 @@ def render_performance_report(stats: dict) -> str:
         if pending > 0:
             lines.append(f"📋 {pending} decisiones pendientes de outcome.")
             lines.append("Corriendo <code>python scripts/run_performance.py</code> se actualizan outcomes elegibles.")
+        elif owner_chat_id is not None:
+            lines.append("Este usuario todavía no acumuló decisiones propias con outcome cerrado.")
+            lines.append("El dataset personal empieza a crecer desde sus próximos análisis.")
         else:
             lines.append("El sistema aún no tiene decisiones con outcome cerrado.")
             lines.append("Verificá que <b>run_analysis.py</b> esté guardando eventos en decision_log.")
@@ -425,7 +432,11 @@ def render_performance_report(stats: dict) -> str:
     return "\n".join(lines)
 
 
-async def main(lookback_days: int, no_telegram: bool) -> None:
+async def main(
+    lookback_days: int,
+    no_telegram: bool,
+    owner_chat_id: int | None = None,
+) -> None:
     cfg = get_config()
     db = PortfolioDatabase(cfg.database.url)
     notifier = TelegramNotifier(
@@ -437,17 +448,25 @@ async def main(lookback_days: int, no_telegram: bool) -> None:
         await db.connect()
 
         logger.info("Actualizando outcomes pendientes...")
-        updated = await db.update_outcomes(lookback_days=lookback_days)
+        updated = await db.update_outcomes(
+            lookback_days=lookback_days,
+            owner_chat_id=owner_chat_id,
+        )
 
         if updated:
             logger.info(f"{updated} outcomes actualizados")
 
         logger.info("Calculando performance...")
-        stats = await db.get_performance_stats_v2(lookback_days=lookback_days)
+        stats = await db.get_performance_stats_v2(
+            lookback_days=lookback_days,
+            owner_chat_id=owner_chat_id,
+        )
+        stats["owner_chat_id"] = owner_chat_id
 
         dataset_stats = await _get_decision_dataset_stats(
             db=db,
             lookback_days=lookback_days,
+            owner_chat_id=owner_chat_id,
         )
         stats["dataset_stats"] = dataset_stats
 
@@ -485,6 +504,7 @@ if __name__ == "__main__":
         action="store_true",
         help="No enviar a Telegram",
     )
+    p.add_argument("--owner-chat-id", type=int, default=None)
 
     args = p.parse_args()
 
@@ -492,5 +512,6 @@ if __name__ == "__main__":
         main(
             lookback_days=args.days,
             no_telegram=args.no_telegram,
+            owner_chat_id=args.owner_chat_id,
         )
     )

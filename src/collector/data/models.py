@@ -66,6 +66,7 @@ class PortfolioSnapshot:
     confidence_score: float
     dom_hash: str
     raw_html_hash: str
+    owner_chat_id: Optional[int] = None
     snapshot_id: uuid.UUID = field(default_factory=uuid.uuid4)
 
     def validate(self) -> list[str]:
@@ -85,6 +86,7 @@ class PortfolioSnapshot:
             "confidence_score": float(self.confidence_score),
             "dom_hash": self.dom_hash,
             "raw_html_hash": self.raw_html_hash,
+            "owner_chat_id": self.owner_chat_id,
             "positions": [p.to_dict() for p in self.positions],
         }
 

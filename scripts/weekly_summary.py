@@ -82,9 +82,13 @@ def _parse_ts(ts) -> datetime | None:
         return None
 
 
-async def _get_week_snapshots(db: PortfolioDatabase, weeks_ago: int = 0) -> list[dict]:
+async def _get_week_snapshots(
+    db: PortfolioDatabase,
+    weeks_ago: int = 0,
+    owner_chat_id: int | None = None,
+) -> list[dict]:
     start, end = _week_range(weeks_ago)
-    history = await db.get_portfolio_history(limit=200)
+    history = await db.get_portfolio_history(limit=200, owner_chat_id=owner_chat_id)
 
     week_snaps = []
 
@@ -388,22 +392,33 @@ def _render(c: dict, week_label: str, n_snaps: int) -> str:
     return "\n".join(h)
 
 
-async def generate_weekly_summary(weeks_ago: int = 0, no_telegram: bool = False) -> str:
+async def generate_weekly_summary(
+    weeks_ago: int = 0,
+    no_telegram: bool = False,
+    owner_chat_id: int | None = None,
+) -> str:
     cfg = get_config()
     db = PortfolioDatabase(cfg.database.url)
 
     await db.connect()
 
     try:
-        week_snaps = await _get_week_snapshots(db, weeks_ago=weeks_ago)
+        week_snaps = await _get_week_snapshots(
+            db,
+            weeks_ago=weeks_ago,
+            owner_chat_id=owner_chat_id,
+        )
 
         if not week_snaps:
             logger.warning("Sin snapshots esta semana — usando historial reciente")
 
-            history = await db.get_portfolio_history(limit=50)
+            history = await db.get_portfolio_history(limit=50, owner_chat_id=owner_chat_id)
 
             if len(history) < 2:
-                return "⚠️ Sin suficientes snapshots. Corré un scrape primero."
+                return (
+                    "⚠️ Todavía no hay suficientes snapshots para comparar una semana.\n"
+                    "Necesito al menos dos capturas privadas en días distintos."
+                )
 
             now = datetime.now(tz=TZ)
             ref = None
@@ -424,7 +439,7 @@ async def generate_weekly_summary(weeks_ago: int = 0, no_telegram: bool = False)
             week_snaps = [snap_start, snap_end]
 
         elif len(week_snaps) == 1:
-            history = await db.get_portfolio_history(limit=50)
+            history = await db.get_portfolio_history(limit=50, owner_chat_id=owner_chat_id)
             ref_ts = week_snaps[0]["_ts"]
 
             for snap in history:
@@ -462,6 +477,7 @@ async def main() -> None:
     p = argparse.ArgumentParser(description="Resumen semanal del portfolio")
     p.add_argument("--weeks-ago", type=int, default=0)
     p.add_argument("--no-telegram", action="store_true")
+    p.add_argument("--owner-chat-id", type=int, default=None)
 
     args = p.parse_args()
 
@@ -469,6 +485,7 @@ async def main() -> None:
         await generate_weekly_summary(
             weeks_ago=args.weeks_ago,
             no_telegram=args.no_telegram,
+            owner_chat_id=args.owner_chat_id,
         )
     )
 
