@@ -33,8 +33,8 @@ Modos de auditoría:
         aunque el Execution Planner luego los bloquee.
 
     execution:
-        Evalúa fills reales confirmados contra el Execution Planner.
-        Esta es la auditoría operativa validada.
+        Evalúa fills reales confirmados/reconciliados.
+        Si el fill fue manual, valida ejecución real pero no necesariamente calibra el planner.
 
     blocked:
         Evalúa ideas bloqueadas por guards.

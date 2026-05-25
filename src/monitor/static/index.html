@@ -271,6 +271,7 @@
         <div class="metric"><span>Assets con precios</span><b id="candlePrices">-</b></div>
         <div class="metric"><span>Candles internas</span><b id="candleInternal">-</b></div>
         <div class="metric"><span>Faltantes</span><b id="candleMissing">-</b></div>
+        <div class="subtle" id="candleNote"></div>
         <table>
           <thead><tr><th>Dia</th><th>Rows</th><th>Tickers</th><th>Rango</th></tr></thead>
           <tbody id="candlesTable"></tbody>
@@ -437,10 +438,23 @@
 
     function renderCandles(data) {
       const c = data.coverage || {};
+      const market = data.market || {};
       $("candleDay").textContent = c.business_day || "-";
       $("candlePrices").textContent = fmtNumber(c.price_assets);
       $("candleInternal").textContent = fmtNumber(c.internal_candles);
-      $("candleMissing").textContent = fmtNumber(c.missing_internal);
+      const missing = Number(c.missing_internal || 0);
+      if (missing > 0 && market.business_day === false) {
+        $("candleMissing").innerHTML = warn("no aplica");
+        $("candleNote").textContent =
+          "Mercado cerrado: no se espera vela diaria para hoy. Se usa la ultima rueda disponible.";
+      } else if (missing > 0 && market.expects_daily_candle === false) {
+        $("candleMissing").innerHTML = warn(fmtNumber(missing));
+        $("candleNote").textContent =
+          "La rueda aun no cerro: estos faltantes pueden ser normales hasta construir candles EOD.";
+      } else {
+        $("candleMissing").textContent = fmtNumber(c.missing_internal);
+        $("candleNote").textContent = "";
+      }
       $("candlesTable").innerHTML = (data.recent || []).map((row) => `
         <tr>
           <td>${row.business_day || "-"}</td>

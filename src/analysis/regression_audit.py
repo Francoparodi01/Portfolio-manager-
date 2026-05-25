@@ -29,7 +29,7 @@ Datos usados:
     decision        = BUY / SELL / SELL_PARTIAL / SELL_FULL
     source          = optimizer / execution_plan / radar / manual
     decision_type   = theoretical / executable / blocked / manual / pilot
-    status          = THEORETICAL / APPROVED / BLOCKED / EXECUTED / SKIPPED
+    status          = THEORETICAL / APPROVED / BLOCKED / EXECUTED / EXECUTED_MANUAL / SKIPPED
 
 Targets:
     raw:
@@ -83,8 +83,8 @@ MODE_READINGS = {
         "y detectar si el planner bloquea ideas buenas, pero no mide performance operativa real."
     ),
     "execution": (
-        "Este modo mide fills reales confirmados contra el planner. "
-        "Es la métrica operativa validada."
+        "Este modo mide fills reales confirmados/reconciliados. "
+        "Si el fill fue manual, valida la ejecución real pero no necesariamente calibra el score del planner."
     ),
     "blocked": (
         "Este modo mide operaciones rechazadas por guards. Si los outcomes son positivos "
@@ -560,7 +560,7 @@ def apply_audit_mode_filter(
         return out[mask].copy(), warnings
 
     if mode == "execution":
-        mask = out["status"].eq("EXECUTED")
+        mask = out["status"].isin(["EXECUTED", "EXECUTED_MANUAL"])
 
         # Protección extra: excluir explícitamente bloqueados.
         mask = mask & ~out["status"].eq("BLOCKED")
@@ -578,7 +578,7 @@ def apply_audit_mode_filter(
         executed_count = int(mask.sum())
         if executed_count == 0 and approved_count:
             warnings.append(
-                f"Hay {approved_count} execution_plan APPROVED/executable, pero 0 EXECUTED. "
+                f"Hay {approved_count} execution_plan APPROVED/executable, pero 0 EXECUTED/EXECUTED_MANUAL. "
                 "Execution audit mide fills reconciliados; correr/importar broker_fills para validarlo."
             )
 
@@ -830,11 +830,11 @@ def run_regression_audit_sync(
             "Puede ser normal si todavía no se registraron eventos de ese tipo."
         )
 
-    # Detectar si las capas están vacías.
-    for col in ["technical_score", "macro_score", "sentiment_score", "risk_score"]:
+    # Detectar si el score/capas no tienen variacion util para regresion.
+    for col in ["final_score", "technical_score", "macro_score", "sentiment_score", "risk_score"]:
         if col in df.columns and df[col].abs().sum() == 0:
             warnings.append(
-                f"{col} está todo en 0. Revisar guardado/extracción de layers si querés regresión por capas."
+                f"{col} está todo en 0. Revisar guardado/extracción si querés regresión por score/capas."
             )
 
     for horizon in config.horizons:
@@ -1478,7 +1478,7 @@ def _build_human_reading(report: RegressionAuditReport) -> list[str]:
         )
     elif mode == "execution":
         lines.append(
-            "Este resultado mide fills reales confirmados. Es la lectura operativa validada."
+            "Este resultado mide fills reales confirmados/reconciliados. Si fueron manuales, valida execution real pero no calibra el planner."
         )
     elif mode == "blocked":
         lines.append(

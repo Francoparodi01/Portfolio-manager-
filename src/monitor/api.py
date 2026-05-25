@@ -280,6 +280,8 @@ async def ingestion(request: web.Request) -> web.Response:
 
 async def candles(request: web.Request) -> web.Response:
     pool: asyncpg.Pool = request.app["pool"]
+    now = _now_art()
+    business = is_trading_day(now)
     async with pool.acquire() as conn:
         coverage = await conn.fetchrow("""
             WITH latest_price_day AS (
@@ -318,6 +320,12 @@ async def candles(request: web.Request) -> web.Response:
 
     return _json({
         "ok": True,
+        "market": {
+            "business_day": business,
+            "open": business and _is_market_hours(now),
+            "closed_reason": market_closed_reason(now),
+            "expects_daily_candle": business and now.time() >= time(18, 0),
+        },
         "coverage": _row(coverage),
         "recent": [_row(r) for r in recent],
     })

@@ -222,13 +222,16 @@ async def build_confidence_audit(days: int = 180) -> str:
         _num(decisions["executed"] if decisions else None)
         + _num(decisions["executed_manual"] if decisions else None)
     ) > 0
-    outcomes_ready = _num(decisions["closed_5d"] if decisions else None) >= 12
+    closed_5d = _num(decisions["closed_5d"] if decisions else None)
+    outcomes_ready = closed_5d >= 12
 
     hard_ok = portfolio_ok and market_ok and candles_ok and decisions_ok
     measurement_ready = execution_ready and outcomes_ready
 
-    if hard_ok and measurement_ready:
-        verdict = "CONFIABLE para medir edge operativo"
+    if hard_ok and execution_ready and closed_5d >= 100:
+        verdict = "CONFIABLE para auditoria estadistica inicial"
+    elif hard_ok and measurement_ready:
+        verdict = "OPERATIVO Y AUDITABLE, muestra chica"
     elif hard_ok:
         verdict = "OPERATIVO, pero todavia no estadistico"
     else:
@@ -281,7 +284,9 @@ async def build_confidence_audit(days: int = 180) -> str:
     elif not outcomes_ready:
         lines.append("• Hay ejecucion, pero faltan al menos 12 outcomes 5d cerrados para una lectura minima.")
     else:
-        lines.append("• Ya hay base minima para mirar regresion/performance con mas confianza.")
+        lines.append("• Hay base minima para diagnostico de performance/regresion, no para afirmar edge definitivo.")
+        if closed_5d < 100:
+            lines.append("• Muestra chica: mantener recoleccion de ruedas y revisar metricas por mes.")
 
     return "\n".join(lines)
 
