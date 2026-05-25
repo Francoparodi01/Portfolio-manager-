@@ -1,149 +1,68 @@
 # Cocos Copilot
 
-Sistema cuantitativo auditable para analizar una cartera real en Cocos Capital, convertir señales en decisiones operativas y medir si esas decisiones agregan valor con el tiempo.
+Cocos Copilot es un sistema cuantitativo y auditable para operar una cartera real
+de Cocos Capital con disciplina de datos. No ejecuta ordenes automaticamente y no
+es asesoramiento financiero: observa, analiza, propone planes, registra decisiones
+y mide resultados.
 
-El proyecto no busca hacer trading automático ni prometer predicciones perfectas. Su función es más concreta:
+El objetivo del proyecto es construir confianza operativa:
 
-- leer la cartera real,
-- separar datos observados de inferencias,
-- producir un plan ejecutable o decidir no operar,
-- registrar cada decisión,
-- medir después si hubo edge.
+- saber que datos entraron;
+- distinguir precio observado, inferencia, decision teorica y ejecucion real;
+- evitar recomendaciones con datos insuficientes;
+- reconciliar fills reales;
+- medir outcomes, performance, regresion y calibracion.
 
-## Estado actual
+## Estado Actual
 
-El sistema ya puede:
+El sistema ya cuenta con:
 
-- scrapear la cartera real de Cocos Capital;
-- leer el universo de `ACCIONES` y `CEDEARS` por separado;
-- guardar precios de mercado actuales y velas históricas de Cocos;
-- analizar cartera actual con técnico, macro, riesgo y sentiment opcional;
-- generar targets teóricos con optimizer;
-- convertir esos targets en `BUY`, `SELL`, `HOLD`, `WATCH` o bloqueos mediante el Execution Planner;
-- ejecutar un radar externo de oportunidades;
-- clasificar como `EXTERNO` cualquier ticker sin velas Cocos suficientes;
-- registrar decisiones, reconciliar fills reales importados y calcular outcomes, IC, EV, win rate y curva de equity;
-- operar por CLI o Telegram;
-- mantener portfolio, mercado y outcomes con scheduler.
+- scraping autenticado de portfolio, mercado, CEDEARs por apartado y movimientos;
+- persistencia en PostgreSQL/TimescaleDB;
+- historico de velas desde Cocos, TradingView/BYMA e snapshots internos;
+- analisis de cartera con tecnico, macro, riesgo, sentiment opcional y optimizer;
+- execution planner con guards operativos;
+- radar de oportunidades sobre universo Cocos;
+- decision log, fills, movements, outcomes, performance, regression audit y DCL;
+- bot de Telegram;
+- scheduler;
+- API read-only de monitoreo con token y TOTP opcional;
+- dashboard local en `http://localhost:8010/`.
 
-La política de datos ya cambió respecto de versiones anteriores:
-
-- **instrumentos operables**: se evalúan con velas de Cocos en `market_candles`;
-- **universo actual**: se descubre desde Cocos en `market_prices`;
-- **contexto macro global**: sigue usando fuentes externas como `yfinance` y APIs locales;
-- **radar externo**: es estricto-Cocos; si no hay velas suficientes, el activo queda fuera de la operabilidad.
-
-## Cómo se capturan los datos
-
-Hay dos flujos distintos y conviene no mezclarlos:
-
-| Flujo | Origen | Destino | Uso |
-|---|---|---|---|
-| Scrape global de mercado | `/market/ACCIONES` y `/market/CEDEARS` | `market_prices` | descubrir universo, segmento y precio actual |
-| Backfill histórico inicial | página individual de cada ticker + request `historic-data-extended` | `market_candles` con `source = COCOS` | base histórica oficial |
-| Continuidad diaria | snapshots propios de `market_prices` | `market_candles` con `source = internal_snapshot` | técnico, optimizer, radar y outcomes |
-
-`market_prices` es una foto del mercado. `market_candles` conserva dos fuentes físicas pero expone una sola serie lógica: si existe una vela oficial `COCOS` para un día, se usa esa; `internal_snapshot` entra solo como fallback.
-
-El proyecto ya tiene scripts para backfill inicial de velas Cocos:
-
-- `scripts/capture_cocos_history.py`
-- `scripts/import_cocos_history.py`
-- `scripts/backfill_cocos_history.py`
-
-El backfill oficial de Cocos queda congelado como base inicial. La continuidad diaria se reconstruye internamente desde `market_prices`; las capturas `historic-data-extended` quedan para altas nuevas o reparaciones manuales/excepcionales.
-
-## Flujo de decisión
+## Principio Central
 
 ```text
-Cocos Capital
-  -> portfolio_snapshots / positions
-  -> market_prices
-  -> market_candles
-
-run_analysis.py
-  -> técnico + macro + riesgo + sentiment
-  -> síntesis multicapa
-  -> optimizer
-  -> execution_planner
-  -> decision_log
-  -> reporte Telegram / stdout
-```
-
-Regla central:
-
-```text
+El scraper observa.
+El analisis interpreta.
 El optimizer propone.
-El Execution Planner decide qué es operable.
-El reporte operativo muestra el plan ejecutable, no el target teórico.
+El execution planner decide que es operable.
+Los fills confirman que paso en la realidad.
+Los outcomes miden si hubo edge.
 ```
 
-## Separación ACCIONES / CEDEARS
-
-La separación por segmento es explícita:
-
-- `ACCIONES`: acciones argentinas;
-- `CEDEARS`: exposición local a activos internacionales.
-
-El sistema conserva `asset_type` para no mezclar ambas capas:
-
-- `market_prices.asset_type`
-- `market_candles.asset_type`
-- carga del universo en análisis y radar.
-
-Esto permite que el análisis futuro modele mejor la diferencia entre comportamiento local argentino y contexto global.
-
-## Stack
-
-| Capa | Tecnología |
-|---|---|
-| Lenguaje | Python |
-| Scraping | Playwright / Chromium |
-| Persistencia | PostgreSQL / TimescaleDB |
-| Scheduler | APScheduler |
-| Bot | python-telegram-bot |
-| Datos cuantitativos | pandas, numpy, scipy |
-| Contexto macro | yfinance + APIs locales |
-| Infraestructura | Docker Compose |
-| Coordinación auxiliar | Redis opcional |
-
-## Arranque rápido
-
-1. Crear `.env`:
+## Arranque Rapido
 
 ```bash
 cp .env.example .env
-```
-
-2. Completar credenciales y `DATABASE_URL`.
-
-3. Construir servicios:
-
-```bash
 docker compose build
+docker compose up -d scheduler telegram_bot monitor_api
 ```
 
-4. Levantar con una base externa ya configurada en `.env`:
+Con DB local:
 
 ```bash
-docker compose up -d scheduler telegram_bot
+docker compose --profile localdb up -d db scheduler telegram_bot monitor_api
 ```
 
-5. O levantar también la base local del compose:
-
-```bash
-docker compose --profile localdb up -d db scheduler telegram_bot
-```
-
-6. Verificar estado:
+Verificacion:
 
 ```bash
 docker compose ps
-docker compose logs -f scheduler
-docker compose logs -f telegram_bot
+docker compose logs --tail=100 scheduler
+docker compose logs --tail=100 telegram_bot
 ```
 
-## Comandos principales
+## Comandos Principales
 
 Telegram:
 
@@ -152,7 +71,9 @@ Telegram:
 /analisis
 /radar
 /performance
-/resumen
+/confidence
+/regression
+/calibration
 /status
 ```
 
@@ -162,41 +83,27 @@ CLI:
 docker compose exec scheduler python scripts/run_analysis.py --no-telegram --no-llm --no-sentiment
 docker compose exec scheduler python scripts/run_opportunity.py --no-telegram
 docker compose exec scheduler python scripts/run_performance.py --no-telegram
+docker compose exec scheduler python scripts/run_confidence_audit.py --no-telegram
+docker compose exec scheduler python scripts/run_regression_audit.py --mode execution
 ```
 
-La referencia completa está en [`COMANDOS.md`](./COMANDOS.md).
+## Documentacion
 
-## Qué mide el sistema
+La documentacion profesional vive en `docs/`:
 
-Las decisiones guardadas en `decision_log` se auditan con:
+- [Indice general](docs/00-indice.md)
+- [Arquitectura](docs/01-arquitectura.md)
+- [Datos y persistencia](docs/02-datos-y-persistencia.md)
+- [Operacion](docs/03-operacion.md)
+- [Analitica y decision](docs/04-analitica-y-decision.md)
+- [Mantenimiento](docs/05-mantenimiento.md)
 
-- outcomes a 5, 10 y 20 días;
-- win rate;
-- expected value;
-- average win / average loss;
-- Information Coefficient y Rank IC;
-- curva de equity;
-- separación entre ideas teóricas del optimizer y ejecución real.
+Atajos historicos:
 
-El reporte de performance distingue explícitamente:
-
-- **EV histórico agregado**: evidencia acumulada del modelo;
-- **Execution Audit**: evidencia de fills reales confirmados; los planes aprobados quedan separados.
-
-## Limitaciones actuales
-
-- No ejecuta órdenes automáticamente.
-- Valida fills reales solo cuando se importan y reconcilian; la captura automática desde Cocos queda pendiente de una fuente estable.
-- El camino operativo ya es canónico: sin historia suficiente en `market_candles`, no se reabre un fallback silencioso a otra fuente.
-- El dataset de ejecución real todavía está madurando.
-- `C.I.` se conserva como `EXTERNO`: la ruta de Cocos no entrega velas utilizables.
-- La capa ML existe como stub/experimental, no como parte del runtime principal.
-
-## Documentación
-
-- [`ARQUITECTURA.md`](./ARQUITECTURA.md): diseño técnico, datos, módulos y contratos.
-- [`COMANDOS.md`](./COMANDOS.md): operación diaria, CLI, Docker, DB y backfill.
+- [ARQUITECTURA.md](ARQUITECTURA.md)
+- [COMANDOS.md](COMANDOS.md)
 
 ## Disclaimer
 
-Proyecto personal de disciplina cuantitativa. No es asesoramiento financiero ni un producto para terceros.
+Proyecto personal de disciplina cuantitativa. No es asesoramiento financiero, no
+garantiza resultados y no debe usarse como sistema autonomo de ejecucion.
