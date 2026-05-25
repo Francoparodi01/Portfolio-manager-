@@ -50,7 +50,7 @@ class CandidateStatus(str, Enum):
     VIGILANCIA_B      = "VIGILANCIA_B"    # mejor que holdings, sin setup
     VIGILANCIA_C      = "VIGILANCIA_C"    # solo observación pasiva
     NO_OPERABLE       = "NO_OPERABLE"     # R/R inválido o deficiente
-    EXTERNO           = "EXTERNO"         # fuera del universo operable por falta de velas Cocos
+    EXTERNO           = "EXTERNO"         # detectado en Cocos, fuera del set operable por falta de velas
     DESCARTAR         = "DESCARTAR"
 
 
@@ -389,7 +389,7 @@ def screen_universe(
             m = ScreenerMetrics(
                 ticker=ticker,
                 passes_screen=False,
-                fail_reason="sin velas Cocos suficientes",
+                fail_reason="sin histórico Cocos suficiente",
             )
             results.append(m)
             logger.debug(f"Screener FAIL {ticker}: {m.fail_reason}")
@@ -996,7 +996,7 @@ def run_opportunity_analysis(
     external_tickers = {
         metric.ticker
         for metric in screener_results
-        if metric.fail_reason == "sin velas Cocos suficientes"
+        if metric.fail_reason == "sin histórico Cocos suficiente"
     }
     external_candidates = [
         OpportunityCandidate(
@@ -1005,9 +1005,9 @@ def run_opportunity_analysis(
             trade_type=TradeType.WATCHLIST,
             final_score=0.0,
             conviction=0.0,
-            why_not_now="sin velas Cocos suficientes",
+            why_not_now="sin histórico Cocos suficiente",
             action_concreta="No operar",
-            alerts=["Sin velas Cocos suficientes para evaluar operabilidad"],
+            alerts=["Detectado en Cocos, pero sin velas suficientes para evaluar operabilidad"],
         )
         for ticker in sorted(external_tickers)
     ]
@@ -1244,7 +1244,7 @@ def run_opportunity_analysis(
         f"{len(report.swap_candidatos)} swaps | "
         f"{len(report.en_vigilancia)} vigilancia | "
         f"{len(report.no_operables)} no operables | "
-        f"{len(report.externos)} externos"
+        f"{len(report.externos)} sin histórico"
     )
     return report
 
@@ -1321,6 +1321,11 @@ def render_opportunity_report(
             for source, count in sorted(counts.items())
         )
         return f"{mode} ({detail})"
+
+    def _tv_chart_url(ticker: str) -> str:
+        raw = str(ticker or "").upper().strip()
+        symbol = {"BA.C": "BAC", "BRKB": "BRKB"}.get(raw, raw.replace(".", ""))
+        return f"https://www.tradingview.com/chart/?symbol=BYMA%3A{symbol}"
 
     def _swap_context(c: OpportunityCandidate) -> str:
         """Texto de contexto para swaps según su intensidad."""
@@ -1400,6 +1405,7 @@ def render_opportunity_report(
             f"momentum {c.momentum_score:+.3f} | sent {c.sentiment_score:+.3f}</code>"
         )
         h.append(f"Fuente técnica: <b>{escape(_technical_source_label(c))}</b>")
+        h.append(f"Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
 
         # Contradicción técnica — nota explícita
         tech_note = _tech_contradiction_note(c)
@@ -1478,6 +1484,7 @@ def render_opportunity_report(
             f"{rr_str} | ${c.price_usd:.2f}{edge_str}{near_tag}"
         )
         h.append(f"   Fuente técnica: <b>{escape(_technical_source_label(c))}</b>")
+        h.append(f"   Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
         # Contradicción técnica en compacto
         if c.tech_contradiction:
             h.append(
@@ -1592,17 +1599,21 @@ def render_opportunity_report(
             )
             if c.asymmetry and c.asymmetry.rr_alert:
                 h.append(f"   ⚠️ {escape(c.asymmetry.rr_alert)}")
+            h.append(f"   Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
             h.append(f"   🎯 {escape(c.action_concreta)}")
             h.append("")
 
-    # ── EXTERNOS ──────────────────────────────────────────────────────────────
+    # ── DETECTADOS EN COCOS, SIN HISTÓRICO ────────────────────────────────────
     if report.externos:
         h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        h.append(f"🌐 <b>EXTERNOS / SIN HISTÓRICO COCOS ({len(report.externos)})</b>")
-        h.append("<i>No se evalúan como operables hasta tener velas Cocos suficientes.</i>")
+        h.append(f"🕯️ <b>EN COCOS / SIN HISTÓRICO OPERABLE ({len(report.externos)})</b>")
+        h.append("<i>Son tickers detectados en Cocos, pero todavía sin 60 velas canónicas. No dependen de fills; los fills solo existen si hubo operaciones reales.</i>")
         h.append("")
-        for c in report.externos:
-            h.append(f"  <b>{c.ticker}</b>: sin velas Cocos suficientes")
+        for c in report.externos[:20]:
+            h.append(f"  <b>{c.ticker}</b>: falta histórico de velas")
+        if len(report.externos) > 20:
+            h.append(f"  +{len(report.externos) - 20} más sin histórico suficiente")
+            h.append("  Acción: priorizar backfill por liquidez, cartera o señales repetidas.")
         h.append("")
 
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

@@ -16,6 +16,7 @@ secrets_multiuser/
 logs/
 screenshots/
 models/
+outputs/
 *.log
 tests/
 

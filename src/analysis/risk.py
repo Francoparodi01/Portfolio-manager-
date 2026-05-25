@@ -108,8 +108,11 @@ class PortfolioRisk:
 def compute_asset_risk(ticker, prices, current_value, portfolio_total, vix=None, portfolio_drawdown=0.0):
     m = RiskMetrics(ticker=ticker)
     if not HAS_DEPS or prices is None or len(prices) < 20:
-        m.suggested_pct = 0.15
+        current_pct = current_value / portfolio_total if portfolio_total > 0 else 0.0
+        m.suggested_pct = current_pct
         m.suggested_pct_adj = m.suggested_pct
+        m.risk_level = "NO_DATA"
+        m.warnings.append("Sin histórico suficiente para risk engine")
         return m
 
     try:

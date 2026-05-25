@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cocos Monitor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111418;
+      --panel: #181d23;
+      --panel-2: #20262e;
+      --line: #303844;
+      --text: #eef2f6;
+      --muted: #9ba7b4;
+      --green: #32c48d;
+      --red: #ff6464;
+      --amber: #f2b84b;
+      --blue: #64a8ff;
+      --violet: #b48cff;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--line);
+      background: rgba(17, 20, 24, 0.96);
+      backdrop-filter: blur(10px);
+    }
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(170px, 1fr) minmax(260px, 500px) auto;
+      gap: 12px;
+      align-items: center;
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 12px 16px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 720;
+      letter-spacing: 0;
+    }
+    .subtle { color: var(--muted); }
+    .auth {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) 104px;
+      gap: 8px;
+    }
+    .auth.totp { grid-template-columns: minmax(160px, 1fr) 104px 104px; }
+    input, button, select {
+      height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+    }
+    input {
+      min-width: 0;
+      padding: 0 10px;
+      outline: none;
+    }
+    input:focus { border-color: var(--blue); }
+    button {
+      cursor: pointer;
+      padding: 0 12px;
+      background: var(--panel-2);
+    }
+    button:hover { border-color: var(--blue); }
+    button.primary {
+      border-color: #3a7fd4;
+      background: #1f4f86;
+    }
+    main {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .wide { grid-column: span 2; }
+    .full { grid-column: 1 / -1; }
+    .card {
+      min-height: 112px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 650;
+      text-transform: uppercase;
+    }
+    .metric {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.055);
+    }
+    .metric:last-child { border-bottom: 0; }
+    .metric b {
+      text-align: right;
+      font-weight: 680;
+      overflow-wrap: anywhere;
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-weight: 720;
+    }
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--muted);
+    }
+    .ok .dot { background: var(--green); }
+    .bad .dot { background: var(--red); }
+    .warn .dot { background: var(--amber); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 2px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .row-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    th, td {
+      padding: 8px 7px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .logline {
+      margin: 0;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      color: #d9dee5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+    }
+    .error {
+      display: none;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border: 1px solid rgba(255,100,100,0.45);
+      border-radius: 8px;
+      background: rgba(255,100,100,0.12);
+      color: #ffd7d7;
+    }
+    .money { color: var(--green); }
+    .amber { color: var(--amber); }
+    .blue { color: var(--blue); }
+    .violet { color: var(--violet); }
+
+    @media (max-width: 980px) {
+      .topbar { grid-template-columns: 1fr; }
+      .auth, .auth.totp { grid-template-columns: 1fr 96px; }
+      .totp-code { grid-column: 1 / -1; }
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .wide { grid-column: 1 / -1; }
+    }
+    @media (max-width: 620px) {
+      main { padding: 12px; }
+      .grid { grid-template-columns: 1fr; }
+      .card { min-height: unset; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="topbar">
+      <div>
+        <h1>Cocos Monitor</h1>
+        <div class="subtle" id="generated">Sin datos todavia</div>
+      </div>
+      <form class="auth" id="authForm">
+        <input id="token" type="password" autocomplete="current-password" placeholder="MONITOR_API_TOKEN">
+        <input id="totp" class="totp-code" inputmode="numeric" autocomplete="one-time-code" placeholder="TOTP" hidden>
+        <button class="primary" type="submit">Actualizar</button>
+      </form>
+      <button id="clearToken" type="button">Salir</button>
+    </div>
+  </header>
+
+  <main>
+    <div class="error" id="error"></div>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Servicios</h2>
+        <div class="metric"><span>Scheduler</span><b id="schedulerStatus">-</b></div>
+        <div class="metric"><span>Telegram bot</span><b id="botStatus">-</b></div>
+        <div class="metric"><span>DB</span><b id="dbStatus">-</b></div>
+        <div class="metric"><span>Redis</span><b id="redisStatus">-</b></div>
+      </article>
+
+      <article class="card">
+        <h2>Mercado</h2>
+        <div class="metric"><span>Estado</span><b id="marketStatus">-</b></div>
+        <div class="metric"><span>Razon cierre</span><b id="marketReason">-</b></div>
+        <div class="metric"><span>Market heartbeat</span><b id="marketBeat">-</b></div>
+        <div class="metric"><span>Risk heartbeat</span><b id="riskBeat">-</b></div>
+      </article>
+
+      <article class="card">
+        <h2>Portfolio</h2>
+        <div class="metric"><span>Ultimo scrape</span><b id="portfolioLast">-</b></div>
+        <div class="metric"><span>Total</span><b class="money" id="portfolioTotal">-</b></div>
+        <div class="metric"><span>24h / 7d</span><b id="portfolioCounts">-</b></div>
+        <div class="metric"><span>Confianza</span><b id="portfolioConfidence">-</b></div>
+      </article>
+
+      <article class="card">
+        <h2>Market Prices</h2>
+        <div class="metric"><span>Ultimo precio</span><b id="priceLast">-</b></div>
+        <div class="metric"><span>Rows 24h</span><b id="priceRows24">-</b></div>
+        <div class="metric"><span>Rows 7d</span><b id="priceRows7">-</b></div>
+        <div class="metric"><span>Tickers 7d</span><b id="priceTickers7">-</b></div>
+        <div class="metric"><span>Universo A/C</span><b id="assetBreakdown">-</b></div>
+      </article>
+
+      <article class="card wide">
+        <div class="row-head">
+          <h2>Candles</h2>
+          <span class="pill" id="candleDay">-</span>
+        </div>
+        <div class="metric"><span>Assets con precios</span><b id="candlePrices">-</b></div>
+        <div class="metric"><span>Candles internas</span><b id="candleInternal">-</b></div>
+        <div class="metric"><span>Faltantes</span><b id="candleMissing">-</b></div>
+        <table>
+          <thead><tr><th>Dia</th><th>Rows</th><th>Tickers</th><th>Rango</th></tr></thead>
+          <tbody id="candlesTable"></tbody>
+        </table>
+      </article>
+
+      <article class="card wide">
+        <div class="row-head">
+          <h2>Decisiones</h2>
+          <span class="pill">90 dias</span>
+        </div>
+        <div class="metric"><span>Total</span><b id="decTotal">-</b></div>
+        <div class="metric"><span>Pendientes 5d</span><b class="amber" id="decPending">-</b></div>
+        <div class="metric"><span>Cerradas 5d</span><b class="blue" id="decClosed">-</b></div>
+        <div class="metric"><span>Execution plan</span><b class="violet" id="decExecPlan">-</b></div>
+        <table>
+          <thead><tr><th>Hora</th><th>Ticker</th><th>Decision</th><th>Status</th><th>5d</th></tr></thead>
+          <tbody id="decisionsTable"></tbody>
+        </table>
+      </article>
+
+      <article class="card wide">
+        <div class="row-head">
+          <h2>Fills reales</h2>
+          <span class="pill">90 dias</span>
+        </div>
+        <div class="metric"><span>Total</span><b id="fillsTotal">-</b></div>
+        <div class="metric"><span>Reconciliados</span><b class="blue" id="fillsReconciled">-</b></div>
+        <div class="metric"><span>Pendientes</span><b class="amber" id="fillsUnreconciled">-</b></div>
+        <div class="metric"><span>Movimientos</span><b id="movementsTotal">-</b></div>
+        <div class="metric"><span>Ultima accion</span><b id="fillsLatest">-</b></div>
+        <table>
+          <thead><tr><th>Hora</th><th>Ticker</th><th>Lado</th><th>Cant.</th><th>Precio</th></tr></thead>
+          <tbody id="fillsTable"></tbody>
+        </table>
+      </article>
+
+      <article class="card full">
+        <div class="row-head">
+          <h2>Logs recientes</h2>
+          <span class="pill" id="logsNote">-</span>
+        </div>
+        <div id="logs"></div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const state = {
+      token: localStorage.getItem("monitorToken") || "",
+      totpRequired: false,
+    };
+
+    $("token").value = state.token;
+
+    function fmtNumber(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      return Number(value).toLocaleString("es-AR", { maximumFractionDigits: 2 });
+    }
+
+    function fmtMoney(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      return "$" + Number(value).toLocaleString("es-AR", { maximumFractionDigits: 0 });
+    }
+
+    function fmtPct(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      return (Number(value) * 100).toLocaleString("es-AR", { maximumFractionDigits: 1 }) + "%";
+    }
+
+    function fmtDate(value) {
+      if (!value) return "-";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return String(value);
+      return d.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" });
+    }
+
+    function fmtAge(seconds) {
+      if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "-";
+      const s = Math.max(0, Number(seconds));
+      if (s < 90) return Math.round(s) + "s";
+      if (s < 3600) return Math.round(s / 60) + "m";
+      if (s < 172800) return Math.round(s / 3600) + "h";
+      return Math.round(s / 86400) + "d";
+    }
+
+    function status(ok, text) {
+      const cls = ok ? "ok" : "bad";
+      return `<span class="status ${cls}"><span class="dot"></span>${text}</span>`;
+    }
+
+    function warn(text) {
+      return `<span class="status warn"><span class="dot"></span>${text}</span>`;
+    }
+
+    function setError(message) {
+      const box = $("error");
+      box.style.display = message ? "block" : "none";
+      box.textContent = message || "";
+    }
+
+    async function api(path) {
+      const headers = {};
+      const token = $("token").value.trim();
+      if (token) headers.Authorization = "Bearer " + token;
+      if (state.totpRequired) {
+        const code = $("totp").value.trim();
+        if (code) headers["X-TOTP-Code"] = code;
+      }
+      const res = await fetch(path, { headers });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || res.statusText || "Error HTTP");
+      return data;
+    }
+
+    async function loadAuthStatus() {
+      const res = await fetch("/api/auth/status");
+      const data = await res.json();
+      state.totpRequired = Boolean(data.auth && data.auth.totp_required);
+      $("totp").hidden = !state.totpRequired;
+      $("authForm").classList.toggle("totp", state.totpRequired);
+    }
+
+    function renderHealth(data) {
+      $("generated").textContent = "Actualizado " + fmtDate(data.generated_at);
+      $("dbStatus").innerHTML = status(data.database.ok, data.database.ok ? "OK" : "Falla");
+      $("redisStatus").innerHTML = status(data.redis.ok, data.redis.ok ? "OK" : "Falla");
+      $("schedulerStatus").innerHTML = data.services.scheduler.alive
+        ? status(true, "vivo " + fmtAge(data.services.scheduler.heartbeat_age_seconds))
+        : warn("sin heartbeat");
+      $("botStatus").innerHTML = data.services.telegram_bot.alive
+        ? status(true, "vivo " + fmtAge(data.services.telegram_bot.heartbeat_age_seconds))
+        : warn("sin heartbeat");
+      $("marketStatus").innerHTML = data.market.open
+        ? status(true, "abierto")
+        : warn(data.market.business_day ? "cerrado" : "sin rueda");
+      $("marketReason").textContent = data.market.closed_reason || "-";
+      $("marketBeat").textContent = fmtAge(data.services.market_heartbeat_age_seconds);
+      $("riskBeat").textContent = fmtAge(data.services.risk_heartbeat_age_seconds);
+    }
+
+    function renderIngestion(data) {
+      const p = data.portfolio.latest || {};
+      const pc = data.portfolio.counts || {};
+      const m = data.market_prices.latest || {};
+      $("portfolioLast").textContent = fmtDate(p.scraped_at) + " (" + fmtAge(p.scraped_at_age_seconds) + ")";
+      $("portfolioTotal").textContent = fmtMoney(p.total_value_ars);
+      $("portfolioCounts").textContent = fmtNumber(pc.last_24h) + " / " + fmtNumber(pc.last_7d);
+      $("portfolioConfidence").textContent = fmtPct(p.confidence_score);
+      $("priceLast").textContent = fmtDate(m.latest_ts) + " (" + fmtAge(m.latest_ts_age_seconds) + ")";
+      $("priceRows24").textContent = fmtNumber(m.rows_24h);
+      $("priceRows7").textContent = fmtNumber(m.rows_7d);
+      $("priceTickers7").textContent = fmtNumber(m.tickers_7d);
+      const breakdown = {};
+      (data.market_prices.asset_breakdown || []).forEach((row) => {
+        breakdown[row.asset_type] = row;
+      });
+      $("assetBreakdown").textContent =
+        fmtNumber(breakdown.ACCION && breakdown.ACCION.tickers_7d) +
+        " / " +
+        fmtNumber(breakdown.CEDEAR && breakdown.CEDEAR.tickers_7d);
+    }
+
+    function renderCandles(data) {
+      const c = data.coverage || {};
+      $("candleDay").textContent = c.business_day || "-";
+      $("candlePrices").textContent = fmtNumber(c.price_assets);
+      $("candleInternal").textContent = fmtNumber(c.internal_candles);
+      $("candleMissing").textContent = fmtNumber(c.missing_internal);
+      $("candlesTable").innerHTML = (data.recent || []).map((row) => `
+        <tr>
+          <td>${row.business_day || "-"}</td>
+          <td>${fmtNumber(row.rows)}</td>
+          <td>${fmtNumber(row.tickers)}</td>
+          <td>${fmtDate(row.min_ts)} - ${fmtDate(row.max_ts)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="4" class="subtle">Sin candles recientes</td></tr>`;
+    }
+
+    function renderDecisions(data) {
+      const s = data.summary || {};
+      $("decTotal").textContent = fmtNumber(s.total);
+      $("decPending").textContent = fmtNumber(s.pending_5d);
+      $("decClosed").textContent = fmtNumber(s.closed_5d);
+      $("decExecPlan").textContent = fmtNumber(s.execution_plan);
+      $("decisionsTable").innerHTML = (data.recent || []).map((row) => `
+        <tr>
+          <td>${fmtDate(row.decided_at)}</td>
+          <td>${row.ticker || "-"}</td>
+          <td>${row.decision || "-"}</td>
+          <td>${row.status || "-"}</td>
+          <td>${row.outcome_5d === null || row.outcome_5d === undefined ? "pend." : fmtPct(row.outcome_5d)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="5" class="subtle">Sin decisiones recientes</td></tr>`;
+    }
+
+    function renderFills(data) {
+      const s = data.summary || {};
+      $("fillsTotal").textContent = fmtNumber(s.total);
+      $("fillsReconciled").textContent = fmtNumber(s.reconciled);
+      $("fillsUnreconciled").textContent = fmtNumber(s.unreconciled);
+      const ms = (data.movements && data.movements.summary) || {};
+      $("movementsTotal").textContent = fmtNumber(ms.trades) + " / " + fmtNumber(ms.total);
+      $("fillsLatest").textContent = fmtDate(ms.latest_executed_at || s.latest_executed_at);
+      const movementRows = data.movements && data.movements.recent && data.movements.recent.length
+        ? data.movements.recent.map((row) => ({
+            executed_at: row.executed_at,
+            ticker: row.ticker,
+            side: row.movement_type,
+            quantity: row.quantity,
+            avg_fill_price: row.price,
+          }))
+        : (data.recent || []);
+      $("fillsTable").innerHTML = movementRows.map((row) => `
+        <tr>
+          <td>${fmtDate(row.executed_at)}</td>
+          <td>${row.ticker || "-"}</td>
+          <td>${row.side || "-"}</td>
+          <td>${fmtNumber(row.quantity)}</td>
+          <td>${fmtMoney(row.avg_fill_price)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="5" class="subtle">Sin fills reales sincronizados</td></tr>`;
+    }
+
+    function renderLogs(data) {
+      $("logsNote").textContent = data.note || (data.items.length + " lineas");
+      $("logs").innerHTML = (data.items || []).slice().reverse().map((item) => (
+        `<pre class="logline">[${item.file}] ${item.line}</pre>`
+      )).join("") || `<div class="subtle">Sin errores relevantes recientes</div>`;
+    }
+
+    async function refresh() {
+      setError("");
+      const token = $("token").value.trim();
+      if (token) localStorage.setItem("monitorToken", token);
+      const [health, ingestion, candles, decisions, fills, logs] = await Promise.all([
+        api("/api/health"),
+        api("/api/ingestion"),
+        api("/api/candles"),
+        api("/api/decisions?days=90"),
+        api("/api/fills?days=90"),
+        api("/api/logs/recent?limit=80"),
+      ]);
+      renderHealth(health);
+      renderIngestion(ingestion);
+      renderCandles(candles);
+      renderDecisions(decisions);
+      renderFills(fills);
+      renderLogs(logs);
+    }
+
+    $("authForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      refresh().catch((err) => setError(err.message));
+    });
+
+    $("clearToken").addEventListener("click", () => {
+      localStorage.removeItem("monitorToken");
+      $("token").value = "";
+      $("totp").value = "";
+      setError("Token local borrado.");
+    });
+
+    loadAuthStatus()
+      .then(() => state.token ? refresh() : null)
+      .catch((err) => setError(err.message));
+    setInterval(() => {
+      if ($("token").value.trim()) refresh().catch((err) => setError(err.message));
+    }, 60000);
+  </script>
+</body>
+</html>

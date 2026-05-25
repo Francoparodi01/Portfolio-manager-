@@ -58,7 +58,7 @@ try:
     from src.core.config import get_config
     from src.core.credentials import CredentialCipher, UserCredentials
     from src.core.logger import get_logger
-    from src.core.market_calendar import is_trading_day
+    from src.core.market_calendar import is_trading_day, market_closed_reason
     from src.core.portfolio_cache import (
         cache_portfolio_snapshot,
         get_cached_live_portfolio,
@@ -72,6 +72,7 @@ except Exception:
     UserCredentials = None
     get_logger = None
     is_trading_day = None
+    market_closed_reason = None
     cache_portfolio_snapshot = None
     get_cached_live_portfolio = None
     redis_client = None
@@ -97,12 +98,13 @@ if not logging.getLogger().handlers:
 # ─────────────────────────────────────────────────────────────────────────────
 
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+BOT_HEARTBEAT_KEY = "cocos:bot:last_heartbeat"
 
 MAX_MESSAGE_LENGTH = 3900
 COMMAND_TIMEOUT_SECONDS = 300
 
 REGRESSION_MODES = {"optimizer", "execution", "blocked", "signal", "all"}
-DEFAULT_REGRESSION_MODE = "optimizer"
+DEFAULT_REGRESSION_MODE = "execution"
 SETTINGS_STATE_KEY = "settings_state"
 SETTINGS_USERNAME_KEY = "settings_username"
 SETTINGS_AWAIT_USERNAME = "await_username"
@@ -250,6 +252,13 @@ def _is_business_day_now() -> bool:
     if is_trading_day is None:
         return now.weekday() < 5
     return is_trading_day(now)
+
+
+def _market_closed_reason_now() -> Optional[str]:
+    now = datetime.now(tz=TZ)
+    if market_closed_reason is None:
+        return "fin_de_semana" if now.weekday() >= 5 else None
+    return market_closed_reason(now)
 
 
 def _is_market_hours_now() -> bool:
@@ -444,9 +453,12 @@ def main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Performance",      callback_data="performance"),
         ],
         [
-            InlineKeyboardButton("📈 Regression",       callback_data="regression_audit"),
+            InlineKeyboardButton("🧭 Confianza",        callback_data="confidence_audit"),
             InlineKeyboardButton("🔭 Radar",            callback_data="radar"),
         ],
+        [
+            InlineKeyboardButton("📈 Regression",       callback_data="regression"),
+        ]
     ]
     final_row = [InlineKeyboardButton("🩺 Status", callback_data="status")]
     if _multiuser_enabled():
@@ -470,17 +482,11 @@ def menu_text() -> str:
         "🧠 <b>Plan de cartera</b> — rotación y acciones sugeridas\n"
         "📅 <b>Resumen semanal</b> — performance de la semana\n"
         "📊 <b>Performance</b> — métricas canónicas y dataset operativo\n"
-        "📈 <b>Regression</b> — auditoría estadística\n"
+        "🧭 <b>Confianza</b> — auditoría operativa del sistema\n"
         "🔭 <b>Radar</b> — oportunidades operables del universo\n"
+        "📈 <b>Regression</b> — auditoría de señales y outcomes\n"
         "🩺 <b>Status</b> — estado del sistema y DB\n"
         f"{settings_line}\n"
-        "<b>Regresión:</b>\n"
-        "• <code>/regression</code> → optimizer\n"
-        "• <code>/regression execution</code>\n"
-        "• <code>/regression blocked</code>\n"
-        "• <code>/regression signal</code>\n"
-        "• <code>/regression all</code>\n\n"
-        "<i>Scraping manual: <code>/admin_scrape</code> (solo admin)</i>"
     )
 
 
@@ -757,6 +763,29 @@ async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
         "scripts/run_performance.py",
         "--days",
         "90",
+        "--no-telegram",
+        *_owner_cli_args(chat_id),
+        timeout=240,
+    )
+    await send_text(context, chat_id, report)
+
+
+async def action_confidence_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    report = await run_python_script(
+        "scripts/run_confidence_audit.py",
+        "--days",
+        "180",
+        "--no-telegram",
+        timeout=240,
+    )
+    await send_text(context, chat_id, report)
+
+
+async def action_calibration(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    report = await run_python_script(
+        "scripts/run_calibration.py",
+        "--days",
+        "180",
         "--no-telegram",
         *_owner_cli_args(chat_id),
         timeout=240,
@@ -1479,6 +1508,16 @@ CALLBACK_ALIASES: dict[str, str] = {
     "performance":      "performance",
     "perf":             "performance",
     "run_performance":  "performance",
+    # Confianza operativa
+    "confidence":       "confidence_audit",
+    "confianza":        "confidence_audit",
+    "trust":            "confidence_audit",
+    "audit":            "confidence_audit",
+    "confidence_audit": "confidence_audit",
+    # Decision Calibration Layer
+    "calibration":      "calibration",
+    "calibracion":      "calibration",
+    "dcl":              "calibration",
     # Radar
     "radar":            "radar",
     "opportunities":    "radar",
@@ -1498,10 +1537,12 @@ CALLBACK_ALIASES: dict[str, str] = {
 }
 
 ACTION_LOADING_TEXT: dict[str, str] = {
+    "calibration":   "DCL: auditando decisiones y outcomes...",
     "portfolio":     "💼 Leyendo último portfolio...",
     "analysis":      "🧠 Generando plan de cartera...",
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
+    "confidence_audit": "🧭 Auditando confianza del sistema...",
     "radar":         "🔭 Generando radar de oportunidades...",
     "radar_full":    "🔭 Generando radar completo...",
     "regression_audit": "📈 Ejecutando auditoría de regresión...",
@@ -1517,6 +1558,8 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "analysis":       action_analysis,
         "weekly_summary": action_weekly_summary,
         "performance":    action_performance,
+        "confidence_audit": action_confidence_audit,
+        "calibration":    action_calibration,
         "radar":          action_radar,
         "radar_full": action_radar_full,
         "regression_audit": action_regression_audit,
@@ -1585,6 +1628,14 @@ async def weekly_summary_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def performance_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "performance")
+
+
+async def confidence_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "confidence_audit")
+
+
+async def calibration_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "calibration")
 
 async def radar_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "radar")
@@ -1781,9 +1832,45 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # App
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def bot_heartbeat_loop(_app: Application) -> None:
+    if redis_client is None:
+        logger.info("[BOT] Heartbeat Redis deshabilitado")
+        return
+
+    while True:
+        try:
+            await redis_client.set(
+                BOT_HEARTBEAT_KEY,
+                str(int(datetime.now(tz=timezone.utc).timestamp())),
+                ex=90,
+            )
+        except Exception as exc:
+            logger.debug("[BOT] Heartbeat Redis ignorado: %s", exc)
+        await asyncio.sleep(30)
+
+
+async def post_init(app: Application) -> None:
+    app.bot_data["heartbeat_task"] = asyncio.create_task(
+        bot_heartbeat_loop(app),
+        name="bot_heartbeat",
+    )
+
+
+async def post_shutdown(app: Application) -> None:
+    task = app.bot_data.get("heartbeat_task")
+    if task:
+        task.cancel()
+
+
 def build_app() -> Application:
     token = _get_token()
-    app   = Application.builder().token(token).build()
+    app   = (
+        Application.builder()
+        .token(token)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     # Comandos principales
     app.add_handler(CommandHandler("start",            start_handler))
@@ -1796,6 +1883,12 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("weekly_summary",   weekly_summary_handler))
     app.add_handler(CommandHandler("resumen_semanal",  weekly_summary_handler))
     app.add_handler(CommandHandler("performance",      performance_handler))
+    app.add_handler(CommandHandler("confianza",        confidence_handler))
+    app.add_handler(CommandHandler("confidence",       confidence_handler))
+    app.add_handler(CommandHandler("trust",            confidence_handler))
+    app.add_handler(CommandHandler("calibration",      calibration_handler))
+    app.add_handler(CommandHandler("calibracion",      calibration_handler))
+    app.add_handler(CommandHandler("dcl",              calibration_handler))
     app.add_handler(CommandHandler("radar",            radar_handler))
     app.add_handler(CommandHandler("radar_full", radar_full_handler))
     app.add_handler(CommandHandler("regression", regression_audit_handler))

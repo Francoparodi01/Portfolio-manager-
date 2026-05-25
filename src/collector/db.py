@@ -29,6 +29,10 @@ from zoneinfo import ZoneInfo
 from src.analysis.decision_engine import directional_return
 from src.analysis.fill_reconciliation import ExecutionCandidate, choose_execution_candidate
 from src.collector.broker_fills import BrokerFill, serialize_raw_payload
+from src.collector.broker_movements import (
+    BrokerMovement,
+    serialize_raw_payload as serialize_movement_raw_payload,
+)
 from src.collector.data.models import AssetType, Currency, MarketCandle
 from src.core.credentials import CredentialCipher, UserCredentials
 
@@ -45,6 +49,8 @@ CANONICAL_OUTCOME_BASIS = "canonical_cocos"
 LEGACY_EXTERNAL_OUTCOME_BASIS = "legacy_external"
 MIN_COMPATIBLE_PRICE_RATIO = 0.5
 MAX_COMPATIBLE_PRICE_RATIO = 2.0
+CEDEAR_MIN_COMPATIBLE_PRICE_RATIO = 0.25
+CEDEAR_MAX_COMPATIBLE_PRICE_RATIO = 4.0
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
@@ -52,6 +58,23 @@ SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
 
 def _schema_sql() -> str:
     return SCHEMA_PATH.read_text(encoding="utf-8")
+
+
+def _json_payload(value) -> dict:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {"value": parsed}
+        except Exception:
+            return {"value": value}
+    try:
+        return dict(value)
+    except Exception:
+        return {"value": str(value)}
 
 
 # ── Migration SQL para decision_log (idempotente) ─────────────────────────────
@@ -568,7 +591,12 @@ class PortfolioDatabase:
                         ROW_NUMBER() OVER (
                             PARTITION BY (ts AT TIME ZONE 'UTC')::date
                             ORDER BY
-                                CASE WHEN source = 'COCOS' THEN 0 ELSE 1 END,
+                                CASE
+                                    WHEN source = 'COCOS' THEN 0
+                                    WHEN source = 'TRADINGVIEW_BYMA' THEN 1
+                                    WHEN source = 'internal_snapshot' THEN 2
+                                    ELSE 3
+                                END,
                                 scraped_at DESC,
                                 ts DESC
                         ) AS source_rank
@@ -925,6 +953,78 @@ class PortfolioDatabase:
         logger.info("%s broker fills guardados", len(rows))
         return len(rows)
 
+    async def save_broker_movements(self, movements: list[BrokerMovement]) -> int:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        if not movements:
+            return 0
+
+        rows = [
+            (
+                movement.source,
+                movement.external_movement_id,
+                movement.executed_at,
+                movement.movement_type,
+                movement.currency,
+                float(movement.amount) if movement.amount is not None else None,
+                float(movement.quantity) if movement.quantity is not None else None,
+                float(movement.price) if movement.price is not None else None,
+                movement.ticker.upper() if movement.ticker else None,
+                movement.instrument_type,
+                movement.settlement_date,
+                movement.description,
+                movement.detail,
+                movement.label,
+                float(movement.balance) if movement.balance is not None else None,
+                serialize_movement_raw_payload(movement.raw_payload),
+            )
+            for movement in movements
+        ]
+
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO broker_movements (
+                    source,
+                    external_movement_id,
+                    executed_at,
+                    movement_type,
+                    currency,
+                    amount,
+                    quantity,
+                    price,
+                    ticker,
+                    instrument_type,
+                    settlement_date,
+                    description,
+                    detail,
+                    label,
+                    balance,
+                    raw_payload
+                )
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
+                ON CONFLICT (source, external_movement_id) DO UPDATE SET
+                    executed_at     = EXCLUDED.executed_at,
+                    movement_type   = EXCLUDED.movement_type,
+                    currency        = EXCLUDED.currency,
+                    amount          = EXCLUDED.amount,
+                    quantity        = EXCLUDED.quantity,
+                    price           = EXCLUDED.price,
+                    ticker          = EXCLUDED.ticker,
+                    instrument_type = EXCLUDED.instrument_type,
+                    settlement_date = EXCLUDED.settlement_date,
+                    description     = EXCLUDED.description,
+                    detail          = EXCLUDED.detail,
+                    label           = EXCLUDED.label,
+                    balance         = EXCLUDED.balance,
+                    raw_payload     = EXCLUDED.raw_payload
+                """,
+                rows,
+            )
+
+        logger.info("%s broker movements guardados", len(rows))
+        return len(rows)
+
     async def reconcile_broker_fills(self, max_age_days: int = 3) -> int:
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
@@ -1002,7 +1102,7 @@ class PortfolioDatabase:
                         else None
                     ),
                     source=str(row["source"]),
-                    raw_payload=dict(row["raw_payload"] or {}),
+                    raw_payload=_json_payload(row["raw_payload"]),
                 )
                 candidate = choose_execution_candidate(
                     fill,
@@ -1058,6 +1158,201 @@ class PortfolioDatabase:
 
         logger.info("broker fills reconciliados: %s", updated)
         return updated
+
+    async def materialize_unmatched_broker_fills(self) -> int:
+        """
+        Link real broker fills that did not match an APPROVED execution plan.
+
+        Unplanned/manual fills are tagged as EXECUTED_MANUAL so outcomes can be
+        tracked without pretending the planner approved them.
+        """
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        async with self._pool.acquire() as conn:
+            groups = await conn.fetch(
+                """
+                SELECT
+                    executed_at::date AS fill_date,
+                    ticker,
+                    side,
+                    ARRAY_AGG(id ORDER BY executed_at, id) AS fill_ids,
+                    ARRAY_AGG(external_fill_id ORDER BY executed_at, id) AS external_ids,
+                    SUM(quantity) AS quantity,
+                    CASE
+                        WHEN SUM(quantity) <> 0
+                        THEN SUM(quantity * avg_fill_price) / SUM(quantity)
+                        ELSE AVG(avg_fill_price)
+                    END AS avg_fill_price,
+                    SUM(ABS(COALESCE(gross_amount_ars, quantity * avg_fill_price))) AS executed_amount_ars,
+                    SUM(COALESCE(fees_ars, 0)) AS fees_ars,
+                    MIN(owner_chat_id) AS owner_chat_id
+                FROM broker_fills
+                WHERE decision_log_id IS NULL
+                GROUP BY executed_at::date, ticker, side
+                ORDER BY fill_date, ticker, side
+                """
+            )
+
+            linked = 0
+            for group in groups:
+                fill_date = group["fill_date"]
+                ticker = str(group["ticker"]).upper()
+                side = str(group["side"]).upper()
+                fill_ids = [int(x) for x in group["fill_ids"]]
+                external_ids = [str(x) for x in group["external_ids"]]
+                executed_amount = float(group["executed_amount_ars"] or 0.0)
+                avg_fill_price = float(group["avg_fill_price"] or 0.0)
+                quantity = float(group["quantity"] or 0.0)
+                owner_chat_id = group["owner_chat_id"]
+
+                layer_patch = {
+                    "broker_fill": {
+                        "reconciliation_mode": "manual_or_unplanned",
+                        "external_fill_ids": external_ids,
+                        "fill_date": fill_date.isoformat(),
+                        "quantity": quantity,
+                        "avg_fill_price": avg_fill_price,
+                        "gross_amount_ars": executed_amount,
+                        "fees_ars": float(group["fees_ars"] or 0.0),
+                    }
+                }
+
+                decision_id = await conn.fetchval(
+                    """
+                    SELECT id
+                    FROM decision_log
+                    WHERE decision_date = $1
+                      AND ticker = $2
+                      AND (
+                          decision = $3
+                          OR ($3 = 'SELL' AND decision IN ('SELL_PARTIAL', 'SELL_FULL'))
+                      )
+                      AND COALESCE(owner_chat_id, 0) = COALESCE($4::bigint, 0)
+                    ORDER BY
+                      CASE
+                        WHEN status = 'APPROVED' THEN 0
+                        WHEN status = 'THEORETICAL' THEN 1
+                        WHEN status = 'BLOCKED' THEN 2
+                        ELSE 3
+                      END,
+                      id ASC
+                    LIMIT 1
+                    """,
+                    fill_date,
+                    ticker,
+                    side,
+                    owner_chat_id,
+                )
+
+                if decision_id is None:
+                    decision_id = await conn.fetchval(
+                        """
+                        INSERT INTO decision_log (
+                            owner_chat_id,
+                            decided_at,
+                            ticker,
+                            decision,
+                            final_score,
+                            confidence,
+                            layers,
+                            price_at_decision,
+                            horizon_days,
+                            decision_type,
+                            source,
+                            status,
+                            theoretical_amount_ars,
+                            executed_amount_ars,
+                            is_executable,
+                            was_blocked
+                        )
+                        VALUES (
+                            $1,
+                            ($2::date::timestamp + TIME '15:00') AT TIME ZONE 'America/Argentina/Buenos_Aires',
+                            $3,
+                            $4,
+                            0.0,
+                            1.0,
+                            $5::jsonb,
+                            $6,
+                            20,
+                            'broker_fill',
+                            'broker_fill',
+                            'EXECUTED_MANUAL',
+                            $7,
+                            $7,
+                            TRUE,
+                            FALSE
+                        )
+                        ON CONFLICT DO NOTHING
+                        RETURNING id
+                        """,
+                        owner_chat_id,
+                        fill_date,
+                        ticker,
+                        side,
+                        json.dumps(layer_patch),
+                        avg_fill_price,
+                        executed_amount,
+                    )
+
+                    if decision_id is None:
+                        decision_id = await conn.fetchval(
+                            """
+                            SELECT id
+                            FROM decision_log
+                            WHERE decision_date = $1
+                              AND ticker = $2
+                              AND decision = $3
+                              AND COALESCE(owner_chat_id, 0) = COALESCE($4::bigint, 0)
+                            ORDER BY id ASC
+                            LIMIT 1
+                            """,
+                            fill_date,
+                            ticker,
+                            side,
+                            owner_chat_id,
+                        )
+
+                if decision_id is None:
+                    continue
+
+                await conn.execute(
+                    """
+                    UPDATE decision_log
+                    SET status = CASE
+                            WHEN status = 'APPROVED' THEN 'EXECUTED'
+                            WHEN status = 'EXECUTED' THEN 'EXECUTED'
+                            ELSE 'EXECUTED_MANUAL'
+                        END,
+                        executed_amount_ars = CASE
+                            WHEN status IN ('APPROVED', 'EXECUTED') THEN $2
+                            ELSE COALESCE(executed_amount_ars, 0) + $2
+                        END,
+                        price_at_decision = COALESCE(price_at_decision, $3),
+                        layers = COALESCE(layers, '{}'::jsonb) || $4::jsonb
+                    WHERE id = $1
+                    """,
+                    int(decision_id),
+                    executed_amount,
+                    avg_fill_price,
+                    json.dumps(layer_patch),
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE broker_fills
+                    SET decision_log_id = $2,
+                        reconciled_at = NOW()
+                    WHERE id = ANY($1::bigint[])
+                    """,
+                    fill_ids,
+                    int(decision_id),
+                )
+                linked += len(fill_ids)
+
+        logger.info("broker fills materializados como decision_log: %s", linked)
+        return linked
 
     # ── Decision Engine ───────────────────────────────────────────────────────
 
@@ -1198,18 +1493,19 @@ class PortfolioDatabase:
         candles: list[dict],
     ) -> dict[str, float]:
         outcomes: dict[str, float] = {}
+        decided_day = decided_at.astimezone(ART_TZ).date()
 
         for horizon, col in [
             (5, "outcome_5d"),
             (10, "outcome_10d"),
             (20, "outcome_20d"),
         ]:
-            target_date = decided_at + timedelta(days=horizon)
-            if target_date > now:
+            target_day = decided_day + timedelta(days=horizon)
+            if target_day > now.astimezone(ART_TZ).date():
                 continue
             eligible = [
                 candle for candle in candles
-                if candle["ts"] >= target_date
+                if candle["ts"].date() >= target_day
             ]
             if not eligible:
                 continue
@@ -1237,18 +1533,25 @@ class PortfolioDatabase:
         were persisted with legacy external prices in another unit; those rows
         stay traceable, but must not feed canonical metrics.
         """
+        decided_day = decided_at.astimezone(ART_TZ).date()
         eligible = [
             candle
             for candle in candles
-            if candle["ts"] >= decided_at and candle.get("close_price") is not None
+            if candle["ts"].date() >= decided_day and candle.get("close_price") is not None
         ]
         if not eligible or entry_price <= 0:
             return LEGACY_EXTERNAL_OUTCOME_BASIS, None
 
         reference_price = float(eligible[0]["close_price"])
         ratio = reference_price / float(entry_price)
+        asset_type = str(eligible[0].get("asset_type") or "").upper()
+        min_ratio = MIN_COMPATIBLE_PRICE_RATIO
+        max_ratio = MAX_COMPATIBLE_PRICE_RATIO
+        if asset_type == "CEDEAR":
+            min_ratio = CEDEAR_MIN_COMPATIBLE_PRICE_RATIO
+            max_ratio = CEDEAR_MAX_COMPATIBLE_PRICE_RATIO
 
-        if MIN_COMPATIBLE_PRICE_RATIO <= ratio <= MAX_COMPATIBLE_PRICE_RATIO:
+        if min_ratio <= ratio <= max_ratio:
             return CANONICAL_OUTCOME_BASIS, ratio
 
         return LEGACY_EXTERNAL_OUTCOME_BASIS, ratio

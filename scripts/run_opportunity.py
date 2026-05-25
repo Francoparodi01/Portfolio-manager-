@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -35,6 +37,7 @@ from src.collector.cocos_history import candles_to_frame
 from src.collector.portfolio_quality import enrich_positions_with_market_metadata
 from src.analysis.macro import fetch_macro, get_macro_regime
 from src.analysis.opportunity_screener import (
+    CandidateStatus,
     run_opportunity_analysis,
     render_opportunity_report,
     COCOS_UNIVERSE_DEFAULT,
@@ -132,6 +135,187 @@ async def _load_cocos_history_frames(cfg, assets: list[dict], limit: int = 260) 
     finally:
         await db.close()
     return frames
+
+
+def _enum_value(value) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _radar_candidate_layers(candidate) -> dict:
+    asym = candidate.asymmetry
+    edge = candidate.edge
+    return {
+        "source": "radar",
+        "candidate_status": _enum_value(candidate.status),
+        "trade_type": _enum_value(candidate.trade_type),
+        "technical": {"raw": candidate.tech_score},
+        "macro": {"raw": candidate.macro_score},
+        "sentiment": {"raw": candidate.sentiment_score},
+        "momentum": {"raw": candidate.momentum_score},
+        "final_score": candidate.final_score,
+        "conviction": candidate.conviction,
+        "edge": edge.raw if edge else None,
+        "edge_label": _enum_value(edge.label) if edge else "",
+        "edge_vs": edge.vs_ticker if edge else "",
+        "rr": asym.risk_reward if asym else None,
+        "stop_loss_pct": asym.stop_loss_pct if asym else None,
+        "asymmetry_ratio": asym.asymmetry_ratio if asym else None,
+        "technical_data_source_mode": candidate.technical_candle_source_mode,
+        "technical_has_reconstructed_candles": candidate.technical_has_reconstructed_candles,
+        "technical_candle_sources": list(candidate.technical_candle_sources or ()),
+        "technical_candle_source_counts": dict(candidate.technical_candle_source_counts or {}),
+    }
+
+
+def _radar_decision_type(candidate) -> str:
+    status = _enum_value(candidate.status).lower()
+    trade_type = _enum_value(candidate.trade_type).lower()
+    return f"radar_{status}_{trade_type}".strip("_")
+
+
+def _radar_is_executable(candidate) -> bool:
+    return candidate.status in {
+        CandidateStatus.COMPRABLE_AHORA,
+        CandidateStatus.COMPRA_HABILITADA,
+        CandidateStatus.SWAP_CANDIDATO,
+    }
+
+
+async def _save_radar_candidates(
+    cfg,
+    report,
+    macro_snap,
+    macro_regime,
+    *,
+    portfolio_total_ars: float,
+    owner_chat_id: int | None = None,
+) -> list[int]:
+    """
+    Persiste señales del radar como ideas teóricas auditables.
+    No representa ejecución real ni modifica el portfolio.
+    """
+    candidates = [
+        c for c in (getattr(report, "candidates", []) or [])
+        if c.status not in {CandidateStatus.EXTERNO, CandidateStatus.DESCARTAR}
+    ]
+    if not candidates:
+        return []
+
+    db = PortfolioDatabase(cfg.database.url)
+    saved_ids: list[int] = []
+    await db.connect()
+    try:
+        pool = await db.get_pool()
+        async with pool.acquire() as conn:
+            for candidate in candidates:
+                ticker = str(candidate.ticker or "").upper().strip()
+                if not ticker:
+                    continue
+
+                exists = await conn.fetchval(
+                    """
+                    SELECT 1
+                    FROM decision_log
+                    WHERE ticker = $1
+                      AND decision = 'BUY'
+                      AND decision_date = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                      AND COALESCE(owner_chat_id, 0) = COALESCE($2::bigint, 0)
+                    LIMIT 1
+                    """,
+                    ticker,
+                    owner_chat_id,
+                )
+                if exists:
+                    logger.info("Dedup radar: BUY %s ya existe hoy - skip", ticker)
+                    continue
+
+                asym = candidate.asymmetry
+                stop_loss_pct = -abs(float(asym.stop_loss_pct)) if asym else None
+                rr_ratio = float(asym.risk_reward) if asym and asym.risk_reward else None
+                target_pct = (
+                    abs(float(asym.stop_loss_pct)) * rr_ratio
+                    if asym and rr_ratio and rr_ratio > 0 else None
+                )
+                theoretical_amount = (
+                    float(portfolio_total_ars or 0.0) * float(candidate.sizing_suggested or 0.0)
+                )
+                is_executable = _radar_is_executable(candidate)
+                block_reason = "" if is_executable else (
+                    candidate.why_not_now
+                    or candidate.action_concreta
+                    or _enum_value(candidate.status)
+                )
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO decision_log (
+                        owner_chat_id,
+                        decided_at,
+                        ticker,
+                        decision,
+                        final_score,
+                        confidence,
+                        layers,
+                        price_at_decision,
+                        vix_at_decision,
+                        regime,
+                        size_pct,
+                        stop_loss_pct,
+                        target_pct,
+                        horizon_days,
+                        rr_ratio,
+                        decision_type,
+                        source,
+                        status,
+                        block_reason,
+                        theoretical_amount_ars,
+                        executed_amount_ars,
+                        is_executable,
+                        was_blocked
+                    )
+                    VALUES (
+                        $1,
+                        $2, $3, 'BUY', $4, $5,
+                        $6::jsonb,
+                        $7, $8, $9,
+                        $10, $11, $12, $13, $14,
+                        $15, 'radar', $16, $17,
+                        $18, 0.0, $19, $20
+                    )
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    """,
+                    owner_chat_id,
+                    datetime.now(timezone.utc),
+                    ticker,
+                    float(candidate.final_score or 0.0),
+                    float(candidate.conviction or 0.0),
+                    json.dumps(_radar_candidate_layers(candidate)),
+                    float(candidate.price_usd) if candidate.price_usd and candidate.price_usd > 0 else None,
+                    float(getattr(macro_snap, "vix", 0.0) or 0.0),
+                    str(macro_regime),
+                    float(candidate.sizing_suggested or 0.0),
+                    stop_loss_pct,
+                    target_pct,
+                    20,
+                    rr_ratio,
+                    _radar_decision_type(candidate),
+                    "THEORETICAL" if is_executable else "BLOCKED",
+                    block_reason,
+                    theoretical_amount,
+                    bool(is_executable),
+                    bool(not is_executable),
+                )
+                if row:
+                    saved_ids.append(int(row["id"]))
+        logger.info("Radar persistido: %s señales auditables", len(saved_ids))
+    except Exception as exc:
+        logger.error("No se pudieron persistir señales del radar: %s", exc, exc_info=True)
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
+    return saved_ids
 
 
 async def main(
@@ -232,6 +416,15 @@ async def main(
     )
 
     # ── 5. Render ──────────────────────────────────────────────────────────────
+    await _save_radar_candidates(
+        cfg,
+        report,
+        macro_snap,
+        macro_regime,
+        portfolio_total_ars=total_ars,
+        owner_chat_id=owner_chat_id,
+    )
+
     output = render_opportunity_report(report, portfolio_total_ars=total_ars)
     print(output)
 

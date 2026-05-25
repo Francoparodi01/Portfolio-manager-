@@ -61,6 +61,7 @@ except Exception:
 
 DEFAULT_HORIZONS = ("5d", "10d", "20d")
 ACTIVE_ACTIONS = ("BUY", "SELL", "SELL_PARTIAL", "SELL_FULL")
+NULL_TEXT_VALUES = {"", "none", "nan", "nat", "<na>", "null"}
 
 VALID_MODES = ("signal", "optimizer", "execution", "blocked", "all")
 
@@ -243,17 +244,10 @@ async def load_decision_log(
         else:
             cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
 
-        outcome_filter = (
-            "AND outcome_basis = 'canonical_cocos'"
-            if "outcome_basis" in cols
-            else ""
-        )
-
         query = f"""
             SELECT {", ".join(selected)}
             FROM decision_log
             WHERE decided_at >= $1
-            {outcome_filter}
             ORDER BY decided_at ASC
         """
 
@@ -296,7 +290,8 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
         "outcome_basis",
     ]:
         if col in out.columns:
-            out[col] = out[col].astype(str).str.strip()
+            out[col] = out[col].astype("string").str.strip()
+            out[col] = out[col].mask(out[col].str.lower().isin(NULL_TEXT_VALUES))
 
     if "source" not in out.columns:
         out["source"] = None
@@ -310,7 +305,6 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
     # Completar source desde layers si existe.
     if "layers" in out.columns:
         out["_source_from_layers"] = out["layers"].apply(_extract_source_from_layers)
-        out["source"] = out["source"].replace({"": None, "None": None, "nan": None})
         out["source"] = out["source"].fillna(out["_source_from_layers"])
         out.drop(columns=["_source_from_layers"], inplace=True, errors="ignore")
 
@@ -555,10 +549,13 @@ def apply_audit_mode_filter(
         return out, warnings
 
     if mode == "optimizer":
+        legacy_theoretical = out["source"].isin(["sin_source", "unknown"]) & (
+            out["decision_type"].eq("theoretical")
+            | out["status"].eq("THEORETICAL")
+        )
         mask = (
             out["source"].eq("optimizer")
-            | out["decision_type"].eq("theoretical")
-            | out["status"].eq("THEORETICAL")
+            | legacy_theoretical
         )
         return out[mask].copy(), warnings
 
@@ -568,6 +565,22 @@ def apply_audit_mode_filter(
         # Protección extra: excluir explícitamente bloqueados.
         mask = mask & ~out["status"].eq("BLOCKED")
         mask = mask & ~out["decision_type"].eq("blocked")
+
+        approved_executable = (
+            out["source"].eq("execution_plan")
+            & out["status"].eq("APPROVED")
+            & out["decision_type"].eq("executable")
+        )
+        if "is_executable" in out.columns:
+            approved_executable = approved_executable & out["is_executable"].fillna(False).astype(bool)
+
+        approved_count = int(approved_executable.sum())
+        executed_count = int(mask.sum())
+        if executed_count == 0 and approved_count:
+            warnings.append(
+                f"Hay {approved_count} execution_plan APPROVED/executable, pero 0 EXECUTED. "
+                "Execution audit mide fills reconciliados; correr/importar broker_fills para validarlo."
+            )
 
         return out[mask].copy(), warnings
 
@@ -788,21 +801,21 @@ def run_regression_audit_sync(
             warnings=["No se cargaron filas desde decision_log."],
         )
 
+    df, mode_warnings = apply_audit_mode_filter(df, config)
+
     rows_loaded = len(df)
 
     source_counts = (
         df["source"].value_counts(dropna=False).to_dict()
-        if "source" in df.columns
+        if "source" in df.columns and not df.empty
         else {}
     )
 
     status_counts = (
         df["status"].value_counts(dropna=False).to_dict()
-        if "status" in df.columns
+        if "status" in df.columns and not df.empty
         else {}
     )
-
-    df, mode_warnings = apply_audit_mode_filter(df, config)
 
     models: list[RegressionModelResult] = []
     buckets: dict[str, pd.DataFrame] = {}
@@ -1438,7 +1451,7 @@ def _build_human_reading(report: RegressionAuditReport) -> list[str]:
 
     if baseline_5d is None or baseline_5d.r2 is None:
         prefix = {
-            "execution": "Todavía no hay suficientes órdenes ejecutables registradas.",
+            "execution": "Todavia no hay suficientes fills EXECUTED/reconciliados con outcome.",
             "blocked": "Todavía no hay suficientes operaciones bloqueadas con outcome.",
             "optimizer": "Todavía no hay suficiente muestra del optimizer.",
             "signal": "Todavía no hay suficiente muestra de señales.",

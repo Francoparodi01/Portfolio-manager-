@@ -23,7 +23,7 @@ except ImportError:
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from pathlib import Path
 
 
@@ -53,6 +53,11 @@ from src.collector.data.normalizer import (
     normalize_ticker,
     parse_decimal,
 )
+from src.collector.broker_fills import BrokerFill, broker_fills_from_cocos_payloads
+from src.collector.broker_movements import (
+    BrokerMovement,
+    broker_movements_from_cocos_payloads,
+)
 
 
 import re as _re
@@ -62,6 +67,34 @@ logger = get_logger(__name__)
 SELECTOR_VERSION = "v1"
 
 SESSION_FILE = "/app/secrets/cocos_session.json"
+
+CEDEAR_SEGMENTS = ("Top", "ETF", "Otros", "Nuevos")
+FILL_DISCOVERY_PATHS = (
+    "/activity",
+    "/activities",
+    "/movements",
+    "/movimientos",
+    "/transactions",
+    "/operaciones",
+    "/orders",
+    "/ordenes",
+    "/account",
+    "/cuenta",
+)
+FILL_API_KEYWORDS = (
+    "activity",
+    "activit",
+    "movement",
+    "movim",
+    "transaction",
+    "orden",
+    "order",
+    "operac",
+    "trade",
+    "fill",
+    "ticker",
+)
+MOVEMENTS_API_KEYWORDS = ("cash_movements", "movements", "movement")
 
 SELECTORS = {
     "login": {
@@ -734,13 +767,20 @@ class CocosCapitalScraper:
     # ── Market ────────────────────────────────────
 
     @timed("scraper.market")
-    async def scrape_market(self, market_type: str) -> list[MarketAsset]:
+    async def scrape_market(
+        self,
+        market_type: str,
+        *,
+        cedear_segment: str | None = None,
+    ) -> list[MarketAsset]:
         """
         Scraping del mercado de Cocos Capital.
         La URL /market/ACCIONES y /market/CEDEARS carga la tabla directamente.
         No requiere interacción con dropdown.
         """
         assert market_type in ("ACCIONES", "CEDEARS")
+        if cedear_segment and market_type != "CEDEARS":
+            raise ValueError("cedear_segment solo aplica a CEDEARS")
 
         await self.login()
 
@@ -752,9 +792,13 @@ class CocosCapitalScraper:
         asset_type = AssetType.ACCION if market_type == "ACCIONES" else AssetType.CEDEAR
 
         try:
-            logger.info(f"Navegando a mercado {market_type}: {url}")
+            segment_note = f" / {cedear_segment}" if cedear_segment else ""
+            logger.info(f"Navegando a mercado {market_type}{segment_note}: {url}")
             await self._page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             await asyncio.sleep(2.0)
+
+            if market_type == "CEDEARS" and cedear_segment:
+                await self._select_cedear_segment(cedear_segment)
 
             # Esperar que aparezca al menos un ticker conocido
             try:
@@ -803,6 +847,61 @@ class CocosCapitalScraper:
             await self._screenshot(f"market_{market_type}_error")
             logger.error(f"scrape_market({market_type}) falló: {e}")
             return []
+
+    async def _select_cedear_segment(self, segment: str) -> None:
+        if not self._page:
+            raise RuntimeError("page no inicializada")
+
+        wanted = str(segment or "").strip().lower()
+        labels = {item.lower(): item for item in CEDEAR_SEGMENTS}
+        if wanted in {"crypto", "cripto"}:
+            raise ValueError("segmento Crypto excluido por politica del proyecto")
+        if wanted not in labels:
+            raise ValueError(f"segmento CEDEAR no soportado: {segment}")
+
+        label = labels[wanted]
+        for selector in (
+            f"button:has-text('{label}')",
+            f"[role='button']:has-text('{label}')",
+            f"text=/^{label}$/i",
+        ):
+            try:
+                locator = self._page.locator(selector).first
+                if await locator.count():
+                    await locator.click(timeout=8_000)
+                    await self._page.wait_for_timeout(1_500)
+                    logger.info("Segmento CEDEAR seleccionado: %s", label)
+                    return
+            except Exception:
+                continue
+
+        logger.warning("No se pudo seleccionar segmento CEDEAR %s; parseo estado actual", label)
+
+    async def scrape_cedears_segments(
+        self,
+        segments: tuple[str, ...] = CEDEAR_SEGMENTS,
+    ) -> list[MarketAsset]:
+        """
+        Barre los apartados comparables de CEDEARs en Cocos.
+        Crypto queda excluido del universo operativo actual.
+        """
+        merged: dict[str, MarketAsset] = {}
+        counts: dict[str, int] = {}
+
+        for segment in segments:
+            if str(segment).strip().lower() in {"crypto", "cripto"}:
+                continue
+            assets = await self.scrape_market("CEDEARS", cedear_segment=segment)
+            counts[str(segment)] = len(assets)
+            for asset in assets:
+                merged.setdefault(asset.ticker, asset)
+
+        logger.info(
+            "CEDEARs segmentados: %d unicos (%s)",
+            len(merged),
+            ", ".join(f"{name}={count}" for name, count in counts.items()),
+        )
+        return list(merged.values())
 
     async def _parse_market_dom(self, asset_type: "AssetType") -> list["MarketAsset"]:
         """
@@ -919,6 +1018,172 @@ class CocosCapitalScraper:
             logger.error(f"Fallback text parser: {e}")
         logger.info(f"Fallback parser → {len(assets)} activos")
         return assets
+
+    async def scrape_broker_fills(
+        self,
+        *,
+        paths: tuple[str, ...] = FILL_DISCOVERY_PATHS,
+        wait_ms: int = 4000,
+    ) -> list[BrokerFill]:
+        """
+        Captura fills/operaciones confirmadas desde respuestas JSON de Cocos.
+
+        Es read-only: navega vistas de actividad/ordenes y parsea solamente filas
+        que tengan ticker, lado, cantidad, precio y fecha ejecutada.
+        """
+        await self.login()
+        if not self._page:
+            raise RuntimeError("page no inicializada")
+
+        payloads: list[Any] = []
+        seen_urls: set[str] = set()
+        tasks: list[asyncio.Task] = []
+
+        async def handle_response(response) -> None:
+            url = response.url
+            lower = url.lower()
+            if url in seen_urls:
+                return
+            if "api.cocos.capital" not in lower:
+                return
+            if not any(keyword in lower for keyword in FILL_API_KEYWORDS):
+                return
+            seen_urls.add(url)
+            try:
+                if response.status >= 400:
+                    return
+                content_type = response.headers.get("content-type", "")
+                if "json" not in content_type.lower():
+                    return
+                payloads.append(await response.json())
+                logger.info("Cocos fills probe JSON: %s", url)
+            except Exception as exc:
+                logger.debug("No se pudo leer response JSON %s: %s", url, exc)
+
+        def on_response(response) -> None:
+            tasks.append(asyncio.create_task(handle_response(response)))
+
+        self._page.on("response", on_response)
+
+        try:
+            for path in paths:
+                url = f"https://app.cocos.capital{path}"
+                try:
+                    logger.info("Sondeando fills Cocos: %s", url)
+                    await self._page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                    await self._page.wait_for_timeout(wait_ms)
+                    if path.rstrip("/") in {"/movements", "/movimientos"}:
+                        await self._select_movements_instrumentos_tab()
+                        await self._page.wait_for_timeout(wait_ms)
+                except Exception as exc:
+                    logger.debug("Sondeo fills omitio %s: %s", url, exc)
+        finally:
+            try:
+                self._page.remove_listener("response", on_response)
+            except Exception:
+                pass
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        fills = broker_fills_from_cocos_payloads(payloads, source="cocos_api")
+        logger.info(
+            "Fills Cocos detectados: %d (payloads=%d, urls=%d)",
+            len(fills),
+            len(payloads),
+            len(seen_urls),
+        )
+        return fills
+
+    async def _select_movements_instrumentos_tab(self) -> None:
+        if not self._page:
+            return
+        for selector in (
+            "button:has-text('Instrumentos')",
+            "[role='button']:has-text('Instrumentos')",
+            "text=/^Instrumentos$/i",
+        ):
+            try:
+                locator = self._page.locator(selector).first
+                if await locator.count():
+                    await locator.click(timeout=8_000)
+                    logger.info("Tab movements Instrumentos seleccionado")
+                    return
+            except Exception:
+                continue
+        logger.warning("No se pudo seleccionar tab Instrumentos en movements")
+
+    async def scrape_portfolio_movements(
+        self,
+        *,
+        wait_ms: int = 4000,
+    ) -> list[BrokerMovement]:
+        """
+        Captura movimientos visibles en Actividad/Movimientos de Cocos.
+
+        Estos movimientos sirven para auditoria de actividad del portfolio. No
+        reemplazan fills porque el endpoint no siempre trae cantidad de titulos
+        ni precio promedio de ejecucion.
+        """
+        await self.login()
+        if not self._page:
+            raise RuntimeError("page no inicializada")
+
+        payloads: list[Any] = []
+        seen_urls: set[str] = set()
+        tasks: list[asyncio.Task] = []
+
+        async def handle_response(response) -> None:
+            url = response.url
+            lower = url.lower()
+            if url in seen_urls:
+                return
+            if "api.cocos.capital" not in lower:
+                return
+            if not any(keyword in lower for keyword in MOVEMENTS_API_KEYWORDS):
+                return
+            seen_urls.add(url)
+            try:
+                if response.status >= 400:
+                    return
+                content_type = response.headers.get("content-type", "")
+                if "json" not in content_type.lower():
+                    return
+                payloads.append(await response.json())
+                logger.info("Cocos movements JSON: %s", url)
+            except Exception as exc:
+                logger.debug("No se pudo leer movements JSON %s: %s", url, exc)
+
+        def on_response(response) -> None:
+            tasks.append(asyncio.create_task(handle_response(response)))
+
+        self._page.on("response", on_response)
+        try:
+            await self._page.goto(
+                "https://app.cocos.capital/movements",
+                wait_until="domcontentloaded",
+                timeout=45_000,
+            )
+            await self._page.wait_for_timeout(wait_ms)
+            await self._select_movements_instrumentos_tab()
+            await self._page.wait_for_timeout(wait_ms)
+        finally:
+            try:
+                self._page.remove_listener("response", on_response)
+            except Exception:
+                pass
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        movements = broker_movements_from_cocos_payloads(payloads)
+        logger.info(
+            "Movimientos Cocos detectados: %d (payloads=%d, urls=%d)",
+            len(movements),
+            len(payloads),
+            len(seen_urls),
+        )
+        return movements
 
     async def save_market_prices(self, assets: list[MarketAsset]) -> int:
         if not assets:

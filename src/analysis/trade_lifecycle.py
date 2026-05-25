@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional
 
@@ -458,8 +458,7 @@ async def check_stop_activations(pool, lookback_days: int = 60) -> list[dict]:
     if not pool:
         return []
 
-    from datetime import timedelta
-    cutoff = __import__("datetime").datetime.utcnow() - timedelta(days=lookback_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(

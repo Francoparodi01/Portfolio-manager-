@@ -27,13 +27,22 @@ def _market_url(market: str, ticker: str) -> str:
 
 
 async def _click_chart_range(page, label: str) -> None:
+    aliases = {
+        "5y": ("5y", "5Y", "5a", "5A", "5 años", "5 anos"),
+        "1y": ("1y", "1Y", "1a", "1A", "1 año", "1 ano"),
+        "all": ("Todos", "Todo", "MAX", "MÁX", "Max", "All"),
+        "max": ("Todos", "Todo", "MAX", "MÁX", "Max", "All"),
+    }
+    candidates = aliases.get(str(label).strip().lower(), (label,))
+
     for frame in page.frames:
-        if "charting_library" not in frame.url:
+        if "charting_library" not in frame.url and "tv-chart" not in frame.url:
             continue
-        locator = frame.get_by_text(label, exact=True)
-        if await locator.count() > 0:
-            await locator.first.click(timeout=10_000, force=True)
-            return
+        for candidate in candidates:
+            locator = frame.get_by_text(candidate, exact=True)
+            if await locator.count() > 0:
+                await locator.first.click(timeout=10_000, force=True)
+                return
     raise RuntimeError(f"No se encontro el selector de rango del grafico: {label}")
 
 

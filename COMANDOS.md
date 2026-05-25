@@ -115,6 +115,16 @@ python scripts/backfill_cocos_history.py --import-db
 python scripts/backfill_cocos_history.py --wait-ms 12000 --pause-ms 20000 --import-db
 ```
 
+### 5. Backfill TradingView/BYMA
+
+Usar para ampliar cobertura de velas cuando Cocos lista el ticker pero todavia no hay historico suficiente.
+Se guarda como `TRADINGVIEW_BYMA`; si luego existe `COCOS`, Cocos tiene prioridad.
+
+```bash
+python scripts/backfill_tradingview_byma.py --asset-type ALL --bars 260
+python scripts/backfill_tradingview_byma.py --tickers ASTS --bars 260
+```
+
 | Flag | Efecto |
 |---|---|
 | `--cdp-url` | endpoint DevTools, default `127.0.0.1:9222` |
@@ -188,6 +198,7 @@ El reporte distingue:
 ```bash
 docker compose exec scheduler python scripts/import_broker_fills.py /app/logs/fills.csv
 docker compose exec scheduler python scripts/import_broker_fills.py /app/logs/fills.csv --source manual_import --max-age-days 3
+docker compose exec scheduler python scripts/sync_cocos_fills.py
 ```
 
 Columnas esperadas del CSV:
@@ -198,6 +209,10 @@ external_fill_id,executed_at,ticker,side,quantity,avg_fill_price,gross_amount_ar
 
 La importación guarda `broker_fills` y reconcilia contra decisiones `execution_plan / APPROVED`.
 Solo un fill confirmado promueve una decisión a `EXECUTED`.
+
+La sincronización Cocos es read-only y parsea únicamente operaciones ejecutadas
+con ticker, lado, cantidad, precio y fecha. Para automatizarla en el scheduler:
+`COCOS_SYNC_FILLS=true`.
 
 ### Outcomes
 

@@ -135,7 +135,13 @@ def candles_to_frame(candles):
     frame = pd.DataFrame(rows)
     frame["ts"] = pd.to_datetime(frame["ts"], utc=True)
     frame["candle_day"] = frame["ts"].dt.date
-    frame["source_priority"] = frame["Source"].map({"COCOS": 0}).fillna(1)
+    frame["source_priority"] = frame["Source"].map(
+        {
+            "COCOS": 0,
+            "TRADINGVIEW_BYMA": 1,
+            "internal_snapshot": 2,
+        }
+    ).fillna(3)
     frame = (
         frame.sort_values(["candle_day", "source_priority", "ts"])
         .drop_duplicates(subset=["candle_day"], keep="first")

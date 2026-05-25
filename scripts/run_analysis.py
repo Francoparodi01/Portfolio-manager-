@@ -43,7 +43,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape
 
 from src.core.config import get_config
@@ -769,6 +769,32 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
 # GUARDAR DECISIONES DEL EXECUTION PLAN EN DECISION_LOG
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _build_position_price_map(positions: list | None) -> dict[str, float]:
+    prices: dict[str, float] = {}
+    for position in positions or []:
+        ticker = str(
+            position.get("ticker", "")
+            if isinstance(position, dict)
+            else getattr(position, "ticker", "")
+        ).upper().strip()
+        if not ticker:
+            continue
+        for key in ("current_price", "price", "last_price"):
+            value = (
+                position.get(key)
+                if isinstance(position, dict)
+                else getattr(position, key, None)
+            )
+            try:
+                price = float(value)
+            except Exception:
+                continue
+            if price > 0:
+                prices[ticker] = price
+                break
+    return prices
+
+
 async def _save_execution_plan_events(
     *,
     cfg,
@@ -777,6 +803,7 @@ async def _save_execution_plan_events(
     macro_snap,
     macro_regime,
     total_ars: float,
+    positions: list | None = None,
     owner_chat_id: int | None = None,
 ) -> list[int]:
     """
@@ -810,6 +837,7 @@ async def _save_execution_plan_events(
         for d in (getattr(execution_plan, "decisions", []) or [])
         if str(getattr(d, "ticker", "") or "").strip()
     }
+    position_price_by_ticker = _build_position_price_map(positions)
 
     def _safe_float(x, default: float = 0.0):
         try:
@@ -938,7 +966,12 @@ async def _save_execution_plan_events(
         target_weight = _safe_float(getattr(d, "target_weight", None), 0.0)
         delta_weight = _safe_float(getattr(d, "delta_weight", None), 0.0)
 
-        price = _price_from_result(r)
+        price = (
+            _price_from_result(r)
+            or _safe_float(getattr(order, "price", None), None)
+            or _safe_float(getattr(order, "current_price", None), None)
+            or position_price_by_ticker.get(ticker)
+        )
         vix = _safe_float(getattr(macro_snap, "vix", None), None)
 
         block_reason = None
@@ -1284,7 +1317,7 @@ async def _save_optimizer_trades(
             "rr_ratio":      rr,
             "regime":        regime,
             "vix":           float(vix) if vix else None,
-            "decided_at":    datetime.utcnow(),
+            "decided_at":    datetime.now(timezone.utc),
             "layers":        layers_payload,
         })
 
@@ -1710,6 +1743,37 @@ def render_report(
 
         h.append("")
 
+    result_tickers = {str(getattr(r, "ticker", "") or "").upper() for r in sorted_results}
+    missing_positions = [
+        p for p in (positions or [])
+        if str(p.get("ticker", "") or "").upper()
+        and str(p.get("ticker", "") or "").upper() not in result_tickers
+    ]
+    if missing_positions:
+        for p in sorted(
+            missing_positions,
+            key=lambda item: -float(item.get("market_value", 0) or 0),
+        ):
+            ticker = str(p.get("ticker", "") or "").upper()
+            cw = float(current_w.get(ticker, 0.0))
+            price = float(p.get("current_price", p.get("last_price", 0)) or 0)
+            market_value = float(p.get("market_value", 0) or 0)
+            reason = str(p.get("market_data_reason") or "sin velas Cocos suficientes")
+            if is_position_operable(p):
+                reason = "sin mínimo de 60 velas Cocos para análisis técnico"
+
+            h.append(
+                f"⚪ <b>{escape(ticker)}</b> → <b>NO_EVALUABLE</b> | "
+                f"peso {_pct(cw)} | valor {_money_ars(market_value)}"
+            )
+            if price > 0:
+                h.append(f"   Precio actual: <b>${price:,.2f}</b>")
+            h.append(
+                "   Lectura: está en cartera, pero no entra al optimizer ni a "
+                f"señal operativa: {escape(reason)}."
+            )
+            h.append("")
+
     # ── CONTEXTO MACRO ────────────────────────────────────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>CONTEXTO DE MERCADO</b>")
@@ -1805,9 +1869,9 @@ def render_report(
 
     h.append("")
 
-    # ── RADAR EXTERNO — compacto dentro de /analisis ──────────────────────────
+    # ── RADAR COCOS — compacto dentro de /analisis ────────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append("<b>RADAR EXTERNO</b>")
+    h.append("<b>RADAR COCOS</b>")
 
     owned = {str(p.get("ticker", "")).upper() for p in positions or []}
     radar = []
@@ -1892,8 +1956,8 @@ def render_report(
     external_universe_tickers = external_universe_tickers or []
     if external_universe_tickers:
         h.append(
-            f"🌐 <b>{len(external_universe_tickers)} tickers EXTERNO</b>: "
-            "sin velas Cocos suficientes para considerarlos operables."
+            f"🕯️ <b>{len(external_universe_tickers)} tickers de Cocos sin histórico operable</b>: "
+            "detectados en mercado, pero sin 60 velas canónicas."
         )
 
     h.append("")
@@ -2121,7 +2185,7 @@ async def main(
             missing_universe = [ticker for ticker in universe_tickers if ticker not in universe_frames]
             if missing_universe:
                 logger.warning(
-                    "Historial Cocos faltante para universo %s; quedan EXTERNO / no operables",
+                    "Historial Cocos faltante para universo %s; quedan sin histórico operable",
                     missing_universe,
                 )
                 external_universe_tickers = missing_universe
@@ -2284,6 +2348,7 @@ async def main(
                 macro_snap=macro_snap,
                 macro_regime=macro_regime,
                 total_ars=total_ars,
+                positions=positions,
                 owner_chat_id=owner_chat_id,
             )
             logger.info(f"Eventos ExecutionPlan guardados en DB: ids={saved}")

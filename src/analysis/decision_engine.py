@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -139,7 +139,7 @@ class DecisionOutput:
     reason: str = ""
     blockers: list[str] = field(default_factory=list)
     source: str = "decision_engine"
-    decided_at: datetime = field(default_factory=datetime.utcnow)
+    decided_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def direction(self) -> str:

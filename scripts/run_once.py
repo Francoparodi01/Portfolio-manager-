@@ -27,6 +27,7 @@ logger = get_logger(__name__)
 
 async def main(
     full: bool = False,
+    fills: bool = False,
     no_db: bool = False,
     json_output: str = None,
     no_telegram: bool = False,
@@ -84,11 +85,25 @@ async def main(
             if full:
                 logger.info("Scrapeando mercado...")
                 acciones = await scraper.scrape_market("ACCIONES")
-                cedears = await scraper.scrape_market("CEDEARS")
+                cedears = await scraper.scrape_cedears_segments()
                 logger.info(f"  Acciones: {len(acciones)}")
-                logger.info(f"  CEDEARs:  {len(cedears)}")
+                logger.info(f"  CEDEARs:  {len(cedears)} (Top + ETF + Otros + Nuevos)")
                 if db:
                     await db.save_market_prices(acciones + cedears)
+
+            if fills:
+                logger.info("Sincronizando fills desde Cocos...")
+                broker_fills = await scraper.scrape_broker_fills()
+                movements = await scraper.scrape_portfolio_movements()
+                logger.info("  Fills detectados: %s", len(broker_fills))
+                logger.info("  Movimientos detectados: %s", len(movements))
+                if db:
+                    saved_movements = await db.save_broker_movements(movements)
+                    saved = await db.save_broker_fills(broker_fills)
+                    reconciled = await db.reconcile_broker_fills()
+                    logger.info("  Movimientos guardados: %s", saved_movements)
+                    logger.info("  Fills guardados: %s", saved)
+                    logger.info("  Fills reconciliados: %s", reconciled)
 
     except Exception as e:
         logger.error(f"Error en run manual: {e}", exc_info=True)
@@ -101,6 +116,7 @@ async def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape manual de Cocos Capital")
     parser.add_argument("--full", action="store_true", help="Incluir scrape de mercado")
+    parser.add_argument("--fills", action="store_true", help="Sincronizar fills/ordenes ejecutadas desde Cocos")
     parser.add_argument("--no-db", action="store_true", help="No guardar en base de datos")
     parser.add_argument("--json", dest="json_output", metavar="FILE", help="Guardar snapshot en archivo JSON")
     parser.add_argument("--no-telegram", action="store_true", help="Deshabilita notificaciones Telegram")
@@ -110,6 +126,7 @@ if __name__ == "__main__":
     asyncio.run(
         main(
             full=args.full,
+            fills=args.fills,
             no_db=args.no_db,
             json_output=args.json_output,
             no_telegram=args.no_telegram,

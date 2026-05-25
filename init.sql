@@ -262,6 +262,30 @@ CREATE TABLE IF NOT EXISTS broker_fills (
     UNIQUE (source, external_fill_id)
 );
 
+-- Movimientos de Actividad/Instrumentos de Cocos. Auditan las ultimas acciones
+-- del portfolio y tambien pueden alimentar broker_fills cuando traen precio/cantidad.
+CREATE TABLE IF NOT EXISTS broker_movements (
+    id                   BIGSERIAL PRIMARY KEY,
+    source               TEXT NOT NULL DEFAULT 'cocos_movements',
+    external_movement_id TEXT NOT NULL,
+    executed_at          TIMESTAMPTZ NOT NULL,
+    movement_type        TEXT NOT NULL,
+    currency             TEXT NOT NULL DEFAULT 'ARS',
+    amount               NUMERIC(20,4),
+    quantity             NUMERIC(20,8),
+    price                NUMERIC(20,4),
+    ticker               TEXT,
+    instrument_type      TEXT,
+    settlement_date      DATE,
+    description          TEXT,
+    detail               TEXT,
+    label                TEXT,
+    balance              NUMERIC(20,4),
+    raw_payload          JSONB,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source, external_movement_id)
+);
+
 -- FEATURE: ML - feature store experimental para entrenamiento e inferencia.
 CREATE TABLE IF NOT EXISTS ml_decision_features (
     decision_log_id                  BIGINT PRIMARY KEY REFERENCES decision_log(id) ON DELETE CASCADE,
@@ -472,6 +496,12 @@ CREATE INDEX IF NOT EXISTS idx_broker_fills_decision_log_id
 
 CREATE INDEX IF NOT EXISTS idx_broker_fills_owner_executed_at
     ON broker_fills(owner_chat_id, executed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_broker_movements_executed_at
+    ON broker_movements(executed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_broker_movements_ticker_type
+    ON broker_movements(ticker, movement_type, executed_at DESC);
 
 -- ── Migration para bases existentes ───────────────────────────────────────────
 -- Si la tabla decision_log ya existe sin las columnas nuevas, agregar:
