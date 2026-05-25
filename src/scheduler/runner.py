@@ -56,6 +56,7 @@ from src.core.redis_client import client as redis_client
 from src.collector.cocos_scraper import CocosCapitalScraper
 from src.collector.cocos_history import candles_to_frame
 from src.collector.db import PortfolioDatabase
+from src.collector.broker_movements import broker_fills_from_movements
 from src.collector.live_portfolio import (
     PortfolioMoveAlert,
     build_live_portfolio,
@@ -841,8 +842,8 @@ class IntradayManager:
                                 )
 
                             if should_refresh_fills:
-                                fills = await scraper.scrape_broker_fills()
                                 movements = await scraper.scrape_portfolio_movements()
+                                fills = broker_fills_from_movements(movements)
                                 saved_movements = await db.save_broker_movements(movements)
                                 saved_fills = await db.save_broker_fills(fills)
                                 reconciled_fills = await db.reconcile_broker_fills()

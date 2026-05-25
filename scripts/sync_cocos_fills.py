@@ -13,6 +13,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 from src.collector.cocos_scraper import CocosCapitalScraper
 from src.collector.db import PortfolioDatabase
+from src.collector.broker_movements import broker_fills_from_movements
 from src.core.config import get_config
 
 
@@ -38,10 +39,11 @@ async def _main() -> None:
 
     try:
         async with CocosCapitalScraper(cfg.scraper) as scraper:
-            fills = await scraper.scrape_broker_fills(wait_ms=args.wait_ms)
             movements = await scraper.scrape_portfolio_movements(wait_ms=args.wait_ms)
 
-        print(f"fills detectados: {len(fills)}")
+        fills = broker_fills_from_movements(movements)
+
+        print(f"fills derivados de movimientos: {len(fills)}")
         for fill in fills[:20]:
             print(
                 f"- {fill.executed_at.isoformat()} {fill.side} "

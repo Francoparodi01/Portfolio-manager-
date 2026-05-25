@@ -415,7 +415,12 @@ async def fills(request: web.Request) -> web.Response:
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE executed_at >= NOW() - INTERVAL '24 hours') AS last_24h,
-                COUNT(*) FILTER (WHERE movement_type IN ('BUY', 'SELL')) AS trades,
+                COUNT(*) FILTER (
+                    WHERE movement_type IN ('BUY', 'SELL')
+                      AND ticker IS NOT NULL
+                      AND quantity IS NOT NULL
+                      AND price IS NOT NULL
+                ) AS trades,
                 MAX(executed_at) AS latest_executed_at
             FROM broker_movements
             WHERE executed_at >= NOW() - ($1::int * INTERVAL '1 day')
@@ -426,6 +431,9 @@ async def fills(request: web.Request) -> web.Response:
             FROM broker_movements
             WHERE executed_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND movement_type IN ('BUY', 'SELL')
+              AND ticker IS NOT NULL
+              AND quantity IS NOT NULL
+              AND price IS NOT NULL
             ORDER BY executed_at DESC, id DESC
             LIMIT 20
         """, days)

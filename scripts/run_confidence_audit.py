@@ -265,10 +265,10 @@ async def build_confidence_audit(days: int = 180) -> str:
     ]
 
     if not broker["exists"]:
-        lines.append("• <b>WAIT</b> No existe broker_fills: no puedo validar fills reales todavia.")
+        lines.append("• <b>WAIT</b> No existe broker_fills: no puedo validar movimientos reales todavia.")
     else:
         lines.append(
-            f"• broker_fills: total {broker['total']} | reconciliados {broker['reconciled']} | pendientes {broker['unreconciled']}"
+            f"• movimientos/fills Cocos: total {broker['total']} | reconciliados {broker['reconciled']} | pendientes {broker['unreconciled']}"
         )
         lines.append(f"• Ultimo fill: {_fmt_dt(broker.get('latest_executed_at'))}")
 
@@ -280,7 +280,7 @@ async def build_confidence_audit(days: int = 180) -> str:
             lines.append("• Primero hay que estabilizar ingesta/candles. Sin eso cualquier metrica miente.")
     elif not execution_ready:
         lines.append("• El sistema esta capturando datos y decisiones, pero aun no hay fills EXECUTED reconciliados.")
-        lines.append("• Para confiar en performance real falta importar/reconciliar broker_fills.")
+        lines.append("• Para confiar en performance real falta importar/reconciliar movimientos Cocos.")
     elif not outcomes_ready:
         lines.append("• Hay ejecucion, pero faltan al menos 12 outcomes 5d cerrados para una lectura minima.")
     else:

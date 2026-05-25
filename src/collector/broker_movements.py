@@ -6,6 +6,8 @@ from datetime import date, datetime, time
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+from src.collector.broker_fills import BrokerFill
+
 
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
@@ -216,6 +218,47 @@ def broker_movements_from_cocos_payloads(
                 continue
             by_key[(movement.source, movement.external_movement_id)] = movement
     return list(by_key.values())
+
+
+def broker_fills_from_movements(
+    movements: Iterable[BrokerMovement],
+    *,
+    source: str = "cocos_movements",
+) -> list[BrokerFill]:
+    """Build clean execution fills from Cocos Instrumentos movements."""
+    fills: list[BrokerFill] = []
+    for movement in movements:
+        side = str(movement.movement_type or "").upper().strip()
+        if side not in {"BUY", "SELL"}:
+            continue
+        if not movement.ticker or movement.quantity is None or movement.price is None:
+            continue
+
+        quantity = abs(float(movement.quantity))
+        price = float(movement.price)
+        if quantity <= 0 or price <= 0:
+            continue
+
+        gross = (
+            abs(float(movement.amount))
+            if movement.amount is not None
+            else quantity * price
+        )
+        fills.append(
+            BrokerFill(
+                external_fill_id=str(movement.external_movement_id),
+                executed_at=movement.executed_at,
+                ticker=movement.ticker.upper(),
+                side=side,
+                quantity=quantity,
+                avg_fill_price=price,
+                gross_amount_ars=gross,
+                fees_ars=None,
+                source=source,
+                raw_payload=movement.raw_payload,
+            )
+        )
+    return fills
 
 
 def serialize_raw_payload(payload: dict[str, Any] | None) -> str:

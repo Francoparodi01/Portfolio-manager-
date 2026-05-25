@@ -425,7 +425,13 @@ WITH ranked_daily_decisions AS (
     SELECT
         id,
         ROW_NUMBER() OVER (
-            PARTITION BY ticker, decision_date, decision
+            PARTITION BY
+                COALESCE(owner_chat_id, 0),
+                ticker,
+                decision_date,
+                decision,
+                COALESCE(source, 'sin_source'),
+                COALESCE(decision_type, 'unknown')
             ORDER BY decided_at DESC, id DESC
         ) AS rn
     FROM decision_log
@@ -466,7 +472,14 @@ CREATE INDEX IF NOT EXISTS idx_decision_log_decided_at
 
 DROP INDEX IF EXISTS idx_decision_log_unique_daily_action;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_log_unique_daily_action
-    ON decision_log(COALESCE(owner_chat_id, 0), ticker, decision_date, decision);
+    ON decision_log(
+        COALESCE(owner_chat_id, 0),
+        ticker,
+        decision_date,
+        decision,
+        COALESCE(source, 'sin_source'),
+        COALESCE(decision_type, 'unknown')
+    );
 
 -- Índice para queries de performance (solo cerrados)
 CREATE INDEX IF NOT EXISTS idx_decision_log_outcome

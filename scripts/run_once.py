@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.core.config import get_config
 from src.core.logger import get_logger
 from src.collector.cocos_scraper import CocosCapitalScraper
+from src.collector.broker_movements import broker_fills_from_movements
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
 
@@ -93,9 +94,9 @@ async def main(
 
             if fills:
                 logger.info("Sincronizando fills desde Cocos...")
-                broker_fills = await scraper.scrape_broker_fills()
                 movements = await scraper.scrape_portfolio_movements()
-                logger.info("  Fills detectados: %s", len(broker_fills))
+                broker_fills = broker_fills_from_movements(movements)
+                logger.info("  Fills derivados de movimientos: %s", len(broker_fills))
                 logger.info("  Movimientos detectados: %s", len(movements))
                 if db:
                     saved_movements = await db.save_broker_movements(movements)

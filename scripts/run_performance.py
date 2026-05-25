@@ -68,7 +68,7 @@ def _ev_label(ev: float | None, *, historical_only: bool = False) -> str:
     if ev > 0.02:
         if historical_only:
             return "✅ POSITIVO — histórico favorable, ejecución aún por validar"
-        return "✅ POSITIVO — el sistema tiene edge real"
+        return "✅ POSITIVO — muestra operativa favorable, seguir validando"
     if ev > 0:
         if historical_only:
             return "🟡 MARGINAL — histórico levemente favorable, seguir midiendo"
@@ -109,6 +109,7 @@ def _dataset_group_note(dataset_stats: list[dict]) -> str:
         is_real_execution = (
             (source == "execution_plan" and status in {"EXECUTED", "EXECUTED_MANUAL"})
             or (source == "broker_fill" and status in {"EXECUTED", "EXECUTED_MANUAL"})
+            or (source == "broker_movement" and status in {"EXECUTED", "EXECUTED_MANUAL"})
         )
 
         if is_real_execution:
@@ -137,8 +138,8 @@ def _dataset_group_note(dataset_stats: list[dict]) -> str:
 
     if executed_with_outcome > 0:
         return (
-            "Lectura: ya hay outcomes de fills reales confirmados. "
-            "El Execution Audit empieza a medir performance operativa validada."
+            "Lectura: ya hay outcomes de movimientos reales confirmados. "
+            "Execution Audit empieza a medir performance operativa validada."
         )
 
     if blocked_with_outcome > 0:
@@ -167,6 +168,7 @@ def _ev_scope(dataset_stats: list[dict]) -> tuple[str, str]:
         if (
             (source == "execution_plan" and status in {"EXECUTED", "EXECUTED_MANUAL"})
             or (source == "broker_fill" and status in {"EXECUTED", "EXECUTED_MANUAL"})
+            or (source == "broker_movement" and status in {"EXECUTED", "EXECUTED_MANUAL"})
         ):
             executed_with_outcome += con_5d
 
@@ -182,7 +184,7 @@ def _ev_scope(dataset_stats: list[dict]) -> tuple[str, str]:
     if executed_with_outcome > 0:
         return (
             "EV agregado",
-            "Incluye fills reales confirmados; contrastalo con Execution Audit para aislar ejecución real.",
+            "Incluye movimientos reales confirmados; contrastalo con Execution Audit para aislar ejecución real.",
         )
 
     return (
@@ -525,7 +527,7 @@ def _friendly_summary(stats: dict, ev_title: str | None = None) -> list[str]:
             ]
             if broker_total > 0 and broker_reconciled == 0:
                 lines.append(
-                    f"Fills Cocos detectados: {_fmt_count(broker_total)}; todavia no matchean con planes aprobados."
+                    f"Movimientos Cocos detectados: {_fmt_count(broker_total)}; todavia no matchean con planes aprobados."
                 )
             return lines
         return [
@@ -620,13 +622,13 @@ def _render_operational_context(stats: dict) -> list[str]:
         reconciled = int(broker.get("reconciled") or 0)
         unreconciled = int(broker.get("unreconciled") or 0)
         lines.append(
-            f"   Fills Cocos: <b>{_fmt_count(total)}</b> | "
+            f"   Movimientos/Fills Cocos: <b>{_fmt_count(total)}</b> | "
             f"reconciliados {_fmt_count(reconciled)} | pendientes {_fmt_count(unreconciled)}"
         )
         if total and not reconciled:
             lines.append("   Aclaracion: hay fills reales, pero no estan cruzados con decision_log; performance real sigue en espera.")
     else:
-        lines.append("   Fills Cocos: sin tabla o sin datos sincronizados.")
+        lines.append("   Movimientos/Fills Cocos: sin tabla o sin datos sincronizados.")
     lines.append("")
     return lines
 

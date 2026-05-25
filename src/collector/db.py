@@ -1113,9 +1113,9 @@ class PortfolioDatabase:
                     continue
 
                 executed_amount = (
-                    fill.gross_amount_ars
+                    abs(float(fill.gross_amount_ars))
                     if fill.gross_amount_ars is not None
-                    else fill.quantity * fill.avg_fill_price
+                    else abs(fill.quantity * fill.avg_fill_price)
                 )
 
                 await conn.execute(
@@ -1176,6 +1176,10 @@ class PortfolioDatabase:
                     executed_at::date AS fill_date,
                     ticker,
                     side,
+                    CASE
+                        WHEN source = 'cocos_movements' THEN 'broker_movement'
+                        ELSE 'broker_fill'
+                    END AS decision_source,
                     ARRAY_AGG(id ORDER BY executed_at, id) AS fill_ids,
                     ARRAY_AGG(external_fill_id ORDER BY executed_at, id) AS external_ids,
                     SUM(quantity) AS quantity,
@@ -1189,7 +1193,7 @@ class PortfolioDatabase:
                     MIN(owner_chat_id) AS owner_chat_id
                 FROM broker_fills
                 WHERE decision_log_id IS NULL
-                GROUP BY executed_at::date, ticker, side
+                GROUP BY executed_at::date, ticker, side, decision_source
                 ORDER BY fill_date, ticker, side
                 """
             )
@@ -1205,9 +1209,15 @@ class PortfolioDatabase:
                 avg_fill_price = float(group["avg_fill_price"] or 0.0)
                 quantity = float(group["quantity"] or 0.0)
                 owner_chat_id = group["owner_chat_id"]
+                decision_source = str(group["decision_source"] or "broker_fill")
+                layer_key = (
+                    "broker_movement"
+                    if decision_source == "broker_movement"
+                    else "broker_fill"
+                )
 
                 layer_patch = {
-                    "broker_fill": {
+                    layer_key: {
                         "reconciliation_mode": "manual_or_unplanned",
                         "external_fill_ids": external_ids,
                         "fill_date": fill_date.isoformat(),
@@ -1228,21 +1238,17 @@ class PortfolioDatabase:
                           decision = $3
                           OR ($3 = 'SELL' AND decision IN ('SELL_PARTIAL', 'SELL_FULL'))
                       )
+                      AND COALESCE(source, '') = $5
+                      AND COALESCE(decision_type, '') = $5
                       AND COALESCE(owner_chat_id, 0) = COALESCE($4::bigint, 0)
-                    ORDER BY
-                      CASE
-                        WHEN status = 'APPROVED' THEN 0
-                        WHEN status = 'THEORETICAL' THEN 1
-                        WHEN status = 'BLOCKED' THEN 2
-                        ELSE 3
-                      END,
-                      id ASC
+                    ORDER BY id ASC
                     LIMIT 1
                     """,
                     fill_date,
                     ticker,
                     side,
                     owner_chat_id,
+                    decision_source,
                 )
 
                 if decision_id is None:
@@ -1276,8 +1282,8 @@ class PortfolioDatabase:
                             $5::jsonb,
                             $6,
                             20,
-                            'broker_fill',
-                            'broker_fill',
+                            $8,
+                            $8,
                             'EXECUTED_MANUAL',
                             $7,
                             $7,
@@ -1294,6 +1300,7 @@ class PortfolioDatabase:
                         json.dumps(layer_patch),
                         avg_fill_price,
                         executed_amount,
+                        decision_source,
                     )
 
                     if decision_id is None:
@@ -1304,6 +1311,8 @@ class PortfolioDatabase:
                             WHERE decision_date = $1
                               AND ticker = $2
                               AND decision = $3
+                              AND COALESCE(source, '') = $5
+                              AND COALESCE(decision_type, '') = $5
                               AND COALESCE(owner_chat_id, 0) = COALESCE($4::bigint, 0)
                             ORDER BY id ASC
                             LIMIT 1
@@ -1312,6 +1321,7 @@ class PortfolioDatabase:
                             ticker,
                             side,
                             owner_chat_id,
+                            decision_source,
                         )
 
                 if decision_id is None:
@@ -1320,16 +1330,14 @@ class PortfolioDatabase:
                 await conn.execute(
                     """
                     UPDATE decision_log
-                    SET status = CASE
-                            WHEN status = 'APPROVED' THEN 'EXECUTED'
-                            WHEN status = 'EXECUTED' THEN 'EXECUTED'
-                            ELSE 'EXECUTED_MANUAL'
-                        END,
-                        executed_amount_ars = CASE
-                            WHEN status IN ('APPROVED', 'EXECUTED') THEN $2
-                            ELSE COALESCE(executed_amount_ars, 0) + $2
-                        END,
-                        price_at_decision = COALESCE(price_at_decision, $3),
+                    SET status = 'EXECUTED_MANUAL',
+                        executed_amount_ars = $2,
+                        theoretical_amount_ars = COALESCE(theoretical_amount_ars, $2),
+                        price_at_decision = $3,
+                        source = $5,
+                        decision_type = $5,
+                        is_executable = TRUE,
+                        was_blocked = FALSE,
                         layers = COALESCE(layers, '{}'::jsonb) || $4::jsonb
                     WHERE id = $1
                     """,
@@ -1337,6 +1345,7 @@ class PortfolioDatabase:
                     executed_amount,
                     avg_fill_price,
                     json.dumps(layer_patch),
+                    decision_source,
                 )
 
                 await conn.execute(
