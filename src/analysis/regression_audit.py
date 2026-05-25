@@ -455,8 +455,20 @@ def _extract_layers(raw: Any) -> dict[str, float]:
         if "layers" in raw and isinstance(raw["layers"], list):
             return _extract_layers(raw["layers"])
 
+        layer_name_map = {
+            "technical": "technical_score",
+            "tech": "technical_score",
+            "macro": "macro_score",
+            "sentiment": "sentiment_score",
+            "news": "sentiment_score",
+            "risk": "risk_score",
+        }
+
         for name, value in raw.items():
             n = str(name).lower()
+            target = layer_name_map.get(n)
+            if target is None:
+                continue
 
             if isinstance(value, dict):
                 v = pick_value(value)
@@ -466,14 +478,7 @@ def _extract_layers(raw: Any) -> dict[str, float]:
                 except Exception:
                     v = 0.0
 
-            if "tech" in n:
-                result["technical_score"] = v
-            elif "macro" in n:
-                result["macro_score"] = v
-            elif "sent" in n or "news" in n:
-                result["sentiment_score"] = v
-            elif "risk" in n:
-                result["risk_score"] = v
+            result[target] = v
 
         return result
 
@@ -821,7 +826,8 @@ def run_regression_audit_sync(
     buckets: dict[str, pd.DataFrame] = {}
     warnings: list[str] = list(mode_warnings)
 
-    rows_usable_total = 0
+    usable_row_ids: set[Any] = set()
+    usable_rows_max_horizon = 0
     all_actions_used: set[str] = set()
 
     if df.empty:
@@ -830,12 +836,26 @@ def run_regression_audit_sync(
             "Puede ser normal si todavía no se registraron eventos de ese tipo."
         )
 
+    manual_execution_count = 0
+    if mode == "execution" and "source" in df.columns and "status" in df.columns:
+        manual_execution_count = int(
+            (
+                df["source"].isin(["broker_movement", "broker_fill"])
+                & df["status"].isin(["EXECUTED", "EXECUTED_MANUAL"])
+            ).sum()
+        )
+
     # Detectar si el score/capas no tienen variacion util para regresion.
     for col in ["final_score", "technical_score", "macro_score", "sentiment_score", "risk_score"]:
         if col in df.columns and df[col].abs().sum() == 0:
-            warnings.append(
-                f"{col} está todo en 0. Revisar guardado/extracción si querés regresión por score/capas."
-            )
+            if mode == "execution" and manual_execution_count:
+                warnings.append(
+                    f"{col} no tiene variacion en execution: la mayoria son fills manuales/broker_movement sin capas del planner."
+                )
+            else:
+                warnings.append(
+                    f"{col} está todo en 0. Revisar guardado/extracción si querés regresión por score/capas."
+                )
 
     for horizon in config.horizons:
         hdf, target_col, actions_used, prep_warnings = prepare_model_frame(
@@ -862,7 +882,9 @@ def run_regression_audit_sync(
         sorted(hdf["decision"].dropna().unique().tolist())
         )
 
-        rows_usable_total += len(hdf)
+        usable_rows_max_horizon = max(usable_rows_max_horizon, len(hdf))
+        if "id" in hdf.columns:
+            usable_row_ids.update(hdf["id"].dropna().tolist())
 
         buckets[horizon] = build_score_bucket_table(hdf, target_col)
 
@@ -931,11 +953,12 @@ def run_regression_audit_sync(
             )
 
     warnings = list(dict.fromkeys(warnings))
+    rows_usable = len(usable_row_ids) if usable_row_ids else usable_rows_max_horizon
 
     return RegressionAuditReport(
         generated_at=generated_at,
         rows_loaded=rows_loaded,
-        rows_usable=rows_usable_total,
+        rows_usable=rows_usable,
         cost_threshold=cost_threshold,
         target_mode=config.target_mode,
         mode=mode,
