@@ -822,6 +822,16 @@ class PortfolioDatabase:
                   AND was_correct IS NOT NULL
                   AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
+                  AND (
+                    (
+                      COALESCE(source, layers->>'source') IN ('broker_movement', 'broker_fill')
+                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
+                    )
+                    OR (
+                      COALESCE(source, layers->>'source') = 'execution_plan'
+                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
+                    )
+                  )
                 ORDER BY decided_at ASC
                 """,
                 cutoff,
@@ -1919,7 +1929,10 @@ class PortfolioDatabase:
                 SELECT
                     id, ticker, decision,
                     outcome_5d, outcome_10d, outcome_20d,
-                    was_correct, size_pct
+                    was_correct, size_pct,
+                    COALESCE(source, layers->>'source', 'sin_source') AS source,
+                    COALESCE(status, 'UNKNOWN') AS status,
+                    COALESCE(decision_type, 'unknown') AS decision_type
                 FROM decision_log
                 WHERE decided_at >= $1
                   AND ($2::bigint IS NULL OR owner_chat_id = $2)
@@ -1927,6 +1940,16 @@ class PortfolioDatabase:
                   AND was_correct IS NOT NULL
                   AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
+                  AND (
+                    (
+                      COALESCE(source, layers->>'source') IN ('broker_movement', 'broker_fill')
+                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
+                    )
+                    OR (
+                      COALESCE(source, layers->>'source') = 'execution_plan'
+                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
+                    )
+                  )
                 ORDER BY decided_at ASC
                 """,
                 cutoff,
@@ -1944,6 +1967,32 @@ class PortfolioDatabase:
                   AND price_at_decision > 0
                   AND decision IN ('BUY', 'SELL')
                   AND decided_at >= $1
+                  AND (
+                    (
+                      COALESCE(source, layers->>'source') IN ('broker_movement', 'broker_fill')
+                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
+                    )
+                    OR (
+                      COALESCE(source, layers->>'source') = 'execution_plan'
+                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
+                    )
+                  )
+                """,
+                cutoff,
+                owner_chat_id,
+            )
+
+            pending_all_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM decision_log
+                WHERE outcome_5d IS NULL
+                  AND ($2::bigint IS NULL OR owner_chat_id = $2)
+                  AND COALESCE(outcome_basis, '') <> 'legacy_external'
+                  AND price_at_decision IS NOT NULL
+                  AND price_at_decision > 0
+                  AND decision IN ('BUY', 'SELL')
+                  AND decided_at >= $1
                 """,
                 cutoff,
                 owner_chat_id,
@@ -1951,14 +2000,42 @@ class PortfolioDatabase:
 
             recent_rows = await conn.fetch(
                 """
-                SELECT ticker, decision, final_score, confidence,
-                       outcome_5d, was_correct, decided_at,
-                       size_pct, stop_loss_pct, target_pct, decision_type
-                FROM decision_log
-                WHERE decision IN ('BUY', 'SELL')
-                  AND ($1::bigint IS NULL OR owner_chat_id = $1)
-                  AND COALESCE(outcome_basis, '') <> 'legacy_external'
-                ORDER BY decided_at DESC
+                SELECT
+                    dl.ticker,
+                    dl.decision,
+                    dl.final_score,
+                    dl.confidence,
+                    dl.outcome_5d,
+                    dl.was_correct,
+                    dl.decided_at,
+                    dl.size_pct,
+                    dl.stop_loss_pct,
+                    dl.target_pct,
+                    dl.decision_type,
+                    dl.source,
+                    dl.status,
+                    dl.block_reason,
+                    dl.layers,
+                    rb.decided_at AS recent_buy_at,
+                    rb.price_at_decision AS recent_buy_price,
+                    rb.executed_amount_ars AS recent_buy_amount
+                FROM decision_log dl
+                LEFT JOIN LATERAL (
+                    SELECT decided_at, price_at_decision, executed_amount_ars
+                    FROM decision_log bm
+                    WHERE bm.ticker = dl.ticker
+                      AND bm.decision = 'BUY'
+                      AND COALESCE(bm.source, bm.layers->>'source') IN ('broker_movement', 'broker_fill')
+                      AND bm.status IN ('EXECUTED', 'EXECUTED_MANUAL')
+                      AND bm.decided_at < dl.decided_at
+                      AND bm.decided_at >= dl.decided_at - INTERVAL '10 days'
+                    ORDER BY bm.decided_at DESC
+                    LIMIT 1
+                ) rb ON TRUE
+                WHERE dl.decision IN ('BUY', 'SELL')
+                  AND ($1::bigint IS NULL OR dl.owner_chat_id = $1)
+                  AND COALESCE(dl.outcome_basis, '') <> 'legacy_external'
+                ORDER BY dl.decided_at DESC
                 LIMIT 8
                 """,
                 owner_chat_id,
@@ -1969,6 +2046,7 @@ class PortfolioDatabase:
         # outcome_* ya se persiste como retorno direccional canonico.
         trader_returns = []
         by_ticker: dict = {}
+        by_source: dict = {}
         ret_10d_list    = []
         ret_20d_list    = []
 
@@ -1993,6 +2071,18 @@ class PortfolioDatabase:
             if tk not in by_ticker:
                 by_ticker[tk] = []
             by_ticker[tk].append(trader_ret)
+
+            source_key = (
+                str(r["source"] or "sin_source"),
+                str(r["status"] or "UNKNOWN"),
+                str(r["decision_type"] or "unknown"),
+            )
+            if source_key not in by_source:
+                by_source[source_key] = {"events": 0, "wins": 0, "sum_return": 0.0}
+            by_source[source_key]["events"] += 1
+            by_source[source_key]["sum_return"] += trader_ret
+            if trader_ret > 0:
+                by_source[source_key]["wins"] += 1
 
         n        = len(trader_returns)
         wins     = [r for r in trader_returns if r > 0]
@@ -2032,11 +2122,27 @@ class PortfolioDatabase:
                 "decision":   None,  # campo legacy, ahora siempre None
             })
 
+        source_stats = []
+        for (source, status, decision_type), values in sorted(
+            by_source.items(),
+            key=lambda item: (-item[1]["events"], item[0]),
+        ):
+            events = int(values["events"])
+            source_stats.append({
+                "source": source,
+                "status": status,
+                "decision_type": decision_type,
+                "events": events,
+                "wins": int(values["wins"]),
+                "avg_return": values["sum_return"] / events if events else None,
+            })
+
         return {
             "total_trades":    n,
             "winners":         n_wins,
             "losers":          n_losses,
             "pending":         int(pending_count or 0),
+            "pending_all":     int(pending_all_count or 0),
             "win_rate":        win_rate,
             "avg_win_5d":      avg_win,
             "avg_loss_5d":     avg_loss,
@@ -2049,5 +2155,6 @@ class PortfolioDatabase:
             "profit_factor":   profit_factor,
             "lookback_days":   lookback_days,
             "ticker_stats":    ticker_stats[:10],
+            "source_stats":    source_stats,
             "recent":          [dict(r) for r in recent_rows],
         }

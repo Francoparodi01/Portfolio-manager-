@@ -215,8 +215,14 @@ async def build_confidence_audit(days: int = 180) -> str:
     candle_day_age = (now.date() - candle_day).days if candle_day else None
     candles_same_day_ok = _num(candles["missing_internal"] if candles else None) == 0
     candles_recent_ok = candle_day_age is not None and candle_day_age <= 5
-    candles_wait = (not expects_same_day_candles) and candles_recent_ok and not candles_same_day_ok
-    candles_ok = candles_same_day_ok or candles_wait
+    candles_closed_ok = (not trading_day) and candles_recent_ok and not candles_same_day_ok
+    candles_wait = (
+        trading_day
+        and (not expects_same_day_candles)
+        and candles_recent_ok
+        and not candles_same_day_ok
+    )
+    candles_ok = candles_same_day_ok or candles_wait or candles_closed_ok
     decisions_ok = _num(decisions["total"] if decisions else None) > 0
     execution_ready = (
         _num(decisions["executed"] if decisions else None)
@@ -248,11 +254,17 @@ async def build_confidence_audit(days: int = 180) -> str:
         f"• {_state(portfolio_ok, 'Portfolio reciente')} — {_fmt_dt(latest_portfolio['scraped_at'] if latest_portfolio else None)} | {_money(latest_portfolio['total_value_ars'] if latest_portfolio else None)}",
         f"• {_state(market_ok, 'Market prices recientes')} — {_fmt_dt(market['latest_ts'] if market else None)} | 7d rows {_num(market['rows_7d'] if market else None)} / tickers {_num(market['tickers_7d'] if market else None)}",
         (
-            f"• {_state(candles_ok and not candles_wait, 'Candles internas completas', wait=candles_wait)} "
-            f"— precios dia {escape(str(candles['business_day'] if candles else '-'))} | "
-            f"velas {escape(str(candle_day or '-'))} "
+            f"• {_state(candles_ok and not candles_wait, 'Candles canonicas', wait=candles_wait)} "
+            f"— velas {escape(str(candle_day or '-'))} "
             f"({_num(candles['latest_candle_assets'] if candles else None)} activos) | "
-            f"faltantes hoy {_num(candles['missing_internal'] if candles else None)}"
+            + (
+                f"hoy no aplica: {escape(closed_reason or 'mercado cerrado')}"
+                if candles_closed_ok
+                else (
+                    f"precios dia {escape(str(candles['business_day'] if candles else '-'))} | "
+                    f"faltantes hoy {_num(candles['missing_internal'] if candles else None)}"
+                )
+            )
         ),
         "",
         "<b>Decision log</b>",

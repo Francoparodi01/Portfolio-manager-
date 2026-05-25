@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from datetime import datetime
@@ -60,6 +61,39 @@ def _pct(x) -> str:
     if x is None:
         return "N/A"
     return f"{float(x):+.1%}"
+
+
+def _money_ars(x) -> str:
+    if x is None:
+        return "N/A"
+    return f"${float(x):,.0f}".replace(",", ".")
+
+
+def _json_payload(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _layer_component(layers: dict, name: str) -> float | None:
+    payload = layers.get(name)
+    if isinstance(payload, dict):
+        for key in ("weighted", "raw", "score"):
+            if payload.get(key) is not None:
+                try:
+                    return float(payload[key])
+                except Exception:
+                    return None
+    try:
+        return float(payload)
+    except Exception:
+        return None
 
 
 def _ev_label(ev: float | None, *, historical_only: bool = False) -> str:
@@ -183,8 +217,8 @@ def _ev_scope(dataset_stats: list[dict]) -> tuple[str, str]:
 
     if executed_with_outcome > 0:
         return (
-            "EV agregado",
-            "Incluye movimientos reales confirmados; contrastalo con Execution Audit para aislar ejecución real.",
+            "EV operativo 5D",
+            "Solo usa ejecuciones reales confirmadas; no mezcla BLOCKED, THEORETICAL ni APPROVED sin fill.",
         )
 
     return (
@@ -513,6 +547,7 @@ def _dataset_totals(dataset_stats: list[dict]) -> dict:
 def _friendly_summary(stats: dict, ev_title: str | None = None) -> list[str]:
     total = int(stats.get("total_trades") or 0)
     pending = int(stats.get("pending") or 0)
+    pending_all = int(stats.get("pending_all") or pending)
     totals = _dataset_totals(stats.get("dataset_stats", []))
     broker = (stats.get("operational_context") or {}).get("broker_fills") or {}
     broker_total = int(broker.get("total") or 0)
@@ -522,9 +557,11 @@ def _friendly_summary(stats: dict, ev_title: str | None = None) -> list[str]:
         if totals["events"] > 0:
             lines = [
                 "El sistema ya esta guardando decisiones, pero todavia no hay resultados cerrados para medir edge.",
-                f"Eventos registrados: {_fmt_count(totals['events'])}. Pendientes de outcome: {_fmt_count(pending)}.",
+                f"Eventos registrados: {_fmt_count(totals['events'])}. Pendientes operativos: {_fmt_count(pending)}.",
                 "Necesita que pasen 5/10/20 ruedas con velas canonicas para empezar a evaluar.",
             ]
+            if pending_all != pending:
+                lines.append(f"Pendientes totales de auditoria: {_fmt_count(pending_all)}.")
             if broker_total > 0 and broker_reconciled == 0:
                 lines.append(
                     f"Movimientos Cocos detectados: {_fmt_count(broker_total)}; todavia no matchean con planes aprobados."
@@ -551,11 +588,14 @@ def _friendly_summary(stats: dict, ev_title: str | None = None) -> list[str]:
     is_historical = "hist" in title_key and "agregado" in title_key
     scope = "historico/modelo" if is_historical else "operativo"
     win_txt = f"{win_rate:.0%}" if win_rate is not None else "N/A"
-    return [
+    lines = [
         verdict,
         f"Muestra: {_fmt_count(total)} trades cerrados, acierto {win_txt}, EV {_pct(ev)}.",
-        f"Alcance: {scope}. Pendientes por madurar: {_fmt_count(pending)}.",
+        f"Alcance: {scope}. Pendientes operativos por madurar: {_fmt_count(pending)}.",
     ]
+    if pending_all != pending:
+        lines.append(f"Auditoria total pendiente: {_fmt_count(pending_all)} señales; lo no operativo no entra al EV principal.")
+    return lines
 
 
 def _render_dataset_friendly(stats: dict) -> list[str]:
@@ -580,6 +620,7 @@ def _render_dataset_friendly(stats: dict) -> list[str]:
     note = _dataset_group_note(dataset_stats)
     if note:
         lines.append(f"   Nota: {escape(note)}")
+    lines.append("   Metrica principal: solo ejecucion real; el resto queda como auditoria.")
 
     lines += ["", "   Desglose:"]
     for row in dataset_stats[:8]:
@@ -633,10 +674,114 @@ def _render_operational_context(stats: dict) -> list[str]:
     return lines
 
 
+def _render_main_sample(stats: dict) -> list[str]:
+    total = int(stats.get("total_trades") or 0)
+    pending = int(stats.get("pending") or 0)
+    pending_all = int(stats.get("pending_all") or pending)
+    source_stats = stats.get("source_stats") or []
+
+    lines = [
+        f"   Base: <b>{_fmt_count(total)}</b> outcomes operativos 5D cerrados.",
+        "   Excluye: BLOCKED, THEORETICAL y APPROVED sin fill.",
+    ]
+    if pending_all != pending:
+        non_operational = max(0, pending_all - pending)
+        lines.append(
+            f"   Pendientes fuera del EV principal: {_fmt_count(non_operational)} "
+            "senales no operativas."
+        )
+
+    if source_stats:
+        parts = []
+        for row in source_stats[:3]:
+            label = "/".join([
+                str(row.get("source") or "?"),
+                str(row.get("status") or "?"),
+            ])
+            parts.append(f"{label}: {_fmt_count(row.get('events'))}")
+        lines.append(f"   Fuentes usadas: {escape(' | '.join(parts))}")
+
+    return lines
+
+
+def _pending_label(row: dict, closed_reason: str | None) -> str:
+    source = str(row.get("source") or "")
+    status = str(row.get("status") or "")
+
+    if source == "execution_plan" and status == "APPROVED":
+        base = "outcome pendiente; plan aprobado, no fill confirmado"
+    elif status in {"EXECUTED", "EXECUTED_MANUAL"}:
+        base = "outcome pendiente; ejecucion real"
+    else:
+        base = "outcome pendiente"
+
+    if closed_reason:
+        base += "; mercado cerrado/no madura hoy"
+    return base
+
+
+def _recent_decision_notes(row: dict) -> list[str]:
+    direction = str(row.get("decision") or "").upper()
+    recent_buy_at = row.get("recent_buy_at")
+    if direction != "SELL" or not recent_buy_at:
+        return []
+
+    layers = _json_payload(row.get("layers"))
+    lines: list[str] = []
+    date_txt = recent_buy_at.strftime("%d/%m") if hasattr(recent_buy_at, "strftime") else str(recent_buy_at)
+    buy_price = _money_ars(row.get("recent_buy_price"))
+    buy_amount = _money_ars(row.get("recent_buy_amount"))
+
+    lines.append(
+        f"      - Reversion reciente: hubo compra real el {date_txt} "
+        f"@ {buy_price} por {buy_amount}; esta linea es senal, no venta confirmada."
+    )
+
+    reason = layers.get("reason") or row.get("block_reason")
+    if reason:
+        lines.append(f"      - Motivo del planner: {escape(str(reason))}.")
+
+    layer_parts = []
+    for label, key in (("tecnico", "technical"), ("riesgo", "risk"), ("macro", "macro"), ("sentiment", "sentiment")):
+        value = _layer_component(layers, key)
+        if value is not None:
+            layer_parts.append(f"{label} {value:+.3f}")
+    if layer_parts:
+        lines.append(f"      - Capas: {escape(' | '.join(layer_parts))}.")
+
+    current_weight = layers.get("current_weight")
+    target_weight = layers.get("target_weight")
+    if current_weight is not None and target_weight is not None:
+        try:
+            lines.append(
+                "      - Lectura: recorte parcial/rebalanceo "
+                f"{float(current_weight):.1%} -> {float(target_weight):.1%}; "
+                "no es take-profit ni stop ejecutado."
+            )
+        except Exception:
+            pass
+
+    source_mode = layers.get("technical_data_source_mode")
+    source_counts = layers.get("technical_candle_source_counts")
+    if source_mode or source_counts:
+        if isinstance(source_counts, dict):
+            counts_txt = ", ".join(f"{k}:{v}" for k, v in source_counts.items())
+        else:
+            counts_txt = str(source_counts or "")
+        lines.append(
+            "      - Historia tecnica: "
+            f"{escape(str(source_mode or 'desconocida'))} "
+            f"{escape(counts_txt)}."
+        )
+
+    return lines
+
+
 def render_performance_report(stats: dict) -> str:
     """Reporte compacto y legible para Telegram."""
     total = int(stats.get("total_trades") or 0)
     pending = int(stats.get("pending") or 0)
+    pending_all = int(stats.get("pending_all") or pending)
     days = int(stats.get("lookback_days") or 90)
     owner_chat_id = stats.get("owner_chat_id")
 
@@ -657,8 +802,11 @@ def render_performance_report(stats: dict) -> str:
         dataset_total = _dataset_totals(stats.get("dataset_stats", []))["events"]
         lines.append("<b>Que significa</b>")
         if pending > 0:
-            lines.append(f"   Hay <b>{_fmt_count(pending)}</b> decisiones pendientes de outcome.")
+            lines.append(f"   Hay <b>{_fmt_count(pending)}</b> ejecuciones reales pendientes de outcome.")
             lines.append("   No es error: aun falta recorrido de mercado para cerrarlas.")
+        elif pending_all > 0:
+            lines.append(f"   Hay <b>{_fmt_count(pending_all)}</b> senales pendientes de auditoria.")
+            lines.append("   No entran al EV operativo hasta ser fills reales o cerrar outcome.")
         elif owner_chat_id is not None:
             lines.append("   Este usuario todavia no acumulo decisiones propias con outcome cerrado.")
         elif dataset_total > 0:
@@ -676,7 +824,8 @@ def render_performance_report(stats: dict) -> str:
     losers = int(stats.get("losers") or 0)
 
     lines += [
-        "<b>Metricas principales</b>",
+        "<b>Metricas principales (solo ejecucion real)</b>",
+        *_render_main_sample(stats),
         (
             f"   Aciertos: <b>{win_rate:.0%}</b> "
             f"({winners} ganadoras / {losers} perdedoras)"
@@ -695,7 +844,7 @@ def render_performance_report(stats: dict) -> str:
         f"   20d: {_pct(stats.get('avg_return_20d'))}",
         f"   Mejor trade: {_pct(stats.get('best_trade'))}",
         f"   Peor trade:  {_pct(stats.get('worst_trade'))}",
-        f"   Pendientes: <b>{_fmt_count(pending)}</b>",
+        f"   Pendientes operativos: <b>{_fmt_count(pending)}</b>",
     ]
 
     ticker_stats = stats.get("ticker_stats", [])
@@ -712,6 +861,7 @@ def render_performance_report(stats: dict) -> str:
     recent = stats.get("recent", [])
     if recent:
         lines += ["", "<b>Ultimas decisiones</b>"]
+        closed_reason = market_closed_reason(datetime.now())
         for r in recent[:6]:
             ticker = escape(str(r.get("ticker", "?")))
             direction = escape(str(r.get("decision", "?")))
@@ -720,18 +870,21 @@ def render_performance_report(stats: dict) -> str:
             correct = r.get("was_correct")
             decided = r.get("decided_at")
             date_str = decided.strftime("%d/%m") if decided else "?"
+            source = r.get("source")
             status = r.get("status")
-            tag = f" <code>[{escape(str(status))}]</code>" if status else ""
+            tag_parts = [str(v) for v in (source, status) if v]
+            tag = f" <code>[{escape('/'.join(tag_parts))}]</code>" if tag_parts else ""
             if correct is True:
                 result = f"OK {_pct(outcome)}"
             elif correct is False:
                 result = f"Fallo {_pct(outcome)}"
             else:
-                result = "pendiente"
+                result = _pending_label(r, closed_reason)
             lines.append(
                 f"   {date_str} <b>{direction} {ticker}</b>{tag} "
                 f"score <code>{score:+.3f}</code> -> {result}"
             )
+            lines.extend(_recent_decision_notes(r))
 
     curve = stats.get("equity_curve", [])
     if curve and len(curve) >= 2:
