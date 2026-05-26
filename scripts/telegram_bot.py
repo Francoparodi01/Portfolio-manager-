@@ -458,6 +458,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📈 Regression",       callback_data="regression"),
+            InlineKeyboardButton("Bot vs Humano",       callback_data="override_audit"),
         ]
     ]
     final_row = [InlineKeyboardButton("🩺 Status", callback_data="status")]
@@ -485,6 +486,7 @@ def menu_text() -> str:
         "🧭 <b>Confianza</b> — auditoría operativa del sistema\n"
         "🔭 <b>Radar</b> — oportunidades operables del universo\n"
         "📈 <b>Regression</b> — auditoría de señales y outcomes\n"
+        "Bot vs Humano — compara planes aprobados contra movimientos reales\n"
         "🩺 <b>Status</b> — estado del sistema y DB\n"
         f"{settings_line}\n"
     )
@@ -761,6 +763,18 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
 async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_python_script(
         "scripts/run_performance.py",
+        "--days",
+        "90",
+        "--no-telegram",
+        *_owner_cli_args(chat_id),
+        timeout=240,
+    )
+    await send_text(context, chat_id, report)
+
+
+async def action_override_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    report = await run_python_script(
+        "scripts/run_override_audit.py",
         "--days",
         "90",
         "--no-telegram",
@@ -1508,6 +1522,11 @@ CALLBACK_ALIASES: dict[str, str] = {
     "performance":      "performance",
     "perf":             "performance",
     "run_performance":  "performance",
+    # Bot vs Humano
+    "override_audit":   "override_audit",
+    "overrides":        "override_audit",
+    "override":         "override_audit",
+    "bot_vs_humano":    "override_audit",
     # Confianza operativa
     "confidence":       "confidence_audit",
     "confianza":        "confidence_audit",
@@ -1542,6 +1561,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "analysis":      "🧠 Generando plan de cartera...",
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
+    "override_audit": "Comparando planes del bot contra movimientos reales...",
     "confidence_audit": "🧭 Auditando confianza del sistema...",
     "radar":         "🔭 Generando radar de oportunidades...",
     "radar_full":    "🔭 Generando radar completo...",
@@ -1558,6 +1578,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "analysis":       action_analysis,
         "weekly_summary": action_weekly_summary,
         "performance":    action_performance,
+        "override_audit": action_override_audit,
         "confidence_audit": action_confidence_audit,
         "calibration":    action_calibration,
         "radar":          action_radar,
@@ -1628,6 +1649,10 @@ async def weekly_summary_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def performance_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "performance")
+
+
+async def override_audit_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "override_audit")
 
 
 async def confidence_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1883,6 +1908,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("weekly_summary",   weekly_summary_handler))
     app.add_handler(CommandHandler("resumen_semanal",  weekly_summary_handler))
     app.add_handler(CommandHandler("performance",      performance_handler))
+    app.add_handler(CommandHandler("override",         override_audit_handler))
+    app.add_handler(CommandHandler("overrides",        override_audit_handler))
+    app.add_handler(CommandHandler("bot_vs_humano",    override_audit_handler))
     app.add_handler(CommandHandler("confianza",        confidence_handler))
     app.add_handler(CommandHandler("confidence",       confidence_handler))
     app.add_handler(CommandHandler("trust",            confidence_handler))
