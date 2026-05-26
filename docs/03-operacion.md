@@ -115,6 +115,9 @@ Auth:
 - TOTP opcional con `MONITOR_TOTP_SECRET`
 
 El monitor es read-only.
+Por seguridad, Docker lo publica solo en `127.0.0.1` por defecto mediante
+`MONITOR_BIND_ADDRESS`. Para acceso remoto usar un tunnel privado con auth, no
+exponer el puerto directo a internet.
 
 ## Variables de Entorno
 
@@ -133,4 +136,3 @@ El monitor es read-only.
 | `COCOS_SYNC_FILLS` | habilita sync programado de fills |
 
 Nunca versionar `.env`.
-

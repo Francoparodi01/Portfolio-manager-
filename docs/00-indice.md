@@ -15,6 +15,7 @@ construir una memoria operacional confiable: datos, decisiones, fills y outcomes
 | [03-operacion.md](03-operacion.md) | Docker, Telegram, CLI, scheduler, monitor API |
 | [04-analitica-y-decision.md](04-analitica-y-decision.md) | analysis, radar, optimizer, planner, performance, regression, DCL |
 | [05-mantenimiento.md](05-mantenimiento.md) | backfills, calidad, troubleshooting, limpieza futura |
+| [06-seguridad-y-publicacion.md](06-seguridad-y-publicacion.md) | seguridad, exposicion remota y publicacion del monitor |
 
 ## Principios del Sistema
 
@@ -55,4 +56,3 @@ construir una memoria operacional confiable: datos, decisiones, fills y outcomes
 | `outcome` | resultado posterior de una decision a 5, 10 o 20 ruedas |
 | `EXTERNOS` viejo | nombre obsoleto; ahora es "en Cocos / sin historico operable" |
 | `TRADINGVIEW_BYMA` | fuente de backfill historico comparable en ARS/BYMA |
-

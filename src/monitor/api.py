@@ -3,6 +3,8 @@ from __future__ import annotations
 import hmac
 import os
 import re
+import time as time_module
+from collections import defaultdict, deque
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,6 +32,10 @@ SCHEDULER_HEARTBEAT_KEY = "cocos:scheduler:last_heartbeat"
 
 TOKEN = os.getenv("MONITOR_API_TOKEN", "")
 TOTP_SECRET = os.getenv("MONITOR_TOTP_SECRET", "")
+AUTH_WINDOW_SECONDS = int(os.getenv("MONITOR_AUTH_WINDOW_SECONDS", "60"))
+AUTH_MAX_FAILURES = int(os.getenv("MONITOR_AUTH_MAX_FAILURES", "8"))
+TRUST_PROXY_HEADERS = os.getenv("MONITOR_TRUST_PROXY_HEADERS", "false").lower() in {"1", "true", "yes", "y"}
+AUTH_FAILURES: dict[str, deque[float]] = defaultdict(deque)
 
 
 def _now_art() -> datetime:
@@ -45,6 +51,39 @@ def _is_market_hours(now: datetime | None = None) -> bool:
 def _json(data: dict, status: int = 200) -> web.Response:
     data.setdefault("generated_at", _now_art().isoformat())
     return web.json_response(data, status=status)
+
+
+def _client_key(request: web.Request) -> str:
+    if TRUST_PROXY_HEADERS:
+        cf_ip = request.headers.get("CF-Connecting-IP", "").strip()
+        if cf_ip:
+            return cf_ip
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip()
+    return request.remote or "unknown"
+
+
+def _auth_limited(request: web.Request) -> bool:
+    now = time_module.monotonic()
+    key = _client_key(request)
+    bucket = AUTH_FAILURES[key]
+    while bucket and now - bucket[0] > AUTH_WINDOW_SECONDS:
+        bucket.popleft()
+    return len(bucket) >= AUTH_MAX_FAILURES
+
+
+def _record_auth_failure(request: web.Request) -> None:
+    now = time_module.monotonic()
+    key = _client_key(request)
+    bucket = AUTH_FAILURES[key]
+    while bucket and now - bucket[0] > AUTH_WINDOW_SECONDS:
+        bucket.popleft()
+    bucket.append(now)
+
+
+def _clear_auth_failures(request: web.Request) -> None:
+    AUTH_FAILURES.pop(_client_key(request), None)
 
 
 def _iso(value) -> str | None:
@@ -127,16 +166,40 @@ async def auth_middleware(request: web.Request, handler):
     if not TOKEN:
         return _json({"ok": False, "error": "MONITOR_API_TOKEN no configurado"}, status=503)
 
+    if _auth_limited(request):
+        return _json({"ok": False, "error": "demasiados intentos invalidos"}, status=429)
+
     provided = _extract_token(request)
     if not hmac.compare_digest(provided, TOKEN):
+        _record_auth_failure(request)
         return _json({"ok": False, "error": "token invalido"}, status=401)
 
     if TOTP_SECRET:
         code = request.headers.get("X-TOTP-Code", "").strip().replace(" ", "")
         if not code or not pyotp.TOTP(TOTP_SECRET).verify(code, valid_window=1):
+            _record_auth_failure(request)
             return _json({"ok": False, "error": "codigo TOTP invalido"}, status=401)
 
+    _clear_auth_failures(request)
     return await handler(request)
+
+
+@web.middleware
+async def security_headers_middleware(request: web.Request, handler):
+    response = await handler(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+        "base-uri 'none'; frame-ancestors 'none'",
+    )
+    if request.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 @web.middleware
@@ -498,7 +561,7 @@ async def create_app() -> web.Application:
         max_size=4,
     )
 
-    app = web.Application(middlewares=[cors_middleware, auth_middleware])
+    app = web.Application(middlewares=[security_headers_middleware, cors_middleware, auth_middleware])
     app["pool"] = pool
     app.router.add_get("/", index)
     app.router.add_get("/api/auth/status", auth_status)
