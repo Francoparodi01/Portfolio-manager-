@@ -129,7 +129,11 @@ def _row(row) -> dict:
             if isinstance(value, datetime):
                 out[f"{key}_age_seconds"] = _age_seconds(value)
         else:
-            out[key] = _num(value)
+            converted = _num(value)
+            if isinstance(converted, (str, int, float, bool)) or converted is None:
+                out[key] = converted
+            else:
+                out[key] = str(converted)
     return out
 
 
@@ -444,6 +448,253 @@ async def decisions(request: web.Request) -> web.Response:
     })
 
 
+async def portfolio_view(request: web.Request) -> web.Response:
+    days = max(7, min(int(request.query.get("days", "90")), 365))
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        latest_snapshot = await conn.fetchrow("""
+            SELECT snapshot_id, scraped_at, total_value_ars, cash_ars, confidence_score
+            FROM portfolio_snapshots
+            ORDER BY scraped_at DESC
+            LIMIT 1
+        """)
+        positions = []
+        allocation = []
+        if latest_snapshot:
+            positions = await conn.fetch("""
+                SELECT
+                    ticker,
+                    COALESCE(asset_type, 'UNKNOWN') AS asset_type,
+                    quantity,
+                    avg_cost,
+                    current_price,
+                    market_value,
+                    unrealized_pnl,
+                    unrealized_pnl_pct,
+                    weight_in_portfolio
+                FROM positions
+                WHERE snapshot_id = $1
+                ORDER BY market_value DESC NULLS LAST, ticker
+            """, latest_snapshot["snapshot_id"])
+            allocation = await conn.fetch("""
+                SELECT
+                    COALESCE(asset_type, 'UNKNOWN') AS asset_type,
+                    SUM(COALESCE(market_value, 0)) AS market_value,
+                    COUNT(*) AS positions
+                FROM positions
+                WHERE snapshot_id = $1
+                GROUP BY 1
+                ORDER BY market_value DESC
+            """, latest_snapshot["snapshot_id"])
+
+        history = await conn.fetch("""
+            SELECT DISTINCT ON ((scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date)
+                (scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date AS day,
+                scraped_at,
+                total_value_ars,
+                cash_ars,
+                confidence_score
+            FROM portfolio_snapshots
+            WHERE scraped_at >= NOW() - ($1::int * INTERVAL '1 day')
+            ORDER BY (scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date, scraped_at DESC
+        """, days)
+
+    return _json({
+        "ok": True,
+        "days": days,
+        "snapshot": _row(latest_snapshot),
+        "positions": [_row(r) for r in positions],
+        "allocation": [_row(r) for r in allocation],
+        "history": [_row(r) for r in history],
+    })
+
+
+async def performance_view(request: web.Request) -> web.Response:
+    days = max(7, min(int(request.query.get("days", "180")), 365))
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        summary = await conn.fetchrow("""
+            WITH real AS (
+                SELECT *
+                FROM decision_log
+                WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND outcome_basis = 'canonical_cocos'
+                  AND outcome_5d IS NOT NULL
+                  AND was_correct IS NOT NULL
+                  AND status = 'EXECUTED_MANUAL'
+                  AND COALESCE(source, layers->>'source') = 'broker_movement'
+            )
+            SELECT
+                COUNT(*) AS closed_5d,
+                AVG(outcome_5d) AS avg_5d,
+                AVG(outcome_10d) AS avg_10d,
+                AVG(outcome_20d) AS avg_20d,
+                AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) AS win_rate_5d,
+                AVG(outcome_5d) FILTER (WHERE outcome_5d > 0) AS avg_win_5d,
+                AVG(outcome_5d) FILTER (WHERE outcome_5d < 0) AS avg_loss_5d,
+                MAX(outcome_5d) AS best_5d,
+                MIN(outcome_5d) AS worst_5d
+            FROM real
+        """, days)
+        by_ticker = await conn.fetch("""
+            SELECT
+                ticker,
+                COUNT(*) AS n,
+                AVG(outcome_5d) AS avg_5d,
+                AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) AS win_rate_5d
+            FROM decision_log
+            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND outcome_basis = 'canonical_cocos'
+              AND outcome_5d IS NOT NULL
+              AND was_correct IS NOT NULL
+              AND status = 'EXECUTED_MANUAL'
+              AND COALESCE(source, layers->>'source') = 'broker_movement'
+            GROUP BY ticker
+            ORDER BY n DESC, avg_5d DESC
+            LIMIT 12
+        """, days)
+        score_points = await conn.fetch("""
+            SELECT
+                decided_at,
+                ticker,
+                decision,
+                status,
+                COALESCE(source, layers->>'source') AS source,
+                final_score,
+                confidence,
+                outcome_5d,
+                outcome_10d,
+                outcome_20d
+            FROM decision_log
+            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND outcome_basis = 'canonical_cocos'
+              AND outcome_5d IS NOT NULL
+              AND final_score IS NOT NULL
+            ORDER BY decided_at DESC
+            LIMIT 160
+        """, days)
+        status_counts = await conn.fetch("""
+            SELECT
+                COALESCE(source, layers->>'source', 'sin_source') AS source,
+                COALESCE(status, 'UNKNOWN') AS status,
+                COUNT(*) AS n,
+                COUNT(outcome_5d) FILTER (WHERE outcome_basis = 'canonical_cocos') AS closed_5d
+            FROM decision_log
+            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+            GROUP BY 1, 2
+            ORDER BY n DESC
+            LIMIT 16
+        """, days)
+
+    summary_dict = _row(summary)
+    win_rate = summary_dict.get("win_rate_5d") or 0
+    avg_win = summary_dict.get("avg_win_5d") or 0
+    avg_loss = abs(summary_dict.get("avg_loss_5d") or 0)
+    summary_dict["ev_5d"] = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+
+    return _json({
+        "ok": True,
+        "days": days,
+        "summary": summary_dict,
+        "by_ticker": [_row(r) for r in by_ticker],
+        "score_points": [_row(r) for r in score_points],
+        "status_counts": [_row(r) for r in status_counts],
+    })
+
+
+async def override_audit(request: web.Request) -> web.Response:
+    days = max(7, min(int(request.query.get("days", "90")), 365))
+    match_window_days = max(1, min(int(request.query.get("match_window_days", "2")), 10))
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            WITH decisions AS (
+                SELECT
+                    id,
+                    decided_at,
+                    ticker,
+                    decision,
+                    final_score,
+                    price_at_decision,
+                    ABS(COALESCE(theoretical_amount_ars, executed_amount_ars, 0)) AS target_amount_ars,
+                    outcome_5d,
+                    outcome_10d,
+                    outcome_20d,
+                    layers->>'reason' AS reason
+                FROM decision_log
+                WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND COALESCE(source, layers->>'source') = 'execution_plan'
+                  AND status = 'APPROVED'
+                  AND decision_type = 'executable'
+                  AND decision IN ('BUY', 'SELL')
+                  AND price_at_decision IS NOT NULL
+            )
+            SELECT
+                d.*,
+                same_fill.first_at AS same_executed_at,
+                same_fill.amount_ars AS same_amount_ars,
+                opposite_fill.first_at AS opposite_executed_at,
+                opposite_fill.amount_ars AS opposite_amount_ars,
+                CASE
+                    WHEN COALESCE(same_fill.amount_ars, 0) / GREATEST(d.target_amount_ars, 1) >= 0.75 THEN 'FOLLOWED'
+                    WHEN COALESCE(same_fill.amount_ars, 0) / GREATEST(d.target_amount_ars, 1) >= 0.15 THEN 'PARTIAL'
+                    WHEN COALESCE(opposite_fill.amount_ars, 0) / GREATEST(d.target_amount_ars, 1) >= 0.15 THEN 'OPPOSITE'
+                    ELSE 'IGNORED'
+                END AS override_status
+            FROM decisions d
+            LEFT JOIN LATERAL (
+                SELECT MIN(executed_at) AS first_at, SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
+                FROM broker_movements bm
+                WHERE bm.ticker = d.ticker
+                  AND bm.movement_type = d.decision
+                  AND bm.executed_at >= d.decided_at
+                  AND bm.executed_at < d.decided_at + ($2::int * INTERVAL '1 day')
+                  AND bm.quantity IS NOT NULL
+                  AND bm.price IS NOT NULL
+            ) same_fill ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT MIN(executed_at) AS first_at, SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
+                FROM broker_movements bm
+                WHERE bm.ticker = d.ticker
+                  AND bm.movement_type = CASE WHEN d.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
+                  AND bm.executed_at >= d.decided_at
+                  AND bm.executed_at < d.decided_at + ($2::int * INTERVAL '1 day')
+                  AND bm.quantity IS NOT NULL
+                  AND bm.price IS NOT NULL
+            ) opposite_fill ON TRUE
+            ORDER BY d.decided_at DESC
+        """, days, match_window_days)
+
+    items = [_row(r) for r in rows]
+    by_status: dict[str, int] = {}
+    unique_intents = set()
+    closed = []
+    for item in items:
+        status = item.get("override_status") or "UNKNOWN"
+        by_status[status] = by_status.get(status, 0) + 1
+        unique_intents.add((item.get("ticker"), item.get("decision")))
+        if item.get("outcome_5d") is not None:
+            closed.append(item)
+
+    bot_wins = sum(1 for item in closed if item.get("override_status") in {"IGNORED", "OPPOSITE"} and (item.get("outcome_5d") or 0) > 0)
+    human_wins = sum(1 for item in closed if item.get("override_status") in {"IGNORED", "OPPOSITE"} and (item.get("outcome_5d") or 0) < 0)
+
+    return _json({
+        "ok": True,
+        "days": days,
+        "match_window_days": match_window_days,
+        "summary": {
+            "plans": len(items),
+            "unique_intents": len(unique_intents),
+            "closed_5d": len(closed),
+            "by_status": by_status,
+            "bot_wins_ignored": bot_wins,
+            "human_wins_ignored": human_wins,
+        },
+        "recent": items[:30],
+    })
+
+
 async def fills(request: web.Request) -> web.Response:
     days = max(1, min(int(request.query.get("days", "90")), 365))
     pool: asyncpg.Pool = request.app["pool"]
@@ -569,6 +820,9 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/ingestion", ingestion)
     app.router.add_get("/api/candles", candles)
     app.router.add_get("/api/decisions", decisions)
+    app.router.add_get("/api/portfolio", portfolio_view)
+    app.router.add_get("/api/performance", performance_view)
+    app.router.add_get("/api/override-audit", override_audit)
     app.router.add_get("/api/fills", fills)
     app.router.add_get("/api/logs/recent", logs_recent)
 

@@ -195,6 +195,48 @@
     .amber { color: var(--amber); }
     .blue { color: var(--blue); }
     .violet { color: var(--violet); }
+    .panel-split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px;
+    }
+    .bars { display: grid; gap: 8px; }
+    .bar-row {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr) 84px;
+      gap: 8px;
+      align-items: center;
+      min-height: 26px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .bar-track {
+      height: 9px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--blue);
+    }
+    .chart {
+      width: 100%;
+      height: 220px;
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.025);
+    }
+    .sparkline {
+      width: 100%;
+      height: 118px;
+    }
+    .chart-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
 
     @media (max-width: 980px) {
       .topbar { grid-template-columns: 1fr; }
@@ -202,6 +244,7 @@
       .totp-code { grid-column: 1 / -1; }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .wide { grid-column: 1 / -1; }
+      .panel-split { grid-template-columns: 1fr; }
     }
     @media (max-width: 620px) {
       main { padding: 12px; }
@@ -261,6 +304,60 @@
         <div class="metric"><span>Rows 7d</span><b id="priceRows7">-</b></div>
         <div class="metric"><span>Tickers 7d</span><b id="priceTickers7">-</b></div>
         <div class="metric"><span>Universo A/C</span><b id="assetBreakdown">-</b></div>
+      </article>
+
+      <article class="card full">
+        <div class="row-head">
+          <h2>Portfolio View</h2>
+          <span class="pill" id="portfolioViewDay">-</span>
+        </div>
+        <div class="panel-split">
+          <div>
+            <div class="metric"><span>Total</span><b class="money" id="portfolioViewTotal">-</b></div>
+            <div class="metric"><span>Cash</span><b id="portfolioViewCash">-</b></div>
+            <div class="metric"><span>Posiciones</span><b id="portfolioViewPositions">-</b></div>
+            <div class="bars" id="allocationBars"></div>
+          </div>
+          <div>
+            <svg class="sparkline" id="portfolioSpark" viewBox="0 0 600 118" preserveAspectRatio="none"></svg>
+            <div class="chart-note" id="portfolioSparkNote">Evolucion diaria de cartera y cash.</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card full">
+        <div class="row-head">
+          <h2>Decision Intelligence</h2>
+          <span class="pill">180 dias</span>
+        </div>
+        <div class="panel-split">
+          <div>
+            <div class="metric"><span>Outcomes reales 5D</span><b id="perfClosed">-</b></div>
+            <div class="metric"><span>Win rate</span><b class="blue" id="perfWinRate">-</b></div>
+            <div class="metric"><span>EV 5D</span><b class="money" id="perfEv">-</b></div>
+            <div class="metric"><span>Mejor / peor</span><b id="perfBestWorst">-</b></div>
+            <div class="bars" id="tickerBars"></div>
+          </div>
+          <div>
+            <svg class="chart" id="scoreScatter" viewBox="0 0 600 220" preserveAspectRatio="none"></svg>
+            <div class="chart-note">Scatter score final vs outcome 5D. Sirve como auditoria visual, no como prueba de edge.</div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card full">
+        <div class="row-head">
+          <h2>Bot vs Humano</h2>
+          <span class="pill" id="overrideWindow">90 dias</span>
+        </div>
+        <div class="metric"><span>Planes / intenciones</span><b id="overridePlans">-</b></div>
+        <div class="metric"><span>Seguidas / parciales</span><b class="blue" id="overrideFollowed">-</b></div>
+        <div class="metric"><span>Ignoradas / opuestas</span><b class="amber" id="overrideIgnored">-</b></div>
+        <div class="metric"><span>Cerradas 5D</span><b id="overrideClosed">-</b></div>
+        <table>
+          <thead><tr><th>Hora</th><th>Ticker</th><th>Bot</th><th>Estado humano</th><th>Outcome</th></tr></thead>
+          <tbody id="overrideTable"></tbody>
+        </table>
       </article>
 
       <article class="card wide">
@@ -368,6 +465,83 @@
       return `<span class="status warn"><span class="dot"></span>${text}</span>`;
     }
 
+    function pct(value) {
+      return Number(value || 0) * 100;
+    }
+
+    function renderBarRows(rows, options = {}) {
+      const max = Math.max(...rows.map((row) => Math.abs(Number(row.value || 0))), 1);
+      return rows.map((row, index) => {
+        const width = Math.max(2, Math.abs(Number(row.value || 0)) / max * 100);
+        const color = row.color || (index % 2 ? "var(--green)" : "var(--blue)");
+        return `
+          <div class="bar-row">
+            <span>${row.label}</span>
+            <span class="bar-track"><span class="bar-fill" style="width:${width}%;background:${color}"></span></span>
+            <b>${options.money ? fmtMoney(row.value) : options.percent ? fmtPct(row.value) : fmtNumber(row.value)}</b>
+          </div>
+        `;
+      }).join("") || `<div class="subtle">Sin datos</div>`;
+    }
+
+    function linePath(points, key, width, height, pad) {
+      const values = points.map((p) => Number(p[key])).filter((v) => Number.isFinite(v));
+      if (values.length < 2) return "";
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const span = Math.max(max - min, 1);
+      return points.map((p, i) => {
+        const value = Number(p[key]);
+        const x = pad + (i / Math.max(points.length - 1, 1)) * (width - pad * 2);
+        const y = height - pad - ((value - min) / span) * (height - pad * 2);
+        return `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(" ");
+    }
+
+    function renderSparkline(svg, points) {
+      const width = 600;
+      const height = 118;
+      const pad = 10;
+      const totalPath = linePath(points, "total_value_ars", width, height, pad);
+      const cashPath = linePath(points, "cash_ars", width, height, pad);
+      svg.innerHTML = `
+        <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="rgba(255,255,255,.16)" />
+        <path d="${totalPath}" fill="none" stroke="var(--green)" stroke-width="3" vector-effect="non-scaling-stroke" />
+        <path d="${cashPath}" fill="none" stroke="var(--blue)" stroke-width="2" opacity=".85" vector-effect="non-scaling-stroke" />
+      `;
+    }
+
+    function renderScatter(svg, points) {
+      const width = 600;
+      const height = 220;
+      const pad = 28;
+      const xs = points.map((p) => Number(p.final_score)).filter(Number.isFinite);
+      const ys = points.map((p) => Number(p.outcome_5d)).filter(Number.isFinite);
+      if (!xs.length || !ys.length) {
+        svg.innerHTML = `<text x="24" y="44" fill="var(--muted)">Sin puntos cerrados suficientes</text>`;
+        return;
+      }
+      const minX = Math.min(...xs, -0.25);
+      const maxX = Math.max(...xs, 0.25);
+      const minY = Math.min(...ys, -0.15);
+      const maxY = Math.max(...ys, 0.15);
+      const spanX = Math.max(maxX - minX, 0.01);
+      const spanY = Math.max(maxY - minY, 0.01);
+      const x0 = pad + ((0 - minX) / spanX) * (width - pad * 2);
+      const y0 = height - pad - ((0 - minY) / spanY) * (height - pad * 2);
+      const circles = points.map((p) => {
+        const x = pad + ((Number(p.final_score) - minX) / spanX) * (width - pad * 2);
+        const y = height - pad - ((Number(p.outcome_5d) - minY) / spanY) * (height - pad * 2);
+        const color = Number(p.outcome_5d) >= 0 ? "var(--green)" : "var(--red)";
+        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${color}" opacity=".82"><title>${p.ticker} ${fmtPct(p.outcome_5d)}</title></circle>`;
+      }).join("");
+      svg.innerHTML = `
+        <line x1="${pad}" y1="${y0}" x2="${width - pad}" y2="${y0}" stroke="rgba(255,255,255,.18)" />
+        <line x1="${x0}" y1="${pad}" x2="${x0}" y2="${height - pad}" stroke="rgba(255,255,255,.18)" />
+        ${circles}
+      `;
+    }
+
     function setError(message) {
       const box = $("error");
       box.style.display = message ? "block" : "none";
@@ -434,6 +608,66 @@
         fmtNumber(breakdown.ACCION && breakdown.ACCION.tickers_7d) +
         " / " +
         fmtNumber(breakdown.CEDEAR && breakdown.CEDEAR.tickers_7d);
+    }
+
+    function renderPortfolioView(data) {
+      const snapshot = data.snapshot || {};
+      const positions = data.positions || [];
+      $("portfolioViewDay").textContent = fmtDate(snapshot.scraped_at);
+      $("portfolioViewTotal").textContent = fmtMoney(snapshot.total_value_ars);
+      $("portfolioViewCash").textContent = fmtMoney(snapshot.cash_ars);
+      $("portfolioViewPositions").textContent = fmtNumber(positions.length);
+      $("allocationBars").innerHTML = renderBarRows(
+        positions.slice(0, 10).map((row) => ({
+          label: row.ticker,
+          value: row.market_value,
+          color: Number(row.unrealized_pnl_pct || 0) >= 0 ? "var(--green)" : "var(--red)",
+        })),
+        { money: true }
+      );
+      renderSparkline($("portfolioSpark"), data.history || []);
+      const first = (data.history || [])[0];
+      const last = (data.history || []).slice(-1)[0];
+      if (first && last && first.total_value_ars) {
+        const change = (Number(last.total_value_ars) / Number(first.total_value_ars)) - 1;
+        $("portfolioSparkNote").textContent = `Cartera ${fmtPct(change)} en ${data.days} dias. Linea verde: total; azul: cash.`;
+      }
+    }
+
+    function renderPerformanceView(data) {
+      const s = data.summary || {};
+      $("perfClosed").textContent = fmtNumber(s.closed_5d);
+      $("perfWinRate").textContent = fmtPct(s.win_rate_5d);
+      $("perfEv").textContent = fmtPct(s.ev_5d);
+      $("perfBestWorst").textContent = `${fmtPct(s.best_5d)} / ${fmtPct(s.worst_5d)}`;
+      $("tickerBars").innerHTML = renderBarRows(
+        (data.by_ticker || []).slice(0, 8).map((row) => ({
+          label: row.ticker,
+          value: row.avg_5d,
+          color: Number(row.avg_5d || 0) >= 0 ? "var(--green)" : "var(--red)",
+        })),
+        { percent: true }
+      );
+      renderScatter($("scoreScatter"), data.score_points || []);
+    }
+
+    function renderOverrideAudit(data) {
+      const s = data.summary || {};
+      const byStatus = s.by_status || {};
+      $("overrideWindow").textContent = `${data.days} dias`;
+      $("overridePlans").textContent = `${fmtNumber(s.plans)} / ${fmtNumber(s.unique_intents)}`;
+      $("overrideFollowed").textContent = `${fmtNumber(byStatus.FOLLOWED || 0)} / ${fmtNumber(byStatus.PARTIAL || 0)}`;
+      $("overrideIgnored").textContent = `${fmtNumber(byStatus.IGNORED || 0)} / ${fmtNumber(byStatus.OPPOSITE || 0)}`;
+      $("overrideClosed").textContent = fmtNumber(s.closed_5d);
+      $("overrideTable").innerHTML = (data.recent || []).slice(0, 10).map((row) => `
+        <tr>
+          <td>${fmtDate(row.decided_at)}</td>
+          <td>${row.ticker || "-"}</td>
+          <td>${row.decision || "-"}</td>
+          <td>${row.override_status || "-"}</td>
+          <td>${row.outcome_5d === null || row.outcome_5d === undefined ? "pend." : fmtPct(row.outcome_5d)}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="5" class="subtle">Sin planes aprobados recientes</td></tr>`;
     }
 
     function renderCandles(data) {
@@ -521,9 +755,12 @@
       setError("");
       const token = $("token").value.trim();
       if (token) localStorage.setItem("monitorToken", token);
-      const [health, ingestion, candles, decisions, fills, logs] = await Promise.all([
+      const [health, ingestion, portfolio, performance, overrides, candles, decisions, fills, logs] = await Promise.all([
         api("/api/health"),
         api("/api/ingestion"),
+        api("/api/portfolio?days=90"),
+        api("/api/performance?days=180"),
+        api("/api/override-audit?days=90"),
         api("/api/candles"),
         api("/api/decisions?days=90"),
         api("/api/fills?days=90"),
@@ -531,6 +768,9 @@
       ]);
       renderHealth(health);
       renderIngestion(ingestion);
+      renderPortfolioView(portfolio);
+      renderPerformanceView(performance);
+      renderOverrideAudit(overrides);
       renderCandles(candles);
       renderDecisions(decisions);
       renderFills(fills);
