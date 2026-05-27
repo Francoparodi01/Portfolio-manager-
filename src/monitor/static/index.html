@@ -237,6 +237,65 @@
       color: var(--muted);
       font-size: 12px;
     }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .period-button {
+      width: 48px;
+      padding: 0;
+      font-size: 12px;
+    }
+    .period-button.active {
+      border-color: var(--blue);
+      color: var(--text);
+      background: #1f4f86;
+    }
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .state-pill::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--muted);
+    }
+    .state-ok::before { background: var(--green); }
+    .state-warn::before { background: var(--amber); }
+    .state-bad::before { background: var(--red); }
+    .bar-row.clickable {
+      cursor: pointer;
+      border-radius: 6px;
+    }
+    .bar-row.clickable:hover {
+      background: rgba(255,255,255,0.045);
+    }
+    .bar-row.selected {
+      color: var(--text);
+      background: rgba(100,168,255,0.12);
+    }
+    .summary-line {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .empty-state {
+      min-height: 64px;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      border: 1px dashed rgba(255,255,255,0.12);
+      border-radius: 8px;
+    }
 
     @media (max-width: 980px) {
       .topbar { grid-template-columns: 1fr; }
@@ -311,6 +370,7 @@
           <h2>Portfolio View</h2>
           <span class="pill" id="portfolioViewDay">-</span>
         </div>
+        <div class="chart-note" id="portfolioUpdated">-</div>
         <div class="panel-split">
           <div>
             <div class="metric"><span>Total</span><b class="money" id="portfolioViewTotal">-</b></div>
@@ -328,8 +388,15 @@
       <article class="card full">
         <div class="row-head">
           <h2>Decision Intelligence</h2>
-          <span class="pill">180 dias</span>
+          <div class="toolbar">
+            <span class="pill" id="selectedTickerPill">Todos los tickers</span>
+            <button class="period-button active" type="button" data-period="7">7d</button>
+            <button class="period-button" type="button" data-period="30">30d</button>
+            <button class="period-button" type="button" data-period="90">90d</button>
+            <button class="period-button" type="button" data-period="365">All</button>
+          </div>
         </div>
+        <div class="chart-note" id="decisionUpdated">-</div>
         <div class="panel-split">
           <div>
             <div class="metric"><span>Outcomes reales 5D</span><b id="perfClosed">-</b></div>
@@ -340,7 +407,9 @@
           </div>
           <div>
             <svg class="chart" id="scoreScatter" viewBox="0 0 600 220" preserveAspectRatio="none"></svg>
-            <div class="chart-note">Scatter score final vs outcome 5D. Sirve como auditoria visual, no como prueba de edge.</div>
+            <div class="chart-note" title="Eje X: final_score al momento de la decision. Eje Y: retorno outcome_5d. Verde es retorno positivo, rojo negativo.">
+              Eje X: score final. Eje Y: outcome 5D. Verde positivo, rojo negativo.
+            </div>
           </div>
         </div>
       </article>
@@ -350,6 +419,8 @@
           <h2>Bot vs Humano</h2>
           <span class="pill" id="overrideWindow">90 dias</span>
         </div>
+        <div class="chart-note" id="overrideUpdated">-</div>
+        <div class="summary-line" id="overrideSummary">-</div>
         <div class="metric"><span>Planes / intenciones</span><b id="overridePlans">-</b></div>
         <div class="metric"><span>Seguidas / parciales</span><b class="blue" id="overrideFollowed">-</b></div>
         <div class="metric"><span>Ignoradas / opuestas</span><b class="amber" id="overrideIgnored">-</b></div>
@@ -421,6 +492,9 @@
     const state = {
       token: localStorage.getItem("monitorToken") || "",
       totpRequired: false,
+      performanceDays: 7,
+      selectedTicker: "",
+      performanceData: null,
     };
 
     $("token").value = state.token;
@@ -456,6 +530,13 @@
       return Math.round(s / 86400) + "d";
     }
 
+    function ageFromIso(value) {
+      if (!value) return "-";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return "-";
+      return fmtAge((Date.now() - d.getTime()) / 1000);
+    }
+
     function status(ok, text) {
       const cls = ok ? "ok" : "bad";
       return `<span class="status ${cls}"><span class="dot"></span>${text}</span>`;
@@ -463,6 +544,14 @@
 
     function warn(text) {
       return `<span class="status warn"><span class="dot"></span>${text}</span>`;
+    }
+
+    function confidenceState(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return { cls: "state-warn", text: "sin score" };
+      if (n >= 0.85) return { cls: "state-ok", text: "alta" };
+      if (n >= 0.65) return { cls: "state-warn", text: "media" };
+      return { cls: "state-bad", text: "baja" };
     }
 
     function pct(value) {
@@ -474,8 +563,10 @@
       return rows.map((row, index) => {
         const width = Math.max(2, Math.abs(Number(row.value || 0)) / max * 100);
         const color = row.color || (index % 2 ? "var(--green)" : "var(--blue)");
+        const selected = options.selected && row.label === options.selected;
+        const attrs = options.clickable ? ` data-ticker="${row.label}"` : "";
         return `
-          <div class="bar-row">
+          <div class="bar-row${options.clickable ? " clickable" : ""}${selected ? " selected" : ""}"${attrs}>
             <span>${row.label}</span>
             <span class="bar-track"><span class="bar-fill" style="width:${width}%;background:${color}"></span></span>
             <b>${options.money ? fmtMoney(row.value) : options.percent ? fmtPct(row.value) : fmtNumber(row.value)}</b>
@@ -502,6 +593,10 @@
       const width = 600;
       const height = 118;
       const pad = 10;
+      if (!points || points.length < 2) {
+        svg.innerHTML = `<text x="18" y="44" fill="var(--muted)">Sin historia suficiente</text>`;
+        return;
+      }
       const totalPath = linePath(points, "total_value_ars", width, height, pad);
       const cashPath = linePath(points, "cash_ars", width, height, pad);
       svg.innerHTML = `
@@ -595,7 +690,8 @@
       $("portfolioLast").textContent = fmtDate(p.scraped_at) + " (" + fmtAge(p.scraped_at_age_seconds) + ")";
       $("portfolioTotal").textContent = fmtMoney(p.total_value_ars);
       $("portfolioCounts").textContent = fmtNumber(pc.last_24h) + " / " + fmtNumber(pc.last_7d);
-      $("portfolioConfidence").textContent = fmtPct(p.confidence_score);
+      const conf = confidenceState(p.confidence_score);
+      $("portfolioConfidence").innerHTML = `<span class="state-pill ${conf.cls}">${conf.text} ${fmtPct(p.confidence_score)}</span>`;
       $("priceLast").textContent = fmtDate(m.latest_ts) + " (" + fmtAge(m.latest_ts_age_seconds) + ")";
       $("priceRows24").textContent = fmtNumber(m.rows_24h);
       $("priceRows7").textContent = fmtNumber(m.rows_7d);
@@ -614,17 +710,23 @@
       const snapshot = data.snapshot || {};
       const positions = data.positions || [];
       $("portfolioViewDay").textContent = fmtDate(snapshot.scraped_at);
+      const conf = confidenceState(snapshot.confidence_score);
+      $("portfolioUpdated").innerHTML = `Portfolio actualizado hace ${ageFromIso(snapshot.scraped_at)} · <span class="state-pill ${conf.cls}">confianza ${conf.text}</span>`;
       $("portfolioViewTotal").textContent = fmtMoney(snapshot.total_value_ars);
       $("portfolioViewCash").textContent = fmtMoney(snapshot.cash_ars);
       $("portfolioViewPositions").textContent = fmtNumber(positions.length);
-      $("allocationBars").innerHTML = renderBarRows(
-        positions.slice(0, 10).map((row) => ({
-          label: row.ticker,
-          value: row.market_value,
-          color: Number(row.unrealized_pnl_pct || 0) >= 0 ? "var(--green)" : "var(--red)",
-        })),
-        { money: true }
-      );
+      if (!positions.length) {
+        $("allocationBars").innerHTML = `<div class="empty-state">Portfolio sin posiciones para mostrar</div>`;
+      } else {
+        $("allocationBars").innerHTML = renderBarRows(
+          positions.slice(0, 10).map((row) => ({
+            label: row.ticker,
+            value: row.market_value,
+            color: Number(row.unrealized_pnl_pct || 0) >= 0 ? "var(--green)" : "var(--red)",
+          })),
+          { money: true, clickable: true, selected: state.selectedTicker }
+        );
+      }
       renderSparkline($("portfolioSpark"), data.history || []);
       const first = (data.history || [])[0];
       const last = (data.history || []).slice(-1)[0];
@@ -635,7 +737,13 @@
     }
 
     function renderPerformanceView(data) {
+      state.performanceData = data;
       const s = data.summary || {};
+      const points = (data.score_points || []).filter((row) => (
+        !state.selectedTicker || row.ticker === state.selectedTicker
+      ));
+      $("decisionUpdated").textContent = `Decision Intelligence actualizado hace ${ageFromIso(data.generated_at)} · periodo ${state.performanceDays === 365 ? "All" : state.performanceDays + "d"}`;
+      $("selectedTickerPill").textContent = state.selectedTicker ? `Filtro: ${state.selectedTicker}` : "Todos los tickers";
       $("perfClosed").textContent = fmtNumber(s.closed_5d);
       $("perfWinRate").textContent = fmtPct(s.win_rate_5d);
       $("perfEv").textContent = fmtPct(s.ev_5d);
@@ -648,13 +756,20 @@
         })),
         { percent: true }
       );
-      renderScatter($("scoreScatter"), data.score_points || []);
+      renderScatter($("scoreScatter"), points);
     }
 
     function renderOverrideAudit(data) {
       const s = data.summary || {};
       const byStatus = s.by_status || {};
       $("overrideWindow").textContent = `${data.days} dias`;
+      $("overrideUpdated").textContent = `Bot vs Humano actualizado hace ${ageFromIso(data.generated_at)}`;
+      $("overrideSummary").innerHTML = `
+        <span>Seguido: <b>${fmtNumber(byStatus.FOLLOWED || 0)}</b></span>
+        <span>Parcial: <b>${fmtNumber(byStatus.PARTIAL || 0)}</b></span>
+        <span>Ignorado: <b>${fmtNumber(byStatus.IGNORED || 0)}</b></span>
+        <span>Opuesto: <b>${fmtNumber(byStatus.OPPOSITE || 0)}</b></span>
+      `;
       $("overridePlans").textContent = `${fmtNumber(s.plans)} / ${fmtNumber(s.unique_intents)}`;
       $("overrideFollowed").textContent = `${fmtNumber(byStatus.FOLLOWED || 0)} / ${fmtNumber(byStatus.PARTIAL || 0)}`;
       $("overrideIgnored").textContent = `${fmtNumber(byStatus.IGNORED || 0)} / ${fmtNumber(byStatus.OPPOSITE || 0)}`;
@@ -759,7 +874,7 @@
         api("/api/health"),
         api("/api/ingestion"),
         api("/api/portfolio?days=90"),
-        api("/api/performance?days=180"),
+        api(`/api/performance?days=${state.performanceDays}`),
         api("/api/override-audit?days=90"),
         api("/api/candles"),
         api("/api/decisions?days=90"),
@@ -787,6 +902,25 @@
       $("token").value = "";
       $("totp").value = "";
       setError("Token local borrado.");
+    });
+
+    document.querySelectorAll("[data-period]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.performanceDays = Number(button.dataset.period || 7);
+        document.querySelectorAll("[data-period]").forEach((b) => b.classList.toggle("active", b === button));
+        refresh().catch((err) => setError(err.message));
+      });
+    });
+
+    $("allocationBars").addEventListener("click", (event) => {
+      const row = event.target.closest("[data-ticker]");
+      if (!row) return;
+      const ticker = row.dataset.ticker || "";
+      state.selectedTicker = state.selectedTicker === ticker ? "" : ticker;
+      document.querySelectorAll("#allocationBars .bar-row").forEach((item) => {
+        item.classList.toggle("selected", state.selectedTicker && item.dataset.ticker === state.selectedTicker);
+      });
+      if (state.performanceData) renderPerformanceView(state.performanceData);
     });
 
     loadAuthStatus()
