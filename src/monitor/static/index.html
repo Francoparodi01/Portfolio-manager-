@@ -81,6 +81,10 @@
       border-color: #3a7fd4;
       background: #1f4f86;
     }
+    button:disabled {
+      cursor: progress;
+      opacity: 0.62;
+    }
     main {
       max-width: 1320px;
       margin: 0 auto;
@@ -254,6 +258,30 @@
       color: var(--text);
       background: #1f4f86;
     }
+    .clear-filter {
+      display: none;
+      width: auto;
+      min-width: 104px;
+      padding: 0 10px;
+      font-size: 12px;
+    }
+    .clear-filter.visible { display: inline-flex; align-items: center; justify-content: center; }
+    .loading-soft {
+      position: relative;
+      opacity: 0.72;
+    }
+    .loading-soft::after {
+      content: "Cargando...";
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      padding: 3px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 12px;
+    }
     .state-pill {
       display: inline-flex;
       align-items: center;
@@ -309,6 +337,36 @@
       main { padding: 12px; }
       .grid { grid-template-columns: 1fr; }
       .card { min-height: unset; }
+      .topbar { padding: 10px 12px; }
+      .row-head {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .toolbar {
+        width: 100%;
+        justify-content: flex-start;
+      }
+      .period-button { flex: 1 1 56px; }
+      .clear-filter { flex: 1 1 128px; }
+      .metric {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .metric b { text-align: left; }
+      .bar-row {
+        grid-template-columns: 58px minmax(0, 1fr) 72px;
+      }
+      table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+      th, td {
+        min-width: 96px;
+        white-space: normal;
+      }
+      .chart { height: 190px; }
     }
   </style>
 </head>
@@ -390,6 +448,7 @@
           <h2>Decision Intelligence</h2>
           <div class="toolbar">
             <span class="pill" id="selectedTickerPill">Todos los tickers</span>
+            <button class="clear-filter" id="clearTickerFilter" type="button">Limpiar filtro</button>
             <button class="period-button active" type="button" data-period="7">7d</button>
             <button class="period-button" type="button" data-period="30">30d</button>
             <button class="period-button" type="button" data-period="90">90d</button>
@@ -548,10 +607,17 @@
 
     function confidenceState(value) {
       const n = Number(value);
-      if (!Number.isFinite(n)) return { cls: "state-warn", text: "sin score" };
-      if (n >= 0.85) return { cls: "state-ok", text: "alta" };
-      if (n >= 0.65) return { cls: "state-warn", text: "media" };
-      return { cls: "state-bad", text: "baja" };
+      if (!Number.isFinite(n)) return { cls: "state-warn", text: "sin score", title: "No hay confidence_score en el ultimo snapshot." };
+      if (n >= 0.85) return { cls: "state-ok", text: "alta", title: "Confidence score alto: snapshot confiable para lectura operativa." };
+      if (n >= 0.65) return { cls: "state-warn", text: "media", title: "Confidence score medio: revisar posibles datos incompletos." };
+      return { cls: "state-bad", text: "baja", title: "Confidence score bajo: no usar esta lectura sin revisar ingestion." };
+    }
+
+    function setDecisionLoading(isLoading) {
+      document.querySelectorAll("[data-period]").forEach((button) => { button.disabled = isLoading; });
+      $("clearTickerFilter").disabled = isLoading;
+      const card = $("scoreScatter").closest(".card");
+      if (card) card.classList.toggle("loading-soft", isLoading);
     }
 
     function pct(value) {
@@ -691,7 +757,7 @@
       $("portfolioTotal").textContent = fmtMoney(p.total_value_ars);
       $("portfolioCounts").textContent = fmtNumber(pc.last_24h) + " / " + fmtNumber(pc.last_7d);
       const conf = confidenceState(p.confidence_score);
-      $("portfolioConfidence").innerHTML = `<span class="state-pill ${conf.cls}">${conf.text} ${fmtPct(p.confidence_score)}</span>`;
+      $("portfolioConfidence").innerHTML = `<span class="state-pill ${conf.cls}" title="${conf.title}">${conf.text} ${fmtPct(p.confidence_score)}</span>`;
       $("priceLast").textContent = fmtDate(m.latest_ts) + " (" + fmtAge(m.latest_ts_age_seconds) + ")";
       $("priceRows24").textContent = fmtNumber(m.rows_24h);
       $("priceRows7").textContent = fmtNumber(m.rows_7d);
@@ -711,7 +777,7 @@
       const positions = data.positions || [];
       $("portfolioViewDay").textContent = fmtDate(snapshot.scraped_at);
       const conf = confidenceState(snapshot.confidence_score);
-      $("portfolioUpdated").innerHTML = `Portfolio actualizado hace ${ageFromIso(snapshot.scraped_at)} · <span class="state-pill ${conf.cls}">confianza ${conf.text}</span>`;
+      $("portfolioUpdated").innerHTML = `Portfolio actualizado hace ${ageFromIso(snapshot.scraped_at)} · <span class="state-pill ${conf.cls}" title="${conf.title}">confianza ${conf.text}</span>`;
       $("portfolioViewTotal").textContent = fmtMoney(snapshot.total_value_ars);
       $("portfolioViewCash").textContent = fmtMoney(snapshot.cash_ars);
       $("portfolioViewPositions").textContent = fmtNumber(positions.length);
@@ -744,6 +810,7 @@
       ));
       $("decisionUpdated").textContent = `Decision Intelligence actualizado hace ${ageFromIso(data.generated_at)} · periodo ${state.performanceDays === 365 ? "All" : state.performanceDays + "d"}`;
       $("selectedTickerPill").textContent = state.selectedTicker ? `Filtro: ${state.selectedTicker}` : "Todos los tickers";
+      $("clearTickerFilter").classList.toggle("visible", Boolean(state.selectedTicker));
       $("perfClosed").textContent = fmtNumber(s.closed_5d);
       $("perfWinRate").textContent = fmtPct(s.win_rate_5d);
       $("perfEv").textContent = fmtPct(s.ev_5d);
@@ -765,10 +832,10 @@
       $("overrideWindow").textContent = `${data.days} dias`;
       $("overrideUpdated").textContent = `Bot vs Humano actualizado hace ${ageFromIso(data.generated_at)}`;
       $("overrideSummary").innerHTML = `
-        <span>Seguido: <b>${fmtNumber(byStatus.FOLLOWED || 0)}</b></span>
-        <span>Parcial: <b>${fmtNumber(byStatus.PARTIAL || 0)}</b></span>
-        <span>Ignorado: <b>${fmtNumber(byStatus.IGNORED || 0)}</b></span>
-        <span>Opuesto: <b>${fmtNumber(byStatus.OPPOSITE || 0)}</b></span>
+        <span title="Planes aprobados que tuvieron movimiento real del mismo lado por al menos 75% del monto objetivo.">Seguido: <b>${fmtNumber(byStatus.FOLLOWED || 0)}</b></span>
+        <span title="Planes aprobados que tuvieron movimiento real del mismo lado por al menos 15%, pero no completo.">Parcial: <b>${fmtNumber(byStatus.PARTIAL || 0)}</b></span>
+        <span title="Planes aprobados sin movimiento real compatible dentro de la ventana de match.">Ignorado: <b>${fmtNumber(byStatus.IGNORED || 0)}</b></span>
+        <span title="Planes aprobados donde hubo movimiento real contrario dentro de la ventana de match.">Opuesto: <b>${fmtNumber(byStatus.OPPOSITE || 0)}</b></span>
       `;
       $("overridePlans").textContent = `${fmtNumber(s.plans)} / ${fmtNumber(s.unique_intents)}`;
       $("overrideFollowed").textContent = `${fmtNumber(byStatus.FOLLOWED || 0)} / ${fmtNumber(byStatus.PARTIAL || 0)}`;
@@ -905,10 +972,17 @@
     });
 
     document.querySelectorAll("[data-period]").forEach((button) => {
-      button.addEventListener("click", () => {
+      button.addEventListener("click", async () => {
         state.performanceDays = Number(button.dataset.period || 7);
         document.querySelectorAll("[data-period]").forEach((b) => b.classList.toggle("active", b === button));
-        refresh().catch((err) => setError(err.message));
+        setDecisionLoading(true);
+        try {
+          await refresh();
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setDecisionLoading(false);
+        }
       });
     });
 
@@ -920,7 +994,23 @@
       document.querySelectorAll("#allocationBars .bar-row").forEach((item) => {
         item.classList.toggle("selected", state.selectedTicker && item.dataset.ticker === state.selectedTicker);
       });
-      if (state.performanceData) renderPerformanceView(state.performanceData);
+      setDecisionLoading(true);
+      requestAnimationFrame(() => {
+        if (state.performanceData) renderPerformanceView(state.performanceData);
+        setDecisionLoading(false);
+      });
+    });
+
+    $("clearTickerFilter").addEventListener("click", () => {
+      state.selectedTicker = "";
+      document.querySelectorAll("#allocationBars .bar-row").forEach((item) => {
+        item.classList.remove("selected");
+      });
+      setDecisionLoading(true);
+      requestAnimationFrame(() => {
+        if (state.performanceData) renderPerformanceView(state.performanceData);
+        setDecisionLoading(false);
+      });
     });
 
     loadAuthStatus()
