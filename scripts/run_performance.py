@@ -35,7 +35,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, time
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -251,13 +251,13 @@ async def _get_decision_dataset_stats(
                 COALESCE(decision_type, 'unknown') AS decision_type,
                 decision,
                 COUNT(*) AS n,
-                COUNT(outcome_5d) FILTER (
+                COUNT(COALESCE(executable_outcome_5d, outcome_5d)) FILTER (
                     WHERE outcome_basis = 'canonical_cocos'
                 ) AS con_5d,
-                COUNT(outcome_10d) FILTER (
+                COUNT(COALESCE(executable_outcome_10d, outcome_10d)) FILTER (
                     WHERE outcome_basis = 'canonical_cocos'
                 ) AS con_10d,
-                COUNT(outcome_20d) FILTER (
+                COUNT(COALESCE(executable_outcome_20d, outcome_20d)) FILTER (
                     WHERE outcome_basis = 'canonical_cocos'
                 ) AS con_20d,
                 COUNT(*) FILTER (
@@ -621,6 +621,7 @@ def _render_dataset_friendly(stats: dict) -> list[str]:
     if note:
         lines.append(f"   Nota: {escape(note)}")
     lines.append("   Metrica principal: solo ejecucion real; el resto queda como auditoria.")
+    lines.append("   Timing: si la senal fue EOD, el outcome usa la proxima rueda cuando existe.")
 
     lines += ["", "   Desglose:"]
     for row in dataset_stats[:8]:
@@ -644,9 +645,15 @@ def _render_operational_context(stats: dict) -> list[str]:
     broker = ctx.get("broker_fills") or {}
     now = datetime.now()
     closed_reason = market_closed_reason(now)
-    market_label = "rueda" if is_trading_day(now) else "cerrado"
+    outside_hours = now.time() < time(10, 30) or now.time() >= time(17, 0)
+    if is_trading_day(now) and not outside_hours:
+        market_label = "rueda"
+    else:
+        market_label = "cerrado"
     if closed_reason:
         market_label += f" ({closed_reason})"
+    elif outside_hours and is_trading_day(now):
+        market_label += " (fuera de horario)"
 
     lines = ["<b>Contexto operativo</b>"]
     lines.append(f"   Mercado: <b>{escape(market_label)}</b>")

@@ -399,6 +399,12 @@ ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS is_executable          BOOLEAN
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS was_blocked            BOOLEAN;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis          TEXT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis_ratio    FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS next_executable_at     TIMESTAMPTZ;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS next_executable_price  FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_5d  FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_10d FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_20d FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_was_correct BOOLEAN;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS owner_chat_id          BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
 ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS owner_chat_id   BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS telegram_username            TEXT;
@@ -549,6 +555,12 @@ ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS is_executable          BOOLEAN
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS was_blocked            BOOLEAN;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis          TEXT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS outcome_basis_ratio    FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS next_executable_at     TIMESTAMPTZ;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS next_executable_price  FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_5d  FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_10d FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_20d FLOAT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_was_correct BOOLEAN;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS owner_chat_id          BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
 ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS owner_chat_id   BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS telegram_username            TEXT;

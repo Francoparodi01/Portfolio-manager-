@@ -43,7 +43,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from html import escape
 
 from src.core.config import get_config
@@ -1442,6 +1442,35 @@ def _action_icon(action: DecisionType | str) -> str:
     return m.get(action, "🟡")
 
 
+def _execution_timing_context(now: datetime | None = None) -> dict[str, str | bool]:
+    """
+    Classify whether a rendered plan is actionable in-session or only next wheel.
+
+    The analysis often runs at EOD, after BYMA is effectively closed. In that
+    case the decision is valid as a signal, but execution must be measured from
+    the next tradable reference, not from the close that generated the signal.
+    """
+    current = now or datetime.now()
+    current_time = current.time()
+    outside_regular_session = current_time < time(10, 30) or current_time >= time(17, 0)
+    if outside_regular_session:
+        return {
+            "next_session": True,
+            "headline": "Plan para próxima rueda",
+            "note": (
+                "El análisis se generó fuera de rueda; validar apertura y no "
+                "perseguir gaps fuertes."
+            ),
+            "order_note": "Ejecutar solo si el precio sigue razonable al abrir.",
+        }
+    return {
+        "next_session": False,
+        "headline": "Plan intradía",
+        "note": "El análisis se generó durante rueda; validar liquidez y spread.",
+        "order_note": "Validar precio límite, liquidez y spread antes de operar.",
+    }
+
+
 def render_report(
     results,
     macro_snap,
@@ -1460,6 +1489,7 @@ def render_report(
     h = []
 
     result_by_ticker = _result_map(results)
+    timing_ctx = _execution_timing_context()
 
     # ── Header ────────────────────────────────────────────────────────────────
     h.append("🧠 <b>ANÁLISIS SEMANAL — SISTEMA CUANTITATIVO</b>")
@@ -1469,6 +1499,8 @@ def render_report(
         f"💼 Portfolio: <b>{_money_ars(total_ars)}</b> | "
         f"Cash libre: <b>{_money_ars(cash_ars)}</b>"
     )
+    if timing_ctx["next_session"]:
+        h.append(f"🕒 <b>{timing_ctx['headline']}</b> — {timing_ctx['note']}")
     h.append("")
 
     # ── DECISIÓN DE HOY — desde ExecutionPlan, nunca desde optimizer ──────────
@@ -1571,6 +1603,8 @@ def render_report(
     h.append("<b>EJECUCIÓN</b>")
 
     if plan:
+        h.append(f"   {timing_ctx['headline']}: {timing_ctx['note']}")
+
         purchases = (
             "$0 ARS"
             if gate in ("CAUTIOUS", "BLOCKED") and plan.gross_sell_ars > 0
@@ -1607,6 +1641,7 @@ def render_report(
 
             if o.action == DecisionType.SELL_FULL:
                 h.append("      → Liquidación total (target 0%)")
+            h.append(f"      Condición: {timing_ctx['order_note']}")
 
             step += 1
 
@@ -1620,13 +1655,17 @@ def render_report(
                 f"   {step}. {ext_icon} Comprar <b>{o.ticker}</b>: "
                 f"+{_money_ars(o.amount_ars)}{partial_tag}{score_tag}"
             )
+            h.append(f"      Condición: {timing_ctx['order_note']}")
             step += 1
 
         if plan.cash_after > 5_000:
             h.append(f"   → Cash remanente: {_money_ars(plan.cash_after)}")
 
     elif plan and not plan.blocked_orders:
-        h.append("   Sin órdenes ejecutables hoy.")
+        if timing_ctx["next_session"]:
+            h.append("   Sin órdenes para próxima rueda.")
+        else:
+            h.append("   Sin órdenes ejecutables hoy.")
 
     elif plan and gate in ("CAUTIOUS", "BLOCKED") and plan.gross_sell_ars > 0:
         h.append(

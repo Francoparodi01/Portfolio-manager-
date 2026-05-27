@@ -515,12 +515,15 @@ async def performance_view(request: web.Request) -> web.Response:
     async with pool.acquire() as conn:
         summary = await conn.fetchrow("""
             WITH real AS (
-                SELECT *
+                SELECT
+                    COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
+                    COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
+                    COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d
                 FROM decision_log
                 WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
                   AND outcome_basis = 'canonical_cocos'
-                  AND outcome_5d IS NOT NULL
-                  AND was_correct IS NOT NULL
+                  AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
+                  AND COALESCE(executable_was_correct, was_correct) IS NOT NULL
                   AND status = 'EXECUTED_MANUAL'
                   AND COALESCE(source, layers->>'source') = 'broker_movement'
             )
@@ -540,13 +543,13 @@ async def performance_view(request: web.Request) -> web.Response:
             SELECT
                 ticker,
                 COUNT(*) AS n,
-                AVG(outcome_5d) AS avg_5d,
-                AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) AS win_rate_5d
+                AVG(COALESCE(executable_outcome_5d, outcome_5d)) AS avg_5d,
+                AVG(CASE WHEN COALESCE(executable_outcome_5d, outcome_5d) > 0 THEN 1.0 ELSE 0.0 END) AS win_rate_5d
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND outcome_basis = 'canonical_cocos'
-              AND outcome_5d IS NOT NULL
-              AND was_correct IS NOT NULL
+              AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
+              AND COALESCE(executable_was_correct, was_correct) IS NOT NULL
               AND status = 'EXECUTED_MANUAL'
               AND COALESCE(source, layers->>'source') = 'broker_movement'
             GROUP BY ticker
@@ -562,13 +565,15 @@ async def performance_view(request: web.Request) -> web.Response:
                 COALESCE(source, layers->>'source') AS source,
                 final_score,
                 confidence,
-                outcome_5d,
-                outcome_10d,
-                outcome_20d
+                COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
+                COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
+                COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
+                next_executable_at,
+                next_executable_price
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND outcome_basis = 'canonical_cocos'
-              AND outcome_5d IS NOT NULL
+              AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
               AND final_score IS NOT NULL
             ORDER BY decided_at DESC
             LIMIT 160
@@ -578,7 +583,7 @@ async def performance_view(request: web.Request) -> web.Response:
                 COALESCE(source, layers->>'source', 'sin_source') AS source,
                 COALESCE(status, 'UNKNOWN') AS status,
                 COUNT(*) AS n,
-                COUNT(outcome_5d) FILTER (WHERE outcome_basis = 'canonical_cocos') AS closed_5d
+                COUNT(COALESCE(executable_outcome_5d, outcome_5d)) FILTER (WHERE outcome_basis = 'canonical_cocos') AS closed_5d
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
             GROUP BY 1, 2
@@ -617,9 +622,11 @@ async def override_audit(request: web.Request) -> web.Response:
                     final_score,
                     price_at_decision,
                     ABS(COALESCE(theoretical_amount_ars, executed_amount_ars, 0)) AS target_amount_ars,
-                    outcome_5d,
-                    outcome_10d,
-                    outcome_20d,
+                    COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
+                    COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
+                    COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
+                    next_executable_at,
+                    next_executable_price,
                     layers->>'reason' AS reason
                 FROM decision_log
                 WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')

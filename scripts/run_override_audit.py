@@ -110,9 +110,11 @@ async def _fetch_audit_rows(
                 final_score,
                 price_at_decision,
                 ABS(COALESCE(theoretical_amount_ars, executed_amount_ars, 0)) AS target_amount_ars,
-                outcome_5d,
-                outcome_10d,
-                outcome_20d,
+                COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
+                COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
+                COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
+                next_executable_at,
+                next_executable_price,
                 layers->>'reason' AS reason
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')

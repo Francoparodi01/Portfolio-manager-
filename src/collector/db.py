@@ -1538,6 +1538,78 @@ class PortfolioDatabase:
 
         return outcomes
 
+    def _next_executable_reference(
+        self,
+        *,
+        entry_price: float,
+        decided_at: datetime,
+        candles: list[dict],
+    ) -> tuple[datetime | None, float | None, date | None]:
+        """
+        Returns the first realistically executable reference.
+
+        If a decision is generated after the local close, the first executable
+        reference is the next candle's open (or close fallback). Intraday
+        decisions keep price_at_decision as the executable reference.
+        """
+        decided_art = decided_at.astimezone(ART_TZ)
+        decided_day = decided_art.date()
+        after_close = decided_art.hour > 17 or (decided_art.hour == 17 and decided_art.minute >= 0)
+
+        if not after_close:
+            return decided_at, float(entry_price), decided_day
+
+        eligible = [
+            candle for candle in candles
+            if candle["ts"].date() > decided_day
+            and (candle.get("open_price") is not None or candle.get("close_price") is not None)
+        ]
+        if not eligible:
+            return None, None, None
+
+        candle = eligible[0]
+        px = candle.get("open_price")
+        if px is None or float(px) <= 0:
+            px = candle.get("close_price")
+        if px is None or float(px) <= 0:
+            return None, None, None
+        return candle["ts"], float(px), candle["ts"].date()
+
+    async def _compute_executable_outcomes(
+        self,
+        *,
+        entry_price: float,
+        start_day: date,
+        direction: str,
+        now: datetime,
+        candles: list[dict],
+    ) -> dict[str, float]:
+        outcomes: dict[str, float] = {}
+
+        for horizon, col in [
+            (5, "executable_outcome_5d"),
+            (10, "executable_outcome_10d"),
+            (20, "executable_outcome_20d"),
+        ]:
+            target_day = start_day + timedelta(days=horizon)
+            if target_day > now.astimezone(ART_TZ).date():
+                continue
+            eligible = [
+                candle for candle in candles
+                if candle["ts"].date() >= target_day
+                and candle.get("close_price") is not None
+            ]
+            if not eligible:
+                continue
+            price_at_horizon = float(eligible[0]["close_price"])
+            outcomes[col] = directional_return(
+                entry_price,
+                price_at_horizon,
+                direction,
+            )
+
+        return outcomes
+
     def _assess_outcome_basis(
         self,
         *,
@@ -1601,7 +1673,7 @@ class PortfolioDatabase:
                         """
                         SELECT id, ticker, price_at_decision, decided_at, decision
                         FROM decision_log
-                        WHERE outcome_5d IS NULL
+                        WHERE (outcome_5d IS NULL OR executable_outcome_5d IS NULL)
                           AND COALESCE(outcome_basis, '') <> 'legacy_external'
                           AND price_at_decision IS NOT NULL
                           AND price_at_decision > 0
@@ -1619,7 +1691,7 @@ class PortfolioDatabase:
                         """
                         SELECT id, ticker, price_at_decision, decided_at, decision
                         FROM decision_log
-                        WHERE outcome_5d IS NULL
+                        WHERE (outcome_5d IS NULL OR executable_outcome_5d IS NULL)
                           AND owner_chat_id = $3
                           AND COALESCE(outcome_basis, '') <> 'legacy_external'
                           AND price_at_decision IS NOT NULL
@@ -1711,11 +1783,39 @@ class PortfolioDatabase:
                     candles=candles,
                 )
 
-                if not outcomes:
+                (
+                    next_executable_at,
+                    next_executable_price,
+                    executable_start_day,
+                ) = self._next_executable_reference(
+                    entry_price=entry_f,
+                    decided_at=decided_at,
+                    candles=candles,
+                )
+                executable_outcomes: dict[str, float] = {}
+                if next_executable_price is not None and executable_start_day is not None:
+                    executable_outcomes = await self._compute_executable_outcomes(
+                        entry_price=float(next_executable_price),
+                        start_day=executable_start_day,
+                        direction=direction,
+                        now=now,
+                        candles=candles,
+                    )
+
+                if not outcomes and not executable_outcomes:
                     continue
 
                 primary = outcomes.get("outcome_5d", outcomes.get("outcome_10d"))
                 was_correct = primary > 0 if primary is not None else None
+                executable_primary = executable_outcomes.get(
+                    "executable_outcome_5d",
+                    executable_outcomes.get("executable_outcome_10d"),
+                )
+                executable_was_correct = (
+                    executable_primary > 0
+                    if executable_primary is not None
+                    else None
+                )
 
                 try:
                     async with self._pool.acquire() as conn:
@@ -1728,7 +1828,13 @@ class PortfolioDatabase:
                                 was_correct       = COALESCE($5, was_correct),
                                 outcome_filled_at = NOW(),
                                 outcome_basis       = $6,
-                                outcome_basis_ratio = $7
+                                outcome_basis_ratio = $7,
+                                next_executable_at     = COALESCE($8, next_executable_at),
+                                next_executable_price  = COALESCE($9, next_executable_price),
+                                executable_outcome_5d  = COALESCE($10, executable_outcome_5d),
+                                executable_outcome_10d = COALESCE($11, executable_outcome_10d),
+                                executable_outcome_20d = COALESCE($12, executable_outcome_20d),
+                                executable_was_correct = COALESCE($13, executable_was_correct)
                             WHERE id = $1
                             """,
                             row["id"],
@@ -1738,6 +1844,12 @@ class PortfolioDatabase:
                             was_correct,
                             outcome_basis,
                             basis_ratio,
+                            next_executable_at,
+                            next_executable_price,
+                            executable_outcomes.get("executable_outcome_5d"),
+                            executable_outcomes.get("executable_outcome_10d"),
+                            executable_outcomes.get("executable_outcome_20d"),
+                            executable_was_correct,
                         )
                     updated += 1
                     logger.debug(f"outcome actualizado: {ticker} id={row['id']} {outcomes}")
@@ -1928,16 +2040,19 @@ class PortfolioDatabase:
                 """
                 SELECT
                     id, ticker, decision,
-                    outcome_5d, outcome_10d, outcome_20d,
-                    was_correct, size_pct,
+                    COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
+                    COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
+                    COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
+                    COALESCE(executable_was_correct, was_correct) AS was_correct,
+                    size_pct,
                     COALESCE(source, layers->>'source', 'sin_source') AS source,
                     COALESCE(status, 'UNKNOWN') AS status,
                     COALESCE(decision_type, 'unknown') AS decision_type
                 FROM decision_log
                 WHERE decided_at >= $1
                   AND ($2::bigint IS NULL OR owner_chat_id = $2)
-                  AND outcome_5d IS NOT NULL
-                  AND was_correct IS NOT NULL
+                  AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
+                  AND COALESCE(executable_was_correct, was_correct) IS NOT NULL
                   AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
                   AND (
@@ -1960,7 +2075,7 @@ class PortfolioDatabase:
                 """
                 SELECT COUNT(*)
                 FROM decision_log
-                WHERE outcome_5d IS NULL
+                WHERE COALESCE(executable_outcome_5d, outcome_5d) IS NULL
                   AND ($2::bigint IS NULL OR owner_chat_id = $2)
                   AND COALESCE(outcome_basis, '') <> 'legacy_external'
                   AND price_at_decision IS NOT NULL
@@ -1986,7 +2101,7 @@ class PortfolioDatabase:
                 """
                 SELECT COUNT(*)
                 FROM decision_log
-                WHERE outcome_5d IS NULL
+                WHERE COALESCE(executable_outcome_5d, outcome_5d) IS NULL
                   AND ($2::bigint IS NULL OR owner_chat_id = $2)
                   AND COALESCE(outcome_basis, '') <> 'legacy_external'
                   AND price_at_decision IS NOT NULL
@@ -2005,8 +2120,10 @@ class PortfolioDatabase:
                     dl.decision,
                     dl.final_score,
                     dl.confidence,
-                    dl.outcome_5d,
-                    dl.was_correct,
+                    COALESCE(dl.executable_outcome_5d, dl.outcome_5d) AS outcome_5d,
+                    COALESCE(dl.executable_was_correct, dl.was_correct) AS was_correct,
+                    dl.next_executable_at,
+                    dl.next_executable_price,
                     dl.decided_at,
                     dl.size_pct,
                     dl.stop_loss_pct,
