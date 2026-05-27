@@ -241,6 +241,32 @@
       color: var(--muted);
       font-size: 12px;
     }
+    .legend {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .legend-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--green);
+    }
+    .legend-sell {
+      width: 0;
+      height: 0;
+      border-left: 6px solid transparent;
+      border-right: 6px solid transparent;
+      border-bottom: 10px solid var(--amber);
+    }
     .toolbar {
       display: flex;
       align-items: center;
@@ -466,8 +492,14 @@
           </div>
           <div>
             <svg class="chart" id="scoreScatter" viewBox="0 0 600 220" preserveAspectRatio="none"></svg>
+            <div class="legend">
+              <span><i class="legend-dot" style="background: var(--green)"></i> outcome positivo</span>
+              <span><i class="legend-dot" style="background: var(--red)"></i> outcome negativo</span>
+              <span><i class="legend-dot"></i> BUY</span>
+              <span><i class="legend-sell"></i> SELL</span>
+            </div>
             <div class="chart-note" title="Eje X: final_score al momento de la decision. Eje Y: retorno outcome_5d. Verde es retorno positivo, rojo negativo.">
-              Eje X: score final. Eje Y: outcome 5D. Verde positivo, rojo negativo.
+              X: score final al decidir. Y: resultado 5D. Si los puntos suben hacia la derecha, el score empieza a explicar resultados.
             </div>
           </div>
         </div>
@@ -580,6 +612,13 @@
       return d.toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" });
     }
 
+    function fmtShortDate(value) {
+      if (!value) return "-";
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return String(value);
+      return d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" });
+    }
+
     function fmtAge(seconds) {
       if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "-";
       const s = Math.max(0, Number(seconds));
@@ -587,6 +626,15 @@
       if (s < 3600) return Math.round(s / 60) + "m";
       if (s < 172800) return Math.round(s / 3600) + "h";
       return Math.round(s / 86400) + "d";
+    }
+
+    function fmtScore(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      return Number(value).toLocaleString("es-AR", {
+        minimumFractionDigits: 3,
+        maximumFractionDigits: 3,
+        signDisplay: "always",
+      });
     }
 
     function ageFromIso(value) {
@@ -690,16 +738,27 @@
       const spanY = Math.max(maxY - minY, 0.01);
       const x0 = pad + ((0 - minX) / spanX) * (width - pad * 2);
       const y0 = height - pad - ((0 - minY) / spanY) * (height - pad * 2);
-      const circles = points.map((p) => {
+      const marks = points.map((p) => {
         const x = pad + ((Number(p.final_score) - minX) / spanX) * (width - pad * 2);
         const y = height - pad - ((Number(p.outcome_5d) - minY) / spanY) * (height - pad * 2);
         const color = Number(p.outcome_5d) >= 0 ? "var(--green)" : "var(--red)";
-        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${color}" opacity=".82"><title>${p.ticker} ${fmtPct(p.outcome_5d)}</title></circle>`;
+        const title = `${p.ticker} · ${p.decision} · ${fmtShortDate(p.decided_at)}
+score ${fmtScore(p.final_score)} · outcome 5D ${fmtPct(p.outcome_5d)}
+estado ${p.status || "-"} · fuente ${p.source || "-"}`;
+        if (String(p.decision || "").toUpperCase() === "SELL") {
+          const path = `${x.toFixed(1)},${(y - 5).toFixed(1)} ${(x - 5).toFixed(1)},${(y + 5).toFixed(1)} ${(x + 5).toFixed(1)},${(y + 5).toFixed(1)}`;
+          return `<polygon points="${path}" fill="${color}" opacity=".88"><title>${title}</title></polygon>`;
+        }
+        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5" fill="${color}" opacity=".82"><title>${title}</title></circle>`;
       }).join("");
       svg.innerHTML = `
         <line x1="${pad}" y1="${y0}" x2="${width - pad}" y2="${y0}" stroke="rgba(255,255,255,.18)" />
         <line x1="${x0}" y1="${pad}" x2="${x0}" y2="${height - pad}" stroke="rgba(255,255,255,.18)" />
-        ${circles}
+        <text x="${pad}" y="18" fill="var(--muted)" font-size="11">score -</text>
+        <text x="${width - pad - 46}" y="18" fill="var(--muted)" font-size="11">score +</text>
+        <text x="${pad}" y="${pad - 8}" fill="var(--muted)" font-size="11">outcome +</text>
+        <text x="${pad}" y="${height - 8}" fill="var(--muted)" font-size="11">outcome -</text>
+        ${marks}
       `;
     }
 
@@ -815,6 +874,9 @@
       $("perfWinRate").textContent = fmtPct(s.win_rate_5d);
       $("perfEv").textContent = fmtPct(s.ev_5d);
       $("perfBestWorst").textContent = `${fmtPct(s.best_5d)} / ${fmtPct(s.worst_5d)}`;
+      if (state.selectedTicker) {
+        $("decisionUpdated").textContent += ` · scatter filtrado por ${state.selectedTicker}`;
+      }
       $("tickerBars").innerHTML = renderBarRows(
         (data.by_ticker || []).slice(0, 8).map((row) => ({
           label: row.ticker,
