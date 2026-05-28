@@ -472,6 +472,53 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
     return result
 
 
+def _post_open_quality_warning(live_portfolio: dict, now: datetime) -> str | None:
+    positions_count = int(live_portfolio.get("positions_count") or 0)
+    covered = int(live_portfolio.get("price_coverage_count") or 0)
+    if positions_count <= 0:
+        return "portfolio vacio o sin posiciones; no hay marca post-open confiable."
+
+    coverage = covered / positions_count if positions_count else 0.0
+    if coverage < 0.80:
+        return (
+            f"cobertura de precios baja ({covered}/{positions_count}); "
+            "usar este reporte solo como contexto, no como marca operable."
+        )
+
+    latest_ts: datetime | None = None
+    for position in live_portfolio.get("positions") or []:
+        raw_ts = position.get("market_price_ts")
+        if not raw_ts:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        latest_ts = ts if latest_ts is None or ts > latest_ts else latest_ts
+
+    if latest_ts is None:
+        return "sin timestamps de market_prices; no se puede validar frescura post-open."
+
+    latest_art = latest_ts.astimezone(ART_TZ)
+    now_art = now.astimezone(ART_TZ)
+    if latest_art.date() != now_art.date():
+        return (
+            f"ultimo precio es de {latest_art.strftime('%d/%m %H:%M')} ART; "
+            "todavia no hay precios de la rueda actual."
+        )
+
+    age_seconds = (now_art - latest_art).total_seconds()
+    if age_seconds > 30 * 60:
+        return (
+            f"precios post-open con {age_seconds / 60:.0f} minutos de atraso; "
+            "esperar proximo scrape antes de decidir."
+        )
+
+    return None
+
+
 async def run_post_open_portfolio_report(run_type: str = "10:45_POST_OPEN_PORTFOLIO") -> dict:
     """
     Marca operativa post-open: usa ultimo snapshot real y precios ya tomados
@@ -506,14 +553,22 @@ async def run_post_open_portfolio_report(run_type: str = "10:45_POST_OPEN_PORTFO
 
         latest_prices = await db.get_latest_market_prices()
         live_portfolio = build_live_portfolio(snapshot, latest_prices)
+        warning = _post_open_quality_warning(live_portfolio, now)
+        if warning:
+            live_portfolio["post_open_warning"] = warning
         await cache_live_portfolio(
             live_portfolio,
             ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
         )
 
-        notifier.send_raw(render_opening_portfolio_report(live_portfolio))
+        title = (
+            "POST OPEN - PRECIOS INSUFICIENTES"
+            if warning else "POST OPEN - PORTFOLIO ACTUALIZADO"
+        )
+        notifier.send_raw(render_opening_portfolio_report(live_portfolio, title=title))
         result.update(
-            success=True,
+            success=not bool(warning),
+            warning=warning,
             positions=live_portfolio.get("positions_count", 0),
             price_coverage=live_portfolio.get("price_coverage_count", 0),
             day_pnl_ars=live_portfolio.get("day_pnl_ars"),

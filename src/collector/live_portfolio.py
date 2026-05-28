@@ -290,5 +290,8 @@ def render_opening_portfolio_report(
         )
 
     lines.append("")
+    warning = str(live_portfolio.get("post_open_warning") or "").strip()
+    if warning:
+        lines.append(f"<b>Advertencia:</b> {escape(warning)}")
     lines.append("<i>Plan EOD = proxima rueda. Este reporte marca cartera post-open con precios operables.</i>")
     return "\n".join(lines)
