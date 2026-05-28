@@ -4,404 +4,524 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cocos Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: dark;
-      --bg: #111418;
-      --panel: #181d23;
-      --panel-2: #20262e;
-      --line: #303844;
-      --text: #eef2f6;
-      --muted: #9ba7b4;
-      --green: #32c48d;
-      --red: #ff6464;
-      --amber: #f2b84b;
-      --blue: #64a8ff;
-      --violet: #b48cff;
+      --bg:        #080a0b;
+      --bg2:       #0d1012;
+      --panel:     #111518;
+      --panel-2:   #181d21;
+      --panel-3:   #1e2428;
+      --line:      #232b30;
+      --line2:     #2d3740;
+      --text:      #dde4ea;
+      --text-dim:  #b0bcc6;
+      --muted:     #6b7c87;
+      --green:     #00c8a0;
+      --green-dim: #00c8a022;
+      --red:       #f05a5a;
+      --red-dim:   #f05a5a22;
+      --amber:     #f0b84a;
+      --amber-dim: #f0b84a22;
+      --teal:      #3ab8d8;
+      --teal-dim:  #3ab8d822;
+      --violet:    #a87de8;
+      --violet-dim:#a87de822;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --sans: "IBM Plex Sans", system-ui, sans-serif;
     }
 
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      margin: 0;
       background: var(--bg);
       color: var(--text);
-      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font: 13.5px/1.5 var(--sans);
+      min-height: 100vh;
+      /* subtle dot grid */
+      background-image: radial-gradient(circle, #1e262c 1px, transparent 1px);
+      background-size: 28px 28px;
+      background-attachment: fixed;
     }
+
+    /* ─── HEADER ─────────────────────────────────────── */
     header {
       position: sticky;
       top: 0;
-      z-index: 10;
+      z-index: 20;
+      background: rgba(8, 10, 11, 0.94);
+      backdrop-filter: blur(16px) saturate(1.4);
       border-bottom: 1px solid var(--line);
-      background: rgba(17, 20, 24, 0.96);
-      backdrop-filter: blur(10px);
     }
+
     .topbar {
       display: grid;
-      grid-template-columns: minmax(170px, 1fr) minmax(260px, 500px) auto;
-      gap: 12px;
+      grid-template-columns: minmax(180px, 1fr) minmax(260px, 520px) auto;
+      gap: 14px;
       align-items: center;
-      max-width: 1320px;
+      max-width: 1360px;
       margin: 0 auto;
-      padding: 12px 16px;
+      padding: 11px 20px;
     }
+
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+
     h1 {
-      margin: 0;
-      font-size: 18px;
-      font-weight: 720;
-      letter-spacing: 0;
+      font-family: var(--mono);
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--green);
     }
-    .subtle { color: var(--muted); }
+
+    h1 .slash { color: var(--muted); font-weight: 400; }
+
+    .generated-tag {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+      margin-top: 1px;
+    }
+
+    /* ─── AUTH ───────────────────────────────────────── */
     .auth {
       display: grid;
-      grid-template-columns: minmax(160px, 1fr) 104px;
-      gap: 8px;
+      grid-template-columns: minmax(160px, 1fr) 100px;
+      gap: 7px;
     }
-    .auth.totp { grid-template-columns: minmax(160px, 1fr) 104px 104px; }
+    .auth.totp { grid-template-columns: minmax(140px, 1fr) 96px 96px; }
+
     input, button, select {
-      height: 36px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--panel);
+      height: 34px;
+      border: 1px solid var(--line2);
+      border-radius: 5px;
+      background: var(--panel-2);
       color: var(--text);
-      font: inherit;
+      font: 13px var(--sans);
     }
+
     input {
       min-width: 0;
       padding: 0 10px;
       outline: none;
+      transition: border-color 0.15s;
     }
-    input:focus { border-color: var(--blue); }
+    input::placeholder { color: var(--muted); font-size: 12px; }
+    input:focus { border-color: var(--teal); background: var(--panel-3); }
+
     button {
       cursor: pointer;
-      padding: 0 12px;
-      background: var(--panel-2);
+      padding: 0 13px;
+      font-weight: 500;
+      transition: border-color 0.15s, background 0.15s;
+      white-space: nowrap;
     }
-    button:hover { border-color: var(--blue); }
+    button:hover { border-color: var(--teal); }
     button.primary {
-      border-color: #3a7fd4;
-      background: #1f4f86;
+      border-color: #2a6a88;
+      background: #0e3a50;
+      color: var(--teal);
+      font-weight: 600;
     }
-    button:disabled {
-      cursor: progress;
-      opacity: 0.62;
+    button.primary:hover { border-color: var(--teal); background: #153e55; }
+    button:disabled { cursor: progress; opacity: 0.5; }
+    button#clearToken {
+      font-size: 12px;
+      color: var(--muted);
+      min-width: 56px;
     }
+
+    /* ─── MAIN ───────────────────────────────────────── */
     main {
-      max-width: 1320px;
+      max-width: 1360px;
       margin: 0 auto;
-      padding: 16px;
+      padding: 20px 20px 40px;
     }
+
+    .error {
+      display: none;
+      margin-bottom: 14px;
+      padding: 11px 14px;
+      border: 1px solid rgba(240, 90, 90, 0.4);
+      border-left: 3px solid var(--red);
+      border-radius: 6px;
+      background: var(--red-dim);
+      color: #ffd0d0;
+      font-size: 13px;
+      animation: fadein 0.2s ease;
+    }
+
+    /* ─── GRID ───────────────────────────────────────── */
     .grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
+      gap: 14px;
     }
     .wide { grid-column: span 2; }
     .full { grid-column: 1 / -1; }
+
+    /* ─── CARD ───────────────────────────────────────── */
     .card {
-      min-height: 112px;
-      padding: 14px;
+      padding: 16px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
       overflow: hidden;
+      position: relative;
+      animation: fadein 0.35s ease both;
     }
+
+    /* accent top border per card type */
+    .card:nth-child(1) { border-top: 2px solid var(--green); }
+    .card:nth-child(2) { border-top: 2px solid var(--amber); }
+    .card:nth-child(3) { border-top: 2px solid var(--teal); }
+    .card:nth-child(4) { border-top: 2px solid var(--violet); }
+    .card:nth-child(5) { border-top: 2px solid var(--teal); }
+    .card:nth-child(6) { border-top: 2px solid var(--green); }
+    .card:nth-child(7) { border-top: 2px solid var(--amber); }
+    .card:nth-child(8) { border-top: 2px solid var(--violet); }
+    .card:nth-child(9) { border-top: 2px solid var(--teal); }
+    .card:nth-child(10) { border-top: 2px solid var(--red); }
+
+    @keyframes fadein {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
     .card h2 {
-      margin: 0 0 10px;
-      font-size: 13px;
+      margin: 0 0 12px;
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 600;
       color: var(--muted);
-      font-weight: 650;
       text-transform: uppercase;
+      letter-spacing: 0.12em;
     }
+
+    /* ─── METRIC ROW ─────────────────────────────────── */
     .metric {
       display: flex;
       justify-content: space-between;
-      gap: 10px;
+      align-items: baseline;
+      gap: 8px;
       padding: 6px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.055);
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      font-size: 13px;
     }
     .metric:last-child { border-bottom: 0; }
+    .metric > span { color: var(--text-dim); }
     .metric b {
+      font-family: var(--mono);
+      font-size: 12.5px;
+      font-weight: 500;
       text-align: right;
-      font-weight: 680;
       overflow-wrap: anywhere;
     }
+
+    /* ─── COLORS ─────────────────────────────────────── */
+    .money  { color: var(--green); }
+    .amber  { color: var(--amber); }
+    .blue   { color: var(--teal); }
+    .violet { color: var(--violet); }
+
+    /* ─── STATUS ─────────────────────────────────────── */
     .status {
       display: inline-flex;
       align-items: center;
-      gap: 7px;
-      font-weight: 720;
+      gap: 6px;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 500;
     }
     .dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 999px;
+      width: 7px; height: 7px;
+      border-radius: 50%;
       background: var(--muted);
     }
-    .ok .dot { background: var(--green); }
-    .bad .dot { background: var(--red); }
-    .warn .dot { background: var(--amber); }
+    .ok .dot   { background: var(--green); box-shadow: 0 0 5px var(--green); }
+    .bad .dot  { background: var(--red);   box-shadow: 0 0 5px var(--red); }
+    .warn .dot { background: var(--amber); box-shadow: 0 0 5px var(--amber); }
+
+    .state-pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; }
+    .state-pill::before {
+      content: "";
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+    .state-ok::before   { background: var(--green); box-shadow: 0 0 4px var(--green); }
+    .state-warn::before { background: var(--amber); box-shadow: 0 0 4px var(--amber); }
+    .state-bad::before  { background: var(--red);   box-shadow: 0 0 4px var(--red); }
+
+    /* ─── PILL ───────────────────────────────────────── */
     .pill {
       display: inline-flex;
       align-items: center;
-      min-height: 24px;
-      padding: 2px 8px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
+      height: 22px;
+      padding: 0 9px;
+      border: 1px solid var(--line2);
+      border-radius: 4px;
       background: var(--panel-2);
       color: var(--muted);
-      font-size: 12px;
+      font-family: var(--mono);
+      font-size: 11px;
       white-space: nowrap;
+      letter-spacing: 0.02em;
     }
+
+    /* ─── ROW HEAD ───────────────────────────────────── */
     .row-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      margin-bottom: 10px;
+      margin-bottom: 12px;
     }
+
+    /* ─── TABLES ─────────────────────────────────────── */
     table {
       width: 100%;
       border-collapse: collapse;
       table-layout: fixed;
+      margin-top: 12px;
     }
     th, td {
-      padding: 8px 7px;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
+      padding: 7px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
       text-align: left;
-      vertical-align: top;
+      vertical-align: middle;
       overflow-wrap: anywhere;
     }
     th {
       color: var(--muted);
-      font-size: 12px;
-      font-weight: 650;
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border-bottom: 1px solid var(--line2);
     }
-    .logline {
-      margin: 0;
-      padding: 8px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-      color: #d9dee5;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-      font-size: 12px;
+    td {
+      font-size: 12.5px;
+      color: var(--text-dim);
     }
-    .error {
-      display: none;
+    td:first-child { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+    tbody tr:hover { background: rgba(255,255,255,0.025); }
+
+    /* ─── CHART NOTE ─────────────────────────────────── */
+    .chart-note {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 11.5px;
+      line-height: 1.5;
+    }
+
+    /* ─── SUMMARY LINE ───────────────────────────────── */
+    .summary-line {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
       margin-bottom: 12px;
-      padding: 10px 12px;
-      border: 1px solid rgba(255,100,100,0.45);
-      border-radius: 8px;
-      background: rgba(255,100,100,0.12);
-      color: #ffd7d7;
+      font-size: 12px;
+      color: var(--muted);
     }
-    .money { color: var(--green); }
-    .amber { color: var(--amber); }
-    .blue { color: var(--blue); }
-    .violet { color: var(--violet); }
+    .summary-line b {
+      font-family: var(--mono);
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    /* ─── PANEL SPLIT ────────────────────────────────── */
     .panel-split {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 14px;
+      gap: 20px;
+      margin-top: 14px;
     }
-    .bars { display: grid; gap: 8px; }
+
+    /* ─── BARS ───────────────────────────────────────── */
+    .bars { display: grid; gap: 6px; margin-top: 12px; }
     .bar-row {
       display: grid;
-      grid-template-columns: 72px minmax(0, 1fr) 84px;
+      grid-template-columns: 64px minmax(0, 1fr) 88px;
       gap: 8px;
       align-items: center;
-      min-height: 26px;
+      min-height: 24px;
       color: var(--muted);
-      font-size: 12px;
+      font-family: var(--mono);
+      font-size: 11px;
+      padding: 3px 4px;
+      border-radius: 4px;
+      transition: background 0.12s;
     }
+    .bar-row b { font-size: 11px; font-weight: 500; text-align: right; color: var(--text-dim); }
     .bar-track {
-      height: 9px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.08);
+      height: 6px;
+      border-radius: 3px;
+      background: rgba(255,255,255,0.06);
       overflow: hidden;
     }
     .bar-fill {
       height: 100%;
-      border-radius: 999px;
-      background: var(--blue);
+      border-radius: 3px;
+      background: var(--teal);
+      transition: width 0.3s ease;
     }
+    .bar-row.clickable { cursor: pointer; }
+    .bar-row.clickable:hover { background: rgba(255,255,255,0.04); }
+    .bar-row.selected { color: var(--text); background: rgba(58,184,216,0.1); }
+    .bar-row.selected b { color: var(--teal); }
+
+    /* ─── CHART / SPARKLINE ──────────────────────────── */
     .chart {
       width: 100%;
-      height: 220px;
-      border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 8px;
-      background: rgba(255,255,255,0.025);
+      height: 200px;
+      border: 1px solid rgba(255,255,255,0.05);
+      border-radius: 7px;
+      background: rgba(255,255,255,0.018);
     }
-    .sparkline {
-      width: 100%;
-      height: 118px;
-    }
-    .chart-note {
-      margin-top: 8px;
-      color: var(--muted);
-      font-size: 12px;
-    }
+    .sparkline { width: 100%; height: 110px; }
+
+    /* ─── LEGEND ─────────────────────────────────────── */
     .legend {
       display: flex;
-      gap: 12px;
+      gap: 14px;
       flex-wrap: wrap;
       margin-top: 8px;
+      font-size: 11px;
       color: var(--muted);
-      font-size: 12px;
     }
-    .legend span {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
     .legend-dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 999px;
+      width: 8px; height: 8px;
+      border-radius: 50%;
       background: var(--green);
     }
     .legend-sell {
-      width: 0;
-      height: 0;
-      border-left: 6px solid transparent;
-      border-right: 6px solid transparent;
-      border-bottom: 10px solid var(--amber);
+      width: 0; height: 0;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-bottom: 9px solid var(--amber);
     }
+
+    /* ─── TOOLBAR ────────────────────────────────────── */
     .toolbar {
       display: flex;
       align-items: center;
       justify-content: flex-end;
-      gap: 8px;
+      gap: 6px;
       flex-wrap: wrap;
     }
     .period-button {
-      width: 48px;
+      width: 42px;
       padding: 0;
-      font-size: 12px;
+      font-size: 11px;
+      font-family: var(--mono);
+      color: var(--muted);
     }
     .period-button.active {
-      border-color: var(--blue);
-      color: var(--text);
-      background: #1f4f86;
+      border-color: var(--teal);
+      color: var(--teal);
+      background: rgba(58,184,216,0.12);
     }
     .clear-filter {
       display: none;
-      width: auto;
-      min-width: 104px;
+      min-width: 100px;
       padding: 0 10px;
-      font-size: 12px;
+      font-size: 11.5px;
     }
-    .clear-filter.visible { display: inline-flex; align-items: center; justify-content: center; }
-    .loading-soft {
-      position: relative;
-      opacity: 0.72;
+    .clear-filter.visible {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
+
+    /* ─── LOADING ────────────────────────────────────── */
+    .loading-soft { position: relative; opacity: 0.65; }
     .loading-soft::after {
       content: "Cargando...";
       position: absolute;
-      top: 10px;
-      right: 10px;
-      padding: 3px 8px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
+      top: 10px; right: 10px;
+      padding: 2px 8px;
+      border: 1px solid var(--line2);
+      border-radius: 4px;
       background: var(--panel-2);
       color: var(--muted);
-      font-size: 12px;
+      font-family: var(--mono);
+      font-size: 11px;
     }
-    .state-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
+
+    /* ─── LOGS ───────────────────────────────────────── */
+    .logline {
+      margin: 0;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      color: #9db4bf;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      line-height: 1.6;
     }
-    .state-pill::before {
-      content: "";
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: var(--muted);
-    }
-    .state-ok::before { background: var(--green); }
-    .state-warn::before { background: var(--amber); }
-    .state-bad::before { background: var(--red); }
-    .bar-row.clickable {
-      cursor: pointer;
-      border-radius: 6px;
-    }
-    .bar-row.clickable:hover {
-      background: rgba(255,255,255,0.045);
-    }
-    .bar-row.selected {
-      color: var(--text);
-      background: rgba(100,168,255,0.12);
-    }
-    .summary-line {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin-bottom: 10px;
-      color: var(--muted);
-      font-size: 12px;
-    }
+    .logline:last-child { border-bottom: 0; }
+
+    /* ─── EMPTY ──────────────────────────────────────── */
     .empty-state {
-      min-height: 64px;
+      min-height: 56px;
       display: grid;
       place-items: center;
       color: var(--muted);
-      border: 1px dashed rgba(255,255,255,0.12);
-      border-radius: 8px;
+      border: 1px dashed rgba(255,255,255,0.08);
+      border-radius: 6px;
+      font-size: 12px;
+      font-family: var(--mono);
     }
 
+    .subtle { color: var(--muted); font-size: 12px; }
+
+    /* ─── RESPONSIVE ─────────────────────────────────── */
     @media (max-width: 980px) {
       .topbar { grid-template-columns: 1fr; }
-      .auth, .auth.totp { grid-template-columns: 1fr 96px; }
+      .auth, .auth.totp { grid-template-columns: minmax(0,1fr) 92px; }
       .totp-code { grid-column: 1 / -1; }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .wide { grid-column: 1 / -1; }
       .panel-split { grid-template-columns: 1fr; }
     }
     @media (max-width: 620px) {
-      main { padding: 12px; }
+      main { padding: 12px 12px 32px; }
       .grid { grid-template-columns: 1fr; }
       .card { min-height: unset; }
-      .topbar { padding: 10px 12px; }
-      .row-head {
-        align-items: flex-start;
-        flex-direction: column;
-      }
-      .toolbar {
-        width: 100%;
-        justify-content: flex-start;
-      }
-      .period-button { flex: 1 1 56px; }
-      .clear-filter { flex: 1 1 128px; }
-      .metric {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: 3px;
-      }
+      .topbar { padding: 10px 14px; }
+      .row-head { align-items: flex-start; flex-direction: column; }
+      .toolbar { width: 100%; justify-content: flex-start; }
+      .period-button { flex: 1 1 48px; }
+      .clear-filter { flex: 1 1 120px; }
+      .metric { align-items: flex-start; flex-direction: column; gap: 2px; }
       .metric b { text-align: left; }
-      .bar-row {
-        grid-template-columns: 58px minmax(0, 1fr) 72px;
-      }
-      table {
-        display: block;
-        overflow-x: auto;
-        white-space: nowrap;
-      }
-      th, td {
-        min-width: 96px;
-        white-space: normal;
-      }
-      .chart { height: 190px; }
+      .bar-row { grid-template-columns: 54px minmax(0, 1fr) 68px; }
+      table { display: block; overflow-x: auto; white-space: nowrap; }
+      th, td { min-width: 90px; white-space: normal; }
+      .chart { height: 170px; }
     }
   </style>
 </head>
 <body>
   <header>
     <div class="topbar">
-      <div>
-        <h1>Cocos Monitor</h1>
-        <div class="subtle" id="generated">Sin datos todavia</div>
+      <div class="brand-block">
+        <div class="brand">
+          <h1>COCOS<span class="slash">/</span>MONITOR</h1>
+        </div>
+        <div class="generated-tag" id="generated">— sin datos</div>
       </div>
       <form class="auth" id="authForm">
         <input id="token" type="password" autocomplete="current-password" placeholder="MONITOR_API_TOKEN">
@@ -463,7 +583,7 @@
             <div class="bars" id="allocationBars"></div>
           </div>
           <div>
-            <svg class="sparkline" id="portfolioSpark" viewBox="0 0 600 118" preserveAspectRatio="none"></svg>
+            <svg class="sparkline" id="portfolioSpark" viewBox="0 0 600 110" preserveAspectRatio="none"></svg>
             <div class="chart-note" id="portfolioSparkNote">Evolucion diaria de cartera y cash.</div>
           </div>
         </div>
@@ -491,7 +611,7 @@
             <div class="bars" id="tickerBars"></div>
           </div>
           <div>
-            <svg class="chart" id="scoreScatter" viewBox="0 0 600 220" preserveAspectRatio="none"></svg>
+            <svg class="chart" id="scoreScatter" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
             <div class="legend">
               <span><i class="legend-dot" style="background: var(--green)"></i> outcome positivo</span>
               <span><i class="legend-dot" style="background: var(--red)"></i> outcome negativo</span>
@@ -499,7 +619,7 @@
               <span><i class="legend-sell"></i> SELL</span>
             </div>
             <div class="chart-note" title="Eje X: final_score al momento de la decision. Eje Y: retorno 5D, usando precio ejecutable de proxima rueda cuando existe. Verde es retorno positivo, rojo negativo.">
-              X: score final al decidir. Y: resultado 5D ejecutable cuando existe. Si los puntos suben hacia la derecha, el score empieza a explicar resultados.
+              X: score final al decidir · Y: resultado 5D ejecutable cuando existe.
             </div>
           </div>
         </div>
@@ -676,7 +796,7 @@
       const max = Math.max(...rows.map((row) => Math.abs(Number(row.value || 0))), 1);
       return rows.map((row, index) => {
         const width = Math.max(2, Math.abs(Number(row.value || 0)) / max * 100);
-        const color = row.color || (index % 2 ? "var(--green)" : "var(--blue)");
+        const color = row.color || (index % 2 ? "var(--green)" : "var(--teal)");
         const selected = options.selected && row.label === options.selected;
         const attrs = options.clickable ? ` data-ticker="${row.label}"` : "";
         return `
@@ -705,29 +825,29 @@
 
     function renderSparkline(svg, points) {
       const width = 600;
-      const height = 118;
+      const height = 110;
       const pad = 10;
       if (!points || points.length < 2) {
-        svg.innerHTML = `<text x="18" y="44" fill="var(--muted)">Sin historia suficiente</text>`;
+        svg.innerHTML = `<text x="18" y="44" fill="var(--muted)" font-family="IBM Plex Mono" font-size="13">Sin historia suficiente</text>`;
         return;
       }
       const totalPath = linePath(points, "total_value_ars", width, height, pad);
       const cashPath = linePath(points, "cash_ars", width, height, pad);
       svg.innerHTML = `
-        <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="rgba(255,255,255,.16)" />
-        <path d="${totalPath}" fill="none" stroke="var(--green)" stroke-width="3" vector-effect="non-scaling-stroke" />
-        <path d="${cashPath}" fill="none" stroke="var(--blue)" stroke-width="2" opacity=".85" vector-effect="non-scaling-stroke" />
+        <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="rgba(255,255,255,.1)" />
+        <path d="${totalPath}" fill="none" stroke="var(--green)" stroke-width="2.5" vector-effect="non-scaling-stroke" />
+        <path d="${cashPath}" fill="none" stroke="var(--teal)" stroke-width="2" opacity=".8" vector-effect="non-scaling-stroke" />
       `;
     }
 
     function renderScatter(svg, points) {
       const width = 600;
-      const height = 220;
+      const height = 200;
       const pad = 28;
       const xs = points.map((p) => Number(p.final_score)).filter(Number.isFinite);
       const ys = points.map((p) => Number(p.outcome_5d)).filter(Number.isFinite);
       if (!xs.length || !ys.length) {
-        svg.innerHTML = `<text x="24" y="44" fill="var(--muted)">Sin puntos cerrados suficientes</text>`;
+        svg.innerHTML = `<text x="24" y="44" fill="var(--muted)" font-family="IBM Plex Mono" font-size="12">Sin puntos cerrados suficientes</text>`;
         return;
       }
       const minX = Math.min(...xs, -0.25);
@@ -742,22 +862,20 @@
         const x = pad + ((Number(p.final_score) - minX) / spanX) * (width - pad * 2);
         const y = height - pad - ((Number(p.outcome_5d) - minY) / spanY) * (height - pad * 2);
         const color = Number(p.outcome_5d) >= 0 ? "var(--green)" : "var(--red)";
-        const title = `${p.ticker} · ${p.decision} · ${fmtShortDate(p.decided_at)}
-score ${fmtScore(p.final_score)} · outcome 5D ${fmtPct(p.outcome_5d)}
-estado ${p.status || "-"} · fuente ${p.source || "-"}`;
+        const title = `${p.ticker} · ${p.decision} · ${fmtShortDate(p.decided_at)}\nscore ${fmtScore(p.final_score)} · outcome 5D ${fmtPct(p.outcome_5d)}\nestado ${p.status || "-"} · fuente ${p.source || "-"}`;
         if (String(p.decision || "").toUpperCase() === "SELL") {
           const path = `${x.toFixed(1)},${(y - 5).toFixed(1)} ${(x - 5).toFixed(1)},${(y + 5).toFixed(1)} ${(x + 5).toFixed(1)},${(y + 5).toFixed(1)}`;
-          return `<polygon points="${path}" fill="${color}" opacity=".88"><title>${title}</title></polygon>`;
+          return `<polygon points="${path}" fill="${color}" opacity=".85"><title>${title}</title></polygon>`;
         }
-        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5" fill="${color}" opacity=".82"><title>${title}</title></circle>`;
+        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${color}" opacity=".8"><title>${title}</title></circle>`;
       }).join("");
       svg.innerHTML = `
-        <line x1="${pad}" y1="${y0}" x2="${width - pad}" y2="${y0}" stroke="rgba(255,255,255,.18)" />
-        <line x1="${x0}" y1="${pad}" x2="${x0}" y2="${height - pad}" stroke="rgba(255,255,255,.18)" />
-        <text x="${pad}" y="18" fill="var(--muted)" font-size="11">score -</text>
-        <text x="${width - pad - 46}" y="18" fill="var(--muted)" font-size="11">score +</text>
-        <text x="${pad}" y="${pad - 8}" fill="var(--muted)" font-size="11">outcome +</text>
-        <text x="${pad}" y="${height - 8}" fill="var(--muted)" font-size="11">outcome -</text>
+        <line x1="${pad}" y1="${y0}" x2="${width - pad}" y2="${y0}" stroke="rgba(255,255,255,.12)" />
+        <line x1="${x0}" y1="${pad}" x2="${x0}" y2="${height - pad}" stroke="rgba(255,255,255,.12)" />
+        <text x="${pad}" y="16" fill="var(--muted)" font-size="10" font-family="IBM Plex Mono">score −</text>
+        <text x="${width - pad - 44}" y="16" fill="var(--muted)" font-size="10" font-family="IBM Plex Mono">score +</text>
+        <text x="${pad}" y="${pad - 6}" fill="var(--muted)" font-size="10" font-family="IBM Plex Mono">outcome +</text>
+        <text x="${pad}" y="${height - 6}" fill="var(--muted)" font-size="10" font-family="IBM Plex Mono">outcome −</text>
         ${marks}
       `;
     }
@@ -791,7 +909,7 @@ estado ${p.status || "-"} · fuente ${p.source || "-"}`;
     }
 
     function renderHealth(data) {
-      $("generated").textContent = "Actualizado " + fmtDate(data.generated_at);
+      $("generated").textContent = "act. " + fmtDate(data.generated_at);
       $("dbStatus").innerHTML = status(data.database.ok, data.database.ok ? "OK" : "Falla");
       $("redisStatus").innerHTML = status(data.redis.ok, data.redis.ok ? "OK" : "Falla");
       $("schedulerStatus").innerHTML = data.services.scheduler.alive
@@ -822,12 +940,9 @@ estado ${p.status || "-"} · fuente ${p.source || "-"}`;
       $("priceRows7").textContent = fmtNumber(m.rows_7d);
       $("priceTickers7").textContent = fmtNumber(m.tickers_7d);
       const breakdown = {};
-      (data.market_prices.asset_breakdown || []).forEach((row) => {
-        breakdown[row.asset_type] = row;
-      });
+      (data.market_prices.asset_breakdown || []).forEach((row) => { breakdown[row.asset_type] = row; });
       $("assetBreakdown").textContent =
-        fmtNumber(breakdown.ACCION && breakdown.ACCION.tickers_7d) +
-        " / " +
+        fmtNumber(breakdown.ACCION && breakdown.ACCION.tickers_7d) + " / " +
         fmtNumber(breakdown.CEDEAR && breakdown.CEDEAR.tickers_7d);
     }
 
@@ -857,7 +972,7 @@ estado ${p.status || "-"} · fuente ${p.source || "-"}`;
       const last = (data.history || []).slice(-1)[0];
       if (first && last && first.total_value_ars) {
         const change = (Number(last.total_value_ars) / Number(first.total_value_ars)) - 1;
-        $("portfolioSparkNote").textContent = `Cartera ${fmtPct(change)} en ${data.days} dias. Linea verde: total; azul: cash.`;
+        $("portfolioSparkNote").textContent = `Cartera ${fmtPct(change)} en ${data.days} dias. Verde: total · Teal: cash.`;
       }
     }
 
@@ -874,9 +989,7 @@ estado ${p.status || "-"} · fuente ${p.source || "-"}`;
       $("perfWinRate").textContent = fmtPct(s.win_rate_5d);
       $("perfEv").textContent = fmtPct(s.ev_5d);
       $("perfBestWorst").textContent = `${fmtPct(s.best_5d)} / ${fmtPct(s.worst_5d)}`;
-      if (state.selectedTicker) {
-        $("decisionUpdated").textContent += ` · scatter filtrado por ${state.selectedTicker}`;
-      }
+      if (state.selectedTicker) $("decisionUpdated").textContent += ` · scatter filtrado por ${state.selectedTicker}`;
       $("tickerBars").innerHTML = renderBarRows(
         (data.by_ticker || []).slice(0, 8).map((row) => ({
           label: row.ticker,
@@ -894,10 +1007,10 @@ estado ${p.status || "-"} · fuente ${p.source || "-"}`;
       $("overrideWindow").textContent = `${data.days} dias`;
       $("overrideUpdated").textContent = `Bot vs Humano actualizado hace ${ageFromIso(data.generated_at)}`;
       $("overrideSummary").innerHTML = `
-        <span title="Planes aprobados que tuvieron movimiento real del mismo lado por al menos 75% del monto objetivo.">Seguido: <b>${fmtNumber(byStatus.FOLLOWED || 0)}</b></span>
-        <span title="Planes aprobados que tuvieron movimiento real del mismo lado por al menos 15%, pero no completo.">Parcial: <b>${fmtNumber(byStatus.PARTIAL || 0)}</b></span>
-        <span title="Planes aprobados sin movimiento real compatible dentro de la ventana de match.">Ignorado: <b>${fmtNumber(byStatus.IGNORED || 0)}</b></span>
-        <span title="Planes aprobados donde hubo movimiento real contrario dentro de la ventana de match.">Opuesto: <b>${fmtNumber(byStatus.OPPOSITE || 0)}</b></span>
+        <span title="Seguido">Seguido: <b>${fmtNumber(byStatus.FOLLOWED || 0)}</b></span>
+        <span title="Parcial">Parcial: <b>${fmtNumber(byStatus.PARTIAL || 0)}</b></span>
+        <span title="Ignorado">Ignorado: <b>${fmtNumber(byStatus.IGNORED || 0)}</b></span>
+        <span title="Opuesto">Opuesto: <b>${fmtNumber(byStatus.OPPOSITE || 0)}</b></span>
       `;
       $("overridePlans").textContent = `${fmtNumber(s.plans)} / ${fmtNumber(s.unique_intents)}`;
       $("overrideFollowed").textContent = `${fmtNumber(byStatus.FOLLOWED || 0)} / ${fmtNumber(byStatus.PARTIAL || 0)}`;
@@ -923,12 +1036,10 @@ estado ${p.status || "-"} · fuente ${p.source || "-"}`;
       const missing = Number(c.missing_internal || 0);
       if (missing > 0 && market.business_day === false) {
         $("candleMissing").innerHTML = warn("no aplica");
-        $("candleNote").textContent =
-          "Mercado cerrado: no se espera vela diaria para hoy. Se usa la ultima rueda disponible.";
+        $("candleNote").textContent = "Mercado cerrado: no se espera vela diaria para hoy.";
       } else if (missing > 0 && market.expects_daily_candle === false) {
         $("candleMissing").innerHTML = warn(fmtNumber(missing));
-        $("candleNote").textContent =
-          "La rueda aun no cerro: estos faltantes pueden ser normales hasta construir candles EOD.";
+        $("candleNote").textContent = "La rueda aun no cerro: faltantes pueden ser normales hasta EOD.";
       } else {
         $("candleMissing").textContent = fmtNumber(c.missing_internal);
         $("candleNote").textContent = "";
@@ -1038,13 +1149,9 @@ estado ${p.status || "-"} · fuente ${p.source || "-"}`;
         state.performanceDays = Number(button.dataset.period || 7);
         document.querySelectorAll("[data-period]").forEach((b) => b.classList.toggle("active", b === button));
         setDecisionLoading(true);
-        try {
-          await refresh();
-        } catch (err) {
-          setError(err.message);
-        } finally {
-          setDecisionLoading(false);
-        }
+        try { await refresh(); }
+        catch (err) { setError(err.message); }
+        finally { setDecisionLoading(false); }
       });
     });
 
@@ -1065,9 +1172,7 @@ estado ${p.status || "-"} · fuente ${p.source || "-"}`;
 
     $("clearTickerFilter").addEventListener("click", () => {
       state.selectedTicker = "";
-      document.querySelectorAll("#allocationBars .bar-row").forEach((item) => {
-        item.classList.remove("selected");
-      });
+      document.querySelectorAll("#allocationBars .bar-row").forEach((item) => item.classList.remove("selected"));
       setDecisionLoading(true);
       requestAnimationFrame(() => {
         if (state.performanceData) renderPerformanceView(state.performanceData);
@@ -1078,6 +1183,7 @@ estado ${p.status || "-"} · fuente ${p.source || "-"}`;
     loadAuthStatus()
       .then(() => state.token ? refresh() : null)
       .catch((err) => setError(err.message));
+
     setInterval(() => {
       if ($("token").value.trim()) refresh().catch((err) => setError(err.message));
     }, 60000);
