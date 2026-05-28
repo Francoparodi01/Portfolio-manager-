@@ -440,7 +440,12 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
                 ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
             )
 
-            notifier.send_raw(render_opening_portfolio_report(live_portfolio))
+            notifier.send_raw(
+                render_opening_portfolio_report(
+                    live_portfolio,
+                    title="APERTURA DE MERCADO - PORTFOLIO ACTUALIZADO",
+                )
+            )
             result.update(
                 success=True,
                 positions=len(snapshot.positions),
@@ -463,6 +468,69 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
         finally:
             await _redis_delete(SCRAPER_LOCK_KEY)
             await db.close()
+
+    return result
+
+
+async def run_post_open_portfolio_report(run_type: str = "10:45_POST_OPEN_PORTFOLIO") -> dict:
+    """
+    Marca operativa post-open: usa ultimo snapshot real y precios ya tomados
+    durante la rueda. No genera decisiones ni cambia el plan EOD.
+    """
+    now = _now_art()
+    if not _is_market_window(now):
+        reason = market_closed_reason(now) or "mercado cerrado"
+        logger.info("run_post_open_portfolio_report [%s] omitido: %s", run_type, reason)
+        return {
+            "success": False,
+            "run_type": run_type,
+            "skipped": "market_closed",
+            "reason": reason,
+        }
+
+    cfg = get_config()
+    notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
+    db = PortfolioDatabase(cfg.database.url)
+    result: dict = {"success": False, "run_type": run_type}
+
+    try:
+        await db.connect()
+        snapshot = await get_cached_portfolio_snapshot()
+        if snapshot is None:
+            snapshot = await db.get_latest_snapshot()
+
+        if not snapshot:
+            result["error"] = "sin_snapshot"
+            logger.warning("run_post_open_portfolio_report [%s]: sin snapshot", run_type)
+            return result
+
+        latest_prices = await db.get_latest_market_prices()
+        live_portfolio = build_live_portfolio(snapshot, latest_prices)
+        await cache_live_portfolio(
+            live_portfolio,
+            ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
+        )
+
+        notifier.send_raw(render_opening_portfolio_report(live_portfolio))
+        result.update(
+            success=True,
+            positions=live_portfolio.get("positions_count", 0),
+            price_coverage=live_portfolio.get("price_coverage_count", 0),
+            day_pnl_ars=live_portfolio.get("day_pnl_ars"),
+            day_change_pct=live_portfolio.get("day_change_pct"),
+        )
+        logger.info(
+            "post-open portfolio ok: %s/%s cobertura - pnl_dia=%s",
+            live_portfolio.get("price_coverage_count", 0),
+            live_portfolio.get("positions_count", 0),
+            live_portfolio.get("day_pnl_ars"),
+        )
+    except Exception as e:
+        logger.error("run_post_open_portfolio_report [%s] fallo: %s", run_type, e, exc_info=True)
+        notifier.notify_critical_error(run_type, str(e))
+        result["error"] = str(e)
+    finally:
+        await db.close()
 
     return result
 
@@ -1229,6 +1297,14 @@ async def _scheduler_main() -> None:
         replace_existing=True,
     )
     scheduler.add_job(
+        run_post_open_portfolio_report,
+        _business_day_cron(hour=10, minute=45),
+        id="post_open_portfolio_report",
+        name="Post-open portfolio mark 10:45 ART",
+        misfire_grace_time=300,
+        replace_existing=True,
+    )
+    scheduler.add_job(
         run_full,
         _business_day_cron(hour=17, minute=0),
         args=["17:00_FULL"],
@@ -1284,7 +1360,7 @@ async def _scheduler_main() -> None:
     )
     scheduler.start()
     logger.info(
-        "Scheduler activo: 10:31 apertura portfolio + intraday on; 17:00 full; 17:01 intraday off; 17:05 candles; 17:10 verify; 17:12 analysis; 21:30 outcomes"
+        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 17:00 full; 17:01 intraday off; 17:05 candles; 17:10 verify; 17:12 analysis; 21:30 outcomes"
     )
 
     # Si arrancamos durante rueda, iniciar loops de inmediato

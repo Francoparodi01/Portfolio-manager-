@@ -19,6 +19,21 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _fmt_ars(value, digits: int = 0, signed: bool = False) -> str:
+    value_f = _safe_float(value)
+    sign = ""
+    if signed:
+        sign = "+" if value_f >= 0 else "-"
+        value_f = abs(value_f)
+    text = f"{value_f:,.{digits}f}"
+    text = text.replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"{sign}${text}"
+
+
+def _fmt_price_ars(value) -> str:
+    return _fmt_ars(value, digits=2)
+
+
 @dataclass(frozen=True)
 class PortfolioMoveAlert:
     ticker: str
@@ -62,6 +77,15 @@ def build_live_portfolio(
         price = latest_price if latest_price > 0 and price_is_fresh else fallback_price
         market_value = quantity * price if quantity > 0 and price > 0 else _safe_float(raw.get("market_value"))
         change_pct_1d = latest.get("change_pct_1d")
+        change_pct_1d_f = (
+            _safe_float(change_pct_1d)
+            if change_pct_1d is not None
+            else None
+        )
+        day_pnl_ars = None
+        if change_pct_1d_f is not None and change_pct_1d_f > -0.99 and market_value:
+            prev_value = market_value / (1.0 + change_pct_1d_f)
+            day_pnl_ars = market_value - prev_value
         market_price_ts = latest.get("ts")
         if hasattr(market_price_ts, "isoformat"):
             market_price_ts = market_price_ts.isoformat()
@@ -74,15 +98,26 @@ def build_live_portfolio(
             ticker=ticker,
             current_price=price,
             market_value=market_value,
-            change_pct_1d=_safe_float(change_pct_1d) if change_pct_1d is not None else None,
+            change_pct_1d=change_pct_1d_f,
+            day_pnl_ars=day_pnl_ars,
             price_source="market_prices" if latest_price > 0 and price_is_fresh else "snapshot",
             market_price_ts=market_price_ts,
         )
         positions.append(position)
 
     invested_ars = sum(_safe_float(p.get("market_value")) for p in positions)
+    day_pnl_ars = sum(
+        _safe_float(p.get("day_pnl_ars"))
+        for p in positions
+        if p.get("day_pnl_ars") is not None
+    )
     cash_ars = _safe_float(snapshot.get("cash_ars"))
     total_value_ars = invested_ars + cash_ars
+    previous_invested_ars = invested_ars - day_pnl_ars
+    day_change_pct = (
+        day_pnl_ars / previous_invested_ars
+        if previous_invested_ars > 0 else None
+    )
 
     for position in positions:
         position["weight_in_portfolio"] = (
@@ -98,6 +133,8 @@ def build_live_portfolio(
         "cash_ars": cash_ars,
         "invested_ars": invested_ars,
         "total_value_ars": total_value_ars,
+        "day_pnl_ars": day_pnl_ars,
+        "day_change_pct": day_change_pct,
         "positions_count": len(positions),
         "price_coverage_count": covered_positions,
         "positions": positions,
@@ -196,11 +233,17 @@ def render_live_portfolio_alert(
     return "\n".join(lines)
 
 
-def render_opening_portfolio_report(live_portfolio: dict) -> str:
+def render_opening_portfolio_report(
+    live_portfolio: dict,
+    *,
+    title: str = "POST OPEN - PORTFOLIO ACTUALIZADO",
+) -> str:
     """Render a daily opening portfolio mark after the first market scrape."""
     total = _safe_float(live_portfolio.get("total_value_ars"))
     invested = _safe_float(live_portfolio.get("invested_ars"))
     cash = _safe_float(live_portfolio.get("cash_ars"))
+    day_pnl = _safe_float(live_portfolio.get("day_pnl_ars"))
+    day_change = live_portfolio.get("day_change_pct")
     covered = int(_safe_float(live_portfolio.get("price_coverage_count")))
     positions_count = int(_safe_float(live_portfolio.get("positions_count")))
     positions = sorted(
@@ -210,11 +253,17 @@ def render_opening_portfolio_report(live_portfolio: dict) -> str:
     )
 
     lines = [
-        "APERTURA DE MERCADO - PORTFOLIO ACTUALIZADO",
+        title,
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"Total apertura: <b>${total:,.0f} ARS</b>".replace(",", "."),
         f"Invertido: <b>${invested:,.0f} ARS</b>".replace(",", "."),
         f"Cash: <b>${cash:,.0f} ARS</b>".replace(",", "."),
+        (
+            f"Variacion post-open: <b>{day_change:+.2%}</b> "
+            f"(<b>${day_pnl:,.0f} ARS</b>)".replace(",", ".")
+            if day_change is not None
+            else "Variacion post-open: <b>N/A</b>"
+        ),
         f"Cobertura precios: <b>{covered}/{positions_count}</b>",
         "",
         "<b>Posiciones</b>",
@@ -226,15 +275,20 @@ def render_opening_portfolio_report(live_portfolio: dict) -> str:
         weight = _safe_float(position.get("weight_in_portfolio"))
         price = _safe_float(position.get("current_price"))
         change = position.get("change_pct_1d")
+        day_pnl_pos = position.get("day_pnl_ars")
         source = str(position.get("price_source") or "snapshot")
         change_txt = f" · {change:+.2%}" if change is not None else ""
+        pnl_txt = (
+            f" · PnL dia {_fmt_ars(day_pnl_pos, signed=True)}"
+            if day_pnl_pos is not None
+            else ""
+        )
         source_txt = "mkt" if source == "market_prices" else "snap"
         lines.append(
-            f"• <b>{ticker}</b>: ${value:,.0f} ARS · {weight:.1%} "
-            f"· ${price:,.2f}{change_txt} · {source_txt}"
-            .replace(",", ".")
+            f"• <b>{ticker}</b>: {_fmt_ars(value)} ARS · {weight:.1%} "
+            f"· {_fmt_price_ars(price)}{change_txt}{pnl_txt} · {source_txt}"
         )
 
     lines.append("")
-    lines.append("<i>Precios desde market_prices de apertura; posiciones/cash desde snapshot real Cocos.</i>")
+    lines.append("<i>Plan EOD = proxima rueda. Este reporte marca cartera post-open con precios operables.</i>")
     return "\n".join(lines)
