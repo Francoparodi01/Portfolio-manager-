@@ -992,14 +992,16 @@ async def _save_execution_plan_events(
         if forced_reason:
             layers_payload["forced_reason"] = forced_reason
 
-        exists = await conn.fetchval(
+        existing_id = await conn.fetchval(
             """
-            SELECT 1
+            SELECT id
             FROM decision_log
             WHERE ticker = $1
               AND decision = $2
               AND decision_date = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+              AND COALESCE(source, layers->>'source') = 'execution_plan'
               AND COALESCE(owner_chat_id, 0) = COALESCE($3::bigint, 0)
+            ORDER BY decided_at DESC
             LIMIT 1
             """,
             ticker,
@@ -1007,18 +1009,111 @@ async def _save_execution_plan_events(
             owner_chat_id,
         )
 
-        if exists:
+        size_pct = abs(delta_weight) if delta_weight else (
+            _safe_float(amount_ars, 0.0) / total_ars if total_ars else 0.0
+        )
+
+        if existing_id:
+            matched_movements = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM decision_log dl
+                JOIN broker_movements bm
+                  ON bm.ticker = dl.ticker
+                 AND bm.movement_type IN (
+                    dl.decision,
+                    CASE WHEN dl.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
+                 )
+                 AND bm.executed_at >= (
+                    CASE
+                        WHEN dl.next_executable_at IS NOT NULL THEN dl.next_executable_at
+                        WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        ELSE dl.decided_at
+                    END
+                 )
+                 AND bm.executed_at < NOW()
+                 AND bm.quantity IS NOT NULL
+                 AND bm.price IS NOT NULL
+                WHERE dl.id = $1
+                """,
+                int(existing_id),
+            )
+            if matched_movements:
+                logger.info(
+                    "ExecutionPlan %s %s already has real movement; creating a new signal",
+                    decision,
+                    ticker,
+                )
+                existing_id = None
+
+        if existing_id:
+            await conn.execute(
+                """
+                UPDATE decision_log SET
+                    decided_at = $2,
+                    final_score = $3,
+                    confidence = $4,
+                    layers = $5::jsonb,
+                    price_at_decision = $6,
+                    vix_at_decision = $7,
+                    regime = $8,
+                    size_pct = $9,
+                    decision_type = $10,
+                    source = $11,
+                    status = $12,
+                    block_reason = $13,
+                    theoretical_amount_ars = $14,
+                    executed_amount_ars = $15,
+                    current_weight = $16,
+                    target_weight = $17,
+                    delta_weight = $18,
+                    is_executable = $19,
+                    was_blocked = $20,
+                    outcome_5d = NULL,
+                    outcome_10d = NULL,
+                    outcome_20d = NULL,
+                    was_correct = NULL,
+                    outcome_filled_at = NULL,
+                    next_executable_at = NULL,
+                    next_executable_price = NULL,
+                    executable_outcome_5d = NULL,
+                    executable_outcome_10d = NULL,
+                    executable_outcome_20d = NULL,
+                    executable_was_correct = NULL
+                WHERE id = $1
+                """,
+                int(existing_id),
+                datetime.now(timezone.utc),
+                final_score,
+                confidence,
+                _json.dumps(layers_payload),
+                price,
+                vix,
+                str(macro_regime),
+                size_pct,
+                decision_type,
+                "execution_plan",
+                status,
+                block_reason,
+                theoretical_ars,
+                amount_ars if is_executable else 0.0,
+                current_weight,
+                target_weight,
+                delta_weight,
+                bool(is_executable),
+                bool(was_blocked),
+            )
             logger.info(
-                "Dedup execution_plan: %s %s status=%s ya existe en últimas 20h — skip",
+                "ExecutionPlan updated: id=%s %s %s status=%s",
+                existing_id,
                 decision,
                 ticker,
                 status,
             )
-            return None
-
-        size_pct = abs(delta_weight) if delta_weight else (
-            _safe_float(amount_ars, 0.0) / total_ars if total_ars else 0.0
-        )
+            return int(existing_id)
 
         row = await conn.fetchrow(
             """

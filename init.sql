@@ -477,7 +477,7 @@ CREATE INDEX IF NOT EXISTS idx_decision_log_decided_at
     ON decision_log(decided_at DESC);
 
 DROP INDEX IF EXISTS idx_decision_log_unique_daily_action;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_log_unique_daily_action
+CREATE INDEX IF NOT EXISTS idx_decision_log_daily_action_lookup
     ON decision_log(
         COALESCE(owner_chat_id, 0),
         ticker,

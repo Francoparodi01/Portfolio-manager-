@@ -367,7 +367,7 @@ def render_performance_report(stats: dict) -> str:
     header = [
         "📊 <b>PERFORMANCE DEL SISTEMA</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"📅 Últimos {days} días | {datetime.now().strftime('%d/%m/%Y %H:%M')} ART",
+        f"📅 Últimos {days} días | {datetime.now(ART).strftime('%d/%m/%Y %H:%M')} ART",
         "",
     ]
 
@@ -455,7 +455,7 @@ def render_performance_report(stats: dict) -> str:
             outcome = r.get("outcome_5d")
             correct = r.get("was_correct")
             decided = r.get("decided_at")
-            date_str = decided.strftime("%d/%m") if decided else "?"
+            date_str = decided.astimezone(ART).strftime("%d/%m") if decided else "?"
 
             source = r.get("source") or None
             status = r.get("status") or None
@@ -795,7 +795,7 @@ def render_performance_report(stats: dict) -> str:
     ev_title, ev_note = _ev_scope(stats.get("dataset_stats", []))
     lines = [
         "📊 <b>Performance</b>",
-        f"Periodo: <b>{days} dias</b> | {datetime.now().strftime('%d/%m/%Y %H:%M')} ART",
+        f"Periodo: <b>{days} dias</b> | {datetime.now(ART).strftime('%d/%m/%Y %H:%M')} ART",
         "",
         "<b>Resumen</b>",
         *[f"   {escape(line)}" for line in _friendly_summary(stats, ev_title)],
@@ -868,7 +868,7 @@ def render_performance_report(stats: dict) -> str:
     recent = stats.get("recent", [])
     if recent:
         lines += ["", "<b>Ultimas decisiones</b>"]
-        closed_reason = market_closed_reason(datetime.now())
+        closed_reason = market_closed_reason(datetime.now(ART))
         for r in recent[:6]:
             ticker = escape(str(r.get("ticker", "?")))
             direction = escape(str(r.get("decision", "?")))
@@ -876,7 +876,7 @@ def render_performance_report(stats: dict) -> str:
             outcome = r.get("outcome_5d")
             correct = r.get("was_correct")
             decided = r.get("decided_at")
-            date_str = decided.strftime("%d/%m") if decided else "?"
+            date_str = decided.astimezone(ART).strftime("%d/%m") if decided else "?"
             source = r.get("source")
             status = r.get("status")
             tag_parts = [str(v) for v in (source, status) if v]

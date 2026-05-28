@@ -82,7 +82,7 @@ MARKET_POLL_SECONDS = 90       # frecuencia del loop de mercado
 RISK_POLL_SECONDS = 60         # frecuencia del risk guard
 PORTFOLIO_REFRESH_SECONDS = int(os.getenv("PORTFOLIO_REFRESH_SECONDS", "300"))
 PORTFOLIO_OFFHOURS_REFRESH_SECONDS = 3600
-COCOS_SYNC_FILLS = os.getenv("COCOS_SYNC_FILLS", "false").lower() == "true"
+COCOS_SYNC_FILLS = os.getenv("COCOS_SYNC_FILLS", "true").lower() == "true"
 FILL_REFRESH_SECONDS = int(os.getenv("FILL_REFRESH_SECONDS", "3600"))
 PORTFOLIO_CACHE_TTL_SECONDS = int(os.getenv("PORTFOLIO_CACHE_TTL_SECONDS", "600"))
 PORTFOLIO_LIVE_POLL_SECONDS = int(os.getenv("PORTFOLIO_LIVE_POLL_SECONDS", "60"))

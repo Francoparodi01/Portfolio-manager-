@@ -115,6 +115,14 @@ async def _fetch_audit_rows(
                 COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
                 next_executable_at,
                 next_executable_price,
+                CASE
+                    WHEN next_executable_at IS NOT NULL THEN next_executable_at
+                    WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                        THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                    WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+                        THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                    ELSE decided_at
+                END AS match_start_at,
                 layers->>'reason' AS reason
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
@@ -139,8 +147,8 @@ async def _fetch_audit_rows(
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = d.decision
-              AND bm.executed_at >= d.decided_at
-              AND bm.executed_at < d.decided_at + ($2::int * INTERVAL '1 day')
+              AND bm.executed_at >= d.match_start_at
+              AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
               AND bm.quantity IS NOT NULL
               AND bm.price IS NOT NULL
         ) same_fill ON TRUE
@@ -151,8 +159,8 @@ async def _fetch_audit_rows(
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = CASE WHEN d.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
-              AND bm.executed_at >= d.decided_at
-              AND bm.executed_at < d.decided_at + ($2::int * INTERVAL '1 day')
+              AND bm.executed_at >= d.match_start_at
+              AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
               AND bm.quantity IS NOT NULL
               AND bm.price IS NOT NULL
         ) opposite_fill ON TRUE
@@ -186,8 +194,26 @@ async def _fetch_audit_rows(
                 AND dl.status = 'APPROVED'
                 AND dl.decision_type = 'executable'
                 AND ($3::bigint IS NULL OR dl.owner_chat_id = $3)
-                AND dl.decided_at <= bm.executed_at
-                AND dl.decided_at >= bm.executed_at - ($2::int * INTERVAL '1 day')
+                AND (
+                    CASE
+                        WHEN dl.next_executable_at IS NOT NULL THEN dl.next_executable_at
+                        WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        ELSE dl.decided_at
+                    END
+                ) <= bm.executed_at
+                AND (
+                    CASE
+                        WHEN dl.next_executable_at IS NOT NULL THEN dl.next_executable_at
+                        WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        ELSE dl.decided_at
+                    END
+                ) >= bm.executed_at - ($2::int * INTERVAL '1 day')
           )
         ORDER BY bm.executed_at DESC
         LIMIT 12

@@ -627,6 +627,14 @@ async def override_audit(request: web.Request) -> web.Response:
                     COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
                     next_executable_at,
                     next_executable_price,
+                    CASE
+                        WHEN next_executable_at IS NOT NULL THEN next_executable_at
+                        WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                            THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+                            THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        ELSE decided_at
+                    END AS match_start_at,
                     layers->>'reason' AS reason
                 FROM decision_log
                 WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
@@ -654,8 +662,8 @@ async def override_audit(request: web.Request) -> web.Response:
                 FROM broker_movements bm
                 WHERE bm.ticker = d.ticker
                   AND bm.movement_type = d.decision
-                  AND bm.executed_at >= d.decided_at
-                  AND bm.executed_at < d.decided_at + ($2::int * INTERVAL '1 day')
+                  AND bm.executed_at >= d.match_start_at
+                  AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
                   AND bm.quantity IS NOT NULL
                   AND bm.price IS NOT NULL
             ) same_fill ON TRUE
@@ -664,8 +672,8 @@ async def override_audit(request: web.Request) -> web.Response:
                 FROM broker_movements bm
                 WHERE bm.ticker = d.ticker
                   AND bm.movement_type = CASE WHEN d.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
-                  AND bm.executed_at >= d.decided_at
-                  AND bm.executed_at < d.decided_at + ($2::int * INTERVAL '1 day')
+                  AND bm.executed_at >= d.match_start_at
+                  AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
                   AND bm.quantity IS NOT NULL
                   AND bm.price IS NOT NULL
             ) opposite_fill ON TRUE
