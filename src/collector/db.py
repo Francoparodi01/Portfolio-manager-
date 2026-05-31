@@ -673,6 +673,35 @@ class PortfolioDatabase:
             )
         return [dict(r) for r in rows]
 
+    async def get_previous_candle_closes(
+        self,
+        tickers: list[str],
+        *,
+        before_day: Optional[date] = None,
+    ) -> dict[str, float]:
+        if not self._pool or not tickers:
+            return {}
+        clean = sorted({str(t).upper() for t in tickers if str(t or "").strip()})
+        if not clean:
+            return {}
+        before_day = before_day or datetime.now(ART_TZ).date()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (ticker)
+                    ticker, close_price
+                FROM market_candles
+                WHERE ticker = ANY($1::text[])
+                  AND close_price IS NOT NULL
+                  AND close_price > 0
+                  AND ts::date < $2::date
+                ORDER BY ticker, ts DESC
+                """,
+                clean,
+                before_day,
+            )
+        return {str(r["ticker"]).upper(): float(r["close_price"]) for r in rows}
+
     async def get_cocos_universe(self) -> list[str]:
         prices = await self.get_cocos_universe_assets()
         tickers = sorted({

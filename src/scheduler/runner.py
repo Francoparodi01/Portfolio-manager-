@@ -34,7 +34,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 try:
@@ -83,7 +83,7 @@ RISK_POLL_SECONDS = 60         # frecuencia del risk guard
 PORTFOLIO_REFRESH_SECONDS = int(os.getenv("PORTFOLIO_REFRESH_SECONDS", "300"))
 PORTFOLIO_OFFHOURS_REFRESH_SECONDS = 3600
 COCOS_SYNC_FILLS = os.getenv("COCOS_SYNC_FILLS", "true").lower() == "true"
-FILL_REFRESH_SECONDS = int(os.getenv("FILL_REFRESH_SECONDS", "3600"))
+FILL_REFRESH_SECONDS = int(os.getenv("FILL_REFRESH_SECONDS", "300"))
 PORTFOLIO_CACHE_TTL_SECONDS = int(os.getenv("PORTFOLIO_CACHE_TTL_SECONDS", "600"))
 PORTFOLIO_LIVE_POLL_SECONDS = int(os.getenv("PORTFOLIO_LIVE_POLL_SECONDS", "60"))
 PORTFOLIO_ALERT_MAJOR_PCT = float(os.getenv("PORTFOLIO_ALERT_MAJOR_PCT", "0.03"))
@@ -433,7 +433,11 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
                 snapshot_payload = snapshot.to_dict()
                 await _cache_snapshot(snapshot)
 
-            latest_prices = await db.get_latest_market_prices()
+            latest_prices = await _latest_prices_with_previous_close(
+                db,
+                [p.get("ticker") for p in snapshot_payload.get("positions") or []],
+                now.date(),
+            )
             live_portfolio = build_live_portfolio(snapshot_payload, latest_prices)
             await cache_live_portfolio(
                 live_portfolio,
@@ -470,6 +474,25 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
             await db.close()
 
     return result
+
+
+async def _latest_prices_with_previous_close(
+    db: PortfolioDatabase,
+    tickers: list,
+    today: date,
+) -> list[dict]:
+    latest_prices = await db.get_latest_market_prices()
+    wanted = {str(t or "").upper() for t in tickers if str(t or "").strip()}
+    previous_closes = await db.get_previous_candle_closes(
+        list(wanted),
+        before_day=today,
+    )
+    for row in latest_prices:
+        ticker = str(row.get("ticker") or "").upper()
+        previous_close = previous_closes.get(ticker)
+        if previous_close:
+            row["previous_close_price"] = previous_close
+    return latest_prices
 
 
 def _post_open_quality_warning(live_portfolio: dict, now: datetime) -> str | None:
@@ -551,7 +574,11 @@ async def run_post_open_portfolio_report(run_type: str = "10:45_POST_OPEN_PORTFO
             logger.warning("run_post_open_portfolio_report [%s]: sin snapshot", run_type)
             return result
 
-        latest_prices = await db.get_latest_market_prices()
+        latest_prices = await _latest_prices_with_previous_close(
+            db,
+            [p.get("ticker") for p in snapshot.get("positions") or []],
+            now.date(),
+        )
         live_portfolio = build_live_portfolio(snapshot, latest_prices)
         warning = _post_open_quality_warning(live_portfolio, now)
         if warning:
@@ -1082,7 +1109,11 @@ class IntradayManager:
                     await asyncio.sleep(PORTFOLIO_LIVE_POLL_SECONDS)
                     continue
 
-                latest_prices = await db.get_latest_market_prices()
+                latest_prices = await _latest_prices_with_previous_close(
+                    db,
+                    [p.get("ticker") for p in snapshot.get("positions") or []],
+                    _now_art().date(),
+                )
                 live_portfolio = build_live_portfolio(snapshot, latest_prices)
                 await cache_live_portfolio(
                     live_portfolio,

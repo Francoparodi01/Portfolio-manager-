@@ -77,11 +77,14 @@ def build_live_portfolio(
         price = latest_price if latest_price > 0 and price_is_fresh else fallback_price
         market_value = quantity * price if quantity > 0 and price > 0 else _safe_float(raw.get("market_value"))
         change_pct_1d = latest.get("change_pct_1d")
+        previous_close_price = _safe_float(latest.get("previous_close_price"))
         change_pct_1d_f = (
             _safe_float(change_pct_1d)
             if change_pct_1d is not None
             else None
         )
+        if previous_close_price > 0 and latest_price > 0 and price_is_fresh:
+            change_pct_1d_f = (latest_price - previous_close_price) / previous_close_price
         day_pnl_ars = None
         if change_pct_1d_f is not None and change_pct_1d_f > -0.99 and market_value:
             prev_value = market_value / (1.0 + change_pct_1d_f)
@@ -100,6 +103,7 @@ def build_live_portfolio(
             market_value=market_value,
             change_pct_1d=change_pct_1d_f,
             day_pnl_ars=day_pnl_ars,
+            previous_close_price=previous_close_price if previous_close_price > 0 else None,
             price_source="market_prices" if latest_price > 0 and price_is_fresh else "snapshot",
             market_price_ts=market_price_ts,
         )

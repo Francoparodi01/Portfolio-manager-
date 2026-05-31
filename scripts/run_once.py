@@ -102,9 +102,11 @@ async def main(
                     saved_movements = await db.save_broker_movements(movements)
                     saved = await db.save_broker_fills(broker_fills)
                     reconciled = await db.reconcile_broker_fills()
+                    materialized = await db.materialize_unmatched_broker_fills()
                     logger.info("  Movimientos guardados: %s", saved_movements)
                     logger.info("  Fills guardados: %s", saved)
                     logger.info("  Fills reconciliados: %s", reconciled)
+                    logger.info("  Fills manuales materializados: %s", materialized)
 
     except Exception as e:
         logger.error(f"Error en run manual: {e}", exc_info=True)

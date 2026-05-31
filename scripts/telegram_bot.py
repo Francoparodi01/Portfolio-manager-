@@ -442,6 +442,24 @@ async def run_first_existing_script(
 # Menú principal
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def sync_operational_state(*, full: bool = False) -> str:
+    args = ["scripts/run_once.py", "--no-telegram", "--fills"]
+    if full:
+        args.append("--full")
+    rc, out, err, _elapsed = await run_cmd(
+        [sys.executable, *args],
+        timeout=360 if full else 240,
+    )
+    if rc == 0:
+        return ""
+    detail = err[-1600:] or out[-1600:] or "sin detalle"
+    return (
+        "<b>Advertencia:</b> no pude refrescar Cocos antes del reporte. "
+        "Muestro la lectura con la DB disponible.\n"
+        f"<code>{detail}</code>\n\n"
+    )
+
+
 def main_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [
@@ -744,6 +762,7 @@ async def action_weekly_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int
 
 async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     owner_args = _owner_cli_args(chat_id)
+    sync_note = await sync_operational_state(full=True)
     report = await run_first_existing_script(
         [
             ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--no-sentiment", *owner_args],
@@ -753,7 +772,7 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
         ],
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
-    await send_text(context, chat_id, report)
+    await send_text(context, chat_id, sync_note + report)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -761,6 +780,7 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    sync_note = await sync_operational_state(full=False)
     report = await run_python_script(
         "scripts/run_performance.py",
         "--days",
@@ -769,10 +789,11 @@ async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
         *_owner_cli_args(chat_id),
         timeout=240,
     )
-    await send_text(context, chat_id, report)
+    await send_text(context, chat_id, sync_note + report)
 
 
 async def action_override_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    sync_note = await sync_operational_state(full=False)
     report = await run_python_script(
         "scripts/run_override_audit.py",
         "--days",
@@ -781,7 +802,7 @@ async def action_override_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int
         *_owner_cli_args(chat_id),
         timeout=240,
     )
-    await send_text(context, chat_id, report)
+    await send_text(context, chat_id, sync_note + report)
 
 
 async def action_confidence_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
