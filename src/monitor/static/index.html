@@ -488,6 +488,34 @@
     .subtle { color: var(--muted); font-size: 12px; }
 
     /* ─── RESPONSIVE ─────────────────────────────────── */
+    .metric-label {
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 8px;
+    }
+
+    .override-badge {
+      display: inline-flex;
+      align-items: center;
+      height: 20px;
+      padding: 0 7px;
+      border-radius: 3px;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+    .ob-followed { background: rgba(255,255,255,0.1);  color: #fff; }
+    .ob-partial  { background: rgba(58,184,216,0.15); color: var(--teal); }
+    .ob-ignored  { background: rgba(107,124,135,0.12); color: var(--muted); }
+    .ob-opposite { background: rgba(240,184,74,0.15);  color: var(--amber); }
+
+    .red-text { color: var(--red); }
+
     @media (max-width: 980px) {
       .topbar { grid-template-columns: 1fr; }
       .auth, .auth.totp { grid-template-columns: minmax(0,1fr) 92px; }
@@ -613,10 +641,15 @@
           <div>
             <svg class="chart" id="scoreScatter" viewBox="0 0 600 200" preserveAspectRatio="none"></svg>
             <div class="legend">
-              <span><i class="legend-dot" style="background: var(--green)"></i> outcome positivo</span>
-              <span><i class="legend-dot" style="background: var(--red)"></i> outcome negativo</span>
+              <span><i class="legend-dot" style="background: var(--green)"></i> outcome +</span>
+              <span><i class="legend-dot" style="background: var(--red)"></i> outcome −</span>
               <span><i class="legend-dot"></i> BUY</span>
               <span><i class="legend-sell"></i> SELL</span>
+              <span style="margin-left:8px;border-left:1px solid var(--line2);padding-left:12px">borde:</span>
+              <span><i class="legend-dot" style="background:transparent;border:2px solid #fff;box-sizing:border-box"></i> FOLLOWED</span>
+              <span><i class="legend-dot" style="background:transparent;border:2px solid var(--teal);box-sizing:border-box"></i> PARTIAL</span>
+              <span><i class="legend-dot" style="background:transparent;border:1.5px solid var(--muted);box-sizing:border-box;opacity:.6"></i> IGNORED</span>
+              <span><i class="legend-dot" style="background:transparent;border:2px solid var(--amber);box-sizing:border-box"></i> OPPOSITE</span>
             </div>
             <div class="chart-note" title="Eje X: final_score al momento de la decision. Eje Y: retorno 5D, usando precio ejecutable de proxima rueda cuando existe. Verde es retorno positivo, rojo negativo.">
               X: score final al decidir · Y: resultado 5D ejecutable cuando existe.
@@ -639,6 +672,30 @@
         <table>
           <thead><tr><th>Hora</th><th>Ticker</th><th>Bot</th><th>Estado humano</th><th>Outcome</th></tr></thead>
           <tbody id="overrideTable"></tbody>
+        </table>
+      </article>
+
+      <article class="card full">
+        <div class="row-head">
+          <h2>Análisis Humano — ¿Cuándo agregás valor?</h2>
+          <span class="pill">90 dias · outcomes cerrados</span>
+        </div>
+        <div class="chart-note" style="margin-bottom:14px">
+          Compara el retorno 5D real según cómo respondiste a la señal del bot. Si FOLLOWED &gt; IGNORED, seguir al bot suma. Si OPPOSITE &gt; FOLLOWED, tu criterio supera al modelo.
+        </div>
+        <div class="panel-split">
+          <div>
+            <div class="metric-label">Win Rate por decisión</div>
+            <div class="bars" id="humanWinRates"></div>
+          </div>
+          <div>
+            <div class="metric-label">Retorno promedio 5D por decisión</div>
+            <div class="bars" id="humanAvgOutcome"></div>
+          </div>
+        </div>
+        <table style="margin-top:18px">
+          <thead><tr><th>Decisión humana</th><th>Outcomes cerrados</th><th>Win rate</th><th>Avg 5D</th></tr></thead>
+          <tbody id="humanSummaryTable"></tbody>
         </table>
       </article>
 
@@ -706,6 +763,7 @@
       performanceDays: 7,
       selectedTicker: "",
       performanceData: null,
+      overrideLookup: {},   // key: ticker_DECISION_DD/MM → override_status
     };
 
     $("token").value = state.token;
@@ -840,6 +898,18 @@
       `;
     }
 
+    // Stroke color and width per override_status
+    const OVERRIDE_STROKE = {
+      FOLLOWED: { color: "#ffffff", width: 2.2, opacity: 1 },
+      PARTIAL:  { color: "#3ab8d8", width: 2,   opacity: 0.9 },
+      IGNORED:  { color: "#6b7c87", width: 1.5, opacity: 0.55 },
+      OPPOSITE: { color: "#f0b84a", width: 2.2, opacity: 1 },
+    };
+
+    function overrideLookupKey(ticker, decision, decided_at) {
+      return `${ticker}_${String(decision).toUpperCase()}_${fmtShortDate(decided_at)}`;
+    }
+
     function renderScatter(svg, points) {
       const width = 600;
       const height = 200;
@@ -861,13 +931,20 @@
       const marks = points.map((p) => {
         const x = pad + ((Number(p.final_score) - minX) / spanX) * (width - pad * 2);
         const y = height - pad - ((Number(p.outcome_5d) - minY) / spanY) * (height - pad * 2);
-        const color = Number(p.outcome_5d) >= 0 ? "var(--green)" : "var(--red)";
-        const title = `${p.ticker} · ${p.decision} · ${fmtShortDate(p.decided_at)}\nscore ${fmtScore(p.final_score)} · outcome 5D ${fmtPct(p.outcome_5d)}\nestado ${p.status || "-"} · fuente ${p.source || "-"}`;
+        const fillColor = Number(p.outcome_5d) >= 0 ? "var(--green)" : "var(--red)";
+        const overrideKey = overrideLookupKey(p.ticker, p.decision, p.decided_at);
+        const overrideStatus = state.overrideLookup[overrideKey] || null;
+        const stroke = OVERRIDE_STROKE[overrideStatus] || { color: "none", width: 0, opacity: 0.7 };
+        const title = `${p.ticker} · ${p.decision} · ${fmtShortDate(p.decided_at)}\nscore ${fmtScore(p.final_score)} · outcome 5D ${fmtPct(p.outcome_5d)}\ndecision humana: ${overrideStatus || "sin match"} · estado ${p.status || "-"}`;
+        const baseOpacity = stroke.color === "none" ? 0.6 : stroke.opacity;
+        const strokeAttr = stroke.color !== "none"
+          ? `stroke="${stroke.color}" stroke-width="${stroke.width}"`
+          : `stroke="none"`;
         if (String(p.decision || "").toUpperCase() === "SELL") {
-          const path = `${x.toFixed(1)},${(y - 5).toFixed(1)} ${(x - 5).toFixed(1)},${(y + 5).toFixed(1)} ${(x + 5).toFixed(1)},${(y + 5).toFixed(1)}`;
-          return `<polygon points="${path}" fill="${color}" opacity=".85"><title>${title}</title></polygon>`;
+          const path = `${x.toFixed(1)},${(y - 6).toFixed(1)} ${(x - 6).toFixed(1)},${(y + 5).toFixed(1)} ${(x + 6).toFixed(1)},${(y + 5).toFixed(1)}`;
+          return `<polygon points="${path}" fill="${fillColor}" ${strokeAttr} opacity="${baseOpacity}" vector-effect="non-scaling-stroke"><title>${title}</title></polygon>`;
         }
-        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${color}" opacity=".8"><title>${title}</title></circle>`;
+        return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" fill="${fillColor}" ${strokeAttr} opacity="${baseOpacity}" vector-effect="non-scaling-stroke"><title>${title}</title></circle>`;
       }).join("");
       svg.innerHTML = `
         <line x1="${pad}" y1="${y0}" x2="${width - pad}" y2="${y0}" stroke="rgba(255,255,255,.12)" />
@@ -1004,6 +1081,14 @@
     function renderOverrideAudit(data) {
       const s = data.summary || {};
       const byStatus = s.by_status || {};
+
+      // Build lookup for scatter override encoding
+      state.overrideLookup = {};
+      (data.recent || []).forEach((row) => {
+        const key = overrideLookupKey(row.ticker, row.decision, row.decided_at);
+        state.overrideLookup[key] = row.override_status;
+      });
+
       $("overrideWindow").textContent = `${data.days} dias`;
       $("overrideUpdated").textContent = `Bot vs Humano actualizado hace ${ageFromIso(data.generated_at)}`;
       $("overrideSummary").innerHTML = `
@@ -1021,10 +1106,104 @@
           <td>${fmtDate(row.decided_at)}</td>
           <td>${row.ticker || "-"}</td>
           <td>${row.decision || "-"}</td>
-          <td>${row.override_status || "-"}</td>
-          <td>${row.outcome_5d === null || row.outcome_5d === undefined ? "pend." : fmtPct(row.outcome_5d)}</td>
+          <td><span class="override-badge ob-${(row.override_status||"").toLowerCase()}">${row.override_status || "-"}</span></td>
+          <td class="${row.outcome_5d >= 0 ? 'money' : 'red-text'}">${row.outcome_5d === null || row.outcome_5d === undefined ? "pend." : fmtPct(row.outcome_5d)}</td>
         </tr>
       `).join("") || `<tr><td colspan="5" class="subtle">Sin planes aprobados recientes</td></tr>`;
+
+      // Render comparison charts
+      renderHumanAnalysis(data.recent || []);
+    }
+
+    function renderHumanAnalysis(rows) {
+      const statuses = ["FOLLOWED", "PARTIAL", "IGNORED", "OPPOSITE"];
+      const colors = {
+        FOLLOWED: "#ffffff",
+        PARTIAL:  "#3ab8d8",
+        IGNORED:  "#6b7c87",
+        OPPOSITE: "#f0b84a",
+      };
+      const labels = {
+        FOLLOWED: "Seguido",
+        PARTIAL:  "Parcial",
+        IGNORED:  "Ignorado",
+        OPPOSITE: "Opuesto",
+      };
+
+      // Group closed outcomes by override_status
+      const groups = {};
+      statuses.forEach((s) => { groups[s] = { outcomes: [], wins: 0 }; });
+      rows.forEach((row) => {
+        const st = row.override_status;
+        if (!st || !groups[st]) return;
+        if (row.outcome_5d === null || row.outcome_5d === undefined) return;
+        const v = Number(row.outcome_5d);
+        if (!Number.isFinite(v)) return;
+        groups[st].outcomes.push(v);
+        if (v >= 0) groups[st].wins++;
+      });
+
+      // Win rate bars
+      const winRateRows = statuses.map((st) => {
+        const g = groups[st];
+        const rate = g.outcomes.length ? g.wins / g.outcomes.length : null;
+        return { label: labels[st], value: rate, count: g.outcomes.length, color: colors[st], status: st };
+      });
+
+      // Avg outcome bars
+      const avgRows = statuses.map((st) => {
+        const g = groups[st];
+        const avg = g.outcomes.length ? g.outcomes.reduce((a, b) => a + b, 0) / g.outcomes.length : null;
+        return { label: labels[st], value: avg, count: g.outcomes.length, color: colors[st], status: st };
+      });
+
+      $("humanWinRates").innerHTML = renderHumanBars(winRateRows, "winrate");
+      $("humanAvgOutcome").innerHTML = renderHumanBars(avgRows, "avg");
+
+      // Scatter by override — mini summary table
+      const summaryRows = statuses.map((st) => {
+        const g = groups[st];
+        const n = g.outcomes.length;
+        const wr = n ? (g.wins / n * 100).toFixed(0) + "%" : "-";
+        const avg = n ? fmtPct(g.outcomes.reduce((a,b)=>a+b,0)/n) : "-";
+        const color = colors[st];
+        return `<tr>
+          <td><span class="override-badge ob-${st.toLowerCase()}">${labels[st]}</span></td>
+          <td style="font-family:var(--mono);color:var(--muted)">${n}</td>
+          <td style="font-family:var(--mono);color:${n ? (g.wins/n>=0.5?'var(--green)':'var(--red)') : 'var(--muted)'}">${wr}</td>
+          <td style="font-family:var(--mono);color:${n && g.outcomes.reduce((a,b)=>a+b,0)/n>=0?'var(--green)':'var(--red)'}">${avg}</td>
+        </tr>`;
+      }).join("");
+      $("humanSummaryTable").innerHTML = summaryRows || `<tr><td colspan="4" class="subtle">Sin datos cerrados</td></tr>`;
+    }
+
+    function renderHumanBars(rows, mode) {
+      const hasData = rows.some((r) => r.value !== null);
+      if (!hasData) return `<div class="empty-state" style="min-height:40px">Sin outcomes cerrados todavia</div>`;
+
+      const absMax = mode === "winrate"
+        ? 1
+        : Math.max(...rows.filter(r => r.value !== null).map(r => Math.abs(r.value)), 0.01);
+
+      return rows.map((row) => {
+        if (row.value === null) {
+          return `<div class="bar-row">
+            <span style="color:${row.color}">${row.label}</span>
+            <span class="bar-track"><span class="bar-fill" style="width:0%;background:${row.color}"></span></span>
+            <b style="color:var(--muted)">n=${row.count}</b>
+          </div>`;
+        }
+        const width = Math.max(2, Math.abs(row.value) / absMax * 100);
+        const isNeg = row.value < 0;
+        const displayVal = mode === "winrate"
+          ? (row.value * 100).toFixed(0) + "%"
+          : fmtPct(row.value);
+        return `<div class="bar-row">
+          <span style="color:${row.color}">${row.label}</span>
+          <span class="bar-track"><span class="bar-fill" style="width:${width}%;background:${isNeg ? 'var(--red)' : row.color}"></span></span>
+          <b style="color:${isNeg ? 'var(--red)' : row.color}">${displayVal} <span style="color:var(--muted);font-size:10px">n=${row.count}</span></b>
+        </div>`;
+      }).join("");
     }
 
     function renderCandles(data) {
