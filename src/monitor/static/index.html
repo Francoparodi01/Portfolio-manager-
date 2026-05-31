@@ -510,6 +510,7 @@
       letter-spacing: 0.04em;
     }
     .ob-followed { background: rgba(255,255,255,0.1);  color: #fff; }
+    .ob-overfollowed { background: rgba(80,255,190,0.16); color: var(--green); }
     .ob-partial  { background: rgba(58,184,216,0.15); color: var(--teal); }
     .ob-ignored  { background: rgba(107,124,135,0.12); color: var(--muted); }
     .ob-opposite { background: rgba(240,184,74,0.15);  color: var(--amber); }
@@ -647,6 +648,7 @@
               <span><i class="legend-sell"></i> SELL</span>
               <span style="margin-left:8px;border-left:1px solid var(--line2);padding-left:12px">borde:</span>
               <span><i class="legend-dot" style="background:transparent;border:2px solid #fff;box-sizing:border-box"></i> FOLLOWED</span>
+              <span><i class="legend-dot" style="background:transparent;border:2px solid var(--green);box-sizing:border-box"></i> OVER</span>
               <span><i class="legend-dot" style="background:transparent;border:2px solid var(--teal);box-sizing:border-box"></i> PARTIAL</span>
               <span><i class="legend-dot" style="background:transparent;border:1.5px solid var(--muted);box-sizing:border-box;opacity:.6"></i> IGNORED</span>
               <span><i class="legend-dot" style="background:transparent;border:2px solid var(--amber);box-sizing:border-box"></i> OPPOSITE</span>
@@ -666,7 +668,7 @@
         <div class="chart-note" id="overrideUpdated">-</div>
         <div class="summary-line" id="overrideSummary">-</div>
         <div class="metric"><span>Planes / intenciones</span><b id="overridePlans">-</b></div>
-        <div class="metric"><span>Seguidas / parciales</span><b class="blue" id="overrideFollowed">-</b></div>
+        <div class="metric"><span>Seguidas / sobre-ej.</span><b class="blue" id="overrideFollowed">-</b></div>
         <div class="metric"><span>Ignoradas / opuestas</span><b class="amber" id="overrideIgnored">-</b></div>
         <div class="metric"><span>Cerradas 5D</span><b id="overrideClosed">-</b></div>
         <table>
@@ -901,6 +903,7 @@
     // Stroke color and width per override_status
     const OVERRIDE_STROKE = {
       FOLLOWED: { color: "#ffffff", width: 2.2, opacity: 1 },
+      OVERFOLLOWED: { color: "#36d399", width: 2.4, opacity: 1 },
       PARTIAL:  { color: "#3ab8d8", width: 2,   opacity: 0.9 },
       IGNORED:  { color: "#6b7c87", width: 1.5, opacity: 0.55 },
       OPPOSITE: { color: "#f0b84a", width: 2.2, opacity: 1 },
@@ -1090,23 +1093,24 @@
       });
 
       $("overrideWindow").textContent = `${data.days} dias`;
-      $("overrideUpdated").textContent = `Bot vs Humano actualizado hace ${ageFromIso(data.generated_at)}`;
+      $("overrideUpdated").textContent = `Bot vs Humano actualizado hace ${ageFromIso(data.generated_at)} Â· ${fmtNumber(s.repeated_plans || 0)} planes repetidos`;
       $("overrideSummary").innerHTML = `
         <span title="Seguido">Seguido: <b>${fmtNumber(byStatus.FOLLOWED || 0)}</b></span>
+        <span title="Mismo lado, tamano mayor al plan">Sobre: <b>${fmtNumber(byStatus.OVERFOLLOWED || 0)}</b></span>
         <span title="Parcial">Parcial: <b>${fmtNumber(byStatus.PARTIAL || 0)}</b></span>
         <span title="Ignorado">Ignorado: <b>${fmtNumber(byStatus.IGNORED || 0)}</b></span>
         <span title="Opuesto">Opuesto: <b>${fmtNumber(byStatus.OPPOSITE || 0)}</b></span>
       `;
       $("overridePlans").textContent = `${fmtNumber(s.plans)} / ${fmtNumber(s.unique_intents)}`;
-      $("overrideFollowed").textContent = `${fmtNumber(byStatus.FOLLOWED || 0)} / ${fmtNumber(byStatus.PARTIAL || 0)}`;
+      $("overrideFollowed").textContent = `${fmtNumber(byStatus.FOLLOWED || 0)} / ${fmtNumber(byStatus.OVERFOLLOWED || 0)}`;
       $("overrideIgnored").textContent = `${fmtNumber(byStatus.IGNORED || 0)} / ${fmtNumber(byStatus.OPPOSITE || 0)}`;
-      $("overrideClosed").textContent = fmtNumber(s.closed_5d);
+      $("overrideClosed").textContent = `${fmtNumber(s.closed_5d)} / ${fmtNumber(s.by_intent && s.by_intent.closed_5d)}`;
       $("overrideTable").innerHTML = (data.recent || []).slice(0, 10).map((row) => `
         <tr>
           <td>${fmtDate(row.decided_at)}</td>
           <td>${row.ticker || "-"}</td>
           <td>${row.decision || "-"}</td>
-          <td><span class="override-badge ob-${(row.override_status||"").toLowerCase()}">${row.override_status || "-"}</span></td>
+          <td><span class="override-badge ob-${(row.override_status||"").toLowerCase()}" title="Movimiento real: ${fmtMoney(row.same_amount_ars || 0)} / plan ${fmtMoney(row.target_amount_ars || 0)}">${row.override_status || "-"}</span></td>
           <td class="${row.outcome_5d >= 0 ? 'money' : 'red-text'}">${row.outcome_5d === null || row.outcome_5d === undefined ? "pend." : fmtPct(row.outcome_5d)}</td>
         </tr>
       `).join("") || `<tr><td colspan="5" class="subtle">Sin planes aprobados recientes</td></tr>`;
@@ -1116,15 +1120,17 @@
     }
 
     function renderHumanAnalysis(rows) {
-      const statuses = ["FOLLOWED", "PARTIAL", "IGNORED", "OPPOSITE"];
+      const statuses = ["FOLLOWED", "OVERFOLLOWED", "PARTIAL", "IGNORED", "OPPOSITE"];
       const colors = {
         FOLLOWED: "#ffffff",
+        OVERFOLLOWED: "#36d399",
         PARTIAL:  "#3ab8d8",
         IGNORED:  "#6b7c87",
         OPPOSITE: "#f0b84a",
       };
       const labels = {
         FOLLOWED: "Seguido",
+        OVERFOLLOWED: "Sobre-ej.",
         PARTIAL:  "Parcial",
         IGNORED:  "Ignorado",
         OPPOSITE: "Opuesto",

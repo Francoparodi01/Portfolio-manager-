@@ -3,7 +3,7 @@ Bot vs Humano audit.
 
 Read-only report:
 - compares approved execution_plan decisions vs real Cocos movements;
-- classifies FOLLOWED / PARTIAL / IGNORED / OPPOSITE;
+- classifies FOLLOWED / OVERFOLLOWED / PARTIAL / IGNORED / OPPOSITE;
 - when outcomes exist, estimates whether following the bot or ignoring it
   would have helped over 5D/10D/20D.
 
@@ -60,19 +60,39 @@ def _as_float(value, default: float = 0.0) -> float:
         return default
 
 
-def _classify(row: dict) -> str:
-    target = max(_as_float(row.get("target_amount_ars")), 1.0)
-    same = _as_float(row.get("same_amount_ars"))
-    opposite = _as_float(row.get("opposite_amount_ars"))
-    same_ratio = same / target
-    opposite_ratio = opposite / target
+STATUS_LABELS = {
+    "FOLLOWED": "FOLLOWED",
+    "OVERFOLLOWED": "OVERFOLLOWED",
+    "PARTIAL": "PARTIAL",
+    "IGNORED": "IGNORED",
+    "OPPOSITE": "OPPOSITE",
+}
 
+
+def _target(row: dict) -> float:
+    return max(_as_float(row.get("target_amount_ars")), 1.0)
+
+
+def _same_ratio(row: dict) -> float:
+    return _as_float(row.get("same_amount_ars")) / _target(row)
+
+
+def _opposite_ratio(row: dict) -> float:
+    return _as_float(row.get("opposite_amount_ars")) / _target(row)
+
+
+def _classify(row: dict) -> str:
+    same_ratio = _same_ratio(row)
+    opposite_ratio = _opposite_ratio(row)
+
+    if same_ratio < 0.15 and opposite_ratio >= 0.15:
+        return "OPPOSITE"
+    if same_ratio >= 1.35:
+        return "OVERFOLLOWED"
     if same_ratio >= 0.75:
         return "FOLLOWED"
     if same_ratio >= 0.15:
         return "PARTIAL"
-    if opposite_ratio >= 0.15:
-        return "OPPOSITE"
     return "IGNORED"
 
 
@@ -84,11 +104,65 @@ def _override_delta(status: str, bot_outcome: float | None) -> float | None:
         return -float(bot_outcome)
     if status == "OPPOSITE":
         return -float(bot_outcome)
-    if status == "FOLLOWED":
+    if status in {"FOLLOWED", "OVERFOLLOWED"}:
         return 0.0
     if status == "PARTIAL":
         return -0.5 * float(bot_outcome)
     return None
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _intent_level_summary(rows: list[dict]) -> dict:
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        key = (str(row.get("ticker") or "").upper(), str(row.get("decision") or "").upper())
+        groups.setdefault(key, []).append(row)
+
+    bot_returns: list[float] = []
+    override_deltas: list[float] = []
+    closed_intents = 0
+    by_status: dict[str, int] = {}
+    status_rank = {
+        "OVERFOLLOWED": 5,
+        "FOLLOWED": 4,
+        "PARTIAL": 3,
+        "OPPOSITE": 2,
+        "IGNORED": 1,
+    }
+
+    for group_rows in groups.values():
+        statuses = [str(r.get("override_status") or "UNKNOWN") for r in group_rows]
+        dominant = max(statuses, key=lambda st: status_rank.get(st, 0)) if statuses else "UNKNOWN"
+        by_status[dominant] = by_status.get(dominant, 0) + 1
+
+        group_bot_returns = [
+            float(r["outcome_5d"])
+            for r in group_rows
+            if r.get("outcome_5d") is not None
+        ]
+        group_deltas = [
+            delta
+            for r in group_rows
+            if r.get("outcome_5d") is not None
+            for delta in [_override_delta(str(r.get("override_status")), float(r["outcome_5d"]))]
+            if delta is not None
+        ]
+        if group_bot_returns:
+            closed_intents += 1
+            bot_returns.append(_mean(group_bot_returns) or 0.0)
+        if group_deltas:
+            override_deltas.append(_mean(group_deltas) or 0.0)
+
+    return {
+        "total": len(groups),
+        "closed_5d": closed_intents,
+        "by_status": by_status,
+        "avg_bot_5d": _mean(bot_returns),
+        "avg_override_delta_5d": _mean(override_deltas),
+    }
 
 
 async def _fetch_audit_rows(
@@ -230,8 +304,10 @@ def _summary(rows: list[dict]) -> dict:
     out = {
         "total": len(rows),
         "unique_intents": 0,
+        "repeated_plans": 0,
         "closed_5d": 0,
         "by_status": {},
+        "by_intent": {},
         "bot_wins_ignored": 0,
         "human_wins_ignored": 0,
         "avg_bot_5d": None,
@@ -264,6 +340,8 @@ def _summary(rows: list[dict]) -> dict:
     if override_deltas:
         out["avg_override_delta_5d"] = sum(override_deltas) / len(override_deltas)
     out["unique_intents"] = len(intent_keys)
+    out["repeated_plans"] = max(0, out["total"] - out["unique_intents"])
+    out["by_intent"] = _intent_level_summary(rows)
     return out
 
 
@@ -273,6 +351,8 @@ def render_report(rows: list[dict], manual_only: list[dict], *, days: int, match
 
     summary = _summary(rows)
     by_status = summary["by_status"]
+    by_intent = summary.get("by_intent") or {}
+    by_intent_status = by_intent.get("by_status") or {}
 
     lines = [
         "🧑‍✈️ <b>BOT VS HUMANO</b>",
@@ -285,14 +365,24 @@ def render_report(rows: list[dict], manual_only: list[dict], *, days: int, match
         "",
         "<b>RESUMEN</b>",
         f"   Planes aprobados: <b>{summary['total']}</b>",
-        f"   Intenciones unicas: <b>{summary['unique_intents']}</b> (ticker + lado)",
-        f"   Cerrados 5D: <b>{summary['closed_5d']}</b>",
-        f"   FOLLOWED: {by_status.get('FOLLOWED', 0)} | PARTIAL: {by_status.get('PARTIAL', 0)} | IGNORED: {by_status.get('IGNORED', 0)} | OPPOSITE: {by_status.get('OPPOSITE', 0)}",
-        f"   Bot hipotetico 5D: <b>{_pct(summary['avg_bot_5d'])}</b>",
-        f"   Delta humano vs bot 5D: <b>{_pct(summary['avg_override_delta_5d'])}</b>",
-        "   Nota: una recomendacion repetida en dias distintos cuenta como varios planes, no como varios trades.",
+        f"   Intenciones unicas: <b>{summary['unique_intents']}</b> (ticker + lado) | repetidas: <b>{summary['repeated_plans']}</b>",
+        f"   Cerrados 5D: <b>{summary['closed_5d']}</b> planes | <b>{by_intent.get('closed_5d', 0)}</b> intenciones",
+        f"   FOLLOWED: {by_status.get('FOLLOWED', 0)} | OVER: {by_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_status.get('PARTIAL', 0)} | IGNORED: {by_status.get('IGNORED', 0)} | OPPOSITE: {by_status.get('OPPOSITE', 0)}",
+        f"   Bot hipotetico 5D por plan: <b>{_pct(summary['avg_bot_5d'])}</b>",
+        f"   Delta humano vs bot 5D por plan: <b>{_pct(summary['avg_override_delta_5d'])}</b>",
+        f"   Bot hipotetico 5D por intencion: <b>{_pct(by_intent.get('avg_bot_5d'))}</b>",
+        f"   Delta humano vs bot 5D por intencion: <b>{_pct(by_intent.get('avg_override_delta_5d'))}</b>",
+        "   Nota: una recomendacion repetida en dias distintos cuenta como varios planes; por intencion pesa una sola vez.",
         "",
     ]
+
+    if by_intent_status:
+        lines += [
+            "<b>LECTURA POR INTENCION</b>",
+            f"   FOLLOWED: {by_intent_status.get('FOLLOWED', 0)} | OVER: {by_intent_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_intent_status.get('PARTIAL', 0)} | IGNORED: {by_intent_status.get('IGNORED', 0)} | OPPOSITE: {by_intent_status.get('OPPOSITE', 0)}",
+            "   Esta vista reduce el peso de senales repetidas del mismo ticker/lado.",
+            "",
+        ]
 
     ignored_closed = summary["bot_wins_ignored"] + summary["human_wins_ignored"]
     if ignored_closed:
@@ -318,17 +408,19 @@ def render_report(rows: list[dict], manual_only: list[dict], *, days: int, match
             status = row["override_status"]
             target = _money(row.get("target_amount_ars"))
             same = _money(row.get("same_amount_ars")) if row.get("same_amount_ars") else "$0"
+            same_ratio = _same_ratio(row)
+            same_ratio_txt = f" ({same_ratio:.1f}x)" if same_ratio >= 0.15 else ""
             outcome = row.get("outcome_5d")
             result = "pendiente" if outcome is None else f"bot {_pct(outcome)}"
             human_delta = _override_delta(status, float(outcome)) if outcome is not None else None
-            if human_delta is not None and status != "FOLLOWED":
+            if human_delta is not None and status not in {"FOLLOWED", "OVERFOLLOWED"}:
                 result += f" | humano-vs-bot {_pct(human_delta)}"
             lines.append(
                 f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> "
-                f"<code>{status}</code> target {target} | mov. {same} -> {result}"
+                f"<code>{status}</code> target {target} | mov. {same}{same_ratio_txt} -> {result}"
             )
             reason = row.get("reason")
-            if reason and status in {"IGNORED", "OPPOSITE", "PARTIAL"}:
+            if reason and status in {"IGNORED", "OPPOSITE", "PARTIAL", "OVERFOLLOWED"}:
                 lines.append(f"      Motivo bot: {escape(str(reason))[:180]}")
         lines.append("")
 

@@ -137,6 +137,111 @@ def _row(row) -> dict:
     return out
 
 
+def _float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _override_target(item: dict) -> float:
+    return max(_float(item.get("target_amount_ars")), 1.0)
+
+
+def _override_same_ratio(item: dict) -> float:
+    return _float(item.get("same_amount_ars")) / _override_target(item)
+
+
+def _override_opposite_ratio(item: dict) -> float:
+    return _float(item.get("opposite_amount_ars")) / _override_target(item)
+
+
+def _classify_override(item: dict) -> str:
+    same_ratio = _override_same_ratio(item)
+    opposite_ratio = _override_opposite_ratio(item)
+    if same_ratio < 0.15 and opposite_ratio >= 0.15:
+        return "OPPOSITE"
+    if same_ratio >= 1.35:
+        return "OVERFOLLOWED"
+    if same_ratio >= 0.75:
+        return "FOLLOWED"
+    if same_ratio >= 0.15:
+        return "PARTIAL"
+    return "IGNORED"
+
+
+def _override_delta(status: str, outcome_5d) -> float | None:
+    if outcome_5d is None:
+        return None
+    outcome = _float(outcome_5d)
+    if status in {"IGNORED", "OPPOSITE"}:
+        return -outcome
+    if status == "PARTIAL":
+        return -0.5 * outcome
+    if status in {"FOLLOWED", "OVERFOLLOWED"}:
+        return 0.0
+    return None
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _override_intent_summary(items: list[dict]) -> dict:
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for item in items:
+        key = (
+            str(item.get("ticker") or "").upper(),
+            str(item.get("decision") or "").upper(),
+        )
+        groups.setdefault(key, []).append(item)
+
+    status_rank = {
+        "OVERFOLLOWED": 5,
+        "FOLLOWED": 4,
+        "PARTIAL": 3,
+        "OPPOSITE": 2,
+        "IGNORED": 1,
+    }
+    by_status: dict[str, int] = {}
+    bot_returns: list[float] = []
+    deltas: list[float] = []
+    closed = 0
+
+    for group in groups.values():
+        statuses = [str(row.get("override_status") or "UNKNOWN") for row in group]
+        dominant = max(statuses, key=lambda st: status_rank.get(st, 0)) if statuses else "UNKNOWN"
+        by_status[dominant] = by_status.get(dominant, 0) + 1
+
+        group_returns = [
+            _float(row.get("outcome_5d"))
+            for row in group
+            if row.get("outcome_5d") is not None
+        ]
+        group_deltas = [
+            delta
+            for row in group
+            if row.get("outcome_5d") is not None
+            for delta in [_override_delta(str(row.get("override_status")), row.get("outcome_5d"))]
+            if delta is not None
+        ]
+        if group_returns:
+            closed += 1
+            bot_returns.append(_mean(group_returns) or 0.0)
+        if group_deltas:
+            deltas.append(_mean(group_deltas) or 0.0)
+
+    return {
+        "total": len(groups),
+        "closed_5d": closed,
+        "by_status": by_status,
+        "avg_bot_5d": _mean(bot_returns),
+        "avg_override_delta_5d": _mean(deltas),
+    }
+
+
 async def _redis_get(key: str):
     try:
         return await redis_client.get(key)
@@ -681,18 +786,30 @@ async def override_audit(request: web.Request) -> web.Response:
         """, days, match_window_days)
 
     items = [_row(r) for r in rows]
+    for item in items:
+        item["override_status"] = _classify_override(item)
+        item["same_ratio"] = _override_same_ratio(item)
+        item["opposite_ratio"] = _override_opposite_ratio(item)
+
     by_status: dict[str, int] = {}
     unique_intents = set()
     closed = []
+    bot_returns: list[float] = []
+    override_deltas: list[float] = []
     for item in items:
         status = item.get("override_status") or "UNKNOWN"
         by_status[status] = by_status.get(status, 0) + 1
         unique_intents.add((item.get("ticker"), item.get("decision")))
         if item.get("outcome_5d") is not None:
             closed.append(item)
+            bot_returns.append(_float(item.get("outcome_5d")))
+            delta = _override_delta(status, item.get("outcome_5d"))
+            if delta is not None:
+                override_deltas.append(delta)
 
     bot_wins = sum(1 for item in closed if item.get("override_status") in {"IGNORED", "OPPOSITE"} and (item.get("outcome_5d") or 0) > 0)
     human_wins = sum(1 for item in closed if item.get("override_status") in {"IGNORED", "OPPOSITE"} and (item.get("outcome_5d") or 0) < 0)
+    by_intent = _override_intent_summary(items)
 
     return _json({
         "ok": True,
@@ -701,8 +818,12 @@ async def override_audit(request: web.Request) -> web.Response:
         "summary": {
             "plans": len(items),
             "unique_intents": len(unique_intents),
+            "repeated_plans": max(0, len(items) - len(unique_intents)),
             "closed_5d": len(closed),
             "by_status": by_status,
+            "by_intent": by_intent,
+            "avg_bot_5d": _mean(bot_returns),
+            "avg_override_delta_5d": _mean(override_deltas),
             "bot_wins_ignored": bot_wins,
             "human_wins_ignored": human_wins,
         },
