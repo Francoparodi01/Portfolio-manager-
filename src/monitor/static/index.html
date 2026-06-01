@@ -4,9 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cocos Monitor</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: dark;
@@ -703,6 +700,39 @@
 
       <article class="card wide">
         <div class="row-head">
+          <h2>Radar Audit</h2>
+          <span class="pill">90 dias</span>
+        </div>
+        <div class="chart-note" id="radarAuditUpdated">-</div>
+        <div class="metric"><span>Ideas radar</span><b id="radarTotal">-</b></div>
+        <div class="metric"><span>Cerradas 5D / 10D</span><b id="radarClosed">-</b></div>
+        <div class="metric"><span>Avg 5D / 10D</span><b class="money" id="radarAvg">-</b></div>
+        <div class="metric"><span>MAE / MFE 10D</span><b id="radarPath">-</b></div>
+        <table>
+          <thead><tr><th>Hora</th><th>Ticker</th><th>Status</th><th>2D</th><th>10D</th><th>Path</th></tr></thead>
+          <tbody id="radarAuditTable"></tbody>
+        </table>
+        <div class="chart-note">Radar Audit es teorico: no entra al EV operativo hasta que haya fill real.</div>
+      </article>
+
+      <article class="card wide">
+        <div class="row-head">
+          <h2>Actividad humana inferida</h2>
+          <span class="pill">7 dias</span>
+        </div>
+        <div class="chart-note" id="humanActivityUpdated">-</div>
+        <div class="metric"><span>Total inferido</span><b id="humanActivityTotal">-</b></div>
+        <div class="metric"><span>Confirmado movements</span><b class="blue" id="humanActivityConfirmed">-</b></div>
+        <div class="metric"><span>Pendiente canonical</span><b class="amber" id="humanActivityPending">-</b></div>
+        <table>
+          <thead><tr><th>Hora</th><th>Ticker</th><th>Lado</th><th>Cant.</th><th>Monto</th><th>Estado</th></tr></thead>
+          <tbody id="humanActivityTable"></tbody>
+        </table>
+        <div class="chart-note">Provisional: detecta cambios de cantidad entre snapshots; no alimenta performance principal.</div>
+      </article>
+
+      <article class="card wide">
+        <div class="row-head">
           <h2>Candles</h2>
           <span class="pill" id="candleDay">-</span>
         </div>
@@ -1042,7 +1072,7 @@
           positions.slice(0, 10).map((row) => ({
             label: row.ticker,
             value: row.market_value,
-            color: Number(row.unrealized_pnl_pct || 0) >= 0 ? "var(--green)" : "var(--red)",
+            color: "var(--accent)",
           })),
           { money: true, clickable: true, selected: state.selectedTicker }
         );
@@ -1212,6 +1242,57 @@
       }).join("");
     }
 
+    function riskClass(value) {
+      const v = String(value || "PENDING").toUpperCase();
+      if (v === "HIGH") return "red-text";
+      if (v === "MEDIUM") return "amber";
+      if (v === "OK") return "money";
+      return "subtle";
+    }
+
+    function renderRadarAudit(data) {
+      const s = data.summary || {};
+      $("radarAuditUpdated").textContent = `Radar Audit actualizado hace ${ageFromIso(data.generated_at)} · separado del EV operativo`;
+      $("radarTotal").textContent = `${fmtNumber(s.total)} ideas · ${fmtNumber(s.theoretical)} teoricas / ${fmtNumber(s.blocked)} bloqueadas`;
+      $("radarClosed").textContent = `${fmtNumber(s.closed_5d)} / ${fmtNumber(s.closed_10d)}`;
+      $("radarAvg").textContent = `${fmtPct(s.avg_5d)} / ${fmtPct(s.avg_10d)}`;
+      $("radarPath").textContent = `${fmtPct(s.avg_mae_10d)} / ${fmtPct(s.avg_mfe_10d)} · HIGH ${fmtNumber(s.high_path_risk)}`;
+      $("radarAuditTable").innerHTML = (data.recent || []).slice(0, 10).map((row) => {
+        const path = row.path_risk || "PENDING";
+        return `
+          <tr>
+            <td>${fmtDate(row.decided_at)}</td>
+            <td>${row.ticker || "-"}</td>
+            <td>${row.candidate_status || row.status || "-"}</td>
+            <td class="${Number(row.outcome_2d || 0) >= 0 ? 'money' : 'red-text'}">${row.outcome_2d === null || row.outcome_2d === undefined ? "pend." : fmtPct(row.outcome_2d)}</td>
+            <td class="${Number(row.outcome_10d || 0) >= 0 ? 'money' : 'red-text'}">${row.outcome_10d === null || row.outcome_10d === undefined ? "pend." : fmtPct(row.outcome_10d)}</td>
+            <td class="${riskClass(path)}" title="MAE 10D ${fmtPct(row.mae_10d)} / MFE 10D ${fmtPct(row.mfe_10d)}">${path}</td>
+          </tr>
+        `;
+      }).join("") || `<tr><td colspan="6" class="subtle">Sin ideas radar auditables</td></tr>`;
+    }
+
+    function renderHumanActivity(data) {
+      const s = data.summary || {};
+      $("humanActivityUpdated").textContent = `Actividad inferida actualizada hace ${ageFromIso(data.generated_at)} · provisional`;
+      $("humanActivityTotal").textContent = fmtNumber(s.total);
+      $("humanActivityConfirmed").textContent = fmtNumber(s.confirmed);
+      $("humanActivityPending").textContent = fmtNumber(s.pending);
+      $("humanActivityTable").innerHTML = (data.recent || []).slice(0, 10).map((row) => {
+        const confirmed = Boolean(row.confirmed_at);
+        return `
+          <tr>
+            <td>${fmtDate(row.scraped_at)}</td>
+            <td>${row.ticker || "-"}</td>
+            <td>${row.side || "-"}</td>
+            <td>${fmtNumber(row.quantity)}</td>
+            <td>${fmtMoney(row.inferred_amount_ars)}</td>
+            <td class="${confirmed ? 'money' : 'amber'}">${confirmed ? "confirmado" : "inferido"}</td>
+          </tr>
+        `;
+      }).join("") || `<tr><td colspan="6" class="subtle">Sin cambios de cantidad detectados</td></tr>`;
+    }
+
     function renderCandles(data) {
       const c = data.coverage || {};
       const market = data.market || {};
@@ -1295,12 +1376,14 @@
       setError("");
       const token = $("token").value.trim();
       if (token) localStorage.setItem("monitorToken", token);
-      const [health, ingestion, portfolio, performance, overrides, candles, decisions, fills, logs] = await Promise.all([
+      const [health, ingestion, portfolio, performance, overrides, radarAudit, humanActivity, candles, decisions, fills, logs] = await Promise.all([
         api("/api/health"),
         api("/api/ingestion"),
         api("/api/portfolio?days=90"),
         api(`/api/performance?days=${state.performanceDays}`),
         api("/api/override-audit?days=90"),
+        api("/api/radar-audit?days=90"),
+        api("/api/human-activity?days=7"),
         api("/api/candles"),
         api("/api/decisions?days=90"),
         api("/api/fills?days=90"),
@@ -1311,6 +1394,8 @@
       renderPortfolioView(portfolio);
       renderPerformanceView(performance);
       renderOverrideAudit(overrides);
+      renderRadarAudit(radarAudit);
+      renderHumanActivity(humanActivity);
       renderCandles(candles);
       renderDecisions(decisions);
       renderFills(fills);

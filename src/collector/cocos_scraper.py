@@ -626,11 +626,25 @@ class CocosCapitalScraper:
                 price       = parse_decimal(lines[3].replace("$", "").strip())
                 market_val  = parse_decimal(lines[4].replace("$", "").strip())
 
-                # Costo promedio suele estar en lines[6]
+                # Costo promedio suele venir como importe monetario. Evitamos
+                # tomar porcentajes de rendimiento como si fueran costo base.
                 avg_cost = None
                 for l in lines[5:10]:
-                    v = parse_decimal(l.replace("$", "").strip())
-                    if v and v > 0 and v != market_val and v != price:
+                    raw_line = l.strip()
+                    raw_lower = raw_line.lower()
+                    if "%" in raw_line:
+                        continue
+                    if "$" not in raw_line and "ars" not in raw_lower:
+                        continue
+                    v = parse_decimal(raw_line.replace("$", "").replace("ARS", "").replace("ars", "").strip())
+                    if (
+                        v
+                        and v > 0
+                        and v != market_val
+                        and v != price
+                        and price > 0
+                        and (price * Decimal("0.05")) <= v <= (price * Decimal("20"))
+                    ):
                         avg_cost = v
                         break
 

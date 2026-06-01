@@ -264,7 +264,7 @@ def render_opening_portfolio_report(
         f"Cash: <b>${cash:,.0f} ARS</b>".replace(",", "."),
         (
             f"Variacion post-open: <b>{day_change:+.2%}</b> "
-            f"(<b>${day_pnl:,.0f} ARS</b>)".replace(",", ".")
+            f"(<b>{_fmt_ars(day_pnl, signed=True)} ARS</b>)"
             if day_change is not None
             else "Variacion post-open: <b>N/A</b>"
         ),

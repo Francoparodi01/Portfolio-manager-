@@ -551,6 +551,12 @@ def apply_audit_mode_filter(
         out = out[out["decision"].isin(ACTIVE_ACTIONS)].copy()
 
     if mode == "signal":
+        radar_count = int(out["source"].eq("radar").sum())
+        if radar_count:
+            warnings.append(
+                f"Se excluyeron {radar_count} filas radar: Radar Audit se evalua separado de calibration/regression."
+            )
+            out = out[~out["source"].eq("radar")].copy()
         return out, warnings
 
     if mode == "optimizer":
@@ -598,9 +604,22 @@ def apply_audit_mode_filter(
         if "was_blocked" in out.columns:
             mask = mask | out["was_blocked"].fillna(False).astype(bool)
 
+        radar_blocked = int((mask & out["source"].eq("radar")).sum())
+        if radar_blocked:
+            warnings.append(
+                f"Se excluyeron {radar_blocked} bloqueos radar: blocked audit mide guards del planner, no ideas del radar."
+            )
+            mask = mask & ~out["source"].eq("radar")
+
         return out[mask].copy(), warnings
 
     if mode == "all":
+        radar_count = int(out["source"].eq("radar").sum())
+        if radar_count:
+            warnings.append(
+                f"Se excluyeron {radar_count} filas radar de mode=all para no mezclar ideas con decisiones del planner."
+            )
+            out = out[~out["source"].eq("radar")].copy()
         return out, warnings
 
     return out, warnings

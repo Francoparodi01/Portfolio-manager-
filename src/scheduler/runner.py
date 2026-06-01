@@ -90,7 +90,7 @@ PORTFOLIO_ALERT_MAJOR_PCT = float(os.getenv("PORTFOLIO_ALERT_MAJOR_PCT", "0.03")
 PORTFOLIO_ALERT_WEIGHTED_PCT = float(os.getenv("PORTFOLIO_ALERT_WEIGHTED_PCT", "0.02"))
 PORTFOLIO_ALERT_MIN_WEIGHT = float(os.getenv("PORTFOLIO_ALERT_MIN_WEIGHT", "0.10"))
 PORTFOLIO_ALERT_TTL_SECONDS = int(os.getenv("PORTFOLIO_ALERT_TTL_SECONDS", "86400"))
-RISK_ALERT_TTL_SECONDS = int(os.getenv("RISK_ALERT_TTL_SECONDS", "1800"))
+RISK_ALERT_TTL_SECONDS = int(os.getenv("RISK_ALERT_TTL_SECONDS", "7200"))
 STOP_TRIGGERED_ALERT_TTL_SECONDS = int(os.getenv("STOP_TRIGGERED_ALERT_TTL_SECONDS", "86400"))
 
 WARNING_PCT = -0.04
@@ -1200,7 +1200,7 @@ class IntradayManager:
                       AND outcome_5d IS NULL
                       AND closed_at IS NULL
                       AND COALESCE(was_stopped, FALSE) IS FALSE
-                      AND COALESCE(status, 'APPROVED') IN ('APPROVED', 'EXECUTED')
+                      AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
                     ORDER BY ticker, decided_at DESC
                 )
                 SELECT
@@ -1305,7 +1305,7 @@ class IntradayManager:
 
         msg = (
             f"{icon} <b>{alert.level} â€” {alert.ticker}</b>\n"
-            f"Precio: <b>${alert.current_price:,.2f}</b> Â· Entrada: <b>${alert.entry_price:,.2f}</b>"
+            f"Precio: <b>${alert.current_price:,.2f}</b> Â· Entrada ejecutada: <b>${alert.entry_price:,.2f}</b>"
             f"{stop_txt}{target_txt}\n"
             f"PNL: <b>{pnl:+.2f}%</b>"
         )
@@ -1392,18 +1392,18 @@ async def _scheduler_main() -> None:
     )
     scheduler.add_job(
         run_full,
-        _business_day_cron(hour=17, minute=0),
-        args=["17:00_FULL"],
+        _business_day_cron(hour=17, minute=2),
+        args=["17:02_FULL"],
         id="portfolio_eod",
-        name="Full 17:00 ART",
+        name="Full 17:02 ART",
         misfire_grace_time=300,
         replace_existing=True,
     )
     scheduler.add_job(
         stop_intraday_loops,
-        _business_day_cron(hour=17, minute=1),
+        _business_day_cron(hour=16, minute=59),
         id="intraday_stop",
-        name="Intraday stop 17:01 ART",
+        name="Intraday stop 16:59 ART",
         misfire_grace_time=300,
         replace_existing=True,
     )
@@ -1446,7 +1446,7 @@ async def _scheduler_main() -> None:
     )
     scheduler.start()
     logger.info(
-        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 17:00 full; 17:01 intraday off; 17:05 candles; 17:10 verify; 17:12 analysis; 21:30 outcomes"
+        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 16:59 intraday off; 17:02 full; 17:05 candles; 17:10 verify; 17:12 analysis; 21:30 outcomes"
     )
 
     # Si arrancamos durante rueda, iniciar loops de inmediato

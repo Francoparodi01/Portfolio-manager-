@@ -242,6 +242,17 @@ def _override_intent_summary(items: list[dict]) -> dict:
     }
 
 
+def _path_risk_label(mae_10d) -> str:
+    if mae_10d is None:
+        return "PENDING"
+    mae = _float(mae_10d)
+    if mae <= -0.12:
+        return "HIGH"
+    if mae <= -0.06:
+        return "MEDIUM"
+    return "OK"
+
+
 async def _redis_get(key: str):
     try:
         return await redis_client.get(key)
@@ -831,6 +842,266 @@ async def override_audit(request: web.Request) -> web.Response:
     })
 
 
+async def radar_audit(request: web.Request) -> web.Response:
+    days = max(7, min(int(request.query.get("days", "90")), 365))
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            WITH radar AS (
+                SELECT
+                    id,
+                    decided_at,
+                    (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date AS decision_day,
+                    COALESCE(
+                        (next_executable_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date,
+                        (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                    ) AS audit_start_day,
+                    ticker,
+                    decision,
+                    final_score,
+                    confidence,
+                    status,
+                    decision_type,
+                    price_at_decision,
+                    rr_ratio,
+                    block_reason,
+                    outcome_5d,
+                    outcome_10d,
+                    outcome_20d,
+                    executable_outcome_5d,
+                    executable_outcome_10d,
+                    executable_outcome_20d,
+                    COALESCE(NULLIF(next_executable_price, 0), price_at_decision) AS audit_entry_price,
+                    layers
+                FROM decision_log
+                WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND COALESCE(source, layers->>'source') = 'radar'
+                  AND decision IN ('BUY', 'SELL')
+                  AND price_at_decision IS NOT NULL
+                  AND price_at_decision > 0
+            )
+            SELECT
+                r.*,
+                COALESCE(r.layers->>'candidate_status', r.status) AS candidate_status,
+                r.layers->>'trade_type' AS trade_type,
+                r.layers->>'edge_label' AS edge_label,
+                (r.layers->>'edge')::float AS edge,
+                r.layers->>'technical_data_source_mode' AS technical_source,
+                path.price_2d,
+                path.close_5d,
+                path.close_10d,
+                path.close_20d,
+                path.mae_10d,
+                path.mfe_10d,
+                CASE
+                    WHEN r.decision = 'SELL' AND path.price_2d IS NOT NULL
+                        THEN (r.audit_entry_price / path.price_2d) - 1
+                    WHEN path.price_2d IS NOT NULL
+                        THEN (path.price_2d / r.audit_entry_price) - 1
+                    ELSE NULL
+                END AS outcome_2d,
+                COALESCE(r.executable_outcome_5d, r.outcome_5d, CASE
+                    WHEN r.decision = 'SELL' AND path.close_5d IS NOT NULL
+                        THEN (r.audit_entry_price / path.close_5d) - 1
+                    WHEN path.close_5d IS NOT NULL
+                        THEN (path.close_5d / r.audit_entry_price) - 1
+                    ELSE NULL
+                END) AS outcome_5d,
+                COALESCE(r.executable_outcome_10d, r.outcome_10d, CASE
+                    WHEN r.decision = 'SELL' AND path.close_10d IS NOT NULL
+                        THEN (r.audit_entry_price / path.close_10d) - 1
+                    WHEN path.close_10d IS NOT NULL
+                        THEN (path.close_10d / r.audit_entry_price) - 1
+                    ELSE NULL
+                END) AS outcome_10d,
+                COALESCE(r.executable_outcome_20d, r.outcome_20d, CASE
+                    WHEN r.decision = 'SELL' AND path.close_20d IS NOT NULL
+                        THEN (r.audit_entry_price / path.close_20d) - 1
+                    WHEN path.close_20d IS NOT NULL
+                        THEN (path.close_20d / r.audit_entry_price) - 1
+                    ELSE NULL
+                END) AS outcome_20d
+            FROM radar r
+            LEFT JOIN LATERAL (
+                WITH candles AS (
+                    SELECT
+                        ts::date AS day,
+                        close_price::float AS close_price,
+                        high_price::float AS high_price,
+                        low_price::float AS low_price
+                    FROM market_candles
+                    WHERE ticker = r.ticker
+                      AND ts::date >= r.audit_start_day
+                      AND ts::date <= r.audit_start_day + 20
+                      AND close_price IS NOT NULL
+                    ORDER BY ts ASC
+                )
+                SELECT
+                    (SELECT close_price FROM candles WHERE day >= r.audit_start_day + 2 LIMIT 1) AS price_2d,
+                    (SELECT close_price FROM candles WHERE day >= r.audit_start_day + 5 LIMIT 1) AS close_5d,
+                    (SELECT close_price FROM candles WHERE day >= r.audit_start_day + 10 LIMIT 1) AS close_10d,
+                    (SELECT close_price FROM candles WHERE day >= r.audit_start_day + 20 LIMIT 1) AS close_20d,
+                    CASE
+                        WHEN r.decision = 'SELL'
+                            THEN MIN((r.audit_entry_price / NULLIF(high_price, 0)) - 1)
+                        ELSE MIN((low_price / NULLIF(r.audit_entry_price, 0)) - 1)
+                    END AS mae_10d,
+                    CASE
+                        WHEN r.decision = 'SELL'
+                            THEN MAX((r.audit_entry_price / NULLIF(low_price, 0)) - 1)
+                        ELSE MAX((high_price / NULLIF(r.audit_entry_price, 0)) - 1)
+                    END AS mfe_10d
+                FROM candles
+                WHERE day <= r.audit_start_day + 10
+            ) path ON TRUE
+            ORDER BY r.decided_at DESC, r.id DESC
+            LIMIT 160
+        """, days)
+
+    items = [_row(r) for r in rows]
+    for item in items:
+        item["path_risk"] = _path_risk_label(item.get("mae_10d"))
+
+    closed_5d = [item for item in items if item.get("outcome_5d") is not None]
+    closed_10d = [item for item in items if item.get("outcome_10d") is not None]
+    high_path_risk = sum(1 for item in items if item.get("path_risk") == "HIGH")
+    executable = sum(1 for item in items if str(item.get("status") or "").upper() == "THEORETICAL")
+    blocked = sum(1 for item in items if str(item.get("status") or "").upper() == "BLOCKED")
+
+    def _wins(values: list[dict], key: str) -> int:
+        return sum(1 for item in values if _float(item.get(key)) > 0)
+
+    return _json({
+        "ok": True,
+        "days": days,
+        "summary": {
+            "total": len(items),
+            "theoretical": executable,
+            "blocked": blocked,
+            "closed_5d": len(closed_5d),
+            "closed_10d": len(closed_10d),
+            "win_rate_5d": (_wins(closed_5d, "outcome_5d") / len(closed_5d)) if closed_5d else None,
+            "win_rate_10d": (_wins(closed_10d, "outcome_10d") / len(closed_10d)) if closed_10d else None,
+            "avg_2d": _mean([_float(item.get("outcome_2d")) for item in items if item.get("outcome_2d") is not None]),
+            "avg_5d": _mean([_float(item.get("outcome_5d")) for item in closed_5d]),
+            "avg_10d": _mean([_float(item.get("outcome_10d")) for item in closed_10d]),
+            "avg_mae_10d": _mean([_float(item.get("mae_10d")) for item in items if item.get("mae_10d") is not None]),
+            "avg_mfe_10d": _mean([_float(item.get("mfe_10d")) for item in items if item.get("mfe_10d") is not None]),
+            "high_path_risk": high_path_risk,
+        },
+        "recent": items[:40],
+    })
+
+
+async def human_activity(request: web.Request) -> web.Response:
+    days = max(1, min(int(request.query.get("days", "7")), 30))
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            WITH snaps AS (
+                SELECT
+                    snapshot_id,
+                    scraped_at,
+                    cash_ars,
+                    LAG(snapshot_id) OVER (ORDER BY scraped_at) AS prev_snapshot_id,
+                    LAG(scraped_at) OVER (ORDER BY scraped_at) AS prev_scraped_at,
+                    LEAD(snapshot_id) OVER (ORDER BY scraped_at) AS next_snapshot_id
+                FROM portfolio_snapshots
+                WHERE scraped_at >= NOW() - ($1::int * INTERVAL '1 day')
+                ORDER BY scraped_at
+            ),
+            pairs AS (
+                SELECT *
+                FROM snaps
+                WHERE prev_snapshot_id IS NOT NULL
+            ),
+            pair_tickers AS (
+                SELECT DISTINCT
+                    p.snapshot_id,
+                    p.prev_snapshot_id,
+                    p.next_snapshot_id,
+                    p.scraped_at,
+                    p.prev_scraped_at,
+                    pos.ticker
+                FROM pairs p
+                JOIN positions pos
+                  ON pos.snapshot_id IN (p.snapshot_id, p.prev_snapshot_id)
+            ),
+            deltas AS (
+                SELECT
+                    pt.prev_scraped_at,
+                    pt.scraped_at,
+                    pt.next_snapshot_id,
+                    pt.ticker,
+                    COALESCE(prev.quantity, 0)::float AS previous_quantity,
+                    COALESCE(cur.quantity, 0)::float AS current_quantity,
+                    COALESCE(nxt.quantity, 0)::float AS next_quantity,
+                    COALESCE(cur.quantity, 0)::float - COALESCE(prev.quantity, 0)::float AS quantity_delta,
+                    COALESCE(cur.current_price, prev.current_price)::float AS reference_price,
+                    COALESCE(cur.market_value, 0)::float AS current_market_value,
+                    COALESCE(prev.market_value, 0)::float AS previous_market_value
+                FROM pair_tickers pt
+                LEFT JOIN positions cur
+                    ON cur.snapshot_id = pt.snapshot_id
+                   AND cur.ticker = pt.ticker
+                LEFT JOIN positions prev
+                    ON prev.snapshot_id = pt.prev_snapshot_id
+                   AND prev.ticker = pt.ticker
+                LEFT JOIN positions nxt
+                    ON nxt.snapshot_id = pt.next_snapshot_id
+                   AND nxt.ticker = pt.ticker
+            )
+            SELECT
+                d.prev_scraped_at,
+                d.scraped_at,
+                d.ticker,
+                CASE WHEN d.quantity_delta > 0 THEN 'BUY' ELSE 'SELL' END AS side,
+                ABS(d.quantity_delta) AS quantity,
+                d.reference_price,
+                ABS(d.quantity_delta * COALESCE(d.reference_price, 0)) AS inferred_amount_ars,
+                bm.executed_at AS confirmed_at,
+                bm.amount AS confirmed_amount_ars,
+                bm.price AS confirmed_price
+            FROM deltas d
+            LEFT JOIN LATERAL (
+                SELECT executed_at, amount, price
+                FROM broker_movements bm
+                WHERE bm.ticker = d.ticker
+                  AND bm.movement_type = CASE WHEN d.quantity_delta > 0 THEN 'BUY' ELSE 'SELL' END
+                  AND bm.executed_at >= d.prev_scraped_at - INTERVAL '15 minutes'
+                  AND bm.executed_at <= d.scraped_at + INTERVAL '12 hours'
+                  AND bm.quantity IS NOT NULL
+                  AND bm.price IS NOT NULL
+                ORDER BY ABS(EXTRACT(EPOCH FROM (bm.executed_at - d.scraped_at))) ASC
+                LIMIT 1
+            ) bm ON TRUE
+            WHERE d.ticker IS NOT NULL
+              AND ABS(d.quantity_delta) > 0.000001
+              AND ABS(d.quantity_delta * COALESCE(d.reference_price, 0)) >= 1000
+              AND ABS(d.quantity_delta) / GREATEST(ABS(d.previous_quantity), ABS(d.current_quantity), 1) >= 0.01
+              AND d.next_snapshot_id IS NOT NULL
+              AND ABS(d.next_quantity - d.current_quantity) <= 0.000001
+            ORDER BY d.scraped_at DESC, d.ticker
+            LIMIT 50
+        """, days)
+
+    items = [_row(r) for r in rows]
+    confirmed = sum(1 for item in items if item.get("confirmed_at"))
+    pending = len(items) - confirmed
+    return _json({
+        "ok": True,
+        "days": days,
+        "summary": {
+            "total": len(items),
+            "confirmed": confirmed,
+            "pending": pending,
+            "scope": "inferred_from_portfolio_snapshots",
+            "note": "Provisional: no entra al EV principal hasta que Cocos movements confirme el movimiento.",
+        },
+        "recent": items,
+    })
+
+
 async def fills(request: web.Request) -> web.Response:
     days = max(1, min(int(request.query.get("days", "90")), 365))
     pool: asyncpg.Pool = request.app["pool"]
@@ -959,6 +1230,8 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/portfolio", portfolio_view)
     app.router.add_get("/api/performance", performance_view)
     app.router.add_get("/api/override-audit", override_audit)
+    app.router.add_get("/api/radar-audit", radar_audit)
+    app.router.add_get("/api/human-activity", human_activity)
     app.router.add_get("/api/fills", fills)
     app.router.add_get("/api/logs/recent", logs_recent)
 

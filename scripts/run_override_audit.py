@@ -300,6 +300,136 @@ async def _fetch_audit_rows(
     return [dict(r) for r in rows], [dict(r) for r in manual_only]
 
 
+async def _fetch_activity_context(conn: asyncpg.Connection) -> dict:
+    row = await conn.fetchrow(
+        """
+        WITH latest AS (
+            SELECT
+                (SELECT MAX(scraped_at) FROM portfolio_snapshots) AS latest_portfolio_at,
+                (
+                    SELECT MAX(executed_at)
+                    FROM broker_movements
+                    WHERE movement_type IN ('BUY', 'SELL')
+                      AND quantity IS NOT NULL
+                      AND price IS NOT NULL
+                ) AS latest_broker_movement_at
+        ),
+        daily_snapshots AS (
+            SELECT
+                ps.snapshot_id,
+                ps.cash_ars,
+                STRING_AGG(
+                    p.ticker || ':' || COALESCE(p.quantity::text, '0'),
+                    ',' ORDER BY p.ticker
+                ) AS positions_sig
+            FROM portfolio_snapshots ps
+            LEFT JOIN positions p ON p.snapshot_id = ps.snapshot_id
+            WHERE (ps.scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date =
+                  (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+            GROUP BY ps.snapshot_id, ps.cash_ars
+        )
+        SELECT
+            latest.latest_portfolio_at,
+            latest.latest_broker_movement_at,
+            COUNT(DISTINCT COALESCE(daily_snapshots.positions_sig, '') || '|cash:' || COALESCE(daily_snapshots.cash_ars::text, '0'))
+                AS position_signatures_today
+        FROM latest
+        LEFT JOIN daily_snapshots ON TRUE
+        GROUP BY latest.latest_portfolio_at, latest.latest_broker_movement_at
+        """
+    )
+    return dict(row) if row else {}
+
+
+async def _fetch_inferred_activity(conn: asyncpg.Connection, *, days: int = 7) -> list[dict]:
+    rows = await conn.fetch(
+        """
+        WITH snaps AS (
+            SELECT
+                snapshot_id,
+                scraped_at,
+                LAG(snapshot_id) OVER (ORDER BY scraped_at) AS prev_snapshot_id,
+                LAG(scraped_at) OVER (ORDER BY scraped_at) AS prev_scraped_at,
+                LEAD(snapshot_id) OVER (ORDER BY scraped_at) AS next_snapshot_id
+            FROM portfolio_snapshots
+            WHERE scraped_at >= NOW() - ($1::int * INTERVAL '1 day')
+            ORDER BY scraped_at
+        ),
+        pairs AS (
+            SELECT *
+            FROM snaps
+            WHERE prev_snapshot_id IS NOT NULL
+        ),
+        pair_tickers AS (
+            SELECT DISTINCT
+                p.snapshot_id,
+                p.prev_snapshot_id,
+                p.next_snapshot_id,
+                p.scraped_at,
+                p.prev_scraped_at,
+                pos.ticker
+            FROM pairs p
+            JOIN positions pos
+              ON pos.snapshot_id IN (p.snapshot_id, p.prev_snapshot_id)
+        ),
+        deltas AS (
+            SELECT
+                pt.prev_scraped_at,
+                pt.scraped_at,
+                pt.next_snapshot_id,
+                pt.ticker,
+                COALESCE(prev.quantity, 0)::float AS previous_quantity,
+                COALESCE(cur.quantity, 0)::float AS current_quantity,
+                COALESCE(nxt.quantity, 0)::float AS next_quantity,
+                COALESCE(cur.quantity, 0)::float - COALESCE(prev.quantity, 0)::float AS quantity_delta,
+                COALESCE(cur.current_price, prev.current_price)::float AS reference_price
+            FROM pair_tickers pt
+            LEFT JOIN positions cur
+                ON cur.snapshot_id = pt.snapshot_id
+               AND cur.ticker = pt.ticker
+            LEFT JOIN positions prev
+                ON prev.snapshot_id = pt.prev_snapshot_id
+               AND prev.ticker = pt.ticker
+            LEFT JOIN positions nxt
+                ON nxt.snapshot_id = pt.next_snapshot_id
+               AND nxt.ticker = pt.ticker
+        )
+        SELECT
+            d.prev_scraped_at,
+            d.scraped_at,
+            d.ticker,
+            CASE WHEN d.quantity_delta > 0 THEN 'BUY' ELSE 'SELL' END AS side,
+            ABS(d.quantity_delta) AS quantity,
+            d.reference_price,
+            ABS(d.quantity_delta * COALESCE(d.reference_price, 0)) AS inferred_amount_ars,
+            bm.executed_at AS confirmed_at
+        FROM deltas d
+        LEFT JOIN LATERAL (
+            SELECT executed_at
+            FROM broker_movements bm
+            WHERE bm.ticker = d.ticker
+              AND bm.movement_type = CASE WHEN d.quantity_delta > 0 THEN 'BUY' ELSE 'SELL' END
+              AND bm.executed_at >= d.prev_scraped_at - INTERVAL '15 minutes'
+              AND bm.executed_at <= d.scraped_at + INTERVAL '12 hours'
+              AND bm.quantity IS NOT NULL
+              AND bm.price IS NOT NULL
+            ORDER BY ABS(EXTRACT(EPOCH FROM (bm.executed_at - d.scraped_at))) ASC
+            LIMIT 1
+        ) bm ON TRUE
+        WHERE d.ticker IS NOT NULL
+          AND ABS(d.quantity_delta) > 0.000001
+          AND ABS(d.quantity_delta * COALESCE(d.reference_price, 0)) >= 1000
+          AND ABS(d.quantity_delta) / GREATEST(ABS(d.previous_quantity), ABS(d.current_quantity), 1) >= 0.01
+          AND d.next_snapshot_id IS NOT NULL
+          AND ABS(d.next_quantity - d.current_quantity) <= 0.000001
+        ORDER BY d.scraped_at DESC, d.ticker
+        LIMIT 12
+        """,
+        max(1, min(int(days), 30)),
+    )
+    return [dict(r) for r in rows]
+
+
 def _summary(rows: list[dict]) -> dict:
     out = {
         "total": len(rows),
@@ -345,7 +475,15 @@ def _summary(rows: list[dict]) -> dict:
     return out
 
 
-def render_report(rows: list[dict], manual_only: list[dict], *, days: int, match_window_days: int) -> str:
+def render_report(
+    rows: list[dict],
+    manual_only: list[dict],
+    *,
+    days: int,
+    match_window_days: int,
+    activity_context: dict | None = None,
+    inferred_activity: list[dict] | None = None,
+) -> str:
     for row in rows:
         row["override_status"] = _classify(row)
 
@@ -376,6 +514,24 @@ def render_report(rows: list[dict], manual_only: list[dict], *, days: int, match
         "",
     ]
 
+    ctx = activity_context or {}
+    latest_portfolio_at = ctx.get("latest_portfolio_at")
+    latest_movement_at = ctx.get("latest_broker_movement_at")
+    signatures_today = int(ctx.get("position_signatures_today") or 0)
+    if latest_portfolio_at and latest_movement_at:
+        latest_portfolio_art = latest_portfolio_at.astimezone(ART)
+        latest_movement_art = latest_movement_at.astimezone(ART)
+        if latest_portfolio_art.date() > latest_movement_art.date() and signatures_today > 1:
+            lines[8:8] = [
+                "<b>AVISO DE SINCRONIZACION</b>",
+                (
+                    "   El portfolio cambio hoy, pero el ultimo movimiento canonico "
+                    f"en Cocos movements es {_fmt_dt(latest_movement_at)}. "
+                    "Los cambios de hoy pueden aparecer como IGNORED/MANUAL_ONLY pendiente hasta que Cocos publique el movimiento."
+                ),
+                "",
+            ]
+
     if by_intent_status:
         lines += [
             "<b>LECTURA POR INTENCION</b>",
@@ -383,6 +539,25 @@ def render_report(rows: list[dict], manual_only: list[dict], *, days: int, match
             "   Esta vista reduce el peso de senales repetidas del mismo ticker/lado.",
             "",
         ]
+
+    inferred = inferred_activity or []
+    if inferred:
+        pending_inferred = sum(1 for row in inferred if not row.get("confirmed_at"))
+        lines += [
+            "<b>ACTIVIDAD HUMANA INFERIDA</b>",
+            (
+                f"   {len(inferred)} cambios de cantidad detectados por snapshots "
+                f"({pending_inferred} sin confirmar por Cocos movements)."
+            ),
+            "   Provisional: no entra al EV ni cambia FOLLOWED/IGNORED hasta tener movimiento canonico.",
+        ]
+        for row in inferred[:6]:
+            status = "confirmado" if row.get("confirmed_at") else "inferido"
+            lines.append(
+                f"   {_fmt_dt(row.get('scraped_at'))} <b>{escape(str(row.get('side')))} {escape(str(row.get('ticker')))}</b> "
+                f"{_as_float(row.get('quantity')):g} ≈ {_money(row.get('inferred_amount_ars'))} | {status}"
+            )
+        lines.append("")
 
     ignored_closed = summary["bot_wins_ignored"] + summary["human_wins_ignored"]
     if ignored_closed:
@@ -445,6 +620,8 @@ async def async_main(args: argparse.Namespace) -> int:
     cfg = get_config()
     dsn = cfg.database.url.replace("postgresql+asyncpg://", "postgresql://")
     conn = await asyncpg.connect(dsn)
+    activity_context = {}
+    inferred_activity = []
     try:
         rows, manual_only = await _fetch_audit_rows(
             conn,
@@ -452,6 +629,8 @@ async def async_main(args: argparse.Namespace) -> int:
             match_window_days=args.match_window_days,
             owner_chat_id=args.owner_chat_id,
         )
+        activity_context = await _fetch_activity_context(conn)
+        inferred_activity = await _fetch_inferred_activity(conn, days=min(args.days, 7))
     finally:
         await conn.close()
 
@@ -460,6 +639,8 @@ async def async_main(args: argparse.Namespace) -> int:
         manual_only,
         days=args.days,
         match_window_days=args.match_window_days,
+        activity_context=activity_context,
+        inferred_activity=inferred_activity,
     )
     print(report)
 

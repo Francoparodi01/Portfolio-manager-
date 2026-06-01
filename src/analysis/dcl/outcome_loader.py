@@ -433,6 +433,11 @@ class OutcomeLoader:
                 if owner_chat_id is not None and "owner_chat_id" in cols
                 else ""
             )
+            radar_filter = (
+                "AND COALESCE(source, layers->>'source', '') <> 'radar'"
+                if {"source", "layers"}.issubset(cols)
+                else ""
+            )
             args: list[Any] = [cutoff]
             if owner_filter:
                 args.append(owner_chat_id)
@@ -443,6 +448,7 @@ class OutcomeLoader:
                 FROM decision_log
                 WHERE decided_at >= $1
                 {owner_filter}
+                {radar_filter}
                 ORDER BY decided_at ASC
                 """,
                 *args,

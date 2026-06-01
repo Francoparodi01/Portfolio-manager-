@@ -243,12 +243,21 @@ async def build_confidence_audit(days: int = 180) -> str:
     else:
         verdict = "REVISAR INGESTA antes de confiar"
 
+    outside_hours = now.time() < time(10, 30) or now.time() >= time(17, 0)
+    if trading_day and not outside_hours:
+        market_label = "rueda"
+    elif trading_day and outside_hours:
+        market_label = "cerrado (fuera de horario)"
+    else:
+        market_label = "cerrado"
+    if closed_reason and "fuera de horario" not in market_label:
+        market_label += f" ({escape(closed_reason)})"
+
     lines = [
         "🧭 <b>CONFIANZA DEL SISTEMA</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"Veredicto: <b>{escape(verdict)}</b>",
-        f"Mercado: <b>{'rueda' if trading_day else 'cerrado'}</b>"
-        + (f" ({escape(closed_reason)})" if closed_reason else ""),
+        f"Mercado: <b>{market_label}</b>",
         "",
         "<b>Pipeline</b>",
         f"• {_state(portfolio_ok, 'Portfolio reciente')} — {_fmt_dt(latest_portfolio['scraped_at'] if latest_portfolio else None)} | {_money(latest_portfolio['total_value_ars'] if latest_portfolio else None)}",

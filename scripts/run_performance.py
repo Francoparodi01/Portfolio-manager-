@@ -284,6 +284,27 @@ async def _get_operational_context(db: PortfolioDatabase) -> dict:
     async with pool.acquire() as conn:
         latest_candle_day = await conn.fetchval("SELECT MAX(ts::date) FROM market_candles")
         latest_market_ts = await conn.fetchval("SELECT MAX(ts) FROM market_prices")
+        latest_portfolio_ts = await conn.fetchval("SELECT MAX(scraped_at) FROM portfolio_snapshots")
+        position_signatures_today = await conn.fetchval(
+            """
+            WITH daily_snapshots AS (
+                SELECT
+                    ps.snapshot_id,
+                    ps.cash_ars,
+                    STRING_AGG(
+                        p.ticker || ':' || COALESCE(p.quantity::text, '0'),
+                        ',' ORDER BY p.ticker
+                    ) AS positions_sig
+                FROM portfolio_snapshots ps
+                LEFT JOIN positions p ON p.snapshot_id = ps.snapshot_id
+                WHERE (ps.scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date =
+                      (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                GROUP BY ps.snapshot_id, ps.cash_ars
+            )
+            SELECT COUNT(DISTINCT COALESCE(positions_sig, '') || '|cash:' || COALESCE(cash_ars::text, '0'))
+            FROM daily_snapshots
+            """
+        )
         broker_exists = await conn.fetchval(
             """
             SELECT EXISTS (
@@ -309,6 +330,8 @@ async def _get_operational_context(db: PortfolioDatabase) -> dict:
     return {
         "latest_candle_day": latest_candle_day,
         "latest_market_ts": latest_market_ts,
+        "latest_portfolio_ts": latest_portfolio_ts,
+        "position_signatures_today": int(position_signatures_today or 0),
         "broker_fills": dict(broker) if broker else None,
     }
 
@@ -673,6 +696,31 @@ def _render_operational_context(stats: dict) -> list[str]:
             f"   Movimientos/Fills Cocos: <b>{_fmt_count(total)}</b> | "
             f"reconciliados {_fmt_count(reconciled)} | pendientes {_fmt_count(unreconciled)}"
         )
+        latest_fill = broker.get("latest_executed_at")
+        latest_portfolio = ctx.get("latest_portfolio_ts")
+        signatures_today = int(ctx.get("position_signatures_today") or 0)
+        if latest_fill and getattr(latest_fill, "tzinfo", None):
+            latest_fill_art = latest_fill.astimezone(ART)
+            lines.append(f"   Ultimo fill canonico: <b>{latest_fill_art.strftime('%d/%m')}</b>")
+        elif latest_fill:
+            lines.append(f"   Ultimo fill canonico: <b>{latest_fill.strftime('%d/%m')}</b>")
+        if latest_portfolio and latest_fill:
+            latest_portfolio_art = (
+                latest_portfolio.astimezone(ART)
+                if getattr(latest_portfolio, "tzinfo", None)
+                else latest_portfolio
+            )
+            latest_fill_art = (
+                latest_fill.astimezone(ART)
+                if getattr(latest_fill, "tzinfo", None)
+                else latest_fill
+            )
+            if latest_portfolio_art.date() > latest_fill_art.date() and signatures_today > 1:
+                lines.append(
+                    "   Aviso: el portfolio cambio hoy, pero Cocos movements todavia "
+                    "no expuso fills canonicos de hoy; performance/Bot vs Humano "
+                    "los toma cuando aparezcan o se materialicen."
+                )
         if total and not reconciled:
             lines.append("   Aclaracion: hay fills reales, pero no estan cruzados con decision_log; performance real sigue en espera.")
     else:
