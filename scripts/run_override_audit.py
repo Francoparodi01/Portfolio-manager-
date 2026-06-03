@@ -261,6 +261,16 @@ async def _fetch_audit_rows(
           AND bm.price IS NOT NULL
           AND NOT EXISTS (
               SELECT 1
+              FROM broker_fills bf
+              JOIN decision_log linked
+                ON linked.id = bf.decision_log_id
+              WHERE bf.source = 'cocos_movements'
+                AND bf.external_fill_id = bm.external_movement_id
+                AND COALESCE(linked.source, linked.layers->>'source') = 'execution_plan'
+                AND ($3::bigint IS NULL OR linked.owner_chat_id = $3)
+          )
+          AND NOT EXISTS (
+              SELECT 1
               FROM decision_log dl
               WHERE dl.ticker = bm.ticker
                 AND dl.decision = bm.movement_type

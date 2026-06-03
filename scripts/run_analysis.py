@@ -66,6 +66,10 @@ from src.analysis.execution_planner import (
     ExecutionPlan,
     MIN_TRADE_ARS,
 )
+from src.analysis.opportunity_screener import (
+    OpportunityReport,
+    run_opportunity_analysis,
+)
 from src.analysis.enums import DecisionType
 from src.analysis.validators import (
     validate_execution_plan,
@@ -1566,6 +1570,139 @@ def _execution_timing_context(now: datetime | None = None) -> dict[str, str | bo
     }
 
 
+def _opportunity_rr(candidate) -> float:
+    asymmetry = getattr(candidate, "asymmetry", None)
+    try:
+        return float(getattr(asymmetry, "risk_reward", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _opportunity_edge(candidate) -> float:
+    edge = getattr(candidate, "edge", None)
+    try:
+        return float(getattr(edge, "raw", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _opportunity_source_label(candidate) -> str:
+    counts = getattr(candidate, "technical_candle_source_counts", None) or {}
+    if isinstance(counts, dict) and counts:
+        return ", ".join(
+            f"{str(source).upper()} {int(count)}"
+            for source, count in sorted(counts.items())
+            if count
+        )
+    mode = str(getattr(candidate, "technical_candle_source_mode", "") or "").upper()
+    return mode or "UNKNOWN"
+
+
+def _append_analysis_radar(
+    h: list[str],
+    *,
+    opportunity_report: OpportunityReport,
+    total_ars: float,
+    available_cash_ars: float,
+) -> None:
+    """Render compact same-engine radar inside /analysis."""
+    h.append("<b>RADAR OPERATIVO</b>")
+    h.append("<i>Mismo motor que /radar; no entra al EV principal ni calibra thresholds.</i>")
+
+    cash = max(float(available_cash_ars or 0.0), 0.0)
+    if cash >= MIN_TRADE_ARS:
+        h.append(f"Cash ejecutable: <b>{_money_ars(cash)}</b>")
+    else:
+        h.append("Sin cash ejecutable: compras nuevas solo via funding o swap.")
+
+    raw_actionable = (
+        list(getattr(opportunity_report, "comprable_ahora", []) or [])
+        + list(getattr(opportunity_report, "compra_habilitada", []) or [])
+    )
+    actionable = [
+        c for c in raw_actionable
+        if str(getattr(c, "trade_type", "") or "").upper() != "SWAP_CANDIDATE"
+        and not str(getattr(c, "swap_vs", "") or "").strip()
+    ]
+    swaps = (
+        [
+            c for c in raw_actionable
+            if str(getattr(c, "trade_type", "") or "").upper() == "SWAP_CANDIDATE"
+            or str(getattr(c, "swap_vs", "") or "").strip()
+        ]
+        + list(getattr(opportunity_report, "swap_candidatos", []) or [])
+    )
+    watch = list(getattr(opportunity_report, "en_vigilancia", []) or [])
+
+    shown_any = False
+
+    if actionable:
+        shown_any = True
+        title = "Compras con cash" if cash >= MIN_TRADE_ARS else "Candidatos sin funding"
+        h.append(f"<b>{escape(title)}</b>")
+        for c in actionable[:3]:
+            suggested = float(total_ars or 0.0) * float(getattr(c, "sizing_suggested", 0.0) or 0.0)
+            executable = min(suggested, cash) if cash >= MIN_TRADE_ARS else 0.0
+            amount_txt = (
+                f" | ejecutable {_money_ars(executable)}"
+                if executable >= MIN_TRADE_ARS
+                else ""
+            )
+            h.append(
+                f"  {escape(str(c.ticker).upper())}: "
+                f"score <code>{float(c.final_score):+.3f}</code> | "
+                f"R/R {_opportunity_rr(c):.1f}x | edge {_opportunity_edge(c):+.3f}"
+                f"{amount_txt}"
+            )
+            if getattr(c, "why_not_now", ""):
+                h.append(f"   Motivo: {escape(str(c.why_not_now))}")
+            elif getattr(c, "action_concreta", ""):
+                h.append(f"   Accion: {escape(str(c.action_concreta))}")
+
+    if swaps:
+        shown_any = True
+        h.append("<b>Swaps posibles</b>")
+        for c in swaps[:3]:
+            swap_vs = str(getattr(c, "swap_vs", "") or "?").upper()
+            strength = str(getattr(c, "swap_strength", "") or "MODERADO").upper()
+            h.append(
+                f"  {escape(str(c.ticker).upper())} vs {escape(swap_vs)}: "
+                f"{escape(strength)} | score <code>{float(c.final_score):+.3f}</code> | "
+                f"edge {_opportunity_edge(c):+.3f} | R/R {_opportunity_rr(c):.1f}x"
+            )
+            if getattr(c, "why_not_now", ""):
+                h.append(f"   Motivo: {escape(str(c.why_not_now))}")
+
+    if watch:
+        shown_any = True
+        h.append("<b>Vigilancia</b>")
+        for c in watch[:3]:
+            why = str(getattr(c, "why_not_now", "") or getattr(c, "action_concreta", ""))
+            h.append(
+                f"  {escape(str(c.ticker).upper())}: "
+                f"score <code>{float(c.final_score):+.3f}</code> | "
+                f"R/R {_opportunity_rr(c):.1f}x | {escape(why)}"
+            )
+
+    if not shown_any:
+        h.append("Sin compras o swaps operativos en el universo Cocos.")
+
+    externos = list(getattr(opportunity_report, "externos", []) or [])
+    if externos:
+        h.append(
+            f"{len(externos)} tickers de Cocos sin historico operable: "
+            "detectados, pero sin 60 velas canonicas."
+        )
+
+    top_sources = []
+    for c in (actionable + swaps + watch)[:4]:
+        label = _opportunity_source_label(c)
+        if label and label not in top_sources:
+            top_sources.append(label)
+    if top_sources:
+        h.append(f"Fuente tecnica radar: <b>{escape(' | '.join(top_sources))}</b>")
+
+
 def render_report(
     results,
     macro_snap,
@@ -1578,6 +1715,7 @@ def render_report(
     external_universe_tickers: list[str] | None = None,
     ic_metrics:       dict | None = None,
     execution_plan:   ExecutionPlan | None = None,
+    opportunity_report: OpportunityReport | None = None,
 ) -> str:
     plan = execution_plan
     gate = plan.gate if plan else "NORMAL"
@@ -2005,6 +2143,17 @@ def render_report(
 
     # ── RADAR COCOS — compacto dentro de /analisis ────────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    if opportunity_report is not None:
+        _append_analysis_radar(
+            h,
+            opportunity_report=opportunity_report,
+            total_ars=total_ars,
+            available_cash_ars=getattr(opportunity_report, "available_cash_ars", cash_ars),
+        )
+        h.append("")
+        h.append("<i>Sistema cuantitativo multicapa - no es asesoramiento financiero</i>")
+        return "\n".join(h)
+
     h.append("<b>RADAR COCOS</b>")
 
     owned = {str(p.get("ticker", "")).upper() for p in positions or []}
@@ -2281,9 +2430,11 @@ async def main(
 
     # ── 7. Universo Cocos ──────────────────────────────────────────────────────
     universe_results = []
+    opportunity_report: OpportunityReport | None = None
     external_universe_tickers: list[str] = []
     cocos_universe: list[str] = []
     cocos_universe_assets: list[dict] = []
+    universe_frames: dict = {}
     try:
         db_u = PortfolioDatabase(cfg.database.url)
         await db_u.connect()
@@ -2364,6 +2515,37 @@ async def main(
                 if r.decision in ("BUY", "ACCUMULATE") and r.final_score > 0.25
             )
             logger.info(f"Universo: {len(universe_results)} resultados, {n_strong} compras claras")
+
+            portfolio_scores = {
+                str(getattr(r, "ticker", "") or "").upper(): float(
+                    getattr(r, "final_score", getattr(r, "score", 0.0)) or 0.0
+                )
+                for r in results or []
+                if str(getattr(r, "ticker", "") or "").strip()
+            }
+            asset_types = {
+                str(asset.get("ticker", "") or "").upper(): asset.get("asset_type", "UNKNOWN")
+                for asset in universe_assets
+                if str(asset.get("ticker", "") or "").strip()
+            }
+            opportunity_report = run_opportunity_analysis(
+                universe=universe_tickers,
+                portfolio_positions=positions,
+                macro_snap=macro_snap,
+                macro_regime=macro_regime,
+                period=period,
+                no_sentiment=no_sentiment,
+                portfolio_scores=portfolio_scores,
+                max_candidates=8,
+                min_score=0.10,
+                min_rr=0.0,
+                exclude_portfolio=True,
+                history_frames=universe_frames,
+                asset_types=asset_types,
+                available_cash_ars=cash_ars,
+            )
+            if opportunity_report.externos:
+                external_universe_tickers = [c.ticker for c in opportunity_report.externos]
 
     except Exception as e:
         logger.warning(f"Análisis de universo falló (no crítico): {e}")
@@ -2519,6 +2701,7 @@ async def main(
         external_universe_tickers = external_universe_tickers,
         ic_metrics       = ic_metrics,
         execution_plan   = execution_plan,
+        opportunity_report = opportunity_report,
     )
 
     # Validación de consistencia del header vs plan (no bloquea el envío)
