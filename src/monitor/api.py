@@ -161,6 +161,9 @@ def _override_opposite_ratio(item: dict) -> float:
 
 
 def _classify_override(item: dict) -> str:
+    if item.get("match_basis") == "pending_open_revalidation" or item.get("match_start_at") is None:
+        return "PENDING_OPEN"
+
     same_ratio = _override_same_ratio(item)
     opposite_ratio = _override_opposite_ratio(item)
     if same_ratio < 0.15 and opposite_ratio >= 0.15:
@@ -201,6 +204,7 @@ def _override_intent_summary(items: list[dict]) -> dict:
         groups.setdefault(key, []).append(item)
 
     status_rank = {
+        "PENDING_OPEN": 0,
         "OVERFOLLOWED": 5,
         "FOLLOWED": 4,
         "PARTIAL": 3,
@@ -738,7 +742,7 @@ async def override_audit(request: web.Request) -> web.Response:
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            WITH decisions AS (
+            WITH decision_base AS (
                 SELECT
                     id,
                     decided_at,
@@ -755,11 +759,15 @@ async def override_audit(request: web.Request) -> web.Response:
                     CASE
                         WHEN next_executable_at IS NOT NULL THEN next_executable_at
                         WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
-                            THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                            THEN ((((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + 1) + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                         WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
-                            THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                            THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                         ELSE decided_at
-                    END AS match_start_at,
+                    END AS provisional_match_start_at,
+                    (
+                        (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                        OR (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+                    ) AS needs_open_revalidation,
                     layers->>'reason' AS reason
                 FROM decision_log
                 WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
@@ -768,12 +776,50 @@ async def override_audit(request: web.Request) -> web.Response:
                   AND decision_type = 'executable'
                   AND decision IN ('BUY', 'SELL')
                   AND price_at_decision IS NOT NULL
+            ),
+            decisions AS (
+                SELECT
+                    d.*,
+                    CASE
+                        WHEN d.next_executable_at IS NOT NULL THEN d.next_executable_at
+                        WHEN d.needs_open_revalidation THEN open_price.first_price_at
+                        ELSE d.provisional_match_start_at
+                    END AS match_start_at,
+                    CASE
+                        WHEN d.next_executable_at IS NOT NULL
+                            THEN (d.next_executable_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                        WHEN d.needs_open_revalidation AND open_price.first_price_at IS NOT NULL
+                            THEN (open_price.first_price_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                        WHEN NOT d.needs_open_revalidation
+                            THEN (d.provisional_match_start_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                        ELSE NULL
+                    END AS match_day,
+                    CASE
+                        WHEN d.next_executable_at IS NOT NULL THEN 'next_executable'
+                        WHEN d.needs_open_revalidation AND open_price.first_price_at IS NOT NULL THEN 'fresh_open_price'
+                        WHEN d.needs_open_revalidation THEN 'pending_open_revalidation'
+                        ELSE 'intraday'
+                    END AS match_basis
+                FROM decision_base d
+                LEFT JOIN LATERAL (
+                    SELECT MIN(mp.ts) AS first_price_at
+                    FROM market_prices mp
+                    WHERE mp.ticker = d.ticker
+                      AND mp.last_price IS NOT NULL
+                      AND mp.last_price > 0
+                      AND mp.ts >= d.provisional_match_start_at
+                      AND mp.ts < d.provisional_match_start_at + INTERVAL '1 day'
+                ) open_price ON TRUE
             )
             SELECT
                 d.*,
                 same_fill.first_at AS same_executed_at,
+                same_fill.executed_at_precision AS same_executed_at_precision,
+                same_fill.executed_at_source AS same_executed_at_source,
                 same_fill.amount_ars AS same_amount_ars,
                 opposite_fill.first_at AS opposite_executed_at,
+                opposite_fill.executed_at_precision AS opposite_executed_at_precision,
+                opposite_fill.executed_at_source AS opposite_executed_at_source,
                 opposite_fill.amount_ars AS opposite_amount_ars,
                 CASE
                     WHEN COALESCE(same_fill.amount_ars, 0) / GREATEST(d.target_amount_ars, 1) >= 0.75 THEN 'FOLLOWED'
@@ -783,22 +829,50 @@ async def override_audit(request: web.Request) -> web.Response:
                 END AS override_status
             FROM decisions d
             LEFT JOIN LATERAL (
-                SELECT MIN(executed_at) AS first_at, SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
+                SELECT
+                    MIN(executed_at) AS first_at,
+                    (ARRAY_AGG(COALESCE(executed_at_precision, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_precision,
+                    (ARRAY_AGG(COALESCE(executed_at_source, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_source,
+                    SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
                 FROM broker_movements bm
                 WHERE bm.ticker = d.ticker
                   AND bm.movement_type = d.decision
-                  AND bm.executed_at >= d.match_start_at
-                  AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+                  AND d.match_start_at IS NOT NULL
+                  AND (
+                      (
+                          bm.executed_at >= d.match_start_at
+                          AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+                      )
+                      OR (
+                          d.match_day IS NOT NULL
+                          AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
+                          AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
+                      )
+                  )
                   AND bm.quantity IS NOT NULL
                   AND bm.price IS NOT NULL
             ) same_fill ON TRUE
             LEFT JOIN LATERAL (
-                SELECT MIN(executed_at) AS first_at, SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
+                SELECT
+                    MIN(executed_at) AS first_at,
+                    (ARRAY_AGG(COALESCE(executed_at_precision, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_precision,
+                    (ARRAY_AGG(COALESCE(executed_at_source, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_source,
+                    SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
                 FROM broker_movements bm
                 WHERE bm.ticker = d.ticker
                   AND bm.movement_type = CASE WHEN d.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
-                  AND bm.executed_at >= d.match_start_at
-                  AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+                  AND d.match_start_at IS NOT NULL
+                  AND (
+                      (
+                          bm.executed_at >= d.match_start_at
+                          AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+                      )
+                      OR (
+                          d.match_day IS NOT NULL
+                          AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
+                          AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
+                      )
+                  )
                   AND bm.quantity IS NOT NULL
                   AND bm.price IS NOT NULL
             ) opposite_fill ON TRUE

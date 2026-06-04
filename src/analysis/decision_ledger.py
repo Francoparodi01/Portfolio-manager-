@@ -51,10 +51,27 @@ def _money(value) -> str:
 def _clean_text(value) -> str:
     text = "" if value is None else str(value)
     return (
-        text.replace("posici?n", "posición")
-        .replace("exposici?n", "exposición")
-        .replace(" ? ", " → ")
+        text.replace("posici?n", "posicion")
+        .replace("exposici?n", "exposicion")
+        .replace("se?al", "senal")
+        .replace("te?rico", "teorico")
+        .replace("ejecuci?n", "ejecucion")
+        .replace(" ? ", " -> ")
+        .replace("?", "")
     )
+
+
+def _precision_label(value) -> str:
+    text = str(value or "").strip().lower()
+    if text == "date_only":
+        return "DATE_ONLY"
+    if text == "exact":
+        return "EXACT"
+    if text == "window":
+        return "WINDOW"
+    if text == "inferred":
+        return "INFERRED"
+    return ""
 
 
 def _fmt_dt(value) -> str:
@@ -100,6 +117,9 @@ def _opposite_ratio(row: dict) -> float:
 
 
 def classify_override(row: dict) -> str:
+    if row.get("match_basis") == "pending_open_revalidation" or row.get("match_start_at") is None:
+        return "PENDING_OPEN"
+
     same_ratio = _same_ratio(row)
     opposite_ratio = _opposite_ratio(row)
     if same_ratio < 0.15 and opposite_ratio >= 0.15:
@@ -150,6 +170,8 @@ async def fetch_decision_ledger(
             COALESCE(decision_type, 'unknown') AS decision_type,
             price_at_decision,
             ABS(COALESCE(NULLIF(executed_amount_ars, 0), theoretical_amount_ars, 0)) AS amount_ars,
+            layers#>>'{broker_fill,executed_at_precision}' AS execution_precision,
+            layers#>>'{broker_fill,executed_at_source}' AS execution_timestamp_source,
             COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
             COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
             COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d
@@ -176,7 +198,7 @@ async def fetch_decision_ledger(
 
     plan_rows = await conn.fetch(
         """
-        WITH decisions AS (
+        WITH decision_base AS (
             SELECT
                 id,
                 decided_at,
@@ -194,11 +216,15 @@ async def fetch_decision_ledger(
                 CASE
                     WHEN next_executable_at IS NOT NULL THEN next_executable_at
                     WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
-                        THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        THEN ((((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + 1) + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                     WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
-                        THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                     ELSE decided_at
-                END AS match_start_at,
+                END AS provisional_match_start_at,
+                (
+                    (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                    OR (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+                ) AS needs_open_revalidation,
                 layers->>'reason' AS reason
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
@@ -208,35 +234,97 @@ async def fetch_decision_ledger(
               AND decision_type = 'executable'
               AND decision IN ('BUY', 'SELL')
               AND price_at_decision IS NOT NULL
+        ),
+        decisions AS (
+            SELECT
+                d.*,
+                CASE
+                    WHEN d.next_executable_at IS NOT NULL THEN d.next_executable_at
+                    WHEN d.needs_open_revalidation THEN open_price.first_price_at
+                    ELSE d.provisional_match_start_at
+                END AS match_start_at,
+                CASE
+                    WHEN d.next_executable_at IS NOT NULL
+                        THEN (d.next_executable_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                    WHEN d.needs_open_revalidation AND open_price.first_price_at IS NOT NULL
+                        THEN (open_price.first_price_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                    WHEN NOT d.needs_open_revalidation
+                        THEN (d.provisional_match_start_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                    ELSE NULL
+                END AS match_day,
+                CASE
+                    WHEN d.next_executable_at IS NOT NULL THEN 'next_executable'
+                    WHEN d.needs_open_revalidation AND open_price.first_price_at IS NOT NULL THEN 'fresh_open_price'
+                    WHEN d.needs_open_revalidation THEN 'pending_open_revalidation'
+                    ELSE 'intraday'
+                END AS match_basis
+            FROM decision_base d
+            LEFT JOIN LATERAL (
+                SELECT MIN(mp.ts) AS first_price_at
+                FROM market_prices mp
+                WHERE mp.ticker = d.ticker
+                  AND mp.last_price IS NOT NULL
+                  AND mp.last_price > 0
+                  AND mp.ts >= d.provisional_match_start_at
+                  AND mp.ts < d.provisional_match_start_at + INTERVAL '1 day'
+            ) open_price ON TRUE
         )
         SELECT
             d.*,
             same_fill.first_at AS same_executed_at,
+            same_fill.executed_at_precision AS same_executed_at_precision,
+            same_fill.executed_at_source AS same_executed_at_source,
             same_fill.amount_ars AS same_amount_ars,
             opposite_fill.first_at AS opposite_executed_at,
+            opposite_fill.executed_at_precision AS opposite_executed_at_precision,
+            opposite_fill.executed_at_source AS opposite_executed_at_source,
             opposite_fill.amount_ars AS opposite_amount_ars
         FROM decisions d
         LEFT JOIN LATERAL (
             SELECT
                 MIN(executed_at) AS first_at,
+                (ARRAY_AGG(COALESCE(executed_at_precision, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_precision,
+                (ARRAY_AGG(COALESCE(executed_at_source, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_source,
                 SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = d.decision
-              AND bm.executed_at >= d.match_start_at
-              AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+              AND d.match_start_at IS NOT NULL
+              AND (
+                  (
+                      bm.executed_at >= d.match_start_at
+                      AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+                  )
+                  OR (
+                      d.match_day IS NOT NULL
+                      AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
+                      AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
+                  )
+              )
               AND bm.quantity IS NOT NULL
               AND bm.price IS NOT NULL
         ) same_fill ON TRUE
         LEFT JOIN LATERAL (
             SELECT
                 MIN(executed_at) AS first_at,
+                (ARRAY_AGG(COALESCE(executed_at_precision, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_precision,
+                (ARRAY_AGG(COALESCE(executed_at_source, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_source,
                 SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = CASE WHEN d.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
-              AND bm.executed_at >= d.match_start_at
-              AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+              AND d.match_start_at IS NOT NULL
+              AND (
+                  (
+                      bm.executed_at >= d.match_start_at
+                      AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+                  )
+                  OR (
+                      d.match_day IS NOT NULL
+                      AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
+                      AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
+                  )
+              )
               AND bm.quantity IS NOT NULL
               AND bm.price IS NOT NULL
         ) opposite_fill ON TRUE
@@ -632,9 +720,11 @@ def render_decision_ledger(data: dict) -> str:
             outcome = row.get("outcome_5d")
             if pnl is None and shown >= 3:
                 continue
+            precision = _precision_label(row.get("execution_precision"))
+            precision_txt = f" <code>{precision}</code>" if precision else ""
             lines.append(
                 f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> "
-                f"{_money(row.get('amount_ars'))} -> 5D {_pct(outcome)} / {_money(pnl)}"
+                f"{_money(row.get('amount_ars'))}{precision_txt} -> 5D {_pct(outcome)} / {_money(pnl)}"
             )
             shown += 1
         lines.append("")
@@ -649,11 +739,16 @@ def render_decision_ledger(data: dict) -> str:
             bot_pnl = row.get("bot_pnl_5d_ars")
             if bot_pnl is None and shown >= 4:
                 continue
+            precision = _precision_label(
+                row.get("same_executed_at_precision")
+                or row.get("opposite_executed_at_precision")
+            )
+            precision_txt = f" | <code>{precision}</code>" if precision else ""
             lines.append(
                 f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> "
                 f"<code>{escape(str(status))}</code> target {_money(row.get('target_amount_ars'))} | "
                 f"bot {_money(bot_pnl)} | humano {_money(row.get('human_pnl_5d_ars'))} | "
-                f"delta {_money(row.get('human_vs_bot_5d_ars'))}"
+                f"delta {_money(row.get('human_vs_bot_5d_ars'))}{precision_txt}"
             )
             reason = row.get("reason")
             if reason and status in {"IGNORED", "PARTIAL", "OPPOSITE", "OVERFOLLOWED"}:

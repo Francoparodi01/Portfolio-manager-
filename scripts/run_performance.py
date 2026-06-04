@@ -81,6 +81,22 @@ def _json_payload(value) -> dict:
     return {}
 
 
+def _clean_text(value) -> str:
+    text = str(value or "")
+    replacements = {
+        "posici?n": "posicion",
+        "exposici?n": "exposicion",
+        "se?al": "senal",
+        "te?rico": "teorico",
+        "ejecuci?n": "ejecucion",
+        " ? ": " -> ",
+        "?": "",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return text
+
+
 def _layer_component(layers: dict, name: str) -> float | None:
     payload = layers.get(name)
     if isinstance(payload, dict):
@@ -794,10 +810,14 @@ def _recent_decision_notes(row: dict) -> list[str]:
 
     reason = layers.get("reason") or row.get("block_reason")
     if reason:
-        lines.append(f"      - Motivo del planner: {escape(str(reason))}.")
+        lines.append(f"      - Motivo del planner: {escape(_clean_text(reason))}.")
 
     layer_parts = []
     for label, key in (("tecnico", "technical"), ("riesgo", "risk"), ("macro", "macro"), ("sentiment", "sentiment")):
+        payload = layers.get(key)
+        if key == "sentiment" and isinstance(payload, dict) and payload.get("reason") == "sentiment_off":
+            layer_parts.append("sentiment OFF")
+            continue
         value = _layer_component(layers, key)
         if value is not None:
             layer_parts.append(f"{label} {value:+.3f}")

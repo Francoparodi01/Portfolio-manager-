@@ -847,6 +847,15 @@
       });
     }
 
+    function fmtPrecision(value) {
+      const text = String(value || "").toLowerCase();
+      if (text === "date_only") return "DATE_ONLY";
+      if (text === "exact") return "EXACT";
+      if (text === "window") return "WINDOW";
+      if (text === "inferred") return "INFERRED";
+      return "";
+    }
+
     function ageFromIso(value) {
       if (!value) return "-";
       const d = new Date(value);
@@ -1140,7 +1149,7 @@
           <td>${fmtDate(row.decided_at)}</td>
           <td>${row.ticker || "-"}</td>
           <td>${row.decision || "-"}</td>
-          <td><span class="override-badge ob-${(row.override_status||"").toLowerCase()}" title="Movimiento real: ${fmtMoney(row.same_amount_ars || 0)} / plan ${fmtMoney(row.target_amount_ars || 0)}">${row.override_status || "-"}</span></td>
+          <td><span class="override-badge ob-${(row.override_status||"").toLowerCase()}" title="Movimiento real: ${fmtMoney(row.same_amount_ars || 0)} / plan ${fmtMoney(row.target_amount_ars || 0)}${fmtPrecision(row.same_executed_at_precision || row.opposite_executed_at_precision) ? " / precisión " + fmtPrecision(row.same_executed_at_precision || row.opposite_executed_at_precision) : ""}">${row.override_status || "-"}${fmtPrecision(row.same_executed_at_precision || row.opposite_executed_at_precision) ? " · " + fmtPrecision(row.same_executed_at_precision || row.opposite_executed_at_precision) : ""}</span></td>
           <td class="${row.outcome_5d >= 0 ? 'money' : 'red-text'}">${row.outcome_5d === null || row.outcome_5d === undefined ? "pend." : fmtPct(row.outcome_5d)}</td>
         </tr>
       `).join("") || `<tr><td colspan="5" class="subtle">Sin planes aprobados recientes</td></tr>`;

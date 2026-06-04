@@ -51,6 +51,35 @@ def _fmt_dt(value) -> str:
     return str(value)
 
 
+def _clean_text(value) -> str:
+    text = str(value or "")
+    replacements = {
+        "posici?n": "posicion",
+        "exposici?n": "exposicion",
+        "se?al": "senal",
+        "te?rico": "teorico",
+        "ejecuci?n": "ejecucion",
+        " ? ": " -> ",
+        "?": "",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return text
+
+
+def _precision_label(value) -> str:
+    text = str(value or "").strip().lower()
+    if text == "date_only":
+        return "DATE_ONLY"
+    if text == "exact":
+        return "EXACT"
+    if text == "window":
+        return "WINDOW"
+    if text == "inferred":
+        return "INFERRED"
+    return ""
+
+
 def _as_float(value, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -61,6 +90,7 @@ def _as_float(value, default: float = 0.0) -> float:
 
 
 STATUS_LABELS = {
+    "PENDING_OPEN": "PENDING_OPEN",
     "FOLLOWED": "FOLLOWED",
     "OVERFOLLOWED": "OVERFOLLOWED",
     "PARTIAL": "PARTIAL",
@@ -82,6 +112,9 @@ def _opposite_ratio(row: dict) -> float:
 
 
 def _classify(row: dict) -> str:
+    if row.get("match_basis") == "pending_open_revalidation" or row.get("match_start_at") is None:
+        return "PENDING_OPEN"
+
     same_ratio = _same_ratio(row)
     opposite_ratio = _opposite_ratio(row)
 
@@ -131,6 +164,7 @@ def _intent_level_summary(rows: list[dict]) -> dict:
         "PARTIAL": 3,
         "OPPOSITE": 2,
         "IGNORED": 1,
+        "PENDING_OPEN": 0,
     }
 
     for group_rows in groups.values():
@@ -174,7 +208,7 @@ async def _fetch_audit_rows(
 ) -> tuple[list[dict], list[dict]]:
     rows = await conn.fetch(
         """
-        WITH decisions AS (
+        WITH decision_base AS (
             SELECT
                 id,
                 decided_at,
@@ -192,11 +226,15 @@ async def _fetch_audit_rows(
                 CASE
                     WHEN next_executable_at IS NOT NULL THEN next_executable_at
                     WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
-                        THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        THEN ((((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + 1) + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                     WHEN (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
-                        THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                        THEN (((decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                     ELSE decided_at
-                END AS match_start_at,
+                END AS provisional_match_start_at,
+                (
+                    (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                    OR (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+                ) AS needs_open_revalidation,
                 layers->>'reason' AS reason
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
@@ -206,35 +244,97 @@ async def _fetch_audit_rows(
               AND decision_type = 'executable'
               AND decision IN ('BUY', 'SELL')
               AND price_at_decision IS NOT NULL
+        ),
+        decisions AS (
+            SELECT
+                d.*,
+                CASE
+                    WHEN d.next_executable_at IS NOT NULL THEN d.next_executable_at
+                    WHEN d.needs_open_revalidation THEN open_price.first_price_at
+                    ELSE d.provisional_match_start_at
+                END AS match_start_at,
+                CASE
+                    WHEN d.next_executable_at IS NOT NULL
+                        THEN (d.next_executable_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                    WHEN d.needs_open_revalidation AND open_price.first_price_at IS NOT NULL
+                        THEN (open_price.first_price_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                    WHEN NOT d.needs_open_revalidation
+                        THEN (d.provisional_match_start_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                    ELSE NULL
+                END AS match_day,
+                CASE
+                    WHEN d.next_executable_at IS NOT NULL THEN 'next_executable'
+                    WHEN d.needs_open_revalidation AND open_price.first_price_at IS NOT NULL THEN 'fresh_open_price'
+                    WHEN d.needs_open_revalidation THEN 'pending_open_revalidation'
+                    ELSE 'intraday'
+                END AS match_basis
+            FROM decision_base d
+            LEFT JOIN LATERAL (
+                SELECT MIN(mp.ts) AS first_price_at
+                FROM market_prices mp
+                WHERE mp.ticker = d.ticker
+                  AND mp.last_price IS NOT NULL
+                  AND mp.last_price > 0
+                  AND mp.ts >= d.provisional_match_start_at
+                  AND mp.ts < d.provisional_match_start_at + INTERVAL '1 day'
+            ) open_price ON TRUE
         )
         SELECT
             d.*,
             same_fill.first_at AS same_executed_at,
+            same_fill.executed_at_precision AS same_executed_at_precision,
+            same_fill.executed_at_source AS same_executed_at_source,
             same_fill.amount_ars AS same_amount_ars,
             opposite_fill.first_at AS opposite_executed_at,
+            opposite_fill.executed_at_precision AS opposite_executed_at_precision,
+            opposite_fill.executed_at_source AS opposite_executed_at_source,
             opposite_fill.amount_ars AS opposite_amount_ars
         FROM decisions d
         LEFT JOIN LATERAL (
             SELECT
                 MIN(executed_at) AS first_at,
+                (ARRAY_AGG(COALESCE(executed_at_precision, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_precision,
+                (ARRAY_AGG(COALESCE(executed_at_source, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_source,
                 SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = d.decision
-              AND bm.executed_at >= d.match_start_at
-              AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+              AND d.match_start_at IS NOT NULL
+              AND (
+                  (
+                      bm.executed_at >= d.match_start_at
+                      AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+                  )
+                  OR (
+                      d.match_day IS NOT NULL
+                      AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
+                      AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
+                  )
+              )
               AND bm.quantity IS NOT NULL
               AND bm.price IS NOT NULL
         ) same_fill ON TRUE
         LEFT JOIN LATERAL (
             SELECT
                 MIN(executed_at) AS first_at,
+                (ARRAY_AGG(COALESCE(executed_at_precision, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_precision,
+                (ARRAY_AGG(COALESCE(executed_at_source, 'unknown') ORDER BY executed_at, id))[1] AS executed_at_source,
                 SUM(ABS(COALESCE(amount, quantity * price, 0))) AS amount_ars
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = CASE WHEN d.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
-              AND bm.executed_at >= d.match_start_at
-              AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+              AND d.match_start_at IS NOT NULL
+              AND (
+                  (
+                      bm.executed_at >= d.match_start_at
+                      AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
+                  )
+                  OR (
+                      d.match_day IS NOT NULL
+                      AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
+                      AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
+                  )
+              )
               AND bm.quantity IS NOT NULL
               AND bm.price IS NOT NULL
         ) opposite_fill ON TRUE
@@ -249,6 +349,8 @@ async def _fetch_audit_rows(
         """
         SELECT
             bm.executed_at,
+            bm.executed_at_precision,
+            bm.executed_at_source,
             bm.ticker,
             bm.movement_type,
             ABS(COALESCE(bm.amount, bm.quantity * bm.price, 0)) AS amount_ars,
@@ -282,9 +384,9 @@ async def _fetch_audit_rows(
                     CASE
                         WHEN dl.next_executable_at IS NOT NULL THEN dl.next_executable_at
                         WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
-                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                            THEN ((((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + 1) + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                         WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
-                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                         ELSE dl.decided_at
                     END
                 ) <= bm.executed_at
@@ -292,9 +394,9 @@ async def _fetch_audit_rows(
                     CASE
                         WHEN dl.next_executable_at IS NOT NULL THEN dl.next_executable_at
                         WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
-                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                            THEN ((((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + 1) + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                         WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
-                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                         ELSE dl.decided_at
                     END
                 ) >= bm.executed_at - ($2::int * INTERVAL '1 day')
@@ -516,7 +618,7 @@ def render_report(
         f"   Planes aprobados/ejecutados: <b>{summary['total']}</b>",
         f"   Intenciones unicas: <b>{summary['unique_intents']}</b> (ticker + lado) | repetidas: <b>{summary['repeated_plans']}</b>",
         f"   Cerrados 5D: <b>{summary['closed_5d']}</b> planes | <b>{by_intent.get('closed_5d', 0)}</b> intenciones",
-        f"   FOLLOWED: {by_status.get('FOLLOWED', 0)} | OVER: {by_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_status.get('PARTIAL', 0)} | IGNORED: {by_status.get('IGNORED', 0)} | OPPOSITE: {by_status.get('OPPOSITE', 0)}",
+        f"   FOLLOWED: {by_status.get('FOLLOWED', 0)} | OVER: {by_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_status.get('PARTIAL', 0)} | IGNORED: {by_status.get('IGNORED', 0)} | OPPOSITE: {by_status.get('OPPOSITE', 0)} | PENDING_OPEN: {by_status.get('PENDING_OPEN', 0)}",
         f"   Bot hipotetico 5D por plan: <b>{_pct(summary['avg_bot_5d'])}</b>",
         f"   Delta humano vs bot 5D por plan: <b>{_pct(summary['avg_override_delta_5d'])}</b>",
         f"   Bot hipotetico 5D por intencion: <b>{_pct(by_intent.get('avg_bot_5d'))}</b>",
@@ -546,7 +648,7 @@ def render_report(
     if by_intent_status:
         lines += [
             "<b>LECTURA POR INTENCION</b>",
-            f"   FOLLOWED: {by_intent_status.get('FOLLOWED', 0)} | OVER: {by_intent_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_intent_status.get('PARTIAL', 0)} | IGNORED: {by_intent_status.get('IGNORED', 0)} | OPPOSITE: {by_intent_status.get('OPPOSITE', 0)}",
+            f"   FOLLOWED: {by_intent_status.get('FOLLOWED', 0)} | OVER: {by_intent_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_intent_status.get('PARTIAL', 0)} | IGNORED: {by_intent_status.get('IGNORED', 0)} | OPPOSITE: {by_intent_status.get('OPPOSITE', 0)} | PENDING_OPEN: {by_intent_status.get('PENDING_OPEN', 0)}",
             "   Esta vista reduce el peso de senales repetidas del mismo ticker/lado.",
             "",
         ]
@@ -597,26 +699,37 @@ def render_report(
             same_ratio = _same_ratio(row)
             same_ratio_txt = f" ({same_ratio:.1f}x)" if same_ratio >= 0.15 else ""
             outcome = row.get("outcome_5d")
-            result = "pendiente" if outcome is None else f"bot {_pct(outcome)}"
+            result = (
+                "pendiente apertura/revalidacion"
+                if status == "PENDING_OPEN"
+                else ("pendiente" if outcome is None else f"bot {_pct(outcome)}")
+            )
             human_delta = _override_delta(status, float(outcome)) if outcome is not None else None
             if human_delta is not None and status not in {"FOLLOWED", "OVERFOLLOWED"}:
                 result += f" | humano-vs-bot {_pct(human_delta)}"
+            precision = _precision_label(
+                row.get("same_executed_at_precision")
+                or row.get("opposite_executed_at_precision")
+            )
+            precision_txt = f" | <code>{precision}</code>" if precision else ""
             lines.append(
                 f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> "
-                f"<code>{status}</code> target {target} | mov. {same}{same_ratio_txt} -> {result}"
+                f"<code>{status}</code> target {target} | mov. {same}{same_ratio_txt} -> {result}{precision_txt}"
             )
             reason = row.get("reason")
             if reason and status in {"IGNORED", "OPPOSITE", "PARTIAL", "OVERFOLLOWED"}:
-                lines.append(f"      Motivo bot: {escape(str(reason))[:180]}")
+                lines.append(f"      Motivo bot: {escape(_clean_text(reason))[:180]}")
         lines.append("")
 
     if manual_only:
         lines.append("<b>MANUAL_ONLY RECIENTE</b>")
         lines.append("   Movimientos reales sin plan aprobado/ejecutado cercano del mismo lado.")
         for row in manual_only[:6]:
+            precision = _precision_label(row.get("executed_at_precision"))
+            precision_txt = f" <code>{precision}</code>" if precision else ""
             lines.append(
                 f"   {_fmt_dt(row.get('executed_at'))} <b>{escape(str(row.get('movement_type')))} {escape(str(row.get('ticker')))}</b> "
-                f"{_money(row.get('amount_ars'))} @ {_money(row.get('price'))}"
+                f"{_money(row.get('amount_ars'))} @ {_money(row.get('price'))}{precision_txt}"
             )
         lines.append("")
 

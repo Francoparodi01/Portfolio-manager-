@@ -84,6 +84,7 @@ class PortfolioDatabase:
     def __init__(self, dsn: str):
         self._dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
         self._pool: Optional[asyncpg.Pool] = None
+        self._execution_timestamp_meta_ready = False
 
     async def connect(self):
         if not HAS_ASYNCPG:
@@ -109,6 +110,38 @@ class PortfolioDatabase:
                 raise
 
         logger.info("Schema inicializado desde init.sql")
+
+    async def _ensure_execution_timestamp_meta_columns(self, conn) -> None:
+        if self._execution_timestamp_meta_ready:
+            return
+        await conn.execute(
+            """
+            ALTER TABLE broker_fills
+                ADD COLUMN IF NOT EXISTS executed_at_precision TEXT NOT NULL DEFAULT 'unknown',
+                ADD COLUMN IF NOT EXISTS executed_at_source    TEXT NOT NULL DEFAULT 'unknown';
+
+            ALTER TABLE broker_movements
+                ADD COLUMN IF NOT EXISTS executed_at_precision TEXT NOT NULL DEFAULT 'date_only',
+                ADD COLUMN IF NOT EXISTS executed_at_source    TEXT NOT NULL DEFAULT 'cocos_movements.execution_date';
+
+            UPDATE broker_movements
+            SET executed_at_precision = 'date_only'
+            WHERE executed_at_precision IS NULL
+               OR executed_at_precision = ''
+               OR executed_at_precision = 'unknown';
+
+            UPDATE broker_fills
+            SET executed_at_precision = 'date_only',
+                executed_at_source = 'cocos_movements.execution_date'
+            WHERE source = 'cocos_movements'
+              AND (
+                    executed_at_precision IS NULL
+                 OR executed_at_precision = ''
+                 OR executed_at_precision = 'unknown'
+              );
+            """
+        )
+        self._execution_timestamp_meta_ready = True
 
     async def upsert_bot_user_credentials(
         self,
@@ -947,6 +980,8 @@ class PortfolioDatabase:
                 fill.source,
                 fill.external_fill_id,
                 fill.executed_at,
+                str(fill.executed_at_precision or "unknown").lower(),
+                str(fill.executed_at_source or "unknown"),
                 fill.ticker.upper(),
                 fill.side.upper(),
                 float(fill.quantity),
@@ -961,6 +996,7 @@ class PortfolioDatabase:
         ]
 
         async with self._pool.acquire() as conn:
+            await self._ensure_execution_timestamp_meta_columns(conn)
             for row in rows:
                 external_id = str(row[1])
                 if external_id.startswith("synthetic:"):
@@ -996,11 +1032,11 @@ class PortfolioDatabase:
                     row[0],
                     row[1],
                     row[2],
-                    row[3],
-                    row[4],
                     row[5],
                     row[6],
                     row[7],
+                    row[8],
+                    row[9],
                 )
 
             await conn.executemany(
@@ -1009,6 +1045,8 @@ class PortfolioDatabase:
                     source,
                     external_fill_id,
                     executed_at,
+                    executed_at_precision,
+                    executed_at_source,
                     ticker,
                     side,
                     quantity,
@@ -1017,9 +1055,11 @@ class PortfolioDatabase:
                     fees_ars,
                     raw_payload
                 )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
                 ON CONFLICT (source, external_fill_id) DO UPDATE SET
                     executed_at      = EXCLUDED.executed_at,
+                    executed_at_precision = EXCLUDED.executed_at_precision,
+                    executed_at_source    = EXCLUDED.executed_at_source,
                     ticker           = EXCLUDED.ticker,
                     side             = EXCLUDED.side,
                     quantity         = EXCLUDED.quantity,
@@ -1045,6 +1085,8 @@ class PortfolioDatabase:
                 movement.source,
                 movement.external_movement_id,
                 movement.executed_at,
+                str(movement.executed_at_precision or "date_only").lower(),
+                str(movement.executed_at_source or "cocos_movements.execution_date"),
                 movement.movement_type,
                 movement.currency,
                 float(movement.amount) if movement.amount is not None else None,
@@ -1063,6 +1105,7 @@ class PortfolioDatabase:
         ]
 
         async with self._pool.acquire() as conn:
+            await self._ensure_execution_timestamp_meta_columns(conn)
             for row in rows:
                 external_id = str(row[1])
                 if external_id.startswith("synthetic:"):
@@ -1095,11 +1138,11 @@ class PortfolioDatabase:
                     row[0],
                     row[1],
                     row[2],
-                    row[3],
                     row[5],
-                    row[6],
                     row[7],
                     row[8],
+                    row[9],
+                    row[10],
                 )
 
             await conn.executemany(
@@ -1108,6 +1151,8 @@ class PortfolioDatabase:
                     source,
                     external_movement_id,
                     executed_at,
+                    executed_at_precision,
+                    executed_at_source,
                     movement_type,
                     currency,
                     amount,
@@ -1122,9 +1167,11 @@ class PortfolioDatabase:
                     balance,
                     raw_payload
                 )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
                 ON CONFLICT (source, external_movement_id) DO UPDATE SET
                     executed_at     = EXCLUDED.executed_at,
+                    executed_at_precision = EXCLUDED.executed_at_precision,
+                    executed_at_source    = EXCLUDED.executed_at_source,
                     movement_type   = EXCLUDED.movement_type,
                     currency        = EXCLUDED.currency,
                     amount          = EXCLUDED.amount,
@@ -1150,6 +1197,7 @@ class PortfolioDatabase:
             raise RuntimeError("Llamar connect() primero")
 
         async with self._pool.acquire() as conn:
+            await self._ensure_execution_timestamp_meta_columns(conn)
             fill_rows = await conn.fetch(
                 """
                 SELECT
@@ -1157,6 +1205,8 @@ class PortfolioDatabase:
                     source,
                     external_fill_id,
                     executed_at,
+                    executed_at_precision,
+                    executed_at_source,
                     ticker,
                     side,
                     quantity,
@@ -1207,6 +1257,8 @@ class PortfolioDatabase:
                 fill = BrokerFill(
                     external_fill_id=str(row["external_fill_id"]),
                     executed_at=row["executed_at"],
+                    executed_at_precision=str(row["executed_at_precision"] or "unknown"),
+                    executed_at_source=str(row["executed_at_source"] or "unknown"),
                     ticker=str(row["ticker"]),
                     side=str(row["side"]),
                     quantity=float(row["quantity"]),
@@ -1265,6 +1317,8 @@ class PortfolioDatabase:
                                 "source": fill.source,
                                 "external_fill_id": fill.external_fill_id,
                                 "executed_at": fill.executed_at.isoformat(),
+                                "executed_at_precision": fill.executed_at_precision,
+                                "executed_at_source": fill.executed_at_source,
                                 "quantity": fill.quantity,
                                 "avg_fill_price": fill.avg_fill_price,
                                 "gross_amount_ars": executed_amount,

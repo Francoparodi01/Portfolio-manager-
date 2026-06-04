@@ -717,6 +717,15 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
         layer = _find_layer(name)
 
         if not layer:
+            if name.lower() == "sentiment" and not bool(getattr(result, "sentiment_active", True)):
+                return {
+                    "weighted": 0.0,
+                    "raw": 0.0,
+                    "weight": 0.0,
+                    "reason": "sentiment_off",
+                    "active": False,
+                    "redistributed_to": ["technical", "macro"],
+                }
             return {
                 "weighted": 0.0,
                 "raw": 0.0,
@@ -748,6 +757,7 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
     payload["macro"] = _layer_payload("macro")
     payload["sentiment"] = _layer_payload("sentiment")
     payload["risk"] = _layer_payload("risk")
+    payload["sentiment_active"] = bool(getattr(result, "sentiment_active", True))
 
     payload["final_score"] = _safe_float(getattr(result, "final_score", 0.0))
     payload["decision_from_synthesis"] = str(getattr(result, "decision", "") or "")
@@ -1032,9 +1042,9 @@ async def _save_execution_plan_events(
                     CASE
                         WHEN dl.next_executable_at IS NOT NULL THEN dl.next_executable_at
                         WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
-                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + INTERVAL '1 day') AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                            THEN ((((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + 1) + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                         WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
-                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AT TIME ZONE 'America/Argentina/Buenos_Aires')
+                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
                         ELSE dl.decided_at
                     END
                  )
@@ -1974,6 +1984,11 @@ def render_report(
         tech = _layer_weighted(r, "technical")
         macro = _layer_weighted(r, "macro")
         sent = _layer_weighted(r, "sentiment")
+        sentiment_label = (
+            "sentiment OFF"
+            if not bool(getattr(r, "sentiment_active", True))
+            else f"sentiment {sent:+.3f}"
+        )
 
         ars_str = ""
 
@@ -2004,7 +2019,7 @@ def render_report(
             h.append(
                 f"   Capas: <code>técnico {tech:+.3f} | "
                 f"macro {macro:+.3f} | "
-                f"sentiment {sent:+.3f}</code>"
+                f"{sentiment_label}</code>"
             )
 
         source_mode = str(
@@ -2405,6 +2420,7 @@ async def main(
             risk_position     = risk_p,
             sentiment_score   = sent.score if sent else 0.0,
             technical_score_raw = getattr(tech, "score_raw", 0.0),
+            skip_sentiment    = no_sentiment,
             technical_candle_source_mode=getattr(tech, "candle_source_mode", "unknown"),
             technical_has_reconstructed_candles=getattr(tech, "has_reconstructed_candles", False),
             technical_candle_sources=getattr(tech, "candle_sources", ()),
@@ -2503,6 +2519,7 @@ async def main(
                     },
                     sentiment_score     = u_sent.score if u_sent else 0.0,
                     technical_score_raw = getattr(u_tech, "score_raw", 0.0),
+                    skip_sentiment      = no_sentiment,
                     technical_candle_source_mode=getattr(u_tech, "candle_source_mode", "unknown"),
                     technical_has_reconstructed_candles=getattr(u_tech, "has_reconstructed_candles", False),
                     technical_candle_sources=getattr(u_tech, "candle_sources", ()),

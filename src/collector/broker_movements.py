@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
+import re
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -31,6 +32,8 @@ class BrokerMovement:
     balance: float | None = None
     source: str = "cocos_movements"
     raw_payload: dict[str, Any] | None = None
+    executed_at_precision: str = "date_only"
+    executed_at_source: str = "cocos_movements.execution_date"
 
 
 def _parse_date(value: Any) -> date | None:
@@ -43,11 +46,55 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
+def _timestamp_precision(value: Any) -> str:
+    if isinstance(value, datetime):
+        return "exact"
+    if isinstance(value, (int, float)):
+        return "exact"
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return "date_only"
+    if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", text):
+        return "date_only"
+    return "exact" if re.search(r"\d{1,2}:\d{2}", text) else "date_only"
+
+
 def _parse_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=ART_TZ)
+    if isinstance(value, (int, float)):
+        raw = float(value)
+        if raw > 10_000_000_000:
+            raw = raw / 1000
+        return datetime.fromtimestamp(raw, tz=timezone.utc)
+
     day = _parse_date(value)
     if day:
         return datetime.combine(day, time.min, tzinfo=ART_TZ)
+    text = str(value or "").strip()
+    if text:
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=ART_TZ)
+        except ValueError:
+            pass
     return datetime.now(tz=ART_TZ)
+
+
+def _timestamp_from_row(
+    row: dict[str, Any],
+    fields: tuple[str, ...],
+    *,
+    source: str,
+) -> tuple[datetime, str, str]:
+    for field in fields:
+        value = row.get(field)
+        if value in (None, ""):
+            continue
+        return _parse_datetime(value), _timestamp_precision(value), f"{source}.{field}"
+    return datetime.now(tz=ART_TZ), "inferred", f"{source}.scrape_time"
 
 
 def _parse_float(value: Any) -> float | None:
@@ -131,14 +178,15 @@ def _cash_movement_from_row(
     ticker = str(row.get("instrument_code") or "").upper().strip() or None
     currency = str(row.get("id_currency") or row.get("currency") or "ARS").upper()
 
+    executed_at, precision, ts_source = _timestamp_from_row(
+        row,
+        ("execution_date", "timestamp", "created_at", "date"),
+        source=source,
+    )
+
     return BrokerMovement(
         external_movement_id=str(external_id),
-        executed_at=_parse_datetime(
-            row.get("execution_date")
-            or row.get("timestamp")
-            or row.get("created_at")
-            or row.get("date")
-        ),
+        executed_at=executed_at,
         movement_type=movement_type,
         currency=currency,
         amount=_signed_amount(row, movement_type),
@@ -151,6 +199,8 @@ def _cash_movement_from_row(
         balance=_parse_float(row.get("balance")),
         source=source,
         raw_payload=row,
+        executed_at_precision=precision,
+        executed_at_source=ts_source,
     )
 
 
@@ -175,9 +225,15 @@ def _ticker_movement_from_row(
         elif movement_type == "BUY":
             amount = abs(amount)
 
+    executed_at, precision, ts_source = _timestamp_from_row(
+        row,
+        ("execution_date", "timestamp", "created_at", "date"),
+        source=source,
+    )
+
     return BrokerMovement(
         external_movement_id=str(external_id),
-        executed_at=_parse_datetime(row.get("execution_date") or row.get("date")),
+        executed_at=executed_at,
         movement_type=movement_type,
         currency=str(row.get("id_currency") or row.get("currency") or "ARS").upper(),
         amount=amount,
@@ -192,6 +248,8 @@ def _ticker_movement_from_row(
         balance=None,
         source=source,
         raw_payload=row,
+        executed_at_precision=precision,
+        executed_at_source=ts_source,
     )
 
 
@@ -279,6 +337,8 @@ def broker_fills_from_movements(
                 fees_ars=None,
                 source=source,
                 raw_payload=movement.raw_payload,
+                executed_at_precision=movement.executed_at_precision,
+                executed_at_source=movement.executed_at_source,
             )
         )
     return fills

@@ -248,6 +248,8 @@ CREATE TABLE IF NOT EXISTS broker_fills (
     source           TEXT          NOT NULL DEFAULT 'manual_import',
     external_fill_id TEXT          NOT NULL,
     executed_at      TIMESTAMPTZ   NOT NULL,
+    executed_at_precision TEXT     NOT NULL DEFAULT 'unknown',
+    executed_at_source    TEXT     NOT NULL DEFAULT 'unknown',
     ticker           TEXT          NOT NULL,
     side             TEXT          NOT NULL CHECK (side IN ('BUY', 'SELL')),
     quantity         NUMERIC(20,8) NOT NULL,
@@ -269,6 +271,8 @@ CREATE TABLE IF NOT EXISTS broker_movements (
     source               TEXT NOT NULL DEFAULT 'cocos_movements',
     external_movement_id TEXT NOT NULL,
     executed_at          TIMESTAMPTZ NOT NULL,
+    executed_at_precision TEXT NOT NULL DEFAULT 'date_only',
+    executed_at_source    TEXT NOT NULL DEFAULT 'cocos_movements.execution_date',
     movement_type        TEXT NOT NULL,
     currency             TEXT NOT NULL DEFAULT 'ARS',
     amount               NUMERIC(20,4),
@@ -416,6 +420,10 @@ ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS credentials_last_verified_at TIME
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS is_active                    BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE broker_fills ADD COLUMN IF NOT EXISTS owner_chat_id           BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
+ALTER TABLE broker_fills ADD COLUMN IF NOT EXISTS executed_at_precision   TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE broker_fills ADD COLUMN IF NOT EXISTS executed_at_source      TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE broker_movements ADD COLUMN IF NOT EXISTS executed_at_precision TEXT NOT NULL DEFAULT 'date_only';
+ALTER TABLE broker_movements ADD COLUMN IF NOT EXISTS executed_at_source    TEXT NOT NULL DEFAULT 'cocos_movements.execution_date';
 
 UPDATE decision_log
 SET decision_type = CASE
@@ -572,6 +580,10 @@ ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS credentials_last_verified_at TIME
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS is_active                    BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE broker_fills ADD COLUMN IF NOT EXISTS owner_chat_id           BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
+ALTER TABLE broker_fills ADD COLUMN IF NOT EXISTS executed_at_precision   TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE broker_fills ADD COLUMN IF NOT EXISTS executed_at_source      TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE broker_movements ADD COLUMN IF NOT EXISTS executed_at_precision TEXT NOT NULL DEFAULT 'date_only';
+ALTER TABLE broker_movements ADD COLUMN IF NOT EXISTS executed_at_source    TEXT NOT NULL DEFAULT 'cocos_movements.execution_date';
 
 -- Rellenar decision_type para filas legacy
 UPDATE decision_log

@@ -21,6 +21,7 @@ Principios:
 """
 from __future__ import annotations
 
+from html import escape
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -509,6 +510,8 @@ def build_telegram_report(signals: list[Signal], total_value_ars: float) -> str:
     """Render compacto para el scheduler diario."""
     if not signals:
         return "Análisis técnico: sin señales operativas disponibles."
+    for signal in signals:
+        signal.reasons = [escape(str(reason)) for reason in signal.reasons]
     blocks = "\n\n".join(signal.to_telegram() for signal in signals)
     return (
         f"<b>Análisis técnico</b>\n"

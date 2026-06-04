@@ -35,6 +35,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from html import escape
 from zoneinfo import ZoneInfo
 
 try:
@@ -90,6 +91,11 @@ PORTFOLIO_ALERT_MAJOR_PCT = float(os.getenv("PORTFOLIO_ALERT_MAJOR_PCT", "0.03")
 PORTFOLIO_ALERT_WEIGHTED_PCT = float(os.getenv("PORTFOLIO_ALERT_WEIGHTED_PCT", "0.02"))
 PORTFOLIO_ALERT_MIN_WEIGHT = float(os.getenv("PORTFOLIO_ALERT_MIN_WEIGHT", "0.10"))
 PORTFOLIO_ALERT_TTL_SECONDS = int(os.getenv("PORTFOLIO_ALERT_TTL_SECONDS", "86400"))
+INTRADAY_REVALIDATION_ENABLED = os.getenv("INTRADAY_REVALIDATION_ENABLED", "true").lower() == "true"
+INTRADAY_REVALIDATION_PCT = float(os.getenv("INTRADAY_REVALIDATION_PCT", "0.03"))
+INTRADAY_REVALIDATION_MAX_PRICE_AGE_SECONDS = int(os.getenv("INTRADAY_REVALIDATION_MAX_PRICE_AGE_SECONDS", "1200"))
+INTRADAY_REVALIDATION_LOOKBACK_DAYS = int(os.getenv("INTRADAY_REVALIDATION_LOOKBACK_DAYS", "7"))
+INTRADAY_REVALIDATION_TTL_SECONDS = int(os.getenv("INTRADAY_REVALIDATION_TTL_SECONDS", "21600"))
 RISK_ALERT_TTL_SECONDS = int(os.getenv("RISK_ALERT_TTL_SECONDS", "7200"))
 STOP_TRIGGERED_ALERT_TTL_SECONDS = int(os.getenv("STOP_TRIGGERED_ALERT_TTL_SECONDS", "86400"))
 
@@ -105,6 +111,7 @@ MONITOR_STATE_KEY = "cocos:monitor:state"
 SCHEDULER_HEARTBEAT_KEY = "cocos:scheduler:last_heartbeat"
 BOT_BUSY_KEY = "cocos:bot:busy"
 PORTFOLIO_ALERT_KEY_PREFIX = "cocos:portfolio:alert"
+INTRADAY_REVALIDATION_KEY_PREFIX = "cocos:intraday:revalidation"
 RISK_ALERT_KEY_PREFIX = "cocos:risk:alert"
 
 # Lock en proceso: garantiza un Ãºnico scraper activo a la vez.
@@ -664,6 +671,10 @@ async def _load_canonical_history_frames(
     limit: int = 260,
 ) -> dict:
     frames = {}
+    latest_prices = {
+        str(row.get("ticker", "") or "").upper(): row
+        for row in await db.get_latest_market_prices()
+    }
     for position in positions:
         ticker = str(getattr(position, "ticker", "") or "").upper()
         asset_type = getattr(getattr(position, "asset_type", None), "value", None)
@@ -675,9 +686,87 @@ async def _load_canonical_history_frames(
             limit=limit,
         )
         frame = candles_to_frame(rows)
+        frame = _overlay_latest_market_price(frame, latest_prices.get(ticker))
         if len(frame) >= 60:
             frames[ticker] = frame
     return frames
+
+
+def _overlay_latest_market_price(frame, latest_row: dict | None):
+    """
+    Ajusta solo el frame en memoria para el reporte tecnico EOD.
+
+    market_candles puede tener la vela oficial del dia anterior o una vela Cocos
+    stale. Para el reporte operativo se necesita que el ultimo Close refleje el
+    ultimo market_prices fresco del dia, sin escribir nuevas velas ni tocar el
+    pipeline canonico.
+    """
+    if frame is None or latest_row is None or getattr(frame, "empty", True):
+        return frame
+    try:
+        import pandas as pd
+
+        price = _safe_float(latest_row.get("last_price"))
+        raw_ts = latest_row.get("ts")
+        if price is None or price <= 0 or raw_ts is None:
+            return frame
+
+        market_ts = pd.Timestamp(raw_ts)
+        if market_ts.tzinfo is None:
+            market_ts = market_ts.tz_localize("UTC")
+        else:
+            market_ts = market_ts.tz_convert("UTC")
+
+        if market_ts.tz_convert(TIMEZONE).date() != _now_art().date():
+            return frame
+
+        out = frame.copy()
+        existing = None
+        drop_indexes = []
+        for idx in out.index:
+            idx_ts = pd.Timestamp(idx)
+            if idx_ts.tzinfo is None:
+                idx_ts = idx_ts.tz_localize("UTC")
+            else:
+                idx_ts = idx_ts.tz_convert("UTC")
+            if idx_ts.date() == market_ts.date():
+                existing = out.loc[idx]
+                drop_indexes.append(idx)
+
+        open_price = high_price = low_price = close_price = float(price)
+        volume = 0.0
+        if existing is not None:
+            if hasattr(existing, "iloc") and getattr(existing, "ndim", 1) > 1:
+                existing = existing.iloc[-1]
+            open_price = _safe_float(existing.get("Open"), close_price) or close_price
+            high_price = max(_safe_float(existing.get("High"), close_price) or close_price, close_price)
+            low_price = min(_safe_float(existing.get("Low"), close_price) or close_price, close_price)
+            volume = _safe_float(existing.get("Volume"), 0.0) or 0.0
+
+        if drop_indexes:
+            out = out.drop(index=drop_indexes)
+        out.loc[market_ts] = {
+            "Open": open_price,
+            "High": high_price,
+            "Low": low_price,
+            "Close": close_price,
+            "Volume": volume,
+            "Source": "internal_snapshot",
+        }
+        out = out.sort_index()
+
+        sources = tuple(sorted(set(out["Source"].astype(str))))
+        source_counts = {
+            str(source): int(count)
+            for source, count in out["Source"].value_counts().sort_index().items()
+        }
+        out.attrs["candle_sources"] = sources
+        out.attrs["candle_source_counts"] = source_counts
+        out.attrs["has_reconstructed_candles"] = "internal_snapshot" in sources
+        return out
+    except Exception as exc:
+        logger.debug("overlay latest market price omitido: %s", exc)
+        return frame
 
 
 async def run_build_daily_candles() -> None:
@@ -842,6 +931,22 @@ class RiskAlert:
     target_price: float | None = None
 
 
+@dataclass(frozen=True)
+class IntradayRevalidationAlert:
+    decision_id: int
+    ticker: str
+    decision: str
+    decided_at: datetime
+    plan_price: float
+    current_price: float
+    change_pct: float
+    target_amount_ars: float
+    current_weight: float | None = None
+    target_weight: float | None = None
+    reason: str | None = None
+    price_ts: datetime | None = None
+
+
 # â”€â”€â”€ Intraday Manager â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class IntradayManager:
@@ -894,7 +999,8 @@ class IntradayManager:
         try:
             self.notifier.send_raw(
                 "ðŸŸ¢ <b>Monitoreo intradÃ­a iniciado</b>\n"
-                "Mercado cada 90s Â· Portfolio cada 5min Â· Live cache cada 60s Â· Risk guard cada 60s."
+                "Mercado cada 90s Â· Portfolio cada 5min Â· Live cache cada 60s Â· "
+                "Risk guard cada 60s Â· Revalidacion intradia official=False."
             )
         except Exception as e:
             logger.warning("No se pudo notificar inicio de monitoreo: %s", e)
@@ -1169,6 +1275,35 @@ class IntradayManager:
                                 len(unseen_alerts),
                             )
 
+                if INTRADAY_REVALIDATION_ENABLED:
+                    pool = await self._resolve_pool(db)
+                    if pool is not None:
+                        revalidations = await self._compute_intraday_revalidations(
+                            pool,
+                            latest_prices,
+                        )
+                        unseen_revalidations = [
+                            alert for alert in revalidations
+                            if not await self._intraday_revalidation_seen(alert)
+                        ]
+                        if unseen_revalidations:
+                            if await _is_bot_busy():
+                                logger.info(
+                                    "Intraday revalidation: bot busy, postergando %d alerta(s)",
+                                    len(unseen_revalidations),
+                                )
+                            else:
+                                sent = self.notifier.send_raw(
+                                    self._render_intraday_revalidations(unseen_revalidations)
+                                )
+                                if sent:
+                                    for alert in unseen_revalidations:
+                                        await self._mark_intraday_revalidation(alert)
+                                    logger.info(
+                                        "Intraday revalidation: %d alerta(s) enviadas",
+                                        len(unseen_revalidations),
+                                    )
+
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1185,6 +1320,217 @@ class IntradayManager:
                     pass
 
             await asyncio.sleep(PORTFOLIO_LIVE_POLL_SECONDS)
+
+    async def _compute_intraday_revalidations(
+        self,
+        pool,
+        latest_prices: list[dict],
+    ) -> list[IntradayRevalidationAlert]:
+        if not latest_prices:
+            return []
+
+        latest_by_ticker = {
+            str(row.get("ticker") or "").upper(): row
+            for row in latest_prices
+            if str(row.get("ticker") or "").strip()
+        }
+        if not latest_by_ticker:
+            return []
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (ticker)
+                    id,
+                    decided_at,
+                    ticker,
+                    decision,
+                    price_at_decision::float AS plan_price,
+                    ABS(COALESCE(theoretical_amount_ars, executed_amount_ars, 0))::float AS target_amount_ars,
+                    current_weight::float AS current_weight,
+                    target_weight::float AS target_weight,
+                    layers->>'reason' AS reason
+                FROM decision_log
+                WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND COALESCE(source, layers->>'source') = 'execution_plan'
+                  AND status IN ('APPROVED', 'EXECUTED')
+                  AND decision_type = 'executable'
+                  AND decision IN ('BUY', 'SELL')
+                  AND price_at_decision IS NOT NULL
+                  AND price_at_decision > 0
+                  AND (
+                    (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                    OR (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+                  )
+                ORDER BY ticker, decided_at DESC, id DESC
+                """,
+                INTRADAY_REVALIDATION_LOOKBACK_DAYS,
+            )
+
+        now = _now_art()
+        alerts: list[IntradayRevalidationAlert] = []
+        for row in rows:
+            ticker = str(row["ticker"] or "").upper()
+            latest = latest_by_ticker.get(ticker)
+            if not latest:
+                continue
+
+            current_price = _safe_float(latest.get("last_price"))
+            plan_price = _safe_float(row["plan_price"])
+            if not current_price or not plan_price or plan_price <= 0:
+                continue
+
+            price_ts = self._parse_price_ts(latest.get("ts"))
+            if price_ts is None:
+                continue
+            age_seconds = (now - price_ts.astimezone(ART_TZ)).total_seconds()
+            if age_seconds < 0 or age_seconds > INTRADAY_REVALIDATION_MAX_PRICE_AGE_SECONDS:
+                continue
+
+            change_pct = (float(current_price) / float(plan_price)) - 1.0
+            if abs(change_pct) < INTRADAY_REVALIDATION_PCT:
+                continue
+
+            alerts.append(
+                IntradayRevalidationAlert(
+                    decision_id=int(row["id"]),
+                    ticker=ticker,
+                    decision=str(row["decision"] or "").upper(),
+                    decided_at=row["decided_at"],
+                    plan_price=float(plan_price),
+                    current_price=float(current_price),
+                    change_pct=float(change_pct),
+                    target_amount_ars=float(row["target_amount_ars"] or 0),
+                    current_weight=(
+                        float(row["current_weight"])
+                        if row["current_weight"] is not None
+                        else None
+                    ),
+                    target_weight=(
+                        float(row["target_weight"])
+                        if row["target_weight"] is not None
+                        else None
+                    ),
+                    reason=str(row["reason"] or "").strip() or None,
+                    price_ts=price_ts,
+                )
+            )
+
+        return sorted(alerts, key=lambda alert: abs(alert.change_pct), reverse=True)
+
+    @staticmethod
+    def _parse_price_ts(value) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=ART_TZ)
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=ART_TZ)
+        except Exception:
+            return None
+
+    async def _intraday_revalidation_seen(self, alert: IntradayRevalidationAlert) -> bool:
+        return bool(await _redis_get(self._intraday_revalidation_key(alert)))
+
+    async def _mark_intraday_revalidation(self, alert: IntradayRevalidationAlert) -> None:
+        await _redis_set(
+            self._intraday_revalidation_key(alert),
+            f"{alert.change_pct:+.6f}",
+            ex=INTRADAY_REVALIDATION_TTL_SECONDS,
+        )
+
+    @staticmethod
+    def _intraday_revalidation_key(alert: IntradayRevalidationAlert) -> str:
+        business_day = _now_art().strftime("%Y%m%d")
+        threshold = max(INTRADAY_REVALIDATION_PCT, 0.0001)
+        bucket = int(abs(alert.change_pct) / threshold)
+        direction = "UP" if alert.change_pct > 0 else "DOWN"
+        return (
+            f"{INTRADAY_REVALIDATION_KEY_PREFIX}:{business_day}:"
+            f"{alert.decision_id}:{direction}:{bucket}"
+        )
+
+    def _render_intraday_revalidations(
+        self,
+        alerts: list[IntradayRevalidationAlert],
+    ) -> str:
+        lines = [
+            "<b>INTRADAY_REVALIDATION</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "official=False | no modifica auditoria",
+            "",
+        ]
+
+        for alert in alerts[:5]:
+            action = self._intraday_action_text(alert)
+            plan = self._plan_label(alert)
+            price_time = (
+                alert.price_ts.astimezone(ART_TZ).strftime("%H:%M")
+                if alert.price_ts
+                else "N/A"
+            )
+            lines += [
+                f"<b>{escape(alert.ticker)}</b>",
+                f"Cambio: <b>{alert.change_pct:+.2%}</b> desde plan EOD",
+                (
+                    f"Plan original: <b>{escape(plan)}</b> en "
+                    f"<b>{self._fmt_price(alert.plan_price)}</b>"
+                ),
+                f"Monto plan: <b>{self._fmt_ars(alert.target_amount_ars)}</b>",
+                (
+                    f"Precio actual: <b>{self._fmt_price(alert.current_price)}</b> "
+                    f"({price_time} ART)"
+                ),
+                f"Accion: <b>{escape(action)}</b>",
+            ]
+            if alert.reason:
+                lines.append(f"Motivo plan: {escape(self._clean_reason(alert.reason))[:180]}")
+            lines.append("")
+
+        lines.append("<i>Revalidacion intradia: contexto operativo, no nueva decision oficial.</i>")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _fmt_price(value: float) -> str:
+        return f"${value:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+
+    @staticmethod
+    def _fmt_ars(value: float) -> str:
+        return f"${value:,.0f} ARS".replace(",", ".")
+
+    @staticmethod
+    def _clean_reason(value: str) -> str:
+        return (
+            str(value or "")
+            .replace("posici?n", "posicion")
+            .replace("exposici?n", "exposicion")
+            .replace(" ? ", " -> ")
+            .replace("?", "")
+        )
+
+    @staticmethod
+    def _plan_label(alert: IntradayRevalidationAlert) -> str:
+        if alert.decision == "SELL":
+            if (
+                alert.target_weight is not None
+                and alert.current_weight is not None
+                and alert.target_weight <= 0.001
+            ):
+                return "SELL total"
+            return "SELL parcial"
+        return "BUY"
+
+    @staticmethod
+    def _intraday_action_text(alert: IntradayRevalidationAlert) -> str:
+        if alert.decision == "SELL":
+            if alert.change_pct < 0:
+                return "Evaluar si ejecutar ahora o esperar cierre"
+            return "Evaluar ejecutar recorte si el motivo sigue vigente"
+
+        if alert.change_pct > 0:
+            return "No perseguir precio automaticamente; revalidar entrada"
+        return "Evaluar si el pullback mejora entrada o esperar cierre"
 
     @staticmethod
     async def _resolve_pool(db: PortfolioDatabase):

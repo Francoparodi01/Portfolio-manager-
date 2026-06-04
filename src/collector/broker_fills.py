@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
@@ -26,6 +26,23 @@ class BrokerFill:
     fees_ars: float | None = None
     source: str = "manual_import"
     raw_payload: dict[str, Any] | None = None
+    executed_at_precision: str = "unknown"
+    executed_at_source: str = "unknown"
+
+
+def _timestamp_precision(value: Any) -> str:
+    if isinstance(value, datetime):
+        return "exact"
+    if isinstance(value, (int, float)):
+        return "exact"
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return "date_only"
+    if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", text):
+        return "date_only"
+    return "exact" if re.search(r"\d{1,2}:\d{2}", text) else "date_only"
 
 
 def _parse_datetime(value: Any) -> datetime:
@@ -40,6 +57,9 @@ def _parse_datetime(value: Any) -> datetime:
     text = str(value or "").strip()
     if not text:
         raise ValueError("executed_at is required")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        day = date.fromisoformat(text)
+        return datetime.combine(day, time.min, tzinfo=ART_TZ)
     iso = text.replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(iso)
@@ -117,6 +137,10 @@ def broker_fill_from_mapping(
         fees_ars=_parse_float(row.get("fees_ars")),
         source=source,
         raw_payload=dict(row),
+        executed_at_precision=str(
+            row.get("executed_at_precision") or _timestamp_precision(row.get("executed_at"))
+        ).lower(),
+        executed_at_source=str(row.get("executed_at_source") or f"{source}.executed_at"),
     )
 
 
@@ -277,6 +301,8 @@ def _fill_from_cocos_row(row: dict[str, Any], *, source: str) -> BrokerFill | No
             fees_ars=float(fees) if fees is not None else None,
             source=source,
             raw_payload=row,
+            executed_at_precision=_timestamp_precision(executed_at_raw),
+            executed_at_source=f"{source}.payload",
         )
     except Exception:
         return None
