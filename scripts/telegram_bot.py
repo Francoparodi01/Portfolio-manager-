@@ -17,7 +17,7 @@ Scraping manual:
 
 Requiere:
   TELEGRAM_BOT_TOKEN o SCRAPER_TELEGRAM_BOT_TOKEN
-  ADMIN_CHAT_IDS=123456789
+  ADMIN_CHAT_IDS=<telegram_chat_id>
 """
 
 from __future__ import annotations
@@ -117,6 +117,26 @@ ADMIN_CHAT_IDS: set[int] = {
     for x in os.getenv("ADMIN_CHAT_IDS", "").replace(";", ",").split(",")
     if x.strip().isdigit()
 }
+TELEGRAM_ALLOWED_CHAT_IDS: set[int] = {
+    int(x)
+    for x in (
+        ",".join(
+            [
+                os.getenv("TELEGRAM_CHAT_ID", ""),
+                os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", ""),
+            ]
+        )
+    )
+    .replace(";", ",")
+    .split(",")
+    if x.strip().isdigit()
+}
+ALLOW_ALL_CHATS = os.getenv("TELEGRAM_ALLOW_ALL_CHATS", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "y",
+}
 
 
 def _get_token() -> str:
@@ -143,6 +163,37 @@ def is_admin(chat_id: int) -> bool:
         logger.warning("[BOT] ADMIN_CHAT_IDS no configurado — admin bloqueado")
         return False
     return int(chat_id) in ADMIN_CHAT_IDS
+
+
+def is_allowed_chat(chat_id: int) -> bool:
+    if _multiuser_enabled() or ALLOW_ALL_CHATS:
+        return True
+    allowed = TELEGRAM_ALLOWED_CHAT_IDS | ADMIN_CHAT_IDS
+    if not allowed:
+        logger.warning("[BOT] No hay chats permitidos configurados; acceso bloqueado")
+        return False
+    return int(chat_id) in allowed
+
+
+async def ensure_allowed_chat(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    if not update.effective_chat:
+        return False
+    chat_id = int(update.effective_chat.id)
+    if is_allowed_chat(chat_id):
+        return True
+
+    logger.warning("[BOT] Chat no autorizado: chat_id=%s", chat_id)
+    try:
+        if update.callback_query:
+            await update.callback_query.answer("Chat no autorizado.", show_alert=True)
+        elif update.message:
+            await update.message.reply_text("Chat no autorizado para este bot.")
+    except Exception:
+        pass
+    return False
 
 
 def _multiuser_enabled() -> bool:
@@ -479,7 +530,10 @@ def main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Bot vs Humano",       callback_data="override_audit"),
         ]
     ]
-    final_row = [InlineKeyboardButton("🩺 Status", callback_data="status")]
+    final_row = [
+        InlineKeyboardButton("Decision Ledger", callback_data="decision_ledger"),
+        InlineKeyboardButton("🩺 Status", callback_data="status"),
+    ]
     if _multiuser_enabled():
         final_row.append(
             InlineKeyboardButton("⚙️ Configuración", callback_data="settings")
@@ -501,6 +555,7 @@ def menu_text() -> str:
         "🧠 <b>Plan de cartera</b> — rotación y acciones sugeridas\n"
         "📅 <b>Resumen semanal</b> — performance de la semana\n"
         "📊 <b>Performance</b> — métricas canónicas y dataset operativo\n"
+        "Decision Ledger — atribución económica de decisiones y swaps\n"
         "🧭 <b>Confianza</b> — auditoría operativa del sistema\n"
         "🔭 <b>Radar</b> — oportunidades operables del universo\n"
         "📈 <b>Regression</b> — auditoría de señales y outcomes\n"
@@ -796,6 +851,19 @@ async def action_override_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int
     sync_note = await sync_operational_state(full=False)
     report = await run_python_script(
         "scripts/run_override_audit.py",
+        "--days",
+        "90",
+        "--no-telegram",
+        *_owner_cli_args(chat_id),
+        timeout=240,
+    )
+    await send_text(context, chat_id, sync_note + report)
+
+
+async def action_decision_ledger(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    sync_note = await sync_operational_state(full=False)
+    report = await run_python_script(
+        "scripts/run_decision_ledger.py",
         "--days",
         "90",
         "--no-telegram",
@@ -1228,6 +1296,8 @@ async def settings_text_handler(
 ) -> None:
     if not update.message or not update.effective_chat:
         return
+    if not await ensure_allowed_chat(update, context):
+        return
     if not _multiuser_enabled():
         return
 
@@ -1548,6 +1618,10 @@ CALLBACK_ALIASES: dict[str, str] = {
     "overrides":        "override_audit",
     "override":         "override_audit",
     "bot_vs_humano":    "override_audit",
+    # Decision Ledger
+    "decision_ledger":  "decision_ledger",
+    "ledger":           "decision_ledger",
+    "atribucion":       "decision_ledger",
     # Confianza operativa
     "confidence":       "confidence_audit",
     "confianza":        "confidence_audit",
@@ -1583,6 +1657,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
     "override_audit": "Comparando planes del bot contra movimientos reales...",
+    "decision_ledger": "Calculando atribución económica...",
     "confidence_audit": "🧭 Auditando confianza del sistema...",
     "radar":         "🔭 Generando radar de oportunidades...",
     "radar_full":    "🔭 Generando radar completo...",
@@ -1600,6 +1675,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "weekly_summary": action_weekly_summary,
         "performance":    action_performance,
         "override_audit": action_override_audit,
+        "decision_ledger": action_decision_ledger,
         "confidence_audit": action_confidence_audit,
         "calibration":    action_calibration,
         "radar":          action_radar,
@@ -1623,6 +1699,8 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
+    if not await ensure_allowed_chat(update, context):
+        return
     await update.message.reply_text(
         menu_text(),
         parse_mode=ParseMode.HTML,
@@ -1640,6 +1718,8 @@ async def _dispatch_command(
     context: ContextTypes.DEFAULT_TYPE,
     action: str,
 ) -> None:
+    if not await ensure_allowed_chat(update, context):
+        return
     chat_id = update.effective_chat.id
     loading = ACTION_LOADING_TEXT.get(action, "🔄 Procesando...")
     await answer_loading(update, loading)
@@ -1676,6 +1756,10 @@ async def override_audit_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> Non
     await _dispatch_command(u, c, "override_audit")
 
 
+async def decision_ledger_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "decision_ledger")
+
+
 async def confidence_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "confidence_audit")
 
@@ -1706,6 +1790,8 @@ async def cancel_settings_handler(
 ) -> None:
     if not update.effective_chat:
         return
+    if not await ensure_allowed_chat(update, context):
+        return
     _clear_settings_state(context)
     await send_text(context, update.effective_chat.id, "Configuración cancelada.")
     await send_menu(context, update.effective_chat.id)
@@ -1714,6 +1800,8 @@ async def regression_audit_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+    if not await ensure_allowed_chat(update, context):
+        return
     chat_id = update.effective_chat.id
 
     raw_mode = (
@@ -1801,6 +1889,8 @@ async def radar_full_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def admin_scrape_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_allowed_chat(update, context):
+        return
     chat_id = update.effective_chat.id
     await answer_loading(update, "⚙️ Iniciando scraping en modo admin...")
     await action_admin_scrape(context, chat_id)
@@ -1808,6 +1898,8 @@ async def admin_scrape_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_refresh_portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_allowed_chat(update, context):
+        return
     chat_id = update.effective_chat.id
     await answer_loading(update, "🔄 Refrescando portfolio en modo admin...")
     await action_admin_refresh_portfolio(context, chat_id)
@@ -1822,6 +1914,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     raw_action = str(query.data or "").strip()
     action     = CALLBACK_ALIASES.get(raw_action)
     chat_id    = query.message.chat_id if query.message else update.effective_chat.id
+
+    if not await ensure_allowed_chat(update, context):
+        return
 
     await query.answer()
 
@@ -1929,6 +2024,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("weekly_summary",   weekly_summary_handler))
     app.add_handler(CommandHandler("resumen_semanal",  weekly_summary_handler))
     app.add_handler(CommandHandler("performance",      performance_handler))
+    app.add_handler(CommandHandler("ledger",           decision_ledger_handler))
+    app.add_handler(CommandHandler("decision_ledger",  decision_ledger_handler))
+    app.add_handler(CommandHandler("atribucion",       decision_ledger_handler))
     app.add_handler(CommandHandler("override",         override_audit_handler))
     app.add_handler(CommandHandler("overrides",        override_audit_handler))
     app.add_handler(CommandHandler("bot_vs_humano",    override_audit_handler))

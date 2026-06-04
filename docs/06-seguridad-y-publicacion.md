@@ -1,4 +1,4 @@
-# Seguridad y publicacion del monitor
+# Seguridad y acceso remoto del monitor
 
 ## Veredicto
 
@@ -17,6 +17,7 @@ decisiones y logs recientes. Eso lo convierte en superficie sensible.
 - Headers de seguridad en respuestas HTTP.
 - Rate-limit simple para intentos invalidos de auth.
 - Docker publica el monitor solo en `127.0.0.1` por defecto.
+- El bot de Telegram queda limitado por allowlist en modo single-user.
 - Headers `X-Frame-Options`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`
   y CSP basica.
 
@@ -87,3 +88,10 @@ MONITOR_TOTP_SECRET=...
 - No publicar puertos de DB/Redis.
 - Revisar logs antes de compartir capturas.
 - Rotar tokens si fueron copiados a chats, screenshots o repos.
+
+## Checklist antes de compartir capturas o reportes
+
+- Ocultar portfolio real, movimientos reales, fills reales, chat ids y tokens.
+- Revisar logs antes de mostrarlos.
+- Usar capturas anonimizadas cuando el material salga del entorno privado.
+- Rotar tokens si fueron copiados a chats, screenshots o documentos externos.

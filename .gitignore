@@ -1,16 +1,28 @@
 # Entorno local
 .env
 .env.*.local
+.env.local
+.env.production
+.env.prod
 venv/
 __pycache__/
 *.pyc
 
 # Secretos
 secret_key/
+.secret_key/
 secrets/
+.secrets/
 secrets_multiuser/
 *.key
 *.pem
+*.crt
+*.p12
+*.pfx
+*.jks
+*session*.json
+*cookies*.json
+*storage_state*.json
 
 # Outputs locales
 logs/
@@ -19,6 +31,10 @@ models/
 outputs/
 *.log
 tests/
+.agents/
+playwright-report/
+test-results/
+trace.zip
 
 # Python
 .pytest_cache/
@@ -34,3 +50,9 @@ Thumbs.db
 # DB / backups
 *.sql.gz
 backup_*.sql
+*.dump
+*.backup
+*.bak
+*.sqlite
+*.sqlite3
+*.db

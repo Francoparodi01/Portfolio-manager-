@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any, Iterable
@@ -60,6 +61,26 @@ def _parse_float(value: Any) -> float | None:
             return float(text)
         except Exception:
             return None
+
+
+def _synthetic_ticker_movement_id(row: dict[str, Any], movement_type: str) -> str:
+    ticker = str(row.get("instrument_code") or "").upper().strip()
+    day = str(row.get("execution_date") or row.get("date") or "")[:10]
+    settlement = str(row.get("settlement_date") or "")[:10]
+    raw = "|".join(
+        [
+            day,
+            settlement,
+            ticker,
+            movement_type,
+            str(row.get("id_instrument") or ""),
+            str(row.get("quantity") or ""),
+            str(row.get("price") or ""),
+            str(row.get("amount") or ""),
+        ]
+    )
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    return f"synthetic:{day}:{ticker}:{movement_type}:{digest}"
 
 
 def _movement_type(row: dict[str, Any]) -> str:
@@ -140,10 +161,12 @@ def _ticker_movement_from_row(
 ) -> BrokerMovement | None:
     external_id = row.get("id_ticket") or row.get("id_movement") or row.get("id")
     ticker = str(row.get("instrument_code") or "").upper().strip()
-    if external_id in (None, "") or not ticker:
+    if not ticker:
         return None
 
     movement_type = _movement_type(row)
+    if external_id in (None, ""):
+        external_id = _synthetic_ticker_movement_id(row, movement_type)
     quantity = _parse_float(row.get("quantity"))
     amount = _parse_float(row.get("amount"))
     if amount is not None:

@@ -93,7 +93,7 @@ def get_config() -> AppConfig:
         database=DatabaseConfig(
             url=os.environ.get(
                 "DATABASE_URL",
-                "postgresql+asyncpg://portfolio:portfolio_secret@db:5432/portfolio",
+                "postgresql+asyncpg://portfolio:change_me_local_db_password@db:5432/portfolio",
             )
         ),
         multiuser_enabled=os.environ.get("MULTIUSER_ENABLED", "false").lower() == "true",

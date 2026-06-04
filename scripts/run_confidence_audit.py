@@ -116,25 +116,30 @@ async def build_confidence_audit(days: int = 180) -> str:
         candles = await conn.fetchrow(
             """
             WITH latest_price_day AS (
-                SELECT MAX(ts::date) AS day FROM market_prices
+                SELECT MAX((ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AS day
+                FROM market_prices
             ),
             latest_candle_day AS (
-                SELECT MAX(ts::date) AS day FROM market_candles
+                SELECT MAX((ts AT TIME ZONE 'UTC')::date) AS day
+                FROM market_candles
+                WHERE source = 'internal_snapshot'
             ),
             price_assets AS (
                 SELECT COUNT(DISTINCT ticker) AS n
                 FROM market_prices, latest_price_day
-                WHERE ts::date = latest_price_day.day
+                WHERE (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = latest_price_day.day
             ),
             candle_assets AS (
                 SELECT COUNT(DISTINCT ticker) AS n
                 FROM market_candles, latest_price_day
-                WHERE ts::date = latest_price_day.day
+                WHERE (ts AT TIME ZONE 'UTC')::date = latest_price_day.day
+                  AND source = 'internal_snapshot'
             ),
             latest_candle_assets AS (
                 SELECT COUNT(DISTINCT ticker) AS n
                 FROM market_candles, latest_candle_day
-                WHERE ts::date = latest_candle_day.day
+                WHERE (ts AT TIME ZONE 'UTC')::date = latest_candle_day.day
+                  AND source = 'internal_snapshot'
             )
             SELECT
                 latest_price_day.day AS business_day,

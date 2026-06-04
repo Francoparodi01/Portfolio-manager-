@@ -97,6 +97,13 @@ La documentacion profesional vive en `docs/`:
 - [Operacion](docs/03-operacion.md)
 - [Analitica y decision](docs/04-analitica-y-decision.md)
 - [Mantenimiento](docs/05-mantenimiento.md)
+- [Seguridad y acceso remoto](docs/06-seguridad-y-publicacion.md)
+
+## Seguridad
+
+Este proyecto esta pensado para uso local-first. No compartas `.env`, logs,
+screenshots, dumps de DB, sesiones, cookies, fills reales ni movimientos reales.
+El monitor debe quedar en `127.0.0.1` salvo que uses tunnel/proxy con auth.
 
 Atajos historicos:
 

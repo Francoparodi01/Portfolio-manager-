@@ -1,0 +1,54 @@
+# Git / tooling
+.git
+.gitignore
+.agents
+.pytest_cache
+.mypy_cache
+.ruff_cache
+__pycache__
+*.pyc
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+!.env.multiuser.example
+secrets
+.secrets
+secret_key
+.secret_key
+secrets_multiuser
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+*.jks
+*session*.json
+*cookies*.json
+*storage_state*.json
+
+# Runtime data
+logs
+screenshots
+outputs
+models
+playwright-report
+test-results
+trace.zip
+
+# Local databases / backups
+*.sql.gz
+backup_*.sql
+*.dump
+*.backup
+*.bak
+*.sqlite
+*.sqlite3
+*.db
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode
+.idea

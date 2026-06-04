@@ -95,6 +95,22 @@ FILL_API_KEYWORDS = (
     "ticker",
 )
 MOVEMENTS_API_KEYWORDS = ("cash_movements", "movements", "movement")
+MOVEMENTS_PAGE_LIMIT = 50
+MOVEMENTS_MAX_PAGES = 6
+
+
+def _count_payload_items(payload: Any, keys: tuple[str, ...]) -> int:
+    if isinstance(payload, dict):
+        total = 0
+        for key, value in payload.items():
+            if key in keys and isinstance(value, list):
+                total += len(value)
+            else:
+                total += _count_payload_items(value, keys)
+        return total
+    if isinstance(payload, list):
+        return sum(_count_payload_items(item, keys) for item in payload)
+    return 0
 
 SELECTORS = {
     "login": {
@@ -393,11 +409,10 @@ class CocosCapitalScraper:
 
             await email_input.click()
             await email_input.type(self._cfg.username, delay=30)
-            logger.info(f"Email ingresado: {self._cfg.username}")
 
             await password_input.click()
             await password_input.type(self._cfg.password, delay=30)
-            logger.info("Password ingresado")
+            logger.info("Credenciales ingresadas")
 
             await asyncio.sleep(0.2)
 
@@ -1145,6 +1160,7 @@ class CocosCapitalScraper:
 
         payloads: list[Any] = []
         seen_urls: set[str] = set()
+        request_headers: dict[str, dict[str, str]] = {}
         tasks: list[asyncio.Task] = []
 
         async def handle_response(response) -> None:
@@ -1163,6 +1179,10 @@ class CocosCapitalScraper:
                 content_type = response.headers.get("content-type", "")
                 if "json" not in content_type.lower():
                     return
+                if "cash_movements" in lower:
+                    request_headers["cash"] = await response.request.all_headers()
+                elif "tickers_movements" in lower:
+                    request_headers["ticker"] = await response.request.all_headers()
                 payloads.append(await response.json())
                 logger.info("Cocos movements JSON: %s", url)
             except Exception as exc:
@@ -1181,6 +1201,10 @@ class CocosCapitalScraper:
             await self._page.wait_for_timeout(wait_ms)
             await self._select_movements_instrumentos_tab()
             await self._page.wait_for_timeout(wait_ms)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                tasks.clear()
+            await self._fetch_movements_api_pages(payloads, seen_urls, request_headers)
         finally:
             try:
                 self._page.remove_listener("response", on_response)
@@ -1198,6 +1222,142 @@ class CocosCapitalScraper:
             len(seen_urls),
         )
         return movements
+
+    async def _fetch_movements_api_pages(
+        self,
+        payloads: list[Any],
+        seen_urls: set[str],
+        request_headers: dict[str, dict[str, str]],
+    ) -> None:
+        """Fetch paginated movement endpoints from the authenticated page context."""
+        if not self._page:
+            return
+
+        endpoints = (
+            (
+                "cash",
+                "https://api.cocos.capital/api/v1/wallet/cash_movements"
+                "?currency=ARS&date_from=&date_to=&limit={limit}&offset={offset}",
+                ("cashMovements",),
+            ),
+            (
+                "ticker",
+                "https://api.cocos.capital/api/v1/wallet/tickers_movements"
+                "?date_from=&date_to=&limit={limit}&offset={offset}",
+                ("tickerMovements",),
+            ),
+        )
+
+        for kind, template, item_keys in endpoints:
+            for page_num in range(MOVEMENTS_MAX_PAGES):
+                offset = page_num * MOVEMENTS_PAGE_LIMIT
+                url = template.format(limit=MOVEMENTS_PAGE_LIMIT, offset=offset)
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+
+                payload = await self._fetch_json_with_request_context(
+                    url,
+                    request_headers.get(kind) or {},
+                )
+                if payload is None:
+                    payload = await self._fetch_json_in_page(url)
+                if payload is None:
+                    break
+
+                payloads.append(payload)
+                item_count = _count_payload_items(payload, item_keys)
+                logger.info(
+                    "Cocos movements paginado: %s items=%d offset=%d",
+                    url,
+                    item_count,
+                    offset,
+                )
+                if item_count < MOVEMENTS_PAGE_LIMIT:
+                    break
+
+    async def _fetch_json_in_page(self, url: str) -> Any | None:
+        if not self._page:
+            return None
+        try:
+            result = await self._page.evaluate(
+                """
+                async (url) => {
+                    const response = await fetch(url, {
+                        credentials: 'include',
+                        headers: { 'accept': 'application/json' },
+                    });
+                    const contentType = response.headers.get('content-type') || '';
+                    const text = await response.text();
+                    let body = null;
+                    try {
+                        body = JSON.parse(text);
+                    } catch (_) {
+                        body = { raw_text: text.slice(0, 1000) };
+                    }
+                    return {
+                        ok: response.ok,
+                        status: response.status,
+                        contentType,
+                        body,
+                    };
+                }
+                """,
+                url,
+            )
+        except Exception as exc:
+            logger.debug("No se pudo fetch movements JSON %s: %s", url, exc)
+            return None
+
+        if not isinstance(result, dict):
+            return None
+        if not result.get("ok"):
+            logger.debug(
+                "Movements JSON no OK %s status=%s",
+                url,
+                result.get("status"),
+            )
+            return None
+        content_type = str(result.get("contentType") or "")
+        if "json" not in content_type.lower():
+            logger.debug("Movements JSON omitido por content-type %s: %s", content_type, url)
+            return None
+        return result.get("body")
+
+    async def _fetch_json_with_request_context(
+        self,
+        url: str,
+        headers: dict[str, str],
+    ) -> Any | None:
+        if not self._page:
+            return None
+        safe_headers = {
+            key: value
+            for key, value in (headers or {}).items()
+            if key.lower()
+            not in {
+                "accept-encoding",
+                "content-length",
+                "host",
+                "referer",
+                "sec-fetch-dest",
+                "sec-fetch-mode",
+                "sec-fetch-site",
+            }
+        }
+        try:
+            response = await self._page.context.request.get(
+                url,
+                headers=safe_headers or None,
+                timeout=15_000,
+            )
+            if not response.ok:
+                logger.debug("Movements request no OK %s status=%s", url, response.status)
+                return None
+            return await response.json()
+        except Exception as exc:
+            logger.debug("No se pudo request movements JSON %s: %s", url, exc)
+            return None
 
     async def save_market_prices(self, assets: list[MarketAsset]) -> int:
         if not assets:

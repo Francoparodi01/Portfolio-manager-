@@ -1,9 +1,33 @@
 """src/core/logger.py — Logger centralizado que escribe a stderr."""
 from __future__ import annotations
 import logging
+import re
 import sys
 
 _configured = False
+
+SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{20,}\b"), "<telegram_token_redacted>"),
+    (re.compile(r"\bbot\d+:[A-Za-z0-9_-]+\b", re.I), "bot***"),
+    (re.compile(r"(Authorization:\s*Bearer\s+)[A-Za-z0-9._~+/=-]+", re.I), r"\1***"),
+    (re.compile(r"(X-API-Token:\s*)[A-Za-z0-9._~+/=-]+", re.I), r"\1***"),
+    (re.compile(r"((?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|APP_ENCRYPTION_KEY)=)[^\s]+", re.I), r"\1***"),
+    (re.compile(r"((?:password|token|secret|api_key)=)[^\s&]+", re.I), r"\1***"),
+    (re.compile(r"(postgres(?:ql)?(?:\+asyncpg)?://[^:\s]+:)[^@\s]+@", re.I), r"\1***@"),
+    (re.compile(r"(redis://[^:\s]+:)[^@\s]+@", re.I), r"\1***@"),
+)
+
+
+def redact_secrets(value: object) -> str:
+    text = str(value)
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+class RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_secrets(super().format(record))
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -12,7 +36,7 @@ def get_logger(name: str) -> logging.Logger:
         # Todo el logging va a stderr para que stdout quede limpio para el bot
         handler = logging.StreamHandler(sys.stderr)
         handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s — %(message)s")
+            RedactingFormatter("%(asctime)s [%(levelname)s] %(name)s — %(message)s")
         )
         root = logging.getLogger()
         root.handlers.clear()

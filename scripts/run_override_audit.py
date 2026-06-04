@@ -202,7 +202,7 @@ async def _fetch_audit_rows(
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND ($3::bigint IS NULL OR owner_chat_id = $3)
               AND COALESCE(source, layers->>'source') = 'execution_plan'
-              AND status = 'APPROVED'
+              AND status IN ('APPROVED', 'EXECUTED')
               AND decision_type = 'executable'
               AND decision IN ('BUY', 'SELL')
               AND price_at_decision IS NOT NULL
@@ -275,7 +275,7 @@ async def _fetch_audit_rows(
               WHERE dl.ticker = bm.ticker
                 AND dl.decision = bm.movement_type
                 AND COALESCE(dl.source, dl.layers->>'source') = 'execution_plan'
-                AND dl.status = 'APPROVED'
+                AND dl.status IN ('APPROVED', 'EXECUTED')
                 AND dl.decision_type = 'executable'
                 AND ($3::bigint IS NULL OR dl.owner_chat_id = $3)
                 AND (
@@ -419,8 +419,9 @@ async def _fetch_inferred_activity(conn: asyncpg.Connection, *, days: int = 7) -
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = CASE WHEN d.quantity_delta > 0 THEN 'BUY' ELSE 'SELL' END
-              AND bm.executed_at >= d.prev_scraped_at - INTERVAL '15 minutes'
-              AND bm.executed_at <= d.scraped_at + INTERVAL '12 hours'
+              AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date =
+                  (d.scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+              AND ABS(ABS(bm.quantity::float) - ABS(d.quantity_delta)) <= 0.000001
               AND bm.quantity IS NOT NULL
               AND bm.price IS NOT NULL
             ORDER BY ABS(EXTRACT(EPOCH FROM (bm.executed_at - d.scraped_at))) ASC
@@ -508,11 +509,11 @@ def render_report(
         f"📅 Ultimos <b>{days}</b> dias | ventana match: <b>{match_window_days}d</b>",
         "",
         "<b>QUE MIDE</b>",
-        "   Compara planes aprobados del bot contra movimientos reales Cocos.",
+        "   Compara planes aprobados/ejecutados del bot contra movimientos reales Cocos.",
         "   No cambia analysis, optimizer, planner ni thresholds.",
         "",
         "<b>RESUMEN</b>",
-        f"   Planes aprobados: <b>{summary['total']}</b>",
+        f"   Planes aprobados/ejecutados: <b>{summary['total']}</b>",
         f"   Intenciones unicas: <b>{summary['unique_intents']}</b> (ticker + lado) | repetidas: <b>{summary['repeated_plans']}</b>",
         f"   Cerrados 5D: <b>{summary['closed_5d']}</b> planes | <b>{by_intent.get('closed_5d', 0)}</b> intenciones",
         f"   FOLLOWED: {by_status.get('FOLLOWED', 0)} | OVER: {by_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_status.get('PARTIAL', 0)} | IGNORED: {by_status.get('IGNORED', 0)} | OPPOSITE: {by_status.get('OPPOSITE', 0)}",
@@ -611,7 +612,7 @@ def render_report(
 
     if manual_only:
         lines.append("<b>MANUAL_ONLY RECIENTE</b>")
-        lines.append("   Movimientos reales sin plan aprobado cercano del mismo lado.")
+        lines.append("   Movimientos reales sin plan aprobado/ejecutado cercano del mismo lado.")
         for row in manual_only[:6]:
             lines.append(
                 f"   {_fmt_dt(row.get('executed_at'))} <b>{escape(str(row.get('movement_type')))} {escape(str(row.get('ticker')))}</b> "

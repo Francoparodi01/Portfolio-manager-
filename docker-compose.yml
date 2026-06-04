@@ -7,16 +7,16 @@ services:
     profiles:
       - localdb
     environment:
-      POSTGRES_USER: portfolio
-      POSTGRES_PASSWORD: portfolio_secret
-      POSTGRES_DB: portfolio
+      POSTGRES_USER: ${POSTGRES_USER:-portfolio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_local_db_password}
+      POSTGRES_DB: ${POSTGRES_DB:-portfolio}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U portfolio -d portfolio"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-portfolio} -d $${POSTGRES_DB:-portfolio}"]
       interval: 10s
       timeout: 5s
       retries: 10

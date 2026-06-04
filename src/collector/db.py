@@ -961,6 +961,48 @@ class PortfolioDatabase:
         ]
 
         async with self._pool.acquire() as conn:
+            for row in rows:
+                external_id = str(row[1])
+                if external_id.startswith("synthetic:"):
+                    continue
+                await conn.execute(
+                    """
+                    UPDATE broker_fills
+                    SET external_fill_id = $2
+                    WHERE id = (
+                        SELECT id
+                        FROM broker_fills
+                        WHERE source = $1
+                          AND external_fill_id LIKE 'synthetic:%'
+                          AND executed_at::date = $3::date
+                          AND ticker = $4
+                          AND side = $5
+                          AND ABS(quantity - $6::numeric) < 0.000001
+                          AND ABS(avg_fill_price - $7::numeric) < 0.01
+                          AND ABS(
+                              COALESCE(gross_amount_ars, quantity * avg_fill_price)
+                              - COALESCE($8::numeric, $6::numeric * $7::numeric)
+                          ) < 0.01
+                        ORDER BY id
+                        LIMIT 1
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM broker_fills
+                        WHERE source = $1
+                          AND external_fill_id = $2
+                    )
+                    """,
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7],
+                )
+
             await conn.executemany(
                 """
                 INSERT INTO broker_fills (
@@ -1021,6 +1063,45 @@ class PortfolioDatabase:
         ]
 
         async with self._pool.acquire() as conn:
+            for row in rows:
+                external_id = str(row[1])
+                if external_id.startswith("synthetic:"):
+                    continue
+                await conn.execute(
+                    """
+                    UPDATE broker_movements
+                    SET external_movement_id = $2
+                    WHERE id = (
+                        SELECT id
+                        FROM broker_movements
+                        WHERE source = $1
+                          AND external_movement_id LIKE 'synthetic:%'
+                          AND executed_at::date = $3::date
+                          AND movement_type = $4
+                          AND COALESCE(ticker, '') = COALESCE($8::text, '')
+                          AND ABS(COALESCE(quantity, 0) - COALESCE($6::numeric, 0)) < 0.000001
+                          AND ABS(COALESCE(price, 0) - COALESCE($7::numeric, 0)) < 0.01
+                          AND ABS(COALESCE(amount, 0) - COALESCE($5::numeric, 0)) < 0.01
+                        ORDER BY id
+                        LIMIT 1
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM broker_movements
+                        WHERE source = $1
+                          AND external_movement_id = $2
+                    )
+                    """,
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8],
+                )
+
             await conn.executemany(
                 """
                 INSERT INTO broker_movements (

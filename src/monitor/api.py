@@ -13,7 +13,9 @@ import asyncpg
 import pyotp
 from aiohttp import web
 
+from src.analysis.decision_ledger import fetch_decision_ledger
 from src.core.config import get_config
+from src.core.logger import redact_secrets
 from src.core.market_calendar import is_trading_day, market_closed_reason
 from src.core.redis_client import client as redis_client
 
@@ -276,7 +278,7 @@ def _extract_token(request: web.Request) -> str:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    public_paths = {"/", "/api/auth/status"}
+    public_paths = {"/", "/linkedin", "/api/auth/status"}
     if request.path in public_paths or request.path.startswith("/static/"):
         return await handler(request)
 
@@ -335,6 +337,10 @@ async def cors_middleware(request: web.Request, handler):
 
 async def index(_request: web.Request) -> web.Response:
     return web.FileResponse(STATIC_DIR / "index.html")
+
+
+async def linkedin_analysis(_request: web.Request) -> web.Response:
+    return web.FileResponse(STATIC_DIR / "linkedin-analysis.html")
 
 
 async def auth_status(_request: web.Request) -> web.Response:
@@ -468,17 +474,19 @@ async def candles(request: web.Request) -> web.Response:
     async with pool.acquire() as conn:
         coverage = await conn.fetchrow("""
             WITH latest_price_day AS (
-                SELECT MAX(ts::date) AS day FROM market_prices
+                SELECT MAX((ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AS day
+                FROM market_prices
             ),
             price_assets AS (
                 SELECT COUNT(DISTINCT ticker) AS n
                 FROM market_prices, latest_price_day
-                WHERE ts::date = latest_price_day.day
+                WHERE (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = latest_price_day.day
             ),
             candle_assets AS (
                 SELECT COUNT(DISTINCT ticker) AS n
                 FROM market_candles, latest_price_day
-                WHERE ts::date = latest_price_day.day
+                WHERE (ts AT TIME ZONE 'UTC')::date = latest_price_day.day
+                  AND source = 'internal_snapshot'
             )
             SELECT
                 latest_price_day.day AS business_day,
@@ -489,13 +497,14 @@ async def candles(request: web.Request) -> web.Response:
         """)
         recent = await conn.fetch("""
             SELECT
-                ts::date AS business_day,
+                (ts AT TIME ZONE 'UTC')::date AS business_day,
                 COUNT(*) AS rows,
                 COUNT(DISTINCT ticker) AS tickers,
                 MIN(ts) AS min_ts,
                 MAX(ts) AS max_ts
             FROM market_candles
             WHERE ts >= NOW() - INTERVAL '14 days'
+              AND source = 'internal_snapshot'
             GROUP BY 1
             ORDER BY 1 DESC
             LIMIT 10
@@ -842,6 +851,22 @@ async def override_audit(request: web.Request) -> web.Response:
     })
 
 
+async def decision_ledger(request: web.Request) -> web.Response:
+    days = max(7, min(int(request.query.get("days", "90")), 365))
+    match_window_days = max(1, min(int(request.query.get("match_window_days", "2")), 10))
+    owner_chat_id = request.query.get("owner_chat_id")
+    owner = int(owner_chat_id) if owner_chat_id else None
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        data = await fetch_decision_ledger(
+            conn,
+            days=days,
+            match_window_days=match_window_days,
+            owner_chat_id=owner,
+        )
+    return _json({"ok": True, **data})
+
+
 async def radar_audit(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
     pool: asyncpg.Pool = request.app["pool"]
@@ -1182,7 +1207,7 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 
 def _redact(line: str) -> str:
-    out = line
+    out = redact_secrets(line)
     for pattern, replacement in SECRET_PATTERNS:
         out = pattern.sub(replacement, out)
     return out[-1200:]
@@ -1222,6 +1247,7 @@ async def create_app() -> web.Application:
     app = web.Application(middlewares=[security_headers_middleware, cors_middleware, auth_middleware])
     app["pool"] = pool
     app.router.add_get("/", index)
+    app.router.add_get("/linkedin", linkedin_analysis)
     app.router.add_get("/api/auth/status", auth_status)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/ingestion", ingestion)
@@ -1230,6 +1256,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/portfolio", portfolio_view)
     app.router.add_get("/api/performance", performance_view)
     app.router.add_get("/api/override-audit", override_audit)
+    app.router.add_get("/api/decision-ledger", decision_ledger)
     app.router.add_get("/api/radar-audit", radar_audit)
     app.router.add_get("/api/human-activity", human_activity)
     app.router.add_get("/api/fills", fills)

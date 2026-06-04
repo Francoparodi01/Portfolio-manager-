@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from src.collector.broker_fills import BrokerFill
@@ -41,11 +41,14 @@ def _age_for_match(fill: BrokerFill, candidate: ExecutionCandidate) -> timedelta
         return age
 
     # Cocos movements often provide operation date without a reliable intraday
-    # timestamp. Same local calendar day should still be eligible.
-    if (
+    # timestamp. Same local calendar day is eligible only for plans emitted
+    # before close. EOD plans cannot be matched to fills from earlier that day.
+    decision_local = candidate.decided_at.astimezone(ART) if candidate.decided_at.tzinfo else candidate.decided_at
+    same_local_day = (
         fill.executed_at.date() == candidate.decided_at.date()
-        or _local_date(fill.executed_at) == _local_date(candidate.decided_at)
-    ):
+        or _local_date(fill.executed_at) == decision_local.date()
+    )
+    if same_local_day and decision_local.time() < time(17, 0):
         return timedelta(0)
     return None
 

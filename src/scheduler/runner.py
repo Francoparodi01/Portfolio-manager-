@@ -334,6 +334,26 @@ async def run_full(run_type: str = "FULL") -> dict:
                 if acciones or cedears:
                     await db.save_market_prices(acciones + cedears)
 
+                if COCOS_SYNC_FILLS:
+                    try:
+                        movements = await scraper.scrape_portfolio_movements()
+                        fills = broker_fills_from_movements(movements)
+                        saved_movements = await db.save_broker_movements(movements)
+                        saved_fills = await db.save_broker_fills(fills)
+                        reconciled_fills = await db.reconcile_broker_fills()
+                        manual_fills = await db.materialize_unmatched_broker_fills()
+                        logger.info(
+                            "run_full: movements=%d/%d fills=%d/%d reconciliados=%d manuales=%d",
+                            len(movements),
+                            saved_movements,
+                            len(fills),
+                            saved_fills,
+                            reconciled_fills,
+                            manual_fills,
+                        )
+                    except Exception as e:
+                        logger.warning("run_full: sync movements fallo (no critico): %s", e, exc_info=True)
+
             result.update(
                 success=True,
                 positions=len(snapshot.positions),

@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quantia - primeros analisis</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f6f1e8;
+      --ink: #17211d;
+      --muted: #68736e;
+      --line: #cfc5b6;
+      --panel: #fffaf0;
+      --green: #087f5b;
+      --green-soft: #d7f4e6;
+      --blue: #1d4ed8;
+      --blue-soft: #dbeafe;
+      --amber: #b45309;
+      --amber-soft: #ffedd5;
+      --red: #b42318;
+      --red-soft: #fee4e2;
+      --violet: #6d28d9;
+      --violet-soft: #ede9fe;
+      --shadow: 0 18px 50px rgba(23, 33, 29, .11);
+      --mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+      --sans: "IBM Plex Sans", Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      --serif: Georgia, "Times New Roman", serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 18% 12%, rgba(8, 127, 91, .13), transparent 28%),
+        radial-gradient(circle at 78% 4%, rgba(180, 83, 9, .12), transparent 24%),
+        linear-gradient(135deg, transparent 0 49%, rgba(23, 33, 29, .035) 49% 51%, transparent 51%),
+        var(--paper);
+      background-size: auto, auto, 34px 34px, auto;
+      color: var(--ink);
+      font: 15px/1.55 var(--sans);
+    }
+
+    .page {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 34px 0 48px;
+    }
+
+    .masthead {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr);
+      gap: 22px;
+      align-items: stretch;
+      margin-bottom: 24px;
+    }
+
+    .hero {
+      position: relative;
+      min-height: 430px;
+      border: 1px solid var(--line);
+      background: rgba(255, 250, 240, .88);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .hero::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(23, 33, 29, .06) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(23, 33, 29, .06) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: linear-gradient(90deg, #000, transparent 74%);
+      pointer-events: none;
+    }
+
+    .hero-inner {
+      position: relative;
+      z-index: 1;
+      padding: 34px;
+      min-height: 430px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 28px;
+    }
+
+    .eyebrow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font: 700 12px/1 var(--mono);
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow span {
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, .55);
+    }
+
+    h1 {
+      max-width: 860px;
+      margin: 0;
+      font: 700 clamp(42px, 7vw, 92px)/.92 var(--serif);
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 760px;
+      margin: 0;
+      color: #314139;
+      font-size: clamp(18px, 2vw, 23px);
+      line-height: 1.35;
+    }
+
+    .hero-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border-top: 1px solid var(--line);
+      background: rgba(239, 227, 208, .72);
+    }
+
+    .hero-strip div {
+      padding: 15px;
+      border-right: 1px solid var(--line);
+    }
+    .hero-strip div:last-child { border-right: 0; }
+
+    .label {
+      display: block;
+      color: var(--muted);
+      font: 700 11px/1.2 var(--mono);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .value {
+      display: block;
+      margin-top: 8px;
+      color: var(--ink);
+      font: 750 28px/1 var(--mono);
+    }
+
+    .side-panel {
+      border: 1px solid var(--line);
+      background: #18231f;
+      color: #f5efe5;
+      box-shadow: var(--shadow);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 430px;
+    }
+
+    .side-panel header {
+      padding: 18px;
+      border-bottom: 1px solid rgba(255,255,255,.16);
+      color: #bdd9cd;
+      font: 700 12px/1 var(--mono);
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .signal-list {
+      display: grid;
+      align-content: start;
+    }
+
+    .signal {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 18px;
+      border-bottom: 1px solid rgba(255,255,255,.12);
+    }
+
+    .signal i {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+    .signal.warn i { background: #f59e0b; }
+    .signal.risk i { background: #fb7185; }
+
+    .signal strong {
+      display: block;
+      font-size: 14px;
+    }
+
+    .signal small {
+      display: block;
+      margin-top: 2px;
+      color: #9eb0a8;
+      font-size: 12px;
+    }
+
+    .signal b {
+      color: #f8d36e;
+      font: 750 18px/1 var(--mono);
+    }
+
+    .side-foot {
+      padding: 18px;
+      color: #9eb0a8;
+      font-size: 13px;
+    }
+
+    .section-title {
+      margin: 34px 0 16px;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 12px;
+      align-items: center;
+      color: var(--muted);
+      font: 800 12px/1 var(--mono);
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .section-title::after {
+      content: "";
+      height: 1px;
+      background: var(--line);
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .metric-card {
+      border: 1px solid var(--line);
+      background: rgba(255, 250, 240, .88);
+      padding: 18px;
+      min-height: 148px;
+      box-shadow: 0 8px 24px rgba(23, 33, 29, .06);
+    }
+
+    .metric-card strong {
+      display: block;
+      margin-top: 22px;
+      font: 800 clamp(28px, 4vw, 44px)/.95 var(--mono);
+      letter-spacing: -.03em;
+    }
+
+    .metric-card p {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .metric-card.green { background: var(--green-soft); border-color: #9ad8bd; }
+    .metric-card.blue { background: var(--blue-soft); border-color: #b8cdfb; }
+    .metric-card.amber { background: var(--amber-soft); border-color: #fdc98b; }
+    .metric-card.violet { background: var(--violet-soft); border-color: #c9b8ff; }
+
+    .analysis-grid {
+      display: grid;
+      grid-template-columns: minmax(0, .92fr) minmax(0, 1.08fr);
+      gap: 18px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      background: rgba(255, 250, 240, .9);
+      box-shadow: 0 12px 34px rgba(23, 33, 29, .08);
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(239, 227, 208, .55);
+    }
+
+    .panel-head h2 {
+      margin: 0;
+      font: 800 13px/1 var(--mono);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 0 9px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.55);
+      color: var(--muted);
+      font: 700 11px/1 var(--mono);
+      white-space: nowrap;
+    }
+
+    .panel-body { padding: 18px; }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .step {
+      position: relative;
+      padding: 13px 12px;
+      min-height: 104px;
+      border: 1px solid var(--line);
+      background: #fffdf8;
+    }
+    .step:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      right: -8px;
+      top: 50%;
+      width: 8px;
+      height: 1px;
+      background: var(--line);
+    }
+    .step b {
+      display: block;
+      margin-bottom: 8px;
+      font: 800 12px/1.2 var(--mono);
+    }
+    .step span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .chart {
+      width: 100%;
+      min-height: 276px;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(90deg, rgba(23,33,29,.06) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(23,33,29,.06) 1px, transparent 1px),
+        #fffdf8;
+      background-size: 54px 54px;
+      padding: 18px;
+    }
+
+    .bars {
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .bar {
+      display: grid;
+      grid-template-columns: 116px 1fr 72px;
+      gap: 12px;
+      align-items: center;
+      font: 700 12px/1 var(--mono);
+    }
+
+    .track {
+      height: 12px;
+      border: 1px solid var(--line);
+      background: #ede4d6;
+      overflow: hidden;
+    }
+
+    .fill { height: 100%; background: var(--green); }
+    .fill.blue { background: var(--blue); }
+    .fill.amber { background: var(--amber); }
+    .fill.red { background: var(--red); }
+
+    .post-panel {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 280px;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .post-copy {
+      padding: 22px;
+      border: 1px solid var(--line);
+      background: #fffdf8;
+      white-space: pre-wrap;
+      font-size: 16px;
+      line-height: 1.55;
+    }
+
+    .copy-actions {
+      position: sticky;
+      top: 18px;
+      display: grid;
+      gap: 10px;
+      border: 1px solid var(--line);
+      background: #18231f;
+      color: #f5efe5;
+      padding: 16px;
+    }
+
+    button {
+      min-height: 42px;
+      border: 1px solid #a3b9ad;
+      background: #d7f4e6;
+      color: #10231b;
+      font: 800 12px/1 var(--mono);
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    button:focus-visible { outline: 3px solid #f8d36e; outline-offset: 2px; }
+
+    .note {
+      margin: 0;
+      color: #9eb0a8;
+      font-size: 13px;
+    }
+
+    .risk-box {
+      border: 1px solid #f1b8b4;
+      background: var(--red-soft);
+      padding: 18px;
+      color: #6f1f19;
+    }
+
+    .risk-box strong {
+      display: block;
+      margin-bottom: 8px;
+      font: 800 13px/1 var(--mono);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    footer {
+      margin-top: 34px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font: 12px/1.45 var(--mono);
+    }
+
+    @media (max-width: 920px) {
+      .masthead, .analysis-grid, .post-panel { grid-template-columns: 1fr; }
+      .hero-inner { min-height: auto; }
+      .hero-strip, .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow { grid-template-columns: 1fr; }
+      .step:not(:last-child)::after { display: none; }
+      .copy-actions { position: static; }
+    }
+
+    @media (max-width: 560px) {
+      .page { width: min(100% - 20px, 1180px); padding-top: 16px; }
+      .hero-inner { padding: 22px; }
+      .hero-strip, .cards { grid-template-columns: 1fr; }
+      .bar { grid-template-columns: 82px 1fr 58px; }
+      .value { font-size: 23px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="masthead" aria-labelledby="title">
+      <article class="hero">
+        <div class="hero-inner">
+          <div class="eyebrow">
+            <span>Quantia</span>
+            <span>primeras ruedas auditadas</span>
+            <span>uso privado</span>
+          </div>
+          <div>
+            <h1 id="title">Primeros analisis del bot: medir antes de confiar.</h1>
+            <p class="lead">
+              El sistema ya separa datos observados, planes del bot, movimientos reales y outcomes. La lectura inicial es operativa: hay senales utiles, pero todavia no hay evidencia suficiente para declarar edge estadistico.
+            </p>
+          </div>
+          <div class="hero-strip" aria-label="Metricas principales">
+            <div><span class="label">Outcomes reales 5D</span><span class="value">31</span></div>
+            <div><span class="label">Win rate operativo</span><span class="value">65%</span></div>
+            <div><span class="label">EV operativo 5D</span><span class="value">+2.3%</span></div>
+            <div><span class="label">Movimientos reconciliados</span><span class="value">50/50</span></div>
+          </div>
+        </div>
+      </article>
+
+      <aside class="side-panel" aria-label="Estado del sistema">
+        <header>lectura ejecutiva</header>
+        <div class="signal-list">
+          <div class="signal"><i></i><div><strong>Operativo y auditable</strong><small>El flujo de fill a outcome ya existe.</small></div><b>OK</b></div>
+          <div class="signal warn"><i></i><div><strong>Muestra chica</strong><small>No alcanza para tocar thresholds.</small></div><b>CAUTELA</b></div>
+          <div class="signal risk"><i></i><div><strong>No es asesoramiento</strong><small>Es infraestructura de decision.</small></div><b>LIMITES</b></div>
+          <div class="signal"><i></i><div><strong>Bot vs humano</strong><small>Compara planes aprobados contra movimientos.</small></div><b>ACTIVO</b></div>
+        </div>
+        <p class="side-foot">
+          Criterio central: una decision no se evalua por intuicion posterior, sino por precio, ventana, fill confirmado, costos y resultado medible.
+        </p>
+      </aside>
+    </section>
+
+    <div class="section-title">metricas iniciales</div>
+    <section class="cards" aria-label="Metricas de las primeras auditorias">
+      <article class="metric-card green">
+        <span class="label">Performance</span>
+        <strong>+3.5%</strong>
+        <p>Equity curve inicial con drawdown bajo en la muestra cerrada.</p>
+      </article>
+      <article class="metric-card blue">
+        <span class="label">Reconciliacion</span>
+        <strong>100%</strong>
+        <p>Movimientos Cocos reconciliados contra el registro operativo.</p>
+      </article>
+      <article class="metric-card amber">
+        <span class="label">Auditoria</span>
+        <strong>164</strong>
+        <p>Eventos en decision log entre planes, bloqueos, radar y ejecucion.</p>
+      </article>
+      <article class="metric-card violet">
+        <span class="label">Veredicto</span>
+        <strong>MVP</strong>
+        <p>Base operativa sana; cuello de botella actual: mas ruedas.</p>
+      </article>
+    </section>
+
+    <div class="section-title">como se mide</div>
+    <section class="analysis-grid">
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Pipeline auditable</h2>
+          <span class="pill">teoria != ejecucion</span>
+        </div>
+        <div class="panel-body">
+          <div class="flow">
+            <div class="step"><b>1. Datos</b><span>Portfolio, precios, velas, movimientos y contexto.</span></div>
+            <div class="step"><b>2. Senal</b><span>Score tecnico, macro, riesgo y optimizer.</span></div>
+            <div class="step"><b>3. Plan</b><span>BUY, SELL, WATCH o BLOCKED con motivo.</span></div>
+            <div class="step"><b>4. Realidad</b><span>Fill o movimiento confirmado por Cocos.</span></div>
+            <div class="step"><b>5. Outcome</b><span>Retornos 5D/10D/20D y auditoria.</span></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Lectura de muestra</h2>
+          <span class="pill">no concluyente</span>
+        </div>
+        <div class="panel-body">
+          <div class="chart" aria-label="Barras de metricas iniciales">
+            <div class="label">senal inicial: positiva, pero no definitiva</div>
+            <div class="bars">
+              <div class="bar"><span>Win rate</span><div class="track"><div class="fill" style="width:65%"></div></div><b>65%</b></div>
+              <div class="bar"><span>EV 5D</span><div class="track"><div class="fill blue" style="width:58%"></div></div><b>+2.3%</b></div>
+              <div class="bar"><span>Drawdown</span><div class="track"><div class="fill amber" style="width:19%"></div></div><b>-1.9%</b></div>
+              <div class="bar"><span>Manual</span><div class="track"><div class="fill red" style="width:74%"></div></div><b>alto</b></div>
+            </div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <div class="section-title">texto para linkedin</div>
+    <section class="post-panel">
+      <article id="linkedinPost" class="post-copy">Durante las primeras ruedas de validacion de Quantia empece a medir algo mas importante que si una recomendacion aislada salio bien o mal: si el proceso de decision puede auditarse con datos reales.
+
+La primera conclusion es clara: el sistema ya es operativo y auditable, pero todavia no tiene edge estadistico confirmado.
+
+Hoy Quantia separa cuatro capas que antes solian mezclarse:
+
+1. Lo que el mercado y la cartera muestran.
+2. Lo que el modelo propone.
+3. Lo que efectivamente se ejecuta.
+4. Lo que ocurre despues con esa decision.
+
+En la muestra inicial, el sistema registra movimientos reales, reconcilia fills, separa planes aprobados de operaciones ejecutadas y calcula outcomes posteriores.
+
+Algunas metricas iniciales:
+
+- 31 outcomes operativos cerrados a 5 dias.
+- 65% de win rate operativo.
+- EV operativo 5D de +2.3%.
+- 50/50 movimientos Cocos reconciliados.
+- Equity curve inicial positiva, con drawdown bajo.
+
+Esto no significa que el modelo ya predice con confianza. De hecho, la parte estadistica todavia exige cautela: la muestra es chica, muchos movimientos fueron manuales y todavia faltan mas ruedas para validar si el score realmente explica retornos futuros.
+
+Para mi, ese es justamente el punto valioso del proyecto.
+
+No estoy construyendo una herramienta que diga "compra" o "vende" sin rendir cuentas. Estoy construyendo una infraestructura para observar datos, generar planes, registrar decisiones, reconciliar la ejecucion real y medir si esas decisiones tuvieron valor.
+
+La pregunta que guia el desarrollo no es:
+"El bot acerto esta operacion?"
+
+La pregunta correcta es:
+"Bajo que condiciones una decision genero valor, y como lo sabemos?"
+
+Quantia todavia esta en validacion real. Pero la base ya esta: medir, comparar y mejorar decisiones financieras a partir de evidencia, no de sensaciones.
+
+#DataAnalytics #FinTech #Python #DataEngineering #QuantitativeFinance</article>
+
+      <aside class="copy-actions">
+        <button type="button" id="copyPost">Copiar texto</button>
+        <p class="note" id="copyStatus">Texto listo para pegar en LinkedIn. La pagina usa metricas agregadas, no portfolio real.</p>
+        <div class="risk-box">
+          <strong>Control de tono</strong>
+          No afirmar edge probado. No prometer rentabilidad. No mostrar cartera real.
+        </div>
+      </aside>
+    </section>
+
+    <footer>
+      Pagina local de comunicacion. No alimenta analysis, performance, regression ni thresholds.
+    </footer>
+  </main>
+
+  <script>
+    const button = document.getElementById("copyPost");
+    const status = document.getElementById("copyStatus");
+    button.addEventListener("click", async () => {
+      const text = document.getElementById("linkedinPost").innerText.trim();
+      try {
+        await navigator.clipboard.writeText(text);
+        status.textContent = "Copiado. Pegalo en LinkedIn y revisa formato final antes de publicar.";
+      } catch {
+        status.textContent = "No pude copiar automaticamente. Selecciona el texto manualmente.";
+      }
+    });
+  </script>
+</body>
+</html>
