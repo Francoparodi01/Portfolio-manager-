@@ -8,13 +8,13 @@ Versión ajustada:
 """
 from __future__ import annotations
 
-import json
 import logging
 import tempfile
-from html import escape as html_escape
 from typing import Optional
 
 import requests
+
+from src.core.telegram_format import html_text, validate_telegram_html
 
 logger = logging.getLogger(__name__)
 
@@ -110,13 +110,19 @@ class TelegramNotifier:
     # ── IMPORTANTES / CRÍTICAS ACTIVAS ─────────────────────────────────────
 
     def notify_login_error(self, error: str) -> bool:
-        return self._send(f"<b>ERROR DE LOGIN</b>\n<code>{html_escape((error or '')[:500])}</code>")
+        return self._send(
+            "<b>⚠️ Error de login Cocos</b>\n"
+            "No se pudo actualizar la cuenta.\n"
+            f"Detalle: <code>{html_text(error, limit=500)}</code>\n"
+            "<i>No modifica decisiones ni performance.</i>"
+        )
 
     def notify_critical_error(self, context: str, error: str) -> bool:
         return self._send(
-            f"<b>ERROR CRITICO</b>\n"
-            f"Contexto: <code>{html_escape((context or '')[:120])}</code>\n"
-            f"Error: <code>{html_escape((error or '')[:500])}</code>"
+            "<b>⚠️ Advertencia operativa</b>\n"
+            f"Proceso: <code>{html_text(context, limit=120)}</code>\n"
+            f"Detalle: <code>{html_text(error, limit=500)}</code>\n"
+            "<i>Revisar logs si se repite. No implica ejecución de órdenes.</i>"
         )
 
     def send_raw(self, text: str) -> bool:
@@ -143,6 +149,9 @@ class TelegramNotifier:
         for chunk in chunks:
             if not chunk.strip():
                 continue
+            valid_html, errors = validate_telegram_html(chunk)
+            if not valid_html:
+                logger.warning("Telegram HTML potencialmente inválido: %s", errors[:3])
             ok = self._send(chunk, parse_mode="HTML")
             if not ok:
                 logger.warning("HTML parse falló, reintentando como texto plano")

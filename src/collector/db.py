@@ -26,6 +26,10 @@ from pathlib import Path
 import uuid
 from typing import Optional
 from zoneinfo import ZoneInfo
+from src.analysis.audit_scope import (
+    classify_decision_audit_scope,
+    ensure_decision_audit_scope_columns,
+)
 from src.analysis.decision_engine import directional_return
 from src.analysis.fill_reconciliation import ExecutionCandidate, choose_execution_candidate
 from src.collector.broker_fills import BrokerFill, serialize_raw_payload
@@ -85,6 +89,7 @@ class PortfolioDatabase:
         self._dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
         self._pool: Optional[asyncpg.Pool] = None
         self._execution_timestamp_meta_ready = False
+        self._decision_audit_scope_ready = False
 
     async def connect(self):
         if not HAS_ASYNCPG:
@@ -142,6 +147,12 @@ class PortfolioDatabase:
             """
         )
         self._execution_timestamp_meta_ready = True
+
+    async def _ensure_decision_audit_scope_columns(self, conn) -> None:
+        if self._decision_audit_scope_ready:
+            return
+        await ensure_decision_audit_scope_columns(conn)
+        self._decision_audit_scope_ready = True
 
     async def upsert_bot_user_credentials(
         self,
@@ -450,6 +461,7 @@ class PortfolioDatabase:
         business_day = business_day or datetime.now(ART_TZ).date()
 
         async with self._pool.acquire() as conn:
+            await self._ensure_decision_audit_scope_columns(conn)
             rows = await conn.fetch(
                 """
                 WITH ranked AS (
@@ -884,16 +896,7 @@ class PortfolioDatabase:
                   AND was_correct IS NOT NULL
                   AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
-                  AND (
-                    (
-                      COALESCE(source, layers->>'source') IN ('broker_movement', 'broker_fill')
-                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
-                    )
-                    OR (
-                      COALESCE(source, layers->>'source') = 'execution_plan'
-                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
-                    )
-                  )
+                  AND is_primary_metric = TRUE
                 ORDER BY decided_at ASC
                 """,
                 cutoff,
@@ -1344,6 +1347,7 @@ class PortfolioDatabase:
             raise RuntimeError("Llamar connect() primero")
 
         async with self._pool.acquire() as conn:
+            await self._ensure_decision_audit_scope_columns(conn)
             groups = await conn.fetch(
                 """
                 SELECT
@@ -1384,6 +1388,11 @@ class PortfolioDatabase:
                 quantity = float(group["quantity"] or 0.0)
                 owner_chat_id = group["owner_chat_id"]
                 decision_source = str(group["decision_source"] or "broker_fill")
+                audit_scope = classify_decision_audit_scope(
+                    source=decision_source,
+                    status="EXECUTED_MANUAL",
+                    decision_type=decision_source,
+                )
                 layer_key = (
                     "broker_movement"
                     if decision_source == "broker_movement"
@@ -1444,7 +1453,11 @@ class PortfolioDatabase:
                             theoretical_amount_ars,
                             executed_amount_ars,
                             is_executable,
-                            was_blocked
+                            was_blocked,
+                            run_intent,
+                            decision_stage,
+                            metric_scope,
+                            is_primary_metric
                         )
                         VALUES (
                             $1,
@@ -1462,7 +1475,11 @@ class PortfolioDatabase:
                             $7,
                             $7,
                             TRUE,
-                            FALSE
+                            FALSE,
+                            $9,
+                            $10,
+                            $11,
+                            $12
                         )
                         ON CONFLICT DO NOTHING
                         RETURNING id
@@ -1475,6 +1492,10 @@ class PortfolioDatabase:
                         avg_fill_price,
                         executed_amount,
                         decision_source,
+                        audit_scope["run_intent"],
+                        audit_scope["decision_stage"],
+                        audit_scope["metric_scope"],
+                        audit_scope["is_primary_metric"],
                     )
 
                     if decision_id is None:
@@ -1512,6 +1533,10 @@ class PortfolioDatabase:
                         decision_type = $5,
                         is_executable = TRUE,
                         was_blocked = FALSE,
+                        run_intent = $6,
+                        decision_stage = $7,
+                        metric_scope = $8,
+                        is_primary_metric = $9,
                         layers = COALESCE(layers, '{}'::jsonb) || $4::jsonb
                     WHERE id = $1
                     """,
@@ -1520,6 +1545,10 @@ class PortfolioDatabase:
                     avg_fill_price,
                     json.dumps(layer_patch),
                     decision_source,
+                    audit_scope["run_intent"],
+                    audit_scope["decision_stage"],
+                    audit_scope["metric_scope"],
+                    audit_scope["is_primary_metric"],
                 )
 
                 await conn.execute(
@@ -1553,16 +1582,25 @@ class PortfolioDatabase:
 
         try:
             async with self._pool.acquire() as conn:
+                await self._ensure_decision_audit_scope_columns(conn)
+                audit_scope = classify_decision_audit_scope(
+                    source="signal",
+                    status=None,
+                    decision_type=getattr(decision, "direction", None),
+                    run_intent="exploratory",
+                )
                 row = await conn.fetchrow(
                     """
                     INSERT INTO decision_log (
                         decided_at, ticker, decision, final_score, confidence,
                         layers, price_at_decision, vix_at_decision, regime,
-                        size_pct, stop_loss_pct, target_pct, horizon_days, rr_ratio
+                        size_pct, stop_loss_pct, target_pct, horizon_days, rr_ratio,
+                        run_intent, decision_stage, metric_scope, is_primary_metric
                     ) VALUES (
                         $1, $2, $3, $4, $5,
                         $6::jsonb, $7, $8, $9,
-                        $10, $11, $12, $13, $14
+                        $10, $11, $12, $13, $14,
+                        $15, $16, $17, $18
                     )
                     RETURNING id
                     """,
@@ -1580,6 +1618,10 @@ class PortfolioDatabase:
                     float(decision.target_pct),
                     int(decision.horizon_days),
                     float(decision.rr_ratio),
+                    audit_scope["run_intent"],
+                    audit_scope["decision_stage"],
+                    audit_scope["metric_scope"],
+                    audit_scope["is_primary_metric"],
                 )
             decision_id = row["id"]
             logger.info(f"Decisión guardada: id={decision_id} {decision.direction} {decision.ticker}")
@@ -1608,6 +1650,13 @@ class PortfolioDatabase:
 
         try:
             async with self._pool.acquire() as conn:
+                await self._ensure_decision_audit_scope_columns(conn)
+                audit_scope = classify_decision_audit_scope(
+                    source=d.get("source"),
+                    status=d.get("status"),
+                    decision_type=d.get("decision_type"),
+                    run_intent="exploratory",
+                )
                 row = await conn.fetchrow(
                     """
                     INSERT INTO decision_log (
@@ -1619,7 +1668,8 @@ class PortfolioDatabase:
                         decision_type, signal_strength,
                         exit_scope, exit_reason_rule,
                         stop_policy, stop_source,
-                        source
+                        source,
+                        run_intent, decision_stage, metric_scope, is_primary_metric
                     ) VALUES (
                         $1,$2,$3,$4,$5,
                         $6,$7,$8,
@@ -1629,7 +1679,8 @@ class PortfolioDatabase:
                         $16,$17,
                         $18,$19,
                         $20,$21,
-                        $22
+                        $22,
+                        $23,$24,$25,$26
                     )
                     RETURNING id
                     """,
@@ -1655,6 +1706,10 @@ class PortfolioDatabase:
                     d.get("stop_policy"),
                     d.get("stop_source"),
                     d.get("source"),
+                    audit_scope["run_intent"],
+                    audit_scope["decision_stage"],
+                    audit_scope["metric_scope"],
+                    audit_scope["is_primary_metric"],
                 )
             trade_id = row["id"]
             logger.info(
@@ -2199,6 +2254,7 @@ class PortfolioDatabase:
         cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
         async with self._pool.acquire() as conn:
+            await self._ensure_decision_audit_scope_columns(conn)
             # Cargar filas raw — el cálculo de retorno del trader se hace en Python
             raw_rows = await conn.fetch(
                 """
@@ -2211,7 +2267,8 @@ class PortfolioDatabase:
                     size_pct,
                     COALESCE(source, layers->>'source', 'sin_source') AS source,
                     COALESCE(status, 'UNKNOWN') AS status,
-                    COALESCE(decision_type, 'unknown') AS decision_type
+                    COALESCE(decision_type, 'unknown') AS decision_type,
+                    COALESCE(metric_scope, 'debug') AS metric_scope
                 FROM decision_log
                 WHERE decided_at >= $1
                   AND ($2::bigint IS NULL OR owner_chat_id = $2)
@@ -2219,16 +2276,7 @@ class PortfolioDatabase:
                   AND COALESCE(executable_was_correct, was_correct) IS NOT NULL
                   AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
-                  AND (
-                    (
-                      COALESCE(source, layers->>'source') IN ('broker_movement', 'broker_fill')
-                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
-                    )
-                    OR (
-                      COALESCE(source, layers->>'source') = 'execution_plan'
-                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
-                    )
-                  )
+                  AND is_primary_metric = TRUE
                 ORDER BY decided_at ASC
                 """,
                 cutoff,
@@ -2246,16 +2294,7 @@ class PortfolioDatabase:
                   AND price_at_decision > 0
                   AND decision IN ('BUY', 'SELL')
                   AND decided_at >= $1
-                  AND (
-                    (
-                      COALESCE(source, layers->>'source') IN ('broker_movement', 'broker_fill')
-                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
-                    )
-                    OR (
-                      COALESCE(source, layers->>'source') = 'execution_plan'
-                      AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
-                    )
-                  )
+                  AND is_primary_metric = TRUE
                 """,
                 cutoff,
                 owner_chat_id,
@@ -2272,6 +2311,7 @@ class PortfolioDatabase:
                   AND price_at_decision > 0
                   AND decision IN ('BUY', 'SELL')
                   AND decided_at >= $1
+                  AND COALESCE(metric_scope, 'debug') IN ('primary', 'planner_audit', 'blocked_audit')
                 """,
                 cutoff,
                 owner_chat_id,
@@ -2309,13 +2349,14 @@ class PortfolioDatabase:
                       AND COALESCE(bm.source, bm.layers->>'source') IN ('broker_movement', 'broker_fill')
                       AND bm.status IN ('EXECUTED', 'EXECUTED_MANUAL')
                       AND bm.decided_at < dl.decided_at
-                      AND bm.decided_at >= dl.decided_at - INTERVAL '10 days'
+                  AND bm.decided_at >= dl.decided_at - INTERVAL '10 days'
                     ORDER BY bm.decided_at DESC
                     LIMIT 1
                 ) rb ON TRUE
                 WHERE dl.decision IN ('BUY', 'SELL')
                   AND ($1::bigint IS NULL OR dl.owner_chat_id = $1)
                   AND COALESCE(dl.outcome_basis, '') <> 'legacy_external'
+                  AND COALESCE(dl.metric_scope, 'debug') IN ('primary', 'planner_audit', 'blocked_audit')
                 ORDER BY dl.decided_at DESC
                 LIMIT 8
                 """,

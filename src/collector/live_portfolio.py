@@ -10,6 +10,7 @@ from src.collector.portfolio_quality import (
     PRICE_STATUS_FRESH,
     enrich_positions_with_market_metadata,
 )
+from src.core.telegram_format import header as tg_header, note as tg_note, section as tg_section
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -201,10 +202,7 @@ def render_live_portfolio_alert(
         reverse=True,
     )
 
-    lines = [
-        "📣 <b>Movimiento relevante en cartera</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-    ]
+    lines = tg_header("📣 Movimiento relevante en cartera", subtitle="Alerta intradía sobre valuación estimada")
 
     for alert in alerts:
         icon = "🟢" if alert.direction == "UP" else "🔴"
@@ -219,7 +217,7 @@ def render_live_portfolio_alert(
         f"📈 Invertido: <b>${invested:,.0f} ARS</b>".replace(",", "."),
         f"💵 Cash: <b>${cash:,.0f} ARS</b>".replace(",", "."),
         "",
-        "<b>Portfolio actualizado</b>",
+        tg_section("Portfolio actualizado"),
     ]
 
     for position in positions:
@@ -233,7 +231,7 @@ def render_live_portfolio_alert(
         )
 
     lines.append("")
-    lines.append("<i>Valuación live estimada con market_prices; posiciones/cash desde último snapshot real.</i>")
+    lines.append(tg_note("Valuación live estimada con market_prices; posiciones/cash desde último snapshot real. No confirma fills."))
     return "\n".join(lines)
 
 
@@ -256,9 +254,7 @@ def render_opening_portfolio_report(
         reverse=True,
     )
 
-    lines = [
-        title,
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    lines = tg_header(title, subtitle="Primer control con precios frescos de apertura") + [
         f"Total apertura: <b>${total:,.0f} ARS</b>".replace(",", "."),
         f"Invertido: <b>${invested:,.0f} ARS</b>".replace(",", "."),
         f"Cash: <b>${cash:,.0f} ARS</b>".replace(",", "."),
@@ -270,7 +266,7 @@ def render_opening_portfolio_report(
         ),
         f"Cobertura precios: <b>{covered}/{positions_count}</b>",
         "",
-        "<b>Posiciones</b>",
+        tg_section("Posiciones"),
     ]
 
     for position in positions:
@@ -297,5 +293,5 @@ def render_opening_portfolio_report(
     warning = str(live_portfolio.get("post_open_warning") or "").strip()
     if warning:
         lines.append(f"<b>Advertencia:</b> {escape(warning)}")
-    lines.append("<i>Plan EOD = proxima rueda. Este reporte marca cartera post-open con precios operables.</i>")
+    lines.append(tg_note("Plan EOD = próxima rueda. Este reporte marca cartera post-open con precios operables; no confirma operaciones."))
     return "\n".join(lines)

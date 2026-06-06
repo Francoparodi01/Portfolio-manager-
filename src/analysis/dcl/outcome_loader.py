@@ -386,6 +386,10 @@ class OutcomeLoader:
         "source",
         "decision_type",
         "status",
+        "run_intent",
+        "decision_stage",
+        "metric_scope",
+        "is_primary_metric",
         "is_executable",
         "was_blocked",
         # Columnas de calidad directa (pueden no existir aún)
@@ -438,6 +442,11 @@ class OutcomeLoader:
                 if {"source", "layers"}.issubset(cols)
                 else ""
             )
+            scope_filter = (
+                "AND COALESCE(metric_scope, 'planner_audit') <> 'debug'"
+                if "metric_scope" in cols
+                else ""
+            )
             args: list[Any] = [cutoff]
             if owner_filter:
                 args.append(owner_chat_id)
@@ -449,6 +458,7 @@ class OutcomeLoader:
                 WHERE decided_at >= $1
                 {owner_filter}
                 {radar_filter}
+                {scope_filter}
                 ORDER BY decided_at ASC
                 """,
                 *args,

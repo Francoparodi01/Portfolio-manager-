@@ -40,7 +40,34 @@ El unico componente candidato a acceso remoto es `monitor_api`, y solo con:
 - HTTPS;
 - allowlist de usuario/correo cuando sea posible.
 
-## Opcion recomendada: Cloudflare Tunnel + Access
+## Opcion recomendada para uso personal: Tailscale
+
+Para revisar el monitor desde el celular sin publicar el dashboard en internet:
+
+1. Instalar Tailscale en la PC y en el celular.
+2. Iniciar sesion con la misma cuenta/tailnet.
+3. Publicar `monitor_api` solo sobre la IP Tailscale de la PC:
+
+```env
+MONITOR_BIND_ADDRESS=100.x.y.z
+```
+
+4. Recrear el monitor:
+
+```bash
+docker compose up -d --force-recreate monitor_api
+```
+
+5. Abrir desde el celular, con Tailscale activo:
+
+```text
+http://100.x.y.z:8010/
+```
+
+Esta opcion evita abrir puertos del router y evita exponer el monitor como web
+publica. El token del monitor sigue siendo obligatorio.
+
+## Opcion alternativa: Cloudflare Tunnel + Access
 
 Para ver el monitor desde afuera sin abrir puertos:
 

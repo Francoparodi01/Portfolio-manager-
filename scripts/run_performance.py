@@ -47,6 +47,13 @@ from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
 from src.analysis.decision_engine import directional_return
 from src.core.market_calendar import is_trading_day, market_closed_reason
+from src.core.telegram_format import (
+    header as tg_header,
+    html_text,
+    note as tg_note,
+    section as tg_section,
+    validate_telegram_html,
+)
 
 logger = get_logger(__name__)
 ART = ZoneInfo("America/Argentina/Buenos_Aires")
@@ -129,12 +136,59 @@ def _ev_label(ev: float | None, *, historical_only: bool = False) -> str:
 
 
 def _dataset_label(row: dict) -> str:
+    metric_scope = str(row.get("metric_scope") or "debug")
+    run_intent = str(row.get("run_intent") or "unknown")
     source = str(row.get("source") or "sin_source")
     status = str(row.get("status") or "UNKNOWN")
     decision_type = str(row.get("decision_type") or "unknown")
     decision = str(row.get("decision") or "?")
 
-    return f"{source} / {status} / {decision_type} / {decision}"
+    return f"{metric_scope} / {run_intent} / {source} / {status} / {decision_type} / {decision}"
+
+
+def _dataset_bucket(row: dict) -> str:
+    metric_scope = str(row.get("metric_scope") or "").lower()
+    run_intent = str(row.get("run_intent") or "").lower()
+    source = str(row.get("source") or "").lower()
+    status = str(row.get("status") or "").upper()
+
+    if metric_scope == "primary" or (
+        source in {"broker_movement", "broker_fill", "execution_plan"}
+        and status in {"EXECUTED", "EXECUTED_MANUAL"}
+    ):
+        return "Ejecución real confirmada"
+    if source == "execution_plan" and status == "APPROVED":
+        return "Plan aprobado sin fill"
+    if source == "execution_plan" and status == "BLOCKED":
+        return "Señal bloqueada / guard"
+    if source == "radar":
+        return "Radar / idea"
+    if source == "optimizer" or status == "THEORETICAL":
+        return "Optimizer teórico"
+    if run_intent == "exploratory" or metric_scope == "debug":
+        return "Exploratorio / debug"
+    return "Otros eventos auditables"
+
+
+def _dataset_friendly_breakdown(dataset_stats: list[dict]) -> list[dict]:
+    buckets: dict[str, dict] = {}
+    for row in dataset_stats:
+        label = _dataset_bucket(row)
+        bucket = buckets.setdefault(
+            label,
+            {"label": label, "n": 0, "con_5d": 0, "con_10d": 0, "con_20d": 0},
+        )
+        for key in ("n", "con_5d", "con_10d", "con_20d"):
+            bucket[key] += int(row.get(key) or 0)
+    order = {
+        "Ejecución real confirmada": 0,
+        "Plan aprobado sin fill": 1,
+        "Señal bloqueada / guard": 2,
+        "Radar / idea": 3,
+        "Optimizer teórico": 4,
+        "Exploratorio / debug": 5,
+    }
+    return sorted(buckets.values(), key=lambda row: (order.get(row["label"], 99), -row["n"]))
 
 
 def _dataset_group_note(dataset_stats: list[dict]) -> str:
@@ -151,12 +205,13 @@ def _dataset_group_note(dataset_stats: list[dict]) -> str:
     optimizer_with_outcome = 0
 
     for row in dataset_stats:
+        metric_scope = str(row.get("metric_scope") or "").lower()
         source = str(row.get("source") or "").lower()
         status = str(row.get("status") or "").upper()
         decision_type = str(row.get("decision_type") or "").lower()
         con_5d = int(row.get("con_5d") or 0)
 
-        is_real_execution = (
+        is_real_execution = metric_scope == "primary" or (
             (source == "execution_plan" and status in {"EXECUTED", "EXECUTED_MANUAL"})
             or (source == "broker_fill" and status in {"EXECUTED", "EXECUTED_MANUAL"})
             or (source == "broker_movement" and status in {"EXECUTED", "EXECUTED_MANUAL"})
@@ -210,12 +265,13 @@ def _ev_scope(dataset_stats: list[dict]) -> tuple[str, str]:
     optimizer_with_outcome = 0
 
     for row in dataset_stats:
+        metric_scope = str(row.get("metric_scope") or "").lower()
         source = str(row.get("source") or "").lower()
         status = str(row.get("status") or "").upper()
         decision_type = str(row.get("decision_type") or "").lower()
         con_5d = int(row.get("con_5d") or 0)
 
-        if (
+        if metric_scope == "primary" or (
             (source == "execution_plan" and status in {"EXECUTED", "EXECUTED_MANUAL"})
             or (source == "broker_fill" and status in {"EXECUTED", "EXECUTED_MANUAL"})
             or (source == "broker_movement" and status in {"EXECUTED", "EXECUTED_MANUAL"})
@@ -262,6 +318,8 @@ async def _get_decision_dataset_stats(
         rows = await conn.fetch(
             """
             SELECT
+                COALESCE(metric_scope, 'debug') AS metric_scope,
+                COALESCE(run_intent, 'unknown') AS run_intent,
                 COALESCE(source, layers->>'source', 'sin_source') AS source,
                 COALESCE(status, 'UNKNOWN') AS status,
                 COALESCE(decision_type, 'unknown') AS decision_type,
@@ -282,8 +340,8 @@ async def _get_decision_dataset_stats(
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND ($2::bigint IS NULL OR owner_chat_id = $2)
-            GROUP BY 1,2,3,4
-            ORDER BY 1,2,3,4
+            GROUP BY 1,2,3,4,5,6
+            ORDER BY 1,2,3,4,5,6
             """,
             lookback_days,
             owner_chat_id,
@@ -396,172 +454,6 @@ def render_dataset_operativo(stats: dict) -> list[str]:
     return lines
 
 
-def render_performance_report(stats: dict) -> str:
-    """Genera reporte de performance en HTML para Telegram."""
-    total = stats.get("total_trades", 0)
-    pending = stats.get("pending", 0)
-    days = stats.get("lookback_days", 90)
-    owner_chat_id = stats.get("owner_chat_id")
-
-    header = [
-        "📊 <b>PERFORMANCE DEL SISTEMA</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"📅 Últimos {days} días | {datetime.now(ART).strftime('%d/%m/%Y %H:%M')} ART",
-        "",
-    ]
-
-    dataset_lines = render_dataset_operativo(stats)
-
-    if total == 0:
-        dataset_total = sum(int(row.get("n") or 0) for row in stats.get("dataset_stats", []))
-        lines = header + dataset_lines + [
-            "⚠️ Sin outcomes canónicos cerrados en este período.",
-            "",
-        ]
-
-        if pending > 0:
-            lines.append(f"📋 {pending} decisiones pendientes de outcome.")
-            lines.append(
-                "Este comando ya intentó actualizar las elegibles; el resto necesita "
-                "5/10/20 ruedas con velas canónicas."
-            )
-        elif owner_chat_id is not None:
-            lines.append("Este usuario todavía no acumuló decisiones propias con outcome cerrado.")
-            lines.append("El dataset personal empieza a crecer desde sus próximos análisis.")
-        elif dataset_total > 0:
-            lines.append("decision_log ya tiene eventos; falta que maduren outcomes canónicos.")
-            lines.append("No es un fallo de guardado, es una etapa normal de cold start.")
-        else:
-            lines.append("El sistema aún no tiene decisiones con outcome cerrado.")
-            lines.append("Verificá que <b>run_analysis.py</b> esté guardando eventos en decision_log.")
-
-        return "\n".join(lines)
-
-    win_rate = stats.get("win_rate")
-    avg_win = stats.get("avg_win_5d")
-    avg_loss = stats.get("avg_loss_5d")
-    ev = stats.get("ev")
-    winners = stats.get("winners", 0)
-    losers = stats.get("losers", 0)
-
-    ev_title, ev_note = _ev_scope(stats.get("dataset_stats", []))
-
-    lines = header + dataset_lines + [
-        "<b>MÉTRICAS PRINCIPALES (horizonte 5d)</b>",
-        f"   Win rate:   <b>{win_rate:.0%}</b>  ({winners}W / {losers}L)"
-        if win_rate is not None else "   Win rate:   <b>N/A</b>",
-        f"   Avg win:    <b>{_pct(avg_win)}</b>",
-        f"   Avg loss:   <b>{_pct(avg_loss)}</b>",
-        "",
-        f"   <b>{ev_title}: {_pct(ev)}</b>",
-        f"   {_ev_label(ev, historical_only=(ev_title == 'EV histórico agregado'))}",
-        f"   <i>{escape(ev_note)}</i>",
-        "",
-        "<b>RETORNOS POR HORIZONTE</b>",
-        f"   5d:   {_pct(stats.get('avg_return_5d'))}",
-        f"   10d:  {_pct(stats.get('avg_return_10d'))}",
-        f"   20d:  {_pct(stats.get('avg_return_20d'))}",
-        "",
-        f"   Mejor trade:  {_pct(stats.get('best_trade'))}",
-        f"   Peor trade:   {_pct(stats.get('worst_trade'))}",
-        "",
-        f"   Total trades: <b>{total}</b>",
-        f"   Pendientes:   {pending} (sin outcome aún)",
-    ]
-
-    ticker_stats = stats.get("ticker_stats", [])
-    if ticker_stats:
-        lines += ["", "<b>POR TICKER</b>"]
-        for ts in ticker_stats[:6]:
-            t = ts.get("ticker", "?")
-            trades = int(ts.get("trades") or 0)
-            wins = int(ts.get("wins") or 0)
-            avg_ret = ts.get("avg_return")
-            wr = wins / trades if trades > 0 else 0
-            icon = "🟢" if (avg_ret or 0) > 0 else "🔴"
-            lines.append(
-                f"   {icon} <b>{escape(str(t))}</b>: "
-                f"{trades} trades | WR {wr:.0%} | avg {_pct(avg_ret)}"
-            )
-
-    recent = stats.get("recent", [])
-    if recent:
-        lines += ["", "<b>ÚLTIMAS DECISIONES</b>"]
-        for r in recent:
-            ticker = r.get("ticker", "?")
-            direction = r.get("decision", "?")
-            score = float(r.get("final_score") or 0.0)
-            outcome = r.get("outcome_5d")
-            correct = r.get("was_correct")
-            decided = r.get("decided_at")
-            date_str = decided.astimezone(ART).strftime("%d/%m") if decided else "?"
-
-            source = r.get("source") or None
-            status = r.get("status") or None
-
-            tag = ""
-            if source or status:
-                tag_parts = []
-                if source:
-                    tag_parts.append(str(source))
-                if status:
-                    tag_parts.append(str(status))
-                tag = f" <code>[{'/'.join(tag_parts)}]</code>"
-
-            if correct is True:
-                res = f"✅ {_pct(outcome)}"
-            elif correct is False:
-                res = f"❌ {_pct(outcome)}"
-            else:
-                res = "⏳ pendiente"
-
-            lines.append(
-                f"   {date_str} <b>{escape(str(direction))} {escape(str(ticker))}</b>{tag} "
-                f"score <code>{score:+.3f}</code> → {res}"
-            )
-
-    curve = stats.get("equity_curve", [])
-    if curve and len(curve) >= 2:
-        eq_end = stats.get("equity_end", 100.0)
-        eq_ret = stats.get("equity_return", 0.0)
-        eq_dd = stats.get("equity_max_drawdown", 0.0)
-        eq_icon = "📈" if eq_ret >= 0 else "📉"
-
-        lines += [
-            "",
-            "<b>EQUITY CURVE</b>",
-            f"   Inicio: 100 → Actual: <b>{eq_end:.1f}</b>",
-            f"   Retorno acumulado: <b>{eq_ret:+.1%}</b> {eq_icon}",
-            f"   Max drawdown: <b>{eq_dd:.1%}</b>",
-            "",
-            "   Últimos movimientos:",
-        ]
-
-        for p in curve[-5:]:
-            icon = "✅" if p.get("correct") else "❌"
-            lines.append(
-                f"   {icon} {p['date']} <b>{escape(str(p['ticker']))}</b> "
-                f"<code>{p['outcome']:+.1%}</code> → equity {p['equity']:.1f}"
-            )
-
-    footer_edge_note = (
-        "<i>EV histórico &gt; 0 sugiere edge del modelo en backtest/outcomes acumulados; "
-        "no prueba por sí solo edge de ejecución.</i>"
-        if ev_title == "EV histórico agregado"
-        else "<i>EV &gt; 0 sugiere edge; confirmarlo contra Execution Audit antes de llamarlo edge operativo.</i>"
-    )
-
-    lines += [
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "<i>EV = (win_rate × avg_win) − (loss_rate × avg_loss)</i>",
-        footer_edge_note,
-        "<i>Separar dataset operativo evita mezclar optimizer teórico con ejecución real.</i>",
-    ]
-
-    return "\n".join(lines)
-
-
 def _fmt_count(value) -> str:
     return f"{int(value or 0):,}".replace(",", ".")
 
@@ -615,13 +507,13 @@ def _friendly_summary(stats: dict, ev_title: str | None = None) -> list[str]:
     ev = stats.get("ev")
 
     if ev is None:
-        verdict = "hay trades cerrados, pero falta evidencia para leer edge."
+        verdict = "Hay trades cerrados, pero falta evidencia para leer edge."
     elif ev > 0.02:
-        verdict = "la muestra cerrada viene positiva."
+        verdict = "La muestra cerrada viene positiva."
     elif ev > 0:
-        verdict = "la muestra cerrada viene apenas positiva; seguir midiendo."
+        verdict = "La muestra cerrada viene apenas positiva; seguir midiendo."
     else:
-        verdict = "la muestra cerrada viene negativa; conviene revisar calidad de senales."
+        verdict = "La muestra cerrada viene negativa; conviene revisar calidad de señales."
 
     title_key = (ev_title or "").lower()
     is_historical = "hist" in title_key and "agregado" in title_key
@@ -633,7 +525,7 @@ def _friendly_summary(stats: dict, ev_title: str | None = None) -> list[str]:
         f"Alcance: {scope}. Pendientes operativos por madurar: {_fmt_count(pending)}.",
     ]
     if pending_all != pending:
-        lines.append(f"Auditoria total pendiente: {_fmt_count(pending_all)} señales; lo no operativo no entra al EV principal.")
+        lines.append(f"Auditoría total pendiente: {_fmt_count(pending_all)} señales; lo no operativo no entra al EV principal.")
     return lines
 
 
@@ -659,21 +551,22 @@ def _render_dataset_friendly(stats: dict) -> list[str]:
     note = _dataset_group_note(dataset_stats)
     if note:
         lines.append(f"   Nota: {escape(note)}")
-    lines.append("   Metrica principal: solo ejecucion real; el resto queda como auditoria.")
-    lines.append("   Timing: si la senal fue EOD, el outcome usa la proxima rueda cuando existe.")
+    lines.append("   Métrica principal: solo ejecución real; el resto queda como auditoría.")
+    lines.append("   Timing: si la señal fue EOD, el outcome usa la próxima rueda cuando existe.")
 
-    lines += ["", "   Desglose:"]
-    for row in dataset_stats[:8]:
-        label = escape(_dataset_label(row))
+    lines += ["", "   Desglose legible:"]
+    friendly_rows = _dataset_friendly_breakdown(dataset_stats)
+    for row in friendly_rows[:8]:
+        label = escape(str(row["label"]))
         lines.append(
-            f"   - <code>{label}</code>: "
+            f"   - {label}: "
             f"<b>{int(row.get('n') or 0)}</b> eventos | "
             f"5D {int(row.get('con_5d') or 0)} | "
             f"10D {int(row.get('con_10d') or 0)} | "
             f"20D {int(row.get('con_20d') or 0)}"
         )
-    if len(dataset_stats) > 8:
-        lines.append(f"   - ... {len(dataset_stats) - 8} grupos mas")
+    if len(friendly_rows) > 8:
+        lines.append(f"   - ... {len(friendly_rows) - 8} grupos más")
 
     lines.append("")
     return lines
@@ -861,11 +754,11 @@ def render_performance_report(stats: dict) -> str:
     owner_chat_id = stats.get("owner_chat_id")
 
     ev_title, ev_note = _ev_scope(stats.get("dataset_stats", []))
-    lines = [
-        "📊 <b>Performance</b>",
-        f"Periodo: <b>{days} dias</b> | {datetime.now(ART).strftime('%d/%m/%Y %H:%M')} ART",
-        "",
-        "<b>Resumen</b>",
+    lines = tg_header(
+        "📊 Performance",
+        subtitle=f"Periodo: {days} dias | {datetime.now(ART).strftime('%d/%m/%Y %H:%M')} ART",
+    ) + [
+        tg_section("Resumen ejecutivo"),
         *[f"   {escape(line)}" for line in _friendly_summary(stats, ev_title)],
         "",
     ]
@@ -875,7 +768,7 @@ def render_performance_report(stats: dict) -> str:
 
     if total == 0:
         dataset_total = _dataset_totals(stats.get("dataset_stats", []))["events"]
-        lines.append("<b>Que significa</b>")
+        lines.append(tg_section("Qué significa"))
         if pending > 0:
             lines.append(f"   Hay <b>{_fmt_count(pending)}</b> ejecuciones reales pendientes de outcome.")
             lines.append("   No es error: aun falta recorrido de mercado para cerrarlas.")
@@ -899,7 +792,7 @@ def render_performance_report(stats: dict) -> str:
     losers = int(stats.get("losers") or 0)
 
     lines += [
-        "<b>Metricas principales (solo ejecucion real)</b>",
+        tg_section("Métricas principales"),
         *_render_main_sample(stats),
         (
             f"   Aciertos: <b>{win_rate:.0%}</b> "
@@ -911,9 +804,9 @@ def render_performance_report(stats: dict) -> str:
         f"   Perdida promedio al fallar: <b>{_pct(avg_loss)}</b>",
         f"   {ev_title}: <b>{_pct(ev)}</b>",
         f"   {_ev_label(ev, historical_only=('hist' in ev_title.lower() and 'agregado' in ev_title.lower()))}",
-        f"   <i>{escape(ev_note)}</i>",
+        f"   {tg_note(ev_note)}",
         "",
-        "<b>Retornos promedio</b>",
+        tg_section("Retornos promedio"),
         f"   5d:  {_pct(stats.get('avg_return_5d'))}",
         f"   10d: {_pct(stats.get('avg_return_10d'))}",
         f"   20d: {_pct(stats.get('avg_return_20d'))}",
@@ -924,7 +817,7 @@ def render_performance_report(stats: dict) -> str:
 
     ticker_stats = stats.get("ticker_stats", [])
     if ticker_stats:
-        lines += ["", "<b>Por ticker</b>"]
+        lines += ["", tg_section("Por ticker")]
         for ts in ticker_stats[:6]:
             t = escape(str(ts.get("ticker", "?")))
             trades = int(ts.get("trades") or 0)
@@ -935,7 +828,7 @@ def render_performance_report(stats: dict) -> str:
 
     recent = stats.get("recent", [])
     if recent:
-        lines += ["", "<b>Ultimas decisiones</b>"]
+        lines += ["", tg_section("Últimas decisiones")]
         closed_reason = market_closed_reason(datetime.now(ART))
         for r in recent[:6]:
             ticker = escape(str(r.get("ticker", "?")))
@@ -957,7 +850,7 @@ def render_performance_report(stats: dict) -> str:
                 result = _pending_label(r, closed_reason)
             lines.append(
                 f"   {date_str} <b>{direction} {ticker}</b>{tag} "
-                f"score <code>{score:+.3f}</code> -> {result}"
+                f"score <code>{score:+.3f}</code> → {result}"
             )
             lines.extend(_recent_decision_notes(r))
 
@@ -965,7 +858,7 @@ def render_performance_report(stats: dict) -> str:
     if curve and len(curve) >= 2:
         lines += [
             "",
-            "<b>Equity curve</b>",
+            tg_section("Equity curve"),
             f"   Inicio: 100 -> Actual: <b>{float(stats.get('equity_end', 100.0)):.1f}</b>",
             f"   Retorno acumulado: <b>{float(stats.get('equity_return', 0.0)):+.1%}</b>",
             f"   Max drawdown: <b>{float(stats.get('equity_max_drawdown', 0.0)):.1%}</b>",
@@ -973,8 +866,8 @@ def render_performance_report(stats: dict) -> str:
 
     lines += [
         "",
-        "<i>EV = (win_rate x avg_win) - (loss_rate x avg_loss).</i>",
-        "<i>Usalo como termometro, no como sentencia: el dataset todavia puede estar chico.</i>",
+        tg_note("EV = (win_rate x avg_win) - (loss_rate x avg_loss)."),
+        tg_note("Usalo como termometro, no como sentencia: el dataset todavia puede estar chico."),
     ]
     return "\n".join(lines)
 
@@ -999,6 +892,9 @@ async def async_main(args: argparse.Namespace) -> int:
         stats["owner_chat_id"] = owner_chat_id
 
         report = render_performance_report(stats)
+        valid_html, html_errors = validate_telegram_html(report)
+        if not valid_html:
+            logger.warning("run_performance HTML potencialmente inválido: %s", html_errors[:3])
 
         if not args.no_telegram:
             notifier = TelegramNotifier(

@@ -27,6 +27,12 @@ from enum import Enum
 from typing import Optional
 
 from src.analysis.execution_planner import MIN_TRADE_ARS
+from src.core.telegram_format import (
+    header as tg_header,
+    note as tg_note,
+    section as tg_section,
+    validate_telegram_html,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1133,10 +1139,6 @@ def run_opportunity_analysis(
         alerts = []
         if asym.rr_alert:
             alerts.append(asym.rr_alert)
-        if asym.rr_valid and asym.risk_reward >= RR_EXCEPCIONAL:
-            alerts.append(
-                f"R/R {asym.risk_reward:.1f}x excepcional — verificar robustez del target/stop"
-            )
 
         cand = OpportunityCandidate(
             ticker               = ticker,
@@ -1347,11 +1349,10 @@ def render_opportunity_report(
             f"Considerar solo si ya se decidió rotar esa posición."
         )
 
-    h = []
-
-    h.append("🔭 <b>RADAR DE OPORTUNIDADES</b>")
-    h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} ART")
+    h = tg_header(
+        "🔭 Radar de oportunidades",
+        subtitle=f"{datetime.now().strftime('%d/%m/%Y %H:%M')} ART",
+    )
     funnel = (
         f"🔍 Universo: {report.universe_size} tickers → "
         f"{report.screened_count} pasaron screener"
@@ -1364,18 +1365,19 @@ def render_opportunity_report(
         funnel += " → 0 ideas rankeadas"
     h.append(funnel)
     gate_icon = {"NORMAL": "✅", "CAUTIOUS": "⚠️", "BLOCKED": "🔴"}.get(report.gate_state, "⚪")
-    h.append(f"{gate_icon} Gate: <b>{report.gate_state}</b>")
+    h.append(f"{gate_icon} Estado operativo: <b>{report.gate_state}</b>")
     h.append(f"💵 Cash libre: <b>{_money(report.available_cash_ars)}</b>")
     if report.available_cash_ars < MIN_TRADE_ARS:
         h.append("   Sin cash ejecutable: nuevas entradas solo via funding o swap.")
     if report.vix_level:
         h.append(f"   VIX: {report.vix_level:.1f}")
+    h.append("   Nota: radar detecta ideas; no cuenta como ejecución real ni entra al EV principal.")
     h.append("")
 
     if not report.candidates:
         h.append("Sin candidatos que cumplan los criterios en este momento.")
         h.append("")
-        h.append("<i>Sistema cuantitativo multicapa — no es asesoramiento financiero</i>")
+        h.append(tg_note("Radar descriptivo. No es asesoramiento financiero."))
         return "\n".join(h)
 
     # ── Helpers de bloque ─────────────────────────────────────────────────────
@@ -1509,7 +1511,7 @@ def render_opportunity_report(
 
     # ── COMPRABLE AHORA ───────────────────────────────────────────────────────
     if report.comprable_ahora:
-        h.append(f"🟢 <b>COMPRABLE AHORA ({len(report.comprable_ahora)})</b>")
+        h.append(tg_section(f"🟢 Comprable ahora ({len(report.comprable_ahora)})"))
         h.append(
             f"<i>Cumple todos los umbrales: score ≥ {SCORE_COMPRABLE_DURO}, "
             f"conviction ≥ {CONVICTION_COMPRABLE:.0%}, R/R ≥ {RR_COMPRABLE:.1f}x, "
@@ -1522,7 +1524,7 @@ def render_opportunity_report(
     # ── COMPRA HABILITADA ─────────────────────────────────────────────────────
     if report.compra_habilitada:
         h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        h.append(f"🟡 <b>COMPRA HABILITADA ({len(report.compra_habilitada)})</b>")
+        h.append(tg_section(f"🟡 Compra habilitada ({len(report.compra_habilitada)})"))
         h.append("<i>Buena señal, pero edge marginal o asimetría justa.</i>")
         h.append("")
         for c in report.compra_habilitada:
@@ -1531,7 +1533,7 @@ def render_opportunity_report(
     # ── SWAPS POSIBLES ────────────────────────────────────────────────────────
     if report.swap_candidatos:
         h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        h.append(f"🔄 <b>SWAPS POSIBLES ({len(report.swap_candidatos)})</b>")
+        h.append(tg_section(f"🔄 Swaps posibles ({len(report.swap_candidatos)})"))
         h.append(
             "<i>Superan un holding actual. Solo si se reduce primero la posición "
             "competidora. [fuerte] = edge claro, [táctico] = mejora moderada, "
@@ -1544,7 +1546,7 @@ def render_opportunity_report(
     # ── EN VIGILANCIA ─────────────────────────────────────────────────────────
     if report.en_vigilancia:
         h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        h.append(f"👁 <b>EN VIGILANCIA ({len(report.en_vigilancia)})</b>")
+        h.append(tg_section(f"👁 En vigilancia ({len(report.en_vigilancia)})"))
         h.append("")
 
         vig_a = [c for c in report.en_vigilancia if c.status == CandidateStatus.VIGILANCIA_A]
@@ -1586,7 +1588,7 @@ def render_opportunity_report(
     # ── NO OPERABLES ──────────────────────────────────────────────────────────
     if report.no_operables:
         h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        h.append(f"⛔ <b>SEÑAL PRESENTE, TRADE NO OPERABLE ({len(report.no_operables)})</b>")
+        h.append(tg_section(f"⛔ Señal presente, trade no operable ({len(report.no_operables)})"))
         h.append("<i>R/R inválido o deficiente — señal interesante pero setup no ejecutable.</i>")
         h.append("")
         for c in report.no_operables:
@@ -1606,7 +1608,7 @@ def render_opportunity_report(
     # ── DETECTADOS EN COCOS, SIN HISTÓRICO ────────────────────────────────────
     if report.externos:
         h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        h.append(f"🕯️ <b>EN COCOS / SIN HISTÓRICO OPERABLE ({len(report.externos)})</b>")
+        h.append(tg_section(f"🕯️ En Cocos / sin histórico operable ({len(report.externos)})"))
         h.append("<i>Son tickers detectados en Cocos, pero todavía sin 60 velas canónicas. No dependen de fills; los fills solo existen si hubo operaciones reales.</i>")
         h.append("")
         for c in report.externos[:20]:
@@ -1616,7 +1618,10 @@ def render_opportunity_report(
             h.append("  Acción: priorizar backfill por liquidez, cartera o señales repetidas.")
         h.append("")
 
-    h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append("<i>Sistema cuantitativo multicapa — no es asesoramiento financiero</i>")
+    h.append(tg_note("Radar descriptivo. No confirma ejecución ni entra al EV principal. No es asesoramiento financiero."))
 
-    return "\n".join(h)
+    report_text = "\n".join(h)
+    valid_html, errors = validate_telegram_html(report_text)
+    if not valid_html:
+        logger.warning("Radar HTML potencialmente inválido: %s", errors[:3])
+    return report_text

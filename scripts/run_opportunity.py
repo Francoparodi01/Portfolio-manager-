@@ -26,6 +26,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from uuid import uuid4
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,13 +35,21 @@ from src.core.logger import get_logger
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
 from src.collector.cocos_history import candles_to_frame
-from src.collector.portfolio_quality import enrich_positions_with_market_metadata
+from src.collector.portfolio_quality import (
+    normalize_positions_with_fresh_market_prices,
+    price_discrepancy_warnings,
+)
 from src.analysis.macro import fetch_macro, get_macro_regime
 from src.analysis.opportunity_screener import (
     CandidateStatus,
     run_opportunity_analysis,
     render_opportunity_report,
     COCOS_UNIVERSE_DEFAULT,
+)
+from src.analysis.audit_scope import (
+    classify_decision_audit_scope,
+    ensure_decision_audit_scope_columns,
+    run_id_to_db,
 )
 
 logger = get_logger(__name__)
@@ -57,15 +66,29 @@ async def _load_portfolio(cfg, owner_chat_id: int | None = None):
             return [], 0.0, 0.0
 
         positions = snap.get("positions", [])
+        cash_ars  = float(snap.get("cash_ars", 0))
         try:
-            positions = enrich_positions_with_market_metadata(
+            positions = normalize_positions_with_fresh_market_prices(
                 positions,
                 await db.get_latest_market_prices(),
             )
+            discrepancies = price_discrepancy_warnings(positions)
+            if discrepancies:
+                for item in discrepancies[:8]:
+                    logger.warning(
+                        "Precio portfolio vs market_prices discrepante en radar: %s snapshot=%s market=%s diff=%+.1f%%",
+                        item.get("ticker"),
+                        item.get("snapshot_price"),
+                        item.get("market_price"),
+                        float(item.get("discrepancy_pct") or 0.0) * 100.0,
+                    )
         except Exception as exc:
             logger.warning("No se pudo auditar frescura de portfolio: %s", exc)
-        total_ars = float(snap.get("total_value_ars", 0))
-        cash_ars  = float(snap.get("cash_ars", 0))
+        normalized_invested = sum(
+            float(p.get("market_value", 0) or 0)
+            for p in positions
+        )
+        total_ars = normalized_invested if normalized_invested > 0 else float(snap.get("total_value_ars", 0))
         return positions, total_ars, cash_ars
     finally:
         await db.close()
@@ -189,6 +212,8 @@ async def _save_radar_candidates(
     *,
     portfolio_total_ars: float,
     owner_chat_id: int | None = None,
+    run_id: str | None = None,
+    run_intent: str = "scheduled_context",
 ) -> list[int]:
     """
     Persiste señales del radar como ideas teóricas auditables.
@@ -207,6 +232,7 @@ async def _save_radar_candidates(
     try:
         pool = await db.get_pool()
         async with pool.acquire() as conn:
+            await ensure_decision_audit_scope_columns(conn)
             for candidate in candidates:
                 ticker = str(candidate.ticker or "").upper().strip()
                 if not ticker:
@@ -220,10 +246,13 @@ async def _save_radar_candidates(
                       AND decision = 'BUY'
                       AND decision_date = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
                       AND COALESCE(owner_chat_id, 0) = COALESCE($2::bigint, 0)
+                      AND COALESCE(source, layers->>'source') = 'radar'
+                      AND COALESCE(run_intent, 'scheduled_context') = $3
                     LIMIT 1
                     """,
                     ticker,
                     owner_chat_id,
+                    run_intent,
                 )
                 if exists:
                     logger.info("Dedup radar: BUY %s ya existe hoy - skip", ticker)
@@ -240,6 +269,15 @@ async def _save_radar_candidates(
                     float(portfolio_total_ars or 0.0) * float(candidate.sizing_suggested or 0.0)
                 )
                 is_executable = _radar_is_executable(candidate)
+                status = "THEORETICAL" if is_executable else "BLOCKED"
+                decision_type = _radar_decision_type(candidate)
+                audit_scope = classify_decision_audit_scope(
+                    source="radar",
+                    status=status,
+                    decision_type=decision_type,
+                    decided_at=datetime.now(timezone.utc),
+                    run_intent=run_intent,
+                )
                 block_reason = "" if is_executable else (
                     candidate.why_not_now
                     or candidate.action_concreta
@@ -270,7 +308,12 @@ async def _save_radar_candidates(
                         theoretical_amount_ars,
                         executed_amount_ars,
                         is_executable,
-                        was_blocked
+                        was_blocked,
+                        run_id,
+                        run_intent,
+                        decision_stage,
+                        metric_scope,
+                        is_primary_metric
                     )
                     VALUES (
                         $1,
@@ -279,7 +322,8 @@ async def _save_radar_candidates(
                         $7, $8, $9,
                         $10, $11, $12, $13, $14,
                         $15, 'radar', $16, $17,
-                        $18, 0.0, $19, $20
+                        $18, 0.0, $19, $20,
+                        $21::uuid, $22, $23, $24, $25
                     )
                     ON CONFLICT DO NOTHING
                     RETURNING id
@@ -298,12 +342,17 @@ async def _save_radar_candidates(
                     target_pct,
                     20,
                     rr_ratio,
-                    _radar_decision_type(candidate),
-                    "THEORETICAL" if is_executable else "BLOCKED",
+                    decision_type,
+                    status,
                     block_reason,
                     theoretical_amount,
                     bool(is_executable),
                     bool(not is_executable),
+                    run_id_to_db(run_id),
+                    audit_scope["run_intent"],
+                    audit_scope["decision_stage"],
+                    audit_scope["metric_scope"],
+                    audit_scope["is_primary_metric"],
                 )
                 if row:
                     saved_ids.append(int(row["id"]))
@@ -328,9 +377,12 @@ async def main(
     min_rr:             float = 0.0,
     exclude_portfolio:  bool = True,
     owner_chat_id:      int | None = None,
+    run_intent:         str = "scheduled_context",
+    persist:            bool = True,
 ):
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
+    radar_run_id = str(uuid4())
 
     # ── 1. Portfolio actual ────────────────────────────────────────────────────
     positions, total_ars, cash_ars = await _load_portfolio(
@@ -416,14 +468,19 @@ async def main(
     )
 
     # ── 5. Render ──────────────────────────────────────────────────────────────
-    await _save_radar_candidates(
-        cfg,
-        report,
-        macro_snap,
-        macro_regime,
-        portfolio_total_ars=total_ars,
-        owner_chat_id=owner_chat_id,
-    )
+    if persist:
+        await _save_radar_candidates(
+            cfg,
+            report,
+            macro_snap,
+            macro_regime,
+            portfolio_total_ars=total_ars,
+            owner_chat_id=owner_chat_id,
+            run_id=radar_run_id,
+            run_intent=run_intent,
+        )
+    else:
+        logger.info("Radar no persistido por --no-persist")
 
     output = render_opportunity_report(report, portfolio_total_ars=total_ars)
     print(output)
@@ -458,6 +515,17 @@ if __name__ == "__main__":
     p.add_argument("--include-portfolio",action="store_true",
                    help="Incluir tickers del portfolio en el análisis (default: excluidos)")
     p.add_argument("--owner-chat-id", type=int, default=None)
+    p.add_argument(
+        "--run-intent",
+        choices=["scheduled_context", "exploratory"],
+        default="scheduled_context",
+        help="Alcance auditable para decision_log (default: scheduled_context)",
+    )
+    p.add_argument(
+        "--no-persist",
+        action="store_true",
+        help="No guardar ideas del radar en decision_log",
+    )
     args = p.parse_args()
 
     # --top es alias de --max
@@ -473,4 +541,6 @@ if __name__ == "__main__":
         min_rr             = args.min_rr,
         exclude_portfolio  = not args.include_portfolio,
         owner_chat_id      = args.owner_chat_id,
+        run_intent         = args.run_intent,
+        persist            = not args.no_persist,
     ))

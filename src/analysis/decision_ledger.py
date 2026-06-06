@@ -7,6 +7,14 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 
+from src.analysis.audit_scope import ensure_decision_audit_scope_columns
+from src.core.telegram_format import (
+    header as tg_header,
+    note as tg_note,
+    section as tg_section,
+    validate_telegram_html,
+)
+
 
 ART = ZoneInfo("America/Argentina/Buenos_Aires")
 
@@ -158,6 +166,8 @@ async def fetch_decision_ledger(
     match_window_days: int = 2,
     owner_chat_id: int | None = None,
 ) -> dict:
+    await ensure_decision_audit_scope_columns(conn)
+
     real_rows = await conn.fetch(
         """
         SELECT
@@ -168,6 +178,9 @@ async def fetch_decision_ledger(
             COALESCE(source, layers->>'source') AS source,
             COALESCE(status, 'UNKNOWN') AS status,
             COALESCE(decision_type, 'unknown') AS decision_type,
+            COALESCE(run_intent, 'unknown') AS run_intent,
+            COALESCE(decision_stage, 'idea') AS decision_stage,
+            COALESCE(metric_scope, 'debug') AS metric_scope,
             price_at_decision,
             ABS(COALESCE(NULLIF(executed_amount_ars, 0), theoretical_amount_ars, 0)) AS amount_ars,
             layers#>>'{broker_fill,executed_at_precision}' AS execution_precision,
@@ -180,16 +193,7 @@ async def fetch_decision_ledger(
           AND ($2::bigint IS NULL OR owner_chat_id = $2)
           AND decision IN ('BUY', 'SELL')
           AND COALESCE(outcome_basis, '') <> 'legacy_external'
-          AND (
-            (
-              COALESCE(source, layers->>'source') IN ('broker_movement', 'broker_fill')
-              AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
-            )
-            OR (
-              COALESCE(source, layers->>'source') = 'execution_plan'
-              AND status IN ('EXECUTED', 'EXECUTED_MANUAL')
-            )
-          )
+          AND is_primary_metric = TRUE
         ORDER BY decided_at DESC, id DESC
         """,
         days,
@@ -207,6 +211,9 @@ async def fetch_decision_ledger(
                 decision,
                 final_score,
                 price_at_decision,
+                COALESCE(run_intent, 'formal_plan') AS run_intent,
+                COALESCE(decision_stage, 'approved_decision') AS decision_stage,
+                COALESCE(metric_scope, 'planner_audit') AS metric_scope,
                 ABS(COALESCE(theoretical_amount_ars, executed_amount_ars, 0)) AS target_amount_ars,
                 COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
                 COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
@@ -230,6 +237,8 @@ async def fetch_decision_ledger(
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND ($3::bigint IS NULL OR owner_chat_id = $3)
               AND COALESCE(source, layers->>'source') = 'execution_plan'
+              AND COALESCE(run_intent, 'formal_plan') = 'formal_plan'
+              AND COALESCE(metric_scope, 'planner_audit') IN ('planner_audit', 'primary')
               AND status IN ('APPROVED', 'EXECUTED')
               AND decision_type = 'executable'
               AND decision IN ('BUY', 'SELL')
@@ -352,6 +361,9 @@ async def fetch_decision_ledger(
                 confidence,
                 status,
                 decision_type,
+                COALESCE(run_intent, 'scheduled_context') AS run_intent,
+                COALESCE(decision_stage, 'idea') AS decision_stage,
+                COALESCE(metric_scope, 'radar_audit') AS metric_scope,
                 price_at_decision,
                 COALESCE(NULLIF(next_executable_price, 0), price_at_decision) AS audit_entry_price,
                 ABS(COALESCE(theoretical_amount_ars, NULLIF(executed_amount_ars, 0), 0)) AS amount_ars,
@@ -371,6 +383,7 @@ async def fetch_decision_ledger(
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND ($2::bigint IS NULL OR owner_chat_id = $2)
               AND COALESCE(source, layers->>'source') = 'radar'
+              AND COALESCE(metric_scope, 'radar_audit') = 'radar_audit'
               AND decision IN ('BUY', 'SELL')
               AND price_at_decision IS NOT NULL
               AND price_at_decision > 0
@@ -510,7 +523,7 @@ async def fetch_decision_ledger(
           AND dl.price_at_decision IS NOT NULL
           AND dl.price_at_decision > 0
           AND COALESCE(dl.executable_outcome_5d, dl.outcome_5d) IS NULL
-          AND COALESCE(dl.source, dl.layers->>'source') IN ('execution_plan', 'broker_movement', 'radar')
+          AND COALESCE(dl.metric_scope, 'debug') IN ('primary', 'planner_audit', 'radar_audit')
         ORDER BY dl.decided_at DESC, dl.id DESC
         LIMIT 30
         """,
@@ -651,30 +664,32 @@ def render_decision_ledger(data: dict) -> str:
             else "Los swaps maduros no superan al activo sacrificado."
         )
 
-    lines = [
-        "<b>DECISION LEDGER</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"Periodo: <b>{int(data.get('days') or 0)} dias</b> | ventana match: <b>{int(data.get('match_window_days') or 0)}d</b>",
-        "",
-        "<b>QUE MIDE</b>",
-        "   Atribucion economica de decisiones, ejecuciones reales y radar.",
+    lines = tg_header(
+        "📒 Decision Ledger",
+        subtitle=(
+            f"Periodo: {int(data.get('days') or 0)} dias | "
+            f"ventana match: {int(data.get('match_window_days') or 0)}d"
+        ),
+    ) + [
+        tg_section("Qué mide"),
+        "   Atribución económica de decisiones, ejecuciones reales, radar y swaps.",
         "   No toca analysis, scores, optimizer, planner ni thresholds.",
-        "   Usa retornos direccionales: BUY gana si sube; SELL gana si baja.",
+        "   BUY gana si sube; SELL gana si baja.",
         "",
     ]
 
     if executive_lines:
         lines += [
-            "<b>LECTURA EJECUTIVA</b>",
+            tg_section("Lectura ejecutiva"),
             f"   {escape(' '.join(executive_lines))}",
             "   Muestra aun limitada: usar como auditoria, no como prueba estadistica final.",
             "",
         ]
 
     lines += [
-        "<b>RESUMEN ARS</b>",
+        tg_section("Resumen ARS"),
         (
-            f"   Ejecucion real: <b>{summary.get('real_closed_5d', 0)}</b> cerradas 5D / "
+            f"   Real ejecutado: <b>{summary.get('real_closed_5d', 0)}</b> cerradas 5D / "
             f"{summary.get('real_total', 0)} eventos | PnL 5D {_money(summary.get('real_pnl_5d_ars'))} | "
             f"win {_rate(summary.get('real_win_rate_5d'))}"
         ),
@@ -695,7 +710,7 @@ def render_decision_ledger(data: dict) -> str:
             f"alpha ARS {_money(summary.get('swap_alpha_5d_ars'))}"
         ),
         "",
-        "<b>RADAR POR OPERABILIDAD</b>",
+        tg_section("Radar por operabilidad"),
         (
             f"   Operable/teorico: <b>{summary.get('radar_operable_closed_5d', 0)}</b> cerradas / "
             f"{summary.get('radar_operable_total', 0)} | avg {_pct(summary.get('radar_operable_avg_5d'))} | "
@@ -711,7 +726,7 @@ def render_decision_ledger(data: dict) -> str:
     ]
 
     if real:
-        lines += ["<b>EJECUCIONES REALES RECIENTES</b>"]
+        lines += [tg_section("Ejecuciones reales recientes")]
         shown = 0
         for row in real:
             if shown >= 6:
@@ -730,7 +745,7 @@ def render_decision_ledger(data: dict) -> str:
         lines.append("")
 
     if plans:
-        lines += ["<b>BOT VS HUMANO ECONOMICO</b>"]
+        lines += [tg_section("Bot vs humano económico")]
         shown = 0
         for row in plans:
             if shown >= 8:
@@ -758,7 +773,7 @@ def render_decision_ledger(data: dict) -> str:
 
     swap_rows = [row for row in radar if row.get("edge_vs")]
     if swap_rows:
-        lines += ["<b>RADAR / SWAPS</b>"]
+        lines += [tg_section("Radar / swaps")]
         swap_display = [
             row for row in swap_rows if row.get("swap_alpha_5d") is not None
         ] + [
@@ -775,7 +790,7 @@ def render_decision_ledger(data: dict) -> str:
         lines.append("")
 
     if pending:
-        lines += ["<b>PENDIENTES VIVOS MARK-TO-LATEST</b>"]
+        lines += [tg_section("Pendientes vivos")]
         lines.append("   No son outcomes cerrados; muestran como vienen con ultimo precio guardado.")
         for row in pending[:8]:
             lines.append(
@@ -786,7 +801,11 @@ def render_decision_ledger(data: dict) -> str:
         lines.append("")
 
     lines += [
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "<i>Ledger descriptivo: mide dinero y costo de oportunidad; no recalibra el cerebro del bot.</i>",
+        tg_note("Ledger descriptivo: mide dinero y costo de oportunidad; no recalibra el cerebro del bot."),
     ]
-    return "\n".join(lines)
+    report = "\n".join(lines)
+    valid_html, errors = validate_telegram_html(report)
+    if not valid_html:
+        lines.append(tg_note(f"Advertencia interna: HTML con formato revisable ({'; '.join(errors[:2])})."))
+        report = "\n".join(lines)
+    return report

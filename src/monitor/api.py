@@ -13,6 +13,7 @@ import asyncpg
 import pyotp
 from aiohttp import web
 
+from src.analysis.audit_scope import ensure_decision_audit_scope_columns
 from src.analysis.decision_ledger import fetch_decision_ledger
 from src.core.config import get_config
 from src.core.logger import redact_secrets
@@ -282,7 +283,7 @@ def _extract_token(request: web.Request) -> str:
 
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
-    public_paths = {"/", "/linkedin", "/api/auth/status"}
+    public_paths = {"/", "/api/auth/status"}
     if request.path in public_paths or request.path.startswith("/static/"):
         return await handler(request)
 
@@ -341,10 +342,6 @@ async def cors_middleware(request: web.Request, handler):
 
 async def index(_request: web.Request) -> web.Response:
     return web.FileResponse(STATIC_DIR / "index.html")
-
-
-async def linkedin_analysis(_request: web.Request) -> web.Response:
-    return web.FileResponse(STATIC_DIR / "linkedin-analysis.html")
 
 
 async def auth_status(_request: web.Request) -> web.Response:
@@ -531,6 +528,7 @@ async def decisions(request: web.Request) -> web.Response:
     days = max(1, min(int(request.query.get("days", "90")), 365))
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
+        await ensure_decision_audit_scope_columns(conn)
         summary = await conn.fetchrow("""
             SELECT
                 COUNT(*) AS total,
@@ -539,12 +537,17 @@ async def decisions(request: web.Request) -> web.Response:
                 COUNT(*) FILTER (WHERE source = 'execution_plan') AS execution_plan,
                 COUNT(*) FILTER (WHERE status = 'BLOCKED') AS blocked,
                 COUNT(*) FILTER (WHERE status = 'APPROVED') AS approved,
-                COUNT(*) FILTER (WHERE status = 'EXECUTED') AS executed
+                COUNT(*) FILTER (WHERE status = 'EXECUTED') AS executed,
+                COUNT(*) FILTER (WHERE is_primary_metric = TRUE) AS primary_metric,
+                COUNT(*) FILTER (WHERE metric_scope = 'radar_audit') AS radar_audit,
+                COUNT(*) FILTER (WHERE metric_scope = 'debug') AS debug_events
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
         """, days)
         groups = await conn.fetch("""
             SELECT
+                COALESCE(metric_scope, 'debug') AS metric_scope,
+                COALESCE(run_intent, 'unknown') AS run_intent,
                 COALESCE(source, layers->>'source', 'sin_source') AS source,
                 COALESCE(status, 'UNKNOWN') AS status,
                 COALESCE(decision_type, 'unknown') AS decision_type,
@@ -555,12 +558,13 @@ async def decisions(request: web.Request) -> web.Response:
                 COUNT(outcome_20d) FILTER (WHERE outcome_basis = 'canonical_cocos') AS con_20d
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
-            GROUP BY 1,2,3,4
-            ORDER BY n DESC, source, status
+            GROUP BY 1,2,3,4,5,6
+            ORDER BY n DESC, metric_scope, source, status
             LIMIT 30
         """, days)
         recent = await conn.fetch("""
             SELECT decided_at, ticker, decision, status, source, final_score,
+                   metric_scope, run_intent, decision_stage,
                    outcome_5d, outcome_basis, was_correct
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
@@ -642,6 +646,7 @@ async def performance_view(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "180")), 365))
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
+        await ensure_decision_audit_scope_columns(conn)
         summary = await conn.fetchrow("""
             WITH real AS (
                 SELECT
@@ -653,8 +658,7 @@ async def performance_view(request: web.Request) -> web.Response:
                   AND outcome_basis = 'canonical_cocos'
                   AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
                   AND COALESCE(executable_was_correct, was_correct) IS NOT NULL
-                  AND status = 'EXECUTED_MANUAL'
-                  AND COALESCE(source, layers->>'source') = 'broker_movement'
+                  AND is_primary_metric = TRUE
             )
             SELECT
                 COUNT(*) AS closed_5d,
@@ -679,8 +683,7 @@ async def performance_view(request: web.Request) -> web.Response:
               AND outcome_basis = 'canonical_cocos'
               AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
               AND COALESCE(executable_was_correct, was_correct) IS NOT NULL
-              AND status = 'EXECUTED_MANUAL'
-              AND COALESCE(source, layers->>'source') = 'broker_movement'
+              AND is_primary_metric = TRUE
             GROUP BY ticker
             ORDER BY n DESC, avg_5d DESC
             LIMIT 12
@@ -691,6 +694,8 @@ async def performance_view(request: web.Request) -> web.Response:
                 ticker,
                 decision,
                 status,
+                COALESCE(metric_scope, 'debug') AS metric_scope,
+                COALESCE(run_intent, 'unknown') AS run_intent,
                 COALESCE(source, layers->>'source') AS source,
                 final_score,
                 confidence,
@@ -704,18 +709,20 @@ async def performance_view(request: web.Request) -> web.Response:
               AND outcome_basis = 'canonical_cocos'
               AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
               AND final_score IS NOT NULL
+              AND COALESCE(metric_scope, 'debug') IN ('primary', 'planner_audit')
             ORDER BY decided_at DESC
             LIMIT 160
         """, days)
         status_counts = await conn.fetch("""
             SELECT
+                COALESCE(metric_scope, 'debug') AS metric_scope,
                 COALESCE(source, layers->>'source', 'sin_source') AS source,
                 COALESCE(status, 'UNKNOWN') AS status,
                 COUNT(*) AS n,
                 COUNT(COALESCE(executable_outcome_5d, outcome_5d)) FILTER (WHERE outcome_basis = 'canonical_cocos') AS closed_5d
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
-            GROUP BY 1, 2
+            GROUP BY 1, 2, 3
             ORDER BY n DESC
             LIMIT 16
         """, days)
@@ -741,6 +748,7 @@ async def override_audit(request: web.Request) -> web.Response:
     match_window_days = max(1, min(int(request.query.get("match_window_days", "2")), 10))
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
+        await ensure_decision_audit_scope_columns(conn)
         rows = await conn.fetch("""
             WITH decision_base AS (
                 SELECT
@@ -750,6 +758,9 @@ async def override_audit(request: web.Request) -> web.Response:
                     decision,
                     final_score,
                     price_at_decision,
+                    COALESCE(run_intent, 'formal_plan') AS run_intent,
+                    COALESCE(decision_stage, 'approved_decision') AS decision_stage,
+                    COALESCE(metric_scope, 'planner_audit') AS metric_scope,
                     ABS(COALESCE(theoretical_amount_ars, executed_amount_ars, 0)) AS target_amount_ars,
                     COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
                     COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
@@ -772,6 +783,8 @@ async def override_audit(request: web.Request) -> web.Response:
                 FROM decision_log
                 WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
                   AND COALESCE(source, layers->>'source') = 'execution_plan'
+                  AND COALESCE(run_intent, 'formal_plan') = 'formal_plan'
+                  AND COALESCE(metric_scope, 'planner_audit') IN ('planner_audit', 'primary')
                   AND status = 'APPROVED'
                   AND decision_type = 'executable'
                   AND decision IN ('BUY', 'SELL')
@@ -945,6 +958,7 @@ async def radar_audit(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
+        await ensure_decision_audit_scope_columns(conn)
         rows = await conn.fetch("""
             WITH radar AS (
                 SELECT
@@ -961,6 +975,9 @@ async def radar_audit(request: web.Request) -> web.Response:
                     confidence,
                     status,
                     decision_type,
+                    COALESCE(run_intent, 'scheduled_context') AS run_intent,
+                    COALESCE(decision_stage, 'idea') AS decision_stage,
+                    COALESCE(metric_scope, 'radar_audit') AS metric_scope,
                     price_at_decision,
                     rr_ratio,
                     block_reason,
@@ -975,6 +992,7 @@ async def radar_audit(request: web.Request) -> web.Response:
                 FROM decision_log
                 WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
                   AND COALESCE(source, layers->>'source') = 'radar'
+                  AND COALESCE(metric_scope, 'radar_audit') = 'radar_audit'
                   AND decision IN ('BUY', 'SELL')
                   AND price_at_decision IS NOT NULL
                   AND price_at_decision > 0
@@ -1321,7 +1339,6 @@ async def create_app() -> web.Application:
     app = web.Application(middlewares=[security_headers_middleware, cors_middleware, auth_middleware])
     app["pool"] = pool
     app.router.add_get("/", index)
-    app.router.add_get("/linkedin", linkedin_analysis)
     app.router.add_get("/api/auth/status", auth_status)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/ingestion", ingestion)

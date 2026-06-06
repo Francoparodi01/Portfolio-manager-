@@ -11,6 +11,8 @@ PRICE_STATUS_FRESH = "FRESH"
 PRICE_STATUS_STALE = "STALE"
 PRICE_STATUS_MISSING = "MISSING"
 
+DEFAULT_PRICE_DISCREPANCY_THRESHOLD = 0.05
+
 
 def _as_dict(row: Any) -> dict:
     if row is None:
@@ -126,6 +128,98 @@ def enrich_positions_with_market_metadata(
         enriched.append(pos)
 
     return enriched
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value) if value is not None else default
+    except Exception:
+        return default
+
+
+def normalize_positions_with_fresh_market_prices(
+    positions: Iterable[Mapping[str, Any]],
+    latest_market_rows: Iterable[Mapping[str, Any]],
+    *,
+    discrepancy_threshold: float = DEFAULT_PRICE_DISCREPANCY_THRESHOLD,
+) -> list[dict]:
+    """Return positions valued with fresh market_prices when available.
+
+    Cocos portfolio can expose a stale or inconsistent position price while the
+    market page already has the latest tradable quote. For operational analysis
+    we keep the raw snapshot fields as metadata, but value the position with the
+    fresh market quote when it belongs to the latest market day.
+    """
+    enriched = enrich_positions_with_market_metadata(positions, latest_market_rows)
+
+    normalized: list[dict] = []
+    for raw in enriched:
+        pos = dict(raw)
+        status = str(pos.get("market_data_status", "") or "").upper()
+        latest_price = _safe_float(pos.get("market_last_price"))
+        quantity = _safe_float(pos.get("quantity"))
+        snapshot_price = _safe_float(pos.get("current_price"))
+
+        discrepancy_pct = None
+        if latest_price > 0 and snapshot_price > 0:
+            discrepancy_pct = (latest_price / snapshot_price) - 1.0
+            pos["price_discrepancy_pct"] = discrepancy_pct
+            pos["price_discrepancy_abs_pct"] = abs(discrepancy_pct)
+            pos["price_discrepancy_status"] = (
+                "WARN"
+                if abs(discrepancy_pct) >= discrepancy_threshold
+                else "OK"
+            )
+
+        if status == PRICE_STATUS_FRESH and latest_price > 0:
+            original_market_value = _safe_float(pos.get("market_value"))
+            pos["snapshot_current_price"] = snapshot_price or None
+            pos["snapshot_market_value"] = original_market_value or None
+            pos["current_price"] = latest_price
+            pos["price_source"] = "market_prices"
+            pos["price_normalized"] = True
+
+            if quantity > 0:
+                market_value = quantity * latest_price
+                pos["market_value"] = market_value
+                pos["market_value_source"] = "market_prices"
+
+                avg_cost = _safe_float(pos.get("avg_cost"))
+                if avg_cost > 0:
+                    pnl = market_value - (quantity * avg_cost)
+                    pos["unrealized_pnl"] = pnl
+                    pos["unrealized_pnl_pct"] = (latest_price / avg_cost) - 1.0
+        else:
+            pos["price_source"] = pos.get("price_source") or "snapshot"
+            pos["price_normalized"] = False
+
+        normalized.append(pos)
+
+    return normalized
+
+
+def price_discrepancy_warnings(
+    positions: Iterable[Mapping[str, Any]],
+    *,
+    threshold: float = DEFAULT_PRICE_DISCREPANCY_THRESHOLD,
+) -> list[dict]:
+    warnings: list[dict] = []
+    for raw in positions or []:
+        pos = dict(raw)
+        discrepancy = _safe_float(pos.get("price_discrepancy_pct"), default=0.0)
+        if abs(discrepancy) < threshold:
+            continue
+        ticker = str(pos.get("ticker", "") or "").upper()
+        warnings.append(
+            {
+                "ticker": ticker,
+                "snapshot_price": pos.get("snapshot_current_price"),
+                "market_price": pos.get("market_last_price"),
+                "discrepancy_pct": discrepancy,
+                "market_price_ts": pos.get("market_price_ts"),
+            }
+        )
+    return warnings
 
 
 def is_position_operable(position: Mapping[str, Any]) -> bool:

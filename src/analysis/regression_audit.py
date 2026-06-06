@@ -222,6 +222,10 @@ async def load_decision_log(
             "source",
             "decision_type",
             "status",
+            "run_intent",
+            "decision_stage",
+            "metric_scope",
+            "is_primary_metric",
             "theoretical_amount_ars",
             "executed_amount_ars",
             "current_weight",
@@ -557,6 +561,13 @@ def apply_audit_mode_filter(
                 f"Se excluyeron {radar_count} filas radar: Radar Audit se evalua separado de calibration/regression."
             )
             out = out[~out["source"].eq("radar")].copy()
+        if "metric_scope" in out.columns:
+            debug_count = int(out["metric_scope"].eq("debug").sum())
+            if debug_count:
+                warnings.append(
+                    f"Se excluyeron {debug_count} filas debug/exploratory de signal audit."
+                )
+                out = out[~out["metric_scope"].eq("debug")].copy()
         return out, warnings
 
     if mode == "optimizer":
@@ -571,7 +582,10 @@ def apply_audit_mode_filter(
         return out[mask].copy(), warnings
 
     if mode == "execution":
-        mask = out["status"].isin(["EXECUTED", "EXECUTED_MANUAL"])
+        if "is_primary_metric" in out.columns:
+            mask = out["is_primary_metric"].fillna(False).astype(bool)
+        else:
+            mask = out["status"].isin(["EXECUTED", "EXECUTED_MANUAL"])
 
         # Protección extra: excluir explícitamente bloqueados.
         mask = mask & ~out["status"].eq("BLOCKED")
@@ -600,6 +614,8 @@ def apply_audit_mode_filter(
             out["status"].eq("BLOCKED")
             | out["decision_type"].eq("blocked")
         )
+        if "metric_scope" in out.columns:
+            mask = mask | out["metric_scope"].eq("blocked_audit")
 
         if "was_blocked" in out.columns:
             mask = mask | out["was_blocked"].fillna(False).astype(bool)
@@ -620,6 +636,13 @@ def apply_audit_mode_filter(
                 f"Se excluyeron {radar_count} filas radar de mode=all para no mezclar ideas con decisiones del planner."
             )
             out = out[~out["source"].eq("radar")].copy()
+        if "metric_scope" in out.columns:
+            debug_count = int(out["metric_scope"].eq("debug").sum())
+            if debug_count:
+                warnings.append(
+                    f"Se excluyeron {debug_count} filas debug/exploratory de mode=all."
+                )
+                out = out[~out["metric_scope"].eq("debug")].copy()
         return out, warnings
 
     return out, warnings

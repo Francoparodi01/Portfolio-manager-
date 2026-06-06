@@ -45,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from datetime import datetime, time, timedelta, timezone
 from html import escape
+from uuid import uuid4
 
 from src.core.config import get_config
 from src.core.logger import get_logger
@@ -77,12 +78,24 @@ from src.analysis.validators import (
     soft_validate,
     PlanValidationError,
 )
+from src.core.telegram_format import (
+    header as tg_header,
+    note as tg_note,
+    section as tg_section,
+    validate_telegram_html,
+)
 from src.analysis.risk_levels import compute_risk_levels
+from src.analysis.audit_scope import (
+    classify_decision_audit_scope,
+    ensure_decision_audit_scope_columns,
+    run_id_to_db,
+)
 from src.collector.cocos_history import candles_to_frame
 from src.collector.portfolio_quality import (
     PRICE_STATUS_FRESH,
-    enrich_positions_with_market_metadata,
     is_position_operable,
+    normalize_positions_with_fresh_market_prices,
+    price_discrepancy_warnings,
 )
 
 logger = get_logger(__name__)
@@ -819,6 +832,8 @@ async def _save_execution_plan_events(
     total_ars: float,
     positions: list | None = None,
     owner_chat_id: int | None = None,
+    run_id: str | None = None,
+    run_intent: str = "formal_plan",
 ) -> list[int]:
     """
     Guarda eventos del ExecutionPlan en decision_log.
@@ -1006,6 +1021,18 @@ async def _save_execution_plan_events(
         if forced_reason:
             layers_payload["forced_reason"] = forced_reason
 
+        decided_at = datetime.now(timezone.utc)
+        audit_scope = classify_decision_audit_scope(
+            source="execution_plan",
+            status=status,
+            decision_type=decision_type,
+            decided_at=decided_at,
+            run_intent=run_intent,
+        )
+        layers_payload["run_intent"] = audit_scope["run_intent"]
+        layers_payload["decision_stage"] = audit_scope["decision_stage"]
+        layers_payload["metric_scope"] = audit_scope["metric_scope"]
+
         existing_id = await conn.fetchval(
             """
             SELECT id
@@ -1086,6 +1113,11 @@ async def _save_execution_plan_events(
                     delta_weight = $18,
                     is_executable = $19,
                     was_blocked = $20,
+                    run_id = $21::uuid,
+                    run_intent = $22,
+                    decision_stage = $23,
+                    metric_scope = $24,
+                    is_primary_metric = $25,
                     outcome_5d = NULL,
                     outcome_10d = NULL,
                     outcome_20d = NULL,
@@ -1100,7 +1132,7 @@ async def _save_execution_plan_events(
                 WHERE id = $1
                 """,
                 int(existing_id),
-                datetime.now(timezone.utc),
+                decided_at,
                 final_score,
                 confidence,
                 _json.dumps(layers_payload),
@@ -1119,6 +1151,11 @@ async def _save_execution_plan_events(
                 delta_weight,
                 bool(is_executable),
                 bool(was_blocked),
+                run_id_to_db(run_id),
+                audit_scope["run_intent"],
+                audit_scope["decision_stage"],
+                audit_scope["metric_scope"],
+                audit_scope["is_primary_metric"],
             )
             logger.info(
                 "ExecutionPlan updated: id=%s %s %s status=%s",
@@ -1157,7 +1194,12 @@ async def _save_execution_plan_events(
                 target_weight,
                 delta_weight,
                 is_executable,
-                was_blocked
+                was_blocked,
+                run_id,
+                run_intent,
+                decision_stage,
+                metric_scope,
+                is_primary_metric
             )
             VALUES (
                 $1,
@@ -1167,12 +1209,12 @@ async def _save_execution_plan_events(
                 $11, $12, $13, $14, $15,
                 $16, $17, $18, $19,
                 $20, $21, $22, $23, $24,
-                $25, $26
+                $25, $26, $27::uuid, $28, $29, $30, $31
             )
             RETURNING id
             """,
             owner_chat_id,
-            datetime.now(timezone.utc),
+            decided_at,
             ticker,
             decision,
             final_score,
@@ -1197,6 +1239,11 @@ async def _save_execution_plan_events(
             delta_weight,
             bool(is_executable),
             bool(was_blocked),
+            run_id_to_db(run_id),
+            audit_scope["run_intent"],
+            audit_scope["decision_stage"],
+            audit_scope["metric_scope"],
+            audit_scope["is_primary_metric"],
         )
 
         return int(row["id"]) if row else None
@@ -1204,6 +1251,7 @@ async def _save_execution_plan_events(
     conn = await asyncpg.connect(db_url)
 
     try:
+        await ensure_decision_audit_scope_columns(conn)
         for order in (getattr(execution_plan, "sell_orders", []) or []):
             row_id = await _insert_event(
                 conn,
@@ -1735,9 +1783,7 @@ def render_report(
     timing_ctx = _execution_timing_context()
 
     # ── Header ────────────────────────────────────────────────────────────────
-    h.append("🧠 <b>ANÁLISIS SEMANAL — SISTEMA CUANTITATIVO</b>")
-    h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')} ART")
+    h.extend(tg_header("🧠 Análisis de cartera", subtitle=f"{datetime.now().strftime('%d/%m/%Y %H:%M')} ART"))
     h.append(
         f"💼 Portfolio: <b>{_money_ars(total_ars)}</b> | "
         f"Cash libre: <b>{_money_ars(cash_ars)}</b>"
@@ -1747,7 +1793,7 @@ def render_report(
     h.append("")
 
     # ── DECISIÓN DE HOY — desde ExecutionPlan, nunca desde optimizer ──────────
-    h.append("<b>DECISIÓN DE HOY</b>")
+    h.append(tg_section("Decisión de cartera"))
 
     if gate == "BLOCKED":
         h.append("🔴 <b>NO OPERAR / DEFENSIVO</b>")
@@ -1790,6 +1836,7 @@ def render_report(
             h.append(f"   {_render_signal_line(score, tech, macro, sent)}")
 
         h.append(f"   Motivo: {escape(main_order.reason)}")
+        h.append("   Estado: plan aprobado; no es ejecución real hasta que exista fill confirmado.")
 
         if main_order.partial and main_order.theoretical_ars > main_order.amount_ars:
             h.append(
@@ -1843,10 +1890,11 @@ def render_report(
     h.append("")
 
     # ── EJECUCIÓN — cash accounting + órdenes ─────────────────────────────────
-    h.append("<b>EJECUCIÓN</b>")
+    h.append(tg_section("Plan operativo"))
 
     if plan:
         h.append(f"   {timing_ctx['headline']}: {timing_ctx['note']}")
+        h.append("   Confirmación requerida: Cocos movements/fill real.")
 
         purchases = (
             "$0 ARS"
@@ -1917,7 +1965,7 @@ def render_report(
         )
 
     if plan and plan.blocked_orders:
-        h.append("   🚫 No ejecutables hoy:")
+        h.append("   🚫 Señales no ejecutables:")
         for o in plan.blocked_orders[:4]:
             action_name = o.action.value if hasattr(o.action, "value") else str(o.action)
             icon = "🔵" if action_name == "WATCH" else "⛔"
@@ -1931,7 +1979,7 @@ def render_report(
 
     # ── CARTERA ACTUAL — señal del activo + decisión de cartera separadas ─────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append("<b>LECTURA DE CARTERA</b>")
+    h.append(tg_section("Lectura de cartera"))
     h.append(f"Historia técnica: <b>{escape(_technical_source_summary(results))}</b>")
     stale_positions = [
         p for p in (positions or [])
@@ -2063,7 +2111,7 @@ def render_report(
 
     # ── CONTEXTO MACRO ────────────────────────────────────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append("<b>CONTEXTO DE MERCADO</b>")
+    h.append(tg_section("Contexto de mercado"))
 
     macro_parts = []
 
@@ -2113,7 +2161,7 @@ def render_report(
 
     # ── OPTIMIZER — bloque INFORMATIVO ────────────────────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append("<b>OPTIMIZER</b>")
+    h.append(tg_section("Optimizer"))
 
     opt = _get(rebalance_report, "optimization", rebalance_report)
 
@@ -2150,8 +2198,9 @@ def render_report(
 
         h.append("")
         h.append(
-            "<i>Nota: los pesos objetivo son teóricos; "
-            "el execution planner puede bloquearlos por guards de calidad.</i>"
+            tg_note(
+                "Los pesos objetivo son teóricos; el execution planner puede bloquearlos por guards de calidad."
+            )
         )
 
     h.append("")
@@ -2166,10 +2215,14 @@ def render_report(
             available_cash_ars=getattr(opportunity_report, "available_cash_ars", cash_ars),
         )
         h.append("")
-        h.append("<i>Sistema cuantitativo multicapa - no es asesoramiento financiero</i>")
-        return "\n".join(h)
+        h.append(tg_note("Plan y radar son informativos hasta fill confirmado. No es asesoramiento financiero."))
+        report = "\n".join(h)
+        valid_html, errors = validate_telegram_html(report)
+        if not valid_html:
+            logger.warning("run_analysis HTML potencialmente inválido: %s", errors[:3])
+        return report
 
-    h.append("<b>RADAR COCOS</b>")
+    h.append(tg_section("Radar Cocos"))
 
     owned = {str(p.get("ticker", "")).upper() for p in positions or []}
     radar = []
@@ -2260,9 +2313,13 @@ def render_report(
 
     h.append("")
 
-    h.append("<i>Sistema cuantitativo multicapa — no es asesoramiento financiero</i>")
+    h.append(tg_note("Plan y radar son informativos hasta fill confirmado. No es asesoramiento financiero."))
 
-    return "\n".join(h)
+    report = "\n".join(h)
+    valid_html, errors = validate_telegram_html(report)
+    if not valid_html:
+        logger.warning("run_analysis HTML potencialmente inválido: %s", errors[:3])
+    return report
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PIPELINE PRINCIPAL
@@ -2277,15 +2334,30 @@ async def _load_portfolio(cfg, owner_chat_id: int | None = None):
             logger.error("Sin snapshots en DB — correr scraper primero")
             sys.exit(1)
         positions = snap.get("positions", [])
+        cash_ars  = float(snap.get("cash_ars", 0))
         try:
-            positions = enrich_positions_with_market_metadata(
+            positions = normalize_positions_with_fresh_market_prices(
                 positions,
                 await db.get_latest_market_prices(),
             )
+            discrepancies = price_discrepancy_warnings(positions)
+            if discrepancies:
+                for item in discrepancies[:8]:
+                    logger.warning(
+                        "Precio portfolio vs market_prices discrepante: %s snapshot=%s market=%s diff=%+.1f%%",
+                        item.get("ticker"),
+                        item.get("snapshot_price"),
+                        item.get("market_price"),
+                        float(item.get("discrepancy_pct") or 0.0) * 100.0,
+                    )
         except Exception as exc:
             logger.warning("No se pudo auditar frescura de portfolio: %s", exc)
-        total_ars = float(snap.get("total_value_ars", 0))
-        cash_ars  = float(snap.get("cash_ars", 0))
+
+        normalized_invested = sum(
+            float(p.get("market_value", 0) or 0)
+            for p in positions
+        )
+        total_ars = normalized_invested if normalized_invested > 0 else float(snap.get("total_value_ars", 0))
         history   = await db.get_portfolio_history(limit=60, owner_chat_id=owner_chat_id)
         return positions, total_ars, cash_ars, history
     finally:
@@ -2330,9 +2402,11 @@ async def main(
     no_sentiment:     bool,
     no_optimizer:     bool = False,
     owner_chat_id:    int | None = None,
+    run_intent:       str = "formal_plan",
 ):
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
+    analysis_run_id = str(uuid4())
 
     # ── 1. Posiciones ──────────────────────────────────────────────────────────
     if tickers_override:
@@ -2683,6 +2757,8 @@ async def main(
                 total_ars=total_ars,
                 positions=positions,
                 owner_chat_id=owner_chat_id,
+                run_id=analysis_run_id,
+                run_intent=run_intent,
             )
             logger.info(f"Eventos ExecutionPlan guardados en DB: ids={saved}")
         except Exception as e:
@@ -2752,6 +2828,12 @@ if __name__ == "__main__":
     p.add_argument("--no-sentiment", action="store_true")
     p.add_argument("--no-optimizer", action="store_true")
     p.add_argument("--owner-chat-id", type=int, default=None)
+    p.add_argument(
+        "--run-intent",
+        choices=["formal_plan", "exploratory"],
+        default="formal_plan",
+        help="Alcance auditable para decision_log (default: formal_plan)",
+    )
     args = p.parse_args()
     asyncio.run(main(
         tickers_override = args.tickers,
@@ -2761,4 +2843,5 @@ if __name__ == "__main__":
         no_sentiment     = args.no_sentiment,
         no_optimizer     = args.no_optimizer,
         owner_chat_id    = args.owner_chat_id,
+        run_intent       = args.run_intent,
     ))

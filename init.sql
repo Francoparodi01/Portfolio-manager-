@@ -237,7 +237,16 @@ CREATE TABLE IF NOT EXISTS decision_log (
     target_weight          FLOAT,
     delta_weight           FLOAT,
     is_executable          BOOLEAN,
-    was_blocked            BOOLEAN
+    was_blocked            BOOLEAN,
+
+    -- Alcance auditable. Evita mezclar consultas exploratorias, radar,
+    -- planes formales y ejecuciones reales en una misma metrica.
+    run_id                 UUID,
+    run_intent             TEXT,
+    decision_stage         TEXT,
+    metric_scope           TEXT,
+    is_primary_metric      BOOLEAN NOT NULL DEFAULT FALSE,
+    superseded_by_id       BIGINT REFERENCES decision_log(id) ON DELETE SET NULL
 );
 
 -- ── broker_fills ──────────────────────────────────────────────────────────────
@@ -410,6 +419,12 @@ ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_10d FLOAT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_20d FLOAT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_was_correct BOOLEAN;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS owner_chat_id          BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS run_id                 UUID;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS run_intent             TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS decision_stage         TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS metric_scope           TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS is_primary_metric      BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS superseded_by_id       BIGINT REFERENCES decision_log(id) ON DELETE SET NULL;
 ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS owner_chat_id   BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS telegram_username            TEXT;
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS display_name                 TEXT;
@@ -433,6 +448,67 @@ SET decision_type = CASE
     ELSE decision
 END
 WHERE decision_type IS NULL;
+
+UPDATE decision_log
+SET
+    run_intent = COALESCE(run_intent, CASE
+        WHEN COALESCE(source, layers->>'source', '') IN ('broker_movement', 'broker_fill') THEN 'broker_sync'
+        WHEN COALESCE(source, layers->>'source', '') = 'execution_plan' THEN 'formal_plan'
+        WHEN COALESCE(source, layers->>'source', '') = 'radar' THEN 'scheduled_context'
+        WHEN COALESCE(source, layers->>'source', '') = 'optimizer' THEN 'exploratory'
+        ELSE 'exploratory'
+    END),
+    decision_stage = COALESCE(decision_stage, CASE
+        WHEN COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL') THEN 'executed'
+        WHEN COALESCE(status, '') = 'APPROVED'
+             AND COALESCE(source, layers->>'source', '') = 'execution_plan'
+             AND (
+                (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                OR (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+             ) THEN 'pending_open'
+        WHEN COALESCE(status, '') = 'APPROVED' THEN 'approved_decision'
+        WHEN COALESCE(status, '') = 'BLOCKED' THEN 'blocked'
+        WHEN COALESCE(source, layers->>'source', '') = 'radar' THEN 'idea'
+        ELSE 'idea'
+    END),
+    metric_scope = COALESCE(metric_scope, CASE
+        WHEN (
+            COALESCE(source, layers->>'source', '') IN ('broker_movement', 'broker_fill')
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) OR (
+            COALESCE(source, layers->>'source', '') = 'execution_plan'
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) THEN 'primary'
+        WHEN COALESCE(source, layers->>'source', '') = 'execution_plan'
+             AND COALESCE(status, '') = 'BLOCKED' THEN 'blocked_audit'
+        WHEN COALESCE(source, layers->>'source', '') = 'execution_plan' THEN 'planner_audit'
+        WHEN COALESCE(source, layers->>'source', '') = 'radar' THEN 'radar_audit'
+        ELSE 'debug'
+    END),
+    is_primary_metric = CASE
+        WHEN (
+            COALESCE(source, layers->>'source', '') IN ('broker_movement', 'broker_fill')
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) OR (
+            COALESCE(source, layers->>'source', '') = 'execution_plan'
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) THEN TRUE
+        ELSE FALSE
+    END
+WHERE
+    run_intent IS NULL
+    OR decision_stage IS NULL
+    OR metric_scope IS NULL
+    OR is_primary_metric IS DISTINCT FROM CASE
+        WHEN (
+            COALESCE(source, layers->>'source', '') IN ('broker_movement', 'broker_fill')
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) OR (
+            COALESCE(source, layers->>'source', '') = 'execution_plan'
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) THEN TRUE
+        ELSE FALSE
+    END;
 
 -- Antes de imponer unicidad diaria, conservar solo la decision mas reciente.
 WITH ranked_daily_decisions AS (
@@ -483,6 +559,13 @@ CREATE INDEX IF NOT EXISTS idx_decision_log_owner_decided_at
 
 CREATE INDEX IF NOT EXISTS idx_decision_log_decided_at
     ON decision_log(decided_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_decision_log_metric_scope
+    ON decision_log(metric_scope, decided_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_decision_log_primary_metric
+    ON decision_log(decided_at DESC)
+    WHERE is_primary_metric = TRUE;
 
 DROP INDEX IF EXISTS idx_decision_log_unique_daily_action;
 CREATE INDEX IF NOT EXISTS idx_decision_log_daily_action_lookup
@@ -570,6 +653,12 @@ ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_10d FLOAT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_outcome_20d FLOAT;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS executable_was_correct BOOLEAN;
 ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS owner_chat_id          BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS run_id                 UUID;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS run_intent             TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS decision_stage         TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS metric_scope           TEXT;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS is_primary_metric      BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE decision_log ADD COLUMN IF NOT EXISTS superseded_by_id       BIGINT REFERENCES decision_log(id) ON DELETE SET NULL;
 ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS owner_chat_id   BIGINT REFERENCES bot_users(chat_id) ON DELETE CASCADE;
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS telegram_username            TEXT;
 ALTER TABLE bot_users ADD COLUMN IF NOT EXISTS display_name                 TEXT;
@@ -594,3 +683,64 @@ SET decision_type = CASE
     ELSE decision
 END
 WHERE decision_type IS NULL;
+
+UPDATE decision_log
+SET
+    run_intent = COALESCE(run_intent, CASE
+        WHEN COALESCE(source, layers->>'source', '') IN ('broker_movement', 'broker_fill') THEN 'broker_sync'
+        WHEN COALESCE(source, layers->>'source', '') = 'execution_plan' THEN 'formal_plan'
+        WHEN COALESCE(source, layers->>'source', '') = 'radar' THEN 'scheduled_context'
+        WHEN COALESCE(source, layers->>'source', '') = 'optimizer' THEN 'exploratory'
+        ELSE 'exploratory'
+    END),
+    decision_stage = COALESCE(decision_stage, CASE
+        WHEN COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL') THEN 'executed'
+        WHEN COALESCE(status, '') = 'APPROVED'
+             AND COALESCE(source, layers->>'source', '') = 'execution_plan'
+             AND (
+                (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
+                OR (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
+             ) THEN 'pending_open'
+        WHEN COALESCE(status, '') = 'APPROVED' THEN 'approved_decision'
+        WHEN COALESCE(status, '') = 'BLOCKED' THEN 'blocked'
+        WHEN COALESCE(source, layers->>'source', '') = 'radar' THEN 'idea'
+        ELSE 'idea'
+    END),
+    metric_scope = COALESCE(metric_scope, CASE
+        WHEN (
+            COALESCE(source, layers->>'source', '') IN ('broker_movement', 'broker_fill')
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) OR (
+            COALESCE(source, layers->>'source', '') = 'execution_plan'
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) THEN 'primary'
+        WHEN COALESCE(source, layers->>'source', '') = 'execution_plan'
+             AND COALESCE(status, '') = 'BLOCKED' THEN 'blocked_audit'
+        WHEN COALESCE(source, layers->>'source', '') = 'execution_plan' THEN 'planner_audit'
+        WHEN COALESCE(source, layers->>'source', '') = 'radar' THEN 'radar_audit'
+        ELSE 'debug'
+    END),
+    is_primary_metric = CASE
+        WHEN (
+            COALESCE(source, layers->>'source', '') IN ('broker_movement', 'broker_fill')
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) OR (
+            COALESCE(source, layers->>'source', '') = 'execution_plan'
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) THEN TRUE
+        ELSE FALSE
+    END
+WHERE
+    run_intent IS NULL
+    OR decision_stage IS NULL
+    OR metric_scope IS NULL
+    OR is_primary_metric IS DISTINCT FROM CASE
+        WHEN (
+            COALESCE(source, layers->>'source', '') IN ('broker_movement', 'broker_fill')
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) OR (
+            COALESCE(source, layers->>'source', '') = 'execution_plan'
+            AND COALESCE(status, '') IN ('EXECUTED', 'EXECUTED_MANUAL')
+        ) THEN TRUE
+        ELSE FALSE
+    END;

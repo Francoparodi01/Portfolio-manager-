@@ -54,6 +54,8 @@ from telegram.ext import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.core.telegram_format import html_text, note, validate_telegram_html
+
 try:
     from src.core.config import get_config
     from src.core.credentials import CredentialCipher, UserCredentials
@@ -358,6 +360,9 @@ async def send_text(
 ) -> None:
     for chunk in split_message(text):
         try:
+            valid_html, errors = validate_telegram_html(chunk)
+            if not valid_html:
+                logger.warning("[BOT] HTML potencialmente inválido: %s", errors[:3])
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=chunk,
@@ -454,12 +459,20 @@ async def run_python_script(
     )
     if rc != 0:
         return (
-            f"❌ <b>Error ejecutando {script}</b>  ⏱ {elapsed:.1f}s\n\n"
-            f"<b>STDERR</b>\n<code>{err[-3000:] or '—'}</code>\n\n"
-            f"<b>STDOUT</b>\n<code>{out[-3000:] or '—'}</code>"
+            f"⚠️ <b>No pude completar {html_text(script)}</b>\n"
+            f"Tiempo: <b>{elapsed:.1f}s</b>\n"
+            "Estado: no se guardan decisiones nuevas por este fallo.\n\n"
+            "<b>Detalle técnico</b>\n"
+            f"<code>{html_text(err[-2200:] or out[-2200:] or 'Sin detalle')}</code>\n\n"
+            f"{note('Si se repite, revisar logs del contenedor antes de operar con ese reporte.')}"
         )
     if not out:
-        return f"⚠️ <b>{script}</b> terminó sin output.  ⏱ {elapsed:.1f}s"
+        return (
+            f"⚠️ <b>{html_text(script)}</b> terminó sin reporte\n"
+            f"Tiempo: <b>{elapsed:.1f}s</b>\n"
+            "Estado: no hay datos nuevos para mostrar.\n"
+            f"{note('No implica compra, venta ni cambio de performance.')}"
+        )
     return out
 
 
@@ -480,7 +493,11 @@ async def run_first_existing_script(
             last_error = err[-1500:]
             continue
         if rc == 0:
-            return out or f"⚠️ {script} terminó sin output.  ⏱ {elapsed:.1f}s"
+            return out or (
+                f"⚠️ <b>{html_text(script)}</b> terminó sin reporte\n"
+                f"Tiempo: <b>{elapsed:.1f}s</b>\n"
+                f"{note('No implica compra, venta ni cambio de performance.')}"
+            )
         last_error = f"Script: {script}\nRC: {rc}\nSTDERR:\n{err[-2500:]}\n\nSTDOUT:\n{out[-2500:]}"
 
     return (
@@ -914,7 +931,7 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
     text = text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
 
     universe_match = re.search(r"^🔍 Universo:\s*(.+)$", text, re.MULTILINE)
-    gate_match = re.search(r"^(?:✅|⚠️|🔴|⚪)\s*Gate:\s*(.+)$", text, re.MULTILINE)
+    gate_match = re.search(r"^(?:✅|⚠️|🔴|⚪)\s*(?:Gate|Estado operativo):\s*(.+)$", text, re.MULTILINE)
     vix_match = re.search(r"^\s*VIX:\s*([0-9.]+)$", text, re.MULTILINE)
 
     universe = universe_match.group(1).strip() if universe_match else "—"
@@ -968,12 +985,13 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
     top = items[:max_items]
 
     lines = [
-        "🔭 <b>RADAR DE OPORTUNIDADES — COMPACTO</b>",
+        "🔭 <b>Radar de oportunidades — compacto</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🔍 Universo: {universe}",
-        f"✅ Gate: <b>{gate}</b> | VIX {vix}",
+        f"Estado operativo: <b>{gate}</b> | VIX {vix}",
+        "Nota: radar detecta ideas; no confirma ejecución ni entra al EV principal.",
         "",
-        "<b>TOP IDEAS</b>",
+        "<b>Top ideas</b>",
     ]
 
     for i, item in enumerate(top, start=1):
@@ -992,7 +1010,7 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "<i>Usá consola para ver el radar completo.</i>",
+        "<i>Usá /radar_full para ver detalle, fuentes y razones.</i>",
     ]
 
     return "\n".join(lines)

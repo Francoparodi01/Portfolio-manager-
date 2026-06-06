@@ -26,6 +26,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.collector.notifier import TelegramNotifier
 from src.core.config import get_config
+from src.core.telegram_format import (
+    header as tg_header,
+    note as tg_note,
+    section as tg_section,
+    validate_telegram_html,
+)
 
 
 ART = ZoneInfo("America/Argentina/Buenos_Aires")
@@ -605,16 +611,16 @@ def render_report(
     by_intent = summary.get("by_intent") or {}
     by_intent_status = by_intent.get("by_status") or {}
 
-    lines = [
-        "🧑‍✈️ <b>BOT VS HUMANO</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"📅 Ultimos <b>{days}</b> dias | ventana match: <b>{match_window_days}d</b>",
-        "",
-        "<b>QUE MIDE</b>",
+    lines = tg_header(
+        "🧑‍✈️ Bot vs Humano",
+        subtitle=f"Últimos {days} dias | ventana match: {match_window_days}d",
+    ) + [
+        tg_section("Qué mide"),
         "   Compara planes aprobados/ejecutados del bot contra movimientos reales Cocos.",
         "   No cambia analysis, optimizer, planner ni thresholds.",
+        "   Si una señal EOD no tuvo precio fresco de apertura, queda PENDING_OPEN.",
         "",
-        "<b>RESUMEN</b>",
+        tg_section("Resumen"),
         f"   Planes aprobados/ejecutados: <b>{summary['total']}</b>",
         f"   Intenciones unicas: <b>{summary['unique_intents']}</b> (ticker + lado) | repetidas: <b>{summary['repeated_plans']}</b>",
         f"   Cerrados 5D: <b>{summary['closed_5d']}</b> planes | <b>{by_intent.get('closed_5d', 0)}</b> intenciones",
@@ -636,7 +642,7 @@ def render_report(
         latest_movement_art = latest_movement_at.astimezone(ART)
         if latest_portfolio_art.date() > latest_movement_art.date() and signatures_today > 1:
             lines[8:8] = [
-                "<b>AVISO DE SINCRONIZACION</b>",
+                tg_section("Aviso de sincronización"),
                 (
                     "   El portfolio cambio hoy, pero el ultimo movimiento canonico "
                     f"en Cocos movements es {_fmt_dt(latest_movement_at)}. "
@@ -647,7 +653,7 @@ def render_report(
 
     if by_intent_status:
         lines += [
-            "<b>LECTURA POR INTENCION</b>",
+            tg_section("Lectura por intención"),
             f"   FOLLOWED: {by_intent_status.get('FOLLOWED', 0)} | OVER: {by_intent_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_intent_status.get('PARTIAL', 0)} | IGNORED: {by_intent_status.get('IGNORED', 0)} | OPPOSITE: {by_intent_status.get('OPPOSITE', 0)} | PENDING_OPEN: {by_intent_status.get('PENDING_OPEN', 0)}",
             "   Esta vista reduce el peso de senales repetidas del mismo ticker/lado.",
             "",
@@ -657,7 +663,7 @@ def render_report(
     if inferred:
         pending_inferred = sum(1 for row in inferred if not row.get("confirmed_at"))
         lines += [
-            "<b>ACTIVIDAD HUMANA INFERIDA</b>",
+            tg_section("Actividad humana inferida"),
             (
                 f"   {len(inferred)} cambios de cantidad detectados por snapshots "
                 f"({pending_inferred} sin confirmar por Cocos movements)."
@@ -675,7 +681,7 @@ def render_report(
     ignored_closed = summary["bot_wins_ignored"] + summary["human_wins_ignored"]
     if ignored_closed:
         lines += [
-            "<b>IGNORADAS / CONTRARIAS CERRADAS</b>",
+            tg_section("Ignoradas / contrarias cerradas"),
             f"   Bot habria tenido razon: <b>{summary['bot_wins_ignored']}</b>",
             f"   Humano evito/mejoro: <b>{summary['human_wins_ignored']}</b>",
             "   Muestra chica: usar como auditoria, no como regla.",
@@ -683,7 +689,7 @@ def render_report(
         ]
     else:
         lines += [
-            "<b>LECTURA</b>",
+            tg_section("Lectura"),
             "   Todavia no hay suficientes overrides cerrados para juzgar.",
             "   Por ahora sirve para trazabilidad: que dijo el bot vs que hiciste.",
             "",
@@ -691,7 +697,7 @@ def render_report(
 
     recent = rows[:10]
     if recent:
-        lines.append("<b>CASOS RECIENTES</b>")
+        lines.append(tg_section("Casos recientes"))
         for row in recent:
             status = row["override_status"]
             target = _money(row.get("target_amount_ars"))
@@ -722,7 +728,7 @@ def render_report(
         lines.append("")
 
     if manual_only:
-        lines.append("<b>MANUAL_ONLY RECIENTE</b>")
+        lines.append(tg_section("Manual only reciente"))
         lines.append("   Movimientos reales sin plan aprobado/ejecutado cercano del mismo lado.")
         for row in manual_only[:6]:
             precision = _precision_label(row.get("executed_at_precision"))
@@ -734,10 +740,13 @@ def render_report(
         lines.append("")
 
     lines += [
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "<i>Override Audit es descriptivo. No afirma edge ni modifica reglas.</i>",
+        tg_note("Override Audit es descriptivo. No afirma edge ni modifica reglas."),
     ]
-    return "\n".join(lines)
+    report = "\n".join(lines)
+    valid_html, errors = validate_telegram_html(report)
+    if not valid_html:
+        report += "\n" + tg_note(f"Advertencia interna: HTML con formato revisable ({'; '.join(errors[:2])}).")
+    return report
 
 
 async def async_main(args: argparse.Namespace) -> int:
