@@ -112,6 +112,7 @@ Smoke tests minimos:
 ```bash
 python -m py_compile scripts/run_analysis.py scripts/run_opportunity.py scripts/run_performance.py scripts/telegram_bot.py
 docker compose exec scheduler python scripts/run_confidence_audit.py --no-telegram
-docker compose exec scheduler python scripts/run_analysis.py --no-telegram --no-llm --no-sentiment
+docker compose exec scheduler python scripts/run_analysis.py --no-telegram --no-llm --skip-radar --no-persist
+docker compose exec scheduler python scripts/run_opportunity.py --no-telegram --no-persist
+docker compose exec scheduler python scripts/run_market_context.py --no-telegram --score-limit 5
 ```
-

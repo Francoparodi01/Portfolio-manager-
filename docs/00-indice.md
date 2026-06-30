@@ -16,6 +16,7 @@ construir una memoria operacional confiable: datos, decisiones, fills y outcomes
 | [04-analitica-y-decision.md](04-analitica-y-decision.md) | analysis, radar, optimizer, planner, performance, regression, DCL |
 | [05-mantenimiento.md](05-mantenimiento.md) | backfills, calidad, troubleshooting, limpieza futura |
 | [06-seguridad-y-publicacion.md](06-seguridad-y-publicacion.md) | seguridad, exposicion remota y publicacion del monitor |
+| [07-analisis-radar-shadow.md](07-analisis-radar-shadow.md) | como analizan cartera, oportunidades y pronosticos 5/20/40 |
 
 ## Principios del Sistema
 

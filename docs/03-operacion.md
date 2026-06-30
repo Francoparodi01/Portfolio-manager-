@@ -60,13 +60,21 @@ docker compose exec scheduler python scripts/run_once.py --fills
 Analisis:
 
 ```bash
-docker compose exec scheduler python scripts/run_analysis.py --no-telegram --no-llm --no-sentiment
-docker compose exec scheduler python scripts/run_opportunity.py --no-telegram
+docker compose exec scheduler python scripts/run_analysis.py --no-telegram --no-llm --skip-radar
+docker compose exec scheduler python scripts/run_analysis.py --no-telegram --no-llm --skip-radar --no-persist
+docker compose exec scheduler python scripts/run_opportunity.py --no-telegram --no-persist
+docker compose exec scheduler python scripts/run_market_context.py --no-telegram
 docker compose exec scheduler python scripts/run_performance.py --no-telegram
 docker compose exec scheduler python scripts/run_confidence_audit.py --no-telegram
 docker compose exec scheduler python scripts/run_regression_audit.py --mode execution
 docker compose exec scheduler python scripts/run_calibration.py --no-telegram
 ```
+
+Regla operativa: sentiment/noticias queda habilitado por defecto en analisis y radar.
+`--no-sentiment` es solo para debugging tecnico o pruebas de performance; no debe usarse
+para una lectura operativa porque omite contexto de noticias que puede afectar el score.
+`--no-persist` se usa cuando la corrida es exploratoria y no debe sumar ruido al
+`decision_log`.
 
 Outcomes:
 
