@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 import sys
 import time
@@ -41,6 +42,7 @@ from zoneinfo import ZoneInfo
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
     HAS_APSCHEDULER = True
 except ImportError:
     HAS_APSCHEDULER = False
@@ -57,7 +59,7 @@ from src.core.redis_client import client as redis_client
 from src.collector.cocos_scraper import CocosCapitalScraper
 from src.collector.cocos_history import candles_to_frame
 from src.collector.db import PortfolioDatabase
-from src.collector.broker_movements import broker_fills_from_movements
+from src.collector.broker_movements import BrokerMovement, broker_fills_from_movements
 from src.collector.live_portfolio import (
     PortfolioMoveAlert,
     build_live_portfolio,
@@ -67,6 +69,9 @@ from src.collector.live_portfolio import (
 )
 from src.collector.notifier import TelegramNotifier
 from src.core.telegram_format import header as tg_header, note as tg_note, section as tg_section
+from src.analysis.manual_market_events import active_event_risk_by_ticker
+from src.analysis.preclose_alerts import build_preclose_alerts, render_preclose_alerts
+from src.analysis.signal_aggregator import load_sentiment_contexts
 
 logger = get_logger(__name__)
 
@@ -88,17 +93,26 @@ COCOS_SYNC_FILLS = os.getenv("COCOS_SYNC_FILLS", "true").lower() == "true"
 FILL_REFRESH_SECONDS = int(os.getenv("FILL_REFRESH_SECONDS", "300"))
 PORTFOLIO_CACHE_TTL_SECONDS = int(os.getenv("PORTFOLIO_CACHE_TTL_SECONDS", "600"))
 PORTFOLIO_LIVE_POLL_SECONDS = int(os.getenv("PORTFOLIO_LIVE_POLL_SECONDS", "60"))
-PORTFOLIO_ALERT_MAJOR_PCT = float(os.getenv("PORTFOLIO_ALERT_MAJOR_PCT", "0.03"))
-PORTFOLIO_ALERT_WEIGHTED_PCT = float(os.getenv("PORTFOLIO_ALERT_WEIGHTED_PCT", "0.02"))
-PORTFOLIO_ALERT_MIN_WEIGHT = float(os.getenv("PORTFOLIO_ALERT_MIN_WEIGHT", "0.10"))
+PORTFOLIO_ALERT_MAJOR_PCT = float(os.getenv("PORTFOLIO_ALERT_MAJOR_PCT", "0.06"))
+PORTFOLIO_ALERT_WEIGHTED_PCT = float(os.getenv("PORTFOLIO_ALERT_WEIGHTED_PCT", "0.04"))
+PORTFOLIO_ALERT_MIN_WEIGHT = float(os.getenv("PORTFOLIO_ALERT_MIN_WEIGHT", "0.12"))
 PORTFOLIO_ALERT_TTL_SECONDS = int(os.getenv("PORTFOLIO_ALERT_TTL_SECONDS", "86400"))
 INTRADAY_REVALIDATION_ENABLED = os.getenv("INTRADAY_REVALIDATION_ENABLED", "true").lower() == "true"
 INTRADAY_REVALIDATION_PCT = float(os.getenv("INTRADAY_REVALIDATION_PCT", "0.03"))
 INTRADAY_REVALIDATION_MAX_PRICE_AGE_SECONDS = int(os.getenv("INTRADAY_REVALIDATION_MAX_PRICE_AGE_SECONDS", "1200"))
 INTRADAY_REVALIDATION_LOOKBACK_DAYS = int(os.getenv("INTRADAY_REVALIDATION_LOOKBACK_DAYS", "7"))
 INTRADAY_REVALIDATION_TTL_SECONDS = int(os.getenv("INTRADAY_REVALIDATION_TTL_SECONDS", "21600"))
-RISK_ALERT_TTL_SECONDS = int(os.getenv("RISK_ALERT_TTL_SECONDS", "7200"))
+INTRADAY_REVALIDATION_MAX_PER_MESSAGE = int(os.getenv("INTRADAY_REVALIDATION_MAX_PER_MESSAGE", "3"))
+RISK_ALERT_TTL_SECONDS = int(os.getenv("RISK_ALERT_TTL_SECONDS", "21600"))
+RISK_ALERT_MAX_PER_DIGEST = int(os.getenv("RISK_ALERT_MAX_PER_DIGEST", "8"))
 STOP_TRIGGERED_ALERT_TTL_SECONDS = int(os.getenv("STOP_TRIGGERED_ALERT_TTL_SECONDS", "86400"))
+SENTIMENT_PIPELINE_ENABLED = os.getenv("SENTIMENT_PIPELINE_ENABLED", "true").lower() == "true"
+SENTIMENT_PIPELINE_INTERVAL_SECONDS = int(os.getenv("SENTIMENT_PIPELINE_INTERVAL_SECONDS", "900"))
+SENTIMENT_PIPELINE_SCORE_LIMIT = int(os.getenv("SENTIMENT_PIPELINE_SCORE_LIMIT", "20"))
+SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS = int(
+    os.getenv("SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS", "604800")
+)
+THESIS_SHADOW_ENABLED = os.getenv("THESIS_SHADOW_ENABLED", "true").lower() == "true"
 
 WARNING_PCT = -0.04
 CRITICAL_PCT = -0.06
@@ -114,6 +128,14 @@ BOT_BUSY_KEY = "cocos:bot:busy"
 PORTFOLIO_ALERT_KEY_PREFIX = "cocos:portfolio:alert"
 INTRADAY_REVALIDATION_KEY_PREFIX = "cocos:intraday:revalidation"
 RISK_ALERT_KEY_PREFIX = "cocos:risk:alert"
+SENTIMENT_OFFHOURS_ALERT_KEY_PREFIX = "cocos:sentiment:offhours:alert"
+
+SEVERE_OFFHOURS_TERMS = {
+    "attack", "ataque", "blockade", "bloqueo", "bomb", "bomba",
+    "capital controls", "cepo", "default", "emergency", "guerra",
+    "invasion", "invasión", "missile", "misil", "nuclear",
+    "sanction", "sanción", "strike", "war",
+}
 
 # Lock en proceso: garantiza un único scraper activo a la vez.
 # Se crea la primera vez que se usa (dentro del event loop).
@@ -177,6 +199,129 @@ def _safe_float(value, default: float | None = None) -> float | None:
         return float(value) if value is not None else default
     except Exception:
         return default
+
+
+def _active_position_tickers(snapshot: dict) -> set[str]:
+    return {
+        str(position.get("ticker") or "").upper()
+        for position in snapshot.get("positions") or []
+        if _safe_float(position.get("quantity"), 0.0) > 0
+        and str(position.get("ticker") or "").strip()
+    }
+
+
+def _movement_key(movement: BrokerMovement) -> tuple[str, str]:
+    return (
+        str(movement.source or "").strip(),
+        str(movement.external_movement_id or "").strip(),
+    )
+
+
+def _fmt_qty(value: float | None) -> str:
+    if value is None:
+        return "-"
+    try:
+        number = float(value)
+        if abs(number - round(number)) < 0.000001:
+            return str(int(round(number)))
+        return f"{number:.4f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "-"
+
+
+def _fmt_ars(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        return f"${abs(float(value)):,.0f}".replace(",", ".")
+    except Exception:
+        return "N/A"
+
+
+def _short_notice_text(value: str, max_len: int = 180) -> str:
+    clean = " ".join(str(value or "").split())
+    if len(clean) <= max_len:
+        return clean
+    return clean[: max_len - 1].rstrip() + "…"
+
+
+def _movement_amount_ars(movement: BrokerMovement) -> float | None:
+    if movement.amount is not None:
+        return abs(float(movement.amount))
+    if movement.quantity is not None and movement.price is not None:
+        return abs(float(movement.quantity) * float(movement.price))
+    return None
+
+
+def _new_trade_movements(
+    movements: list[BrokerMovement],
+    existing_keys: set[tuple[str, str]],
+) -> list[BrokerMovement]:
+    new_movements = []
+    seen: set[tuple[str, str]] = set()
+    for movement in movements:
+        key = _movement_key(movement)
+        if not key[0] or not key[1] or key in existing_keys or key in seen:
+            continue
+        if str(movement.movement_type or "").upper() not in {"BUY", "SELL"}:
+            continue
+        if not movement.ticker:
+            continue
+        if movement.quantity is None or movement.price is None:
+            continue
+        new_movements.append(movement)
+        seen.add(key)
+    return new_movements
+
+
+def _render_new_movements_notice(
+    movements: list[BrokerMovement],
+    *,
+    portfolio_refreshed: bool,
+    manual_event_risk_by_ticker: dict[str, str] | None = None,
+) -> str:
+    if not movements:
+        return ""
+    manual_event_risk_by_ticker = {
+        str(ticker or "").upper(): str(reason or "")
+        for ticker, reason in dict(manual_event_risk_by_ticker or {}).items()
+    }
+
+    ordered = sorted(
+        movements,
+        key=lambda item: item.executed_at or datetime.min.replace(tzinfo=ART_TZ),
+        reverse=True,
+    )
+    lines = [
+        "<b>Movimientos Cocos detectados</b>",
+        "Se registraron operaciones reales del portfolio.",
+        "",
+    ]
+    for movement in ordered[:8]:
+        side = str(movement.movement_type or "").upper()
+        ticker_raw = str(movement.ticker or "").upper()
+        ticker = escape(ticker_raw)
+        qty = _fmt_qty(movement.quantity)
+        amount = _fmt_ars(_movement_amount_ars(movement))
+        lines.append(f"{ticker} {side} | {qty} nominales | {amount}")
+        if side == "BUY" and manual_event_risk_by_ticker.get(ticker_raw):
+            reason = _short_notice_text(manual_event_risk_by_ticker[ticker_raw])
+            lines.append(f"⚠️ BUY contra EVENT_RISK activo: {escape(reason)}")
+
+    omitted = len(ordered) - 8
+    if omitted > 0:
+        lines.append(f"+{omitted} movimiento(s) mas.")
+
+    lines.append("")
+    if portfolio_refreshed:
+        lines.append("Portfolio sincronizado. El proximo analisis usa esta cartera actualizada.")
+    else:
+        lines.append("Movimientos registrados. Si el portfolio no se refresco aun, el proximo scrape lo alinea.")
+
+    if any(str(m.executed_at_precision or "").lower() == "date_only" for m in ordered):
+        lines.append("Nota: Cocos informa fecha de operacion, no hora exacta intradia.")
+
+    return "\n".join(lines)
 
 
 # ─── Redis helpers (fire-and-forget, nunca rompen el flujo) ────────────────────
@@ -299,6 +444,44 @@ async def run_scrape(run_type: str = "SCHEDULED") -> dict:
     return result
 
 
+async def _scrape_portfolio_with_retries(
+    scraper: CocosCapitalScraper,
+    run_type: str,
+    attempts: int = 2,
+    delay_seconds: float = 3.0,
+):
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return await scraper.scrape_portfolio()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            logger.warning(
+                "scrape_portfolio [%s] fallo intento %d/%d: %s; recargo y reintento",
+                run_type,
+                attempt,
+                attempts,
+                exc,
+                exc_info=True,
+            )
+            page = getattr(scraper, "_page", None)
+            if page is not None:
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=30_000)
+                except Exception as reload_exc:
+                    logger.warning(
+                        "scrape_portfolio [%s]: no pude recargar pagina antes del retry: %s",
+                        run_type,
+                        reload_exc,
+                    )
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+    assert last_exc is not None
+    raise last_exc
+
+
 async def run_full(run_type: str = "FULL") -> dict:
     """
     Scrape completo: portfolio + mercado + análisis técnico.
@@ -333,9 +516,23 @@ async def run_full(run_type: str = "FULL") -> dict:
             async with CocosCapitalScraper(cfg.scraper) as scraper:
                 await scraper.login()
 
-                snapshot = await scraper.scrape_portfolio()
-                await db.save_snapshot(snapshot)
-                await _cache_snapshot(snapshot)
+                snapshot = None
+                portfolio_error: Exception | None = None
+                try:
+                    snapshot = await _scrape_portfolio_with_retries(scraper, run_type, attempts=2)
+                    await db.save_snapshot(snapshot)
+                    await _cache_snapshot(snapshot)
+                except Exception as exc:
+                    portfolio_error = exc
+                    logger.error(
+                        "run_full [%s]: portfolio fallo tras retry; sigo con mercado/fills sin guardar snapshot",
+                        run_type,
+                        exc_info=True,
+                    )
+                    notifier.send_raw(
+                        "⚠️ Cocos portfolio no refrescó tras 2 intentos en "
+                        f"{escape(run_type)}. Sigo guardando mercado/fills; no se inventa snapshot nuevo."
+                    )
 
                 acciones = await scraper.scrape_market("ACCIONES")
                 cedears = await scraper.scrape_cedears_segments()
@@ -346,10 +543,24 @@ async def run_full(run_type: str = "FULL") -> dict:
                     try:
                         movements = await scraper.scrape_portfolio_movements()
                         fills = broker_fills_from_movements(movements)
+                        existing_movement_keys = await db.existing_broker_movement_keys(movements)
+                        new_movements = _new_trade_movements(movements, existing_movement_keys)
                         saved_movements = await db.save_broker_movements(movements)
                         saved_fills = await db.save_broker_fills(fills)
                         reconciled_fills = await db.reconcile_broker_fills()
                         manual_fills = await db.materialize_unmatched_broker_fills()
+                        if new_movements:
+                            movement_event_risk = await _safe_manual_event_risk_by_ticker(
+                                db,
+                                [movement.ticker for movement in new_movements],
+                            )
+                            notifier.send_raw(
+                                _render_new_movements_notice(
+                                    new_movements,
+                                    portfolio_refreshed=snapshot is not None,
+                                    manual_event_risk_by_ticker=movement_event_risk,
+                                )
+                            )
                         logger.info(
                             "run_full: movements=%d/%d fills=%d/%d reconciliados=%d manuales=%d",
                             len(movements),
@@ -364,15 +575,25 @@ async def run_full(run_type: str = "FULL") -> dict:
 
             result.update(
                 success=True,
-                positions=len(snapshot.positions),
+                partial=portfolio_error is not None,
+                portfolio_error=str(portfolio_error) if portfolio_error else None,
+                positions=len(snapshot.positions) if snapshot is not None else 0,
                 acciones=len(acciones),
                 cedears=len(cedears),
             )
+            if snapshot is None:
+                logger.warning(
+                    "run_full parcial: portfolio sin refrescar; mercado guardado con %d acciones y %d cedears",
+                    len(acciones),
+                    len(cedears),
+                )
             logger.info(
                 "run_full ok: %d posiciones · %d acciones · %d cedears",
-                len(snapshot.positions), len(acciones), len(cedears),
+                len(snapshot.positions) if snapshot is not None else 0,
+                len(acciones),
+                len(cedears),
             )
-            notifier.notify_scrape_complete(
+            (snapshot is not None) and notifier.notify_scrape_complete(
                 total_ars=float(snapshot.total_value_ars),
                 positions_count=len(snapshot.positions),
                 confidence=snapshot.confidence_score,
@@ -383,15 +604,28 @@ async def run_full(run_type: str = "FULL") -> dict:
             )
 
             # Análisis técnico — no crítico, fallo no afecta el resultado principal
-            if snapshot.positions:
+            if snapshot is not None and snapshot.positions:
                 try:
                     from src.analysis.technical import (
                         analyze_portfolio_from_frames,
                         build_telegram_report,
                     )
+                    from src.analysis.macro import fetch_macro
+                    from src.analysis.signal_aggregator import load_top_sentiment_events
                     frames = await _load_canonical_history_frames(db, snapshot.positions)
                     signals = analyze_portfolio_from_frames(frames)
-                    report = build_telegram_report(signals, float(snapshot.total_value_ars))
+                    macro_snapshot = fetch_macro()
+                    sentiment_events = []
+                    pool = await db.get_pool()
+                    if pool:
+                        async with pool.acquire() as conn:
+                            sentiment_events = await load_top_sentiment_events(conn, limit=3)
+                    report = build_telegram_report(
+                        signals,
+                        float(snapshot.total_value_ars),
+                        macro_snapshot=macro_snapshot,
+                        sentiment_events=sentiment_events,
+                    )
                     notifier.send_raw(report)
                     logger.info("Análisis técnico: %d señales enviadas", len(signals))
                 except Exception as e:
@@ -467,6 +701,10 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
                 now.date(),
             )
             live_portfolio = build_live_portfolio(snapshot_payload, latest_prices)
+            live_portfolio = await _attach_manual_event_risk_to_live_portfolio(
+                db,
+                live_portfolio,
+            )
             await cache_live_portfolio(
                 live_portfolio,
                 ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
@@ -521,6 +759,50 @@ async def _latest_prices_with_previous_close(
         if previous_close:
             row["previous_close_price"] = previous_close
     return latest_prices
+
+
+async def _load_manual_event_risk_by_ticker(
+    db: PortfolioDatabase,
+    tickers: list,
+) -> dict[str, str]:
+    tickers_norm = [
+        str(ticker or "").upper()
+        for ticker in tickers or []
+        if str(ticker or "").strip()
+    ]
+    if not tickers_norm:
+        return {}
+    events = await db.get_active_manual_market_events(tickers=tickers_norm)
+    return active_event_risk_by_ticker(events)
+
+
+async def _safe_manual_event_risk_by_ticker(
+    db: PortfolioDatabase,
+    tickers: list,
+) -> dict[str, str]:
+    try:
+        return await _load_manual_event_risk_by_ticker(db, tickers)
+    except Exception as exc:
+        logger.debug("manual event risk unavailable: %s", exc)
+        return {}
+
+
+async def _attach_manual_event_risk_to_live_portfolio(
+    db: PortfolioDatabase,
+    live_portfolio: dict,
+) -> dict:
+    """Annotate live portfolio payload with active manual catalyst risk."""
+    tickers = [
+        str(p.get("ticker") or "").upper()
+        for p in live_portfolio.get("positions") or []
+        if str(p.get("ticker") or "").strip()
+    ]
+    if not tickers:
+        return live_portfolio
+    risk = await _safe_manual_event_risk_by_ticker(db, tickers)
+    if risk:
+        live_portfolio["manual_event_risk_by_ticker"] = risk
+    return live_portfolio
 
 
 def _post_open_quality_warning(live_portfolio: dict, now: datetime) -> str | None:
@@ -608,6 +890,10 @@ async def run_post_open_portfolio_report(run_type: str = "10:45_POST_OPEN_PORTFO
             now.date(),
         )
         live_portfolio = build_live_portfolio(snapshot, latest_prices)
+        live_portfolio = await _attach_manual_event_risk_to_live_portfolio(
+            db,
+            live_portfolio,
+        )
         warning = _post_open_quality_warning(live_portfolio, now)
         if warning:
             live_portfolio["post_open_warning"] = warning
@@ -849,6 +1135,8 @@ async def run_verify_decision_prices() -> None:
                 WHERE decision_date = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
                   AND COALESCE(source, '') IN ('execution_plan', 'radar')
                   AND decision IN ('BUY', 'SELL')
+                  AND decision_type = 'executable'
+                  AND status != 'BLOCKED'
                 """
             )
         total = int(row["total"] or 0) if row else 0
@@ -880,7 +1168,7 @@ async def run_daily_analysis() -> None:
 
     cfg = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
-    cmd = [sys.executable, "scripts/run_analysis.py", "--no-llm", "--no-sentiment"]
+    cmd = [sys.executable, "scripts/run_analysis.py", "--no-llm"]
     logger.info("daily_analysis iniciando: %s", " ".join(cmd))
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -917,6 +1205,320 @@ async def run_daily_analysis() -> None:
         notifier.notify_critical_error("daily_analysis", str(e))
 
     await run_verify_decision_prices()
+
+
+def _snapshot_age_seconds(snapshot: dict, now: datetime | None = None) -> float | None:
+    scraped_at = snapshot.get("scraped_at") if snapshot else None
+    if not scraped_at:
+        return None
+    parsed = IntradayManager._parse_price_ts(scraped_at)
+    if parsed is None:
+        return None
+    current = now or _now_art()
+    if current.tzinfo and parsed.tzinfo:
+        parsed = parsed.astimezone(current.tzinfo)
+    return (current - parsed).total_seconds()
+
+
+async def run_preclose_alerts(slot: str = "16:45") -> dict:
+    """Genera alertas pre-cierre auditables sin crear decisiones oficiales."""
+    now = _now_art()
+    result: dict = {"success": False, "slot": slot}
+    if not _is_market_window(now):
+        reason = market_closed_reason(now) or "fuera de rueda"
+        logger.info("preclose_alerts [%s] omitido: %s", slot, reason)
+        result.update(skipped="market_closed", reason=reason)
+        return result
+
+    cfg = get_config()
+    notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
+    db = PortfolioDatabase(cfg.database.url)
+    try:
+        await db.connect()
+        snapshot = await db.get_latest_snapshot()
+        if not snapshot:
+            logger.warning("preclose_alerts [%s]: sin snapshot de portfolio", slot)
+            notifier.send_raw(
+                f"⚠️ Pre-cierre {escape(slot)}: no hay snapshot de portfolio. No genero alertas."
+            )
+            result["error"] = "missing_snapshot"
+            return result
+
+        age_seconds = _snapshot_age_seconds(snapshot, now)
+        if age_seconds is None or age_seconds < 0 or age_seconds > 45 * 60:
+            logger.warning(
+                "preclose_alerts [%s]: snapshot stale age=%s; no genero alertas",
+                slot,
+                age_seconds,
+            )
+            notifier.send_raw(
+                f"⚠️ Pre-cierre {escape(slot)}: portfolio stale/no confiable. "
+                "No genero alertas predictivas con cartera vieja."
+            )
+            result.update(error="stale_snapshot", age_seconds=age_seconds)
+            return result
+
+        positions = [
+            position
+            for position in (snapshot.get("positions") or [])
+            if _safe_float(position.get("quantity"), 0.0) > 0
+            and _safe_float(position.get("market_value"), 0.0) > 0
+        ]
+        if not positions:
+            logger.info("preclose_alerts [%s]: sin posiciones activas", slot)
+            result.update(success=True, alerts=0, saved=0)
+            return result
+
+        tickers = sorted({
+            str(position.get("ticker") or "").upper()
+            for position in positions
+            if str(position.get("ticker") or "").strip()
+        })
+        latest_prices = await db.get_latest_market_prices()
+        previous_closes = await db.get_previous_candle_closes(
+            tickers,
+            before_day=now.date(),
+        )
+        sentiment_contexts = {}
+        pool = await db.get_pool()
+        if pool:
+            async with pool.acquire() as conn:
+                sentiment_contexts = await load_sentiment_contexts(conn, tickers)
+        manual_events = await db.get_active_manual_market_events(
+            at=now.astimezone(timezone.utc),
+            tickers=tickers,
+        )
+        manual_event_risk = active_event_risk_by_ticker(manual_events)
+
+        invested = sum(float(position.get("market_value", 0) or 0) for position in positions)
+        cash_ars = max(float(snapshot.get("cash_ars", 0) or 0), 0.0)
+        total_ars = invested + cash_ars
+        alerts = build_preclose_alerts(
+            positions=positions,
+            latest_prices=latest_prices,
+            previous_closes=previous_closes,
+            total_ars=total_ars,
+            sentiment_contexts=sentiment_contexts,
+            manual_event_risk_by_ticker=manual_event_risk,
+            now=now,
+        )
+        saved = await db.save_preclose_alerts(alerts, alert_ts=now, slot=slot)
+        if alerts:
+            notifier.send_raw(render_preclose_alerts(alerts, slot=slot))
+        logger.info(
+            "preclose_alerts [%s]: tickers=%d alerts=%d saved=%d",
+            slot,
+            len(tickers),
+            len(alerts),
+            saved,
+        )
+        result.update(success=True, alerts=len(alerts), saved=saved)
+        return result
+    except Exception as exc:
+        logger.error("preclose_alerts [%s] fallo: %s", slot, exc, exc_info=True)
+        notifier.notify_critical_error(f"preclose_alerts {slot}", str(exc))
+        result["error"] = str(exc)
+        return result
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
+
+
+async def run_sentiment_pipeline_job() -> None:
+    """Fetch/score/aggregate sentiment context without changing decisions."""
+    if not SENTIMENT_PIPELINE_ENABLED:
+        logger.debug("sentiment_pipeline omitido: disabled")
+        return
+
+    cmd = [
+        sys.executable,
+        "scripts/run_sentiment_pipeline.py",
+        "--score-limit",
+        str(SENTIMENT_PIPELINE_SCORE_LIMIT),
+    ]
+    logger.info("sentiment_pipeline iniciando: %s", " ".join(cmd))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=240)
+        out = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            logger.warning(
+                "sentiment_pipeline fallo rc=%s stderr=%s",
+                proc.returncode,
+                err[-1200:],
+            )
+            return
+        logger.info(
+            "sentiment_pipeline OK stdout=%s stderr=%d chars",
+            out[-500:],
+            len(err),
+        )
+        if not _is_market_window():
+            await _send_offhours_sentiment_alerts()
+    except asyncio.TimeoutError:
+        logger.warning("sentiment_pipeline timeout")
+    except Exception as exc:
+        logger.warning("sentiment_pipeline fallo no critico: %s", exc, exc_info=True)
+
+
+async def run_thesis_shadow_job() -> None:
+    """Persist independent forecasts without touching plans or orders."""
+    if not THESIS_SHADOW_ENABLED:
+        logger.debug("thesis_shadow omitido: disabled")
+        return
+    if not _is_business_day():
+        logger.info("thesis_shadow omitido: %s", market_closed_reason() or "mercado cerrado")
+        return
+
+    cmd = [sys.executable, "scripts/run_thesis_shadow.py"]
+    logger.info("thesis_shadow iniciando: %s", " ".join(cmd))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)
+        out = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            logger.warning("thesis_shadow fallo rc=%s stderr=%s", proc.returncode, err[-1600:])
+            return
+        logger.info("thesis_shadow OK stdout=%s stderr=%d chars", out[-1200:], len(err))
+    except asyncio.TimeoutError:
+        logger.warning("thesis_shadow timeout")
+    except Exception as exc:
+        logger.warning("thesis_shadow fallo no critico: %s", exc, exc_info=True)
+
+
+def _is_severe_offhours_sentiment_event(event: dict) -> bool:
+    impact = str(event.get("impact") or "").lower()
+    confidence = float(event.get("confidence") or 0.0)
+    score = float(event.get("score") or 0.0)
+    text_value = " ".join([
+        str(event.get("headline") or ""),
+        str(event.get("summary") or ""),
+    ]).lower()
+    has_severe_term = any(
+        bool(re.search(rf"\b{re.escape(term)}\b", text_value))
+        for term in SEVERE_OFFHOURS_TERMS
+    )
+    return (
+        impact == "high"
+        and confidence >= 0.40
+        and abs(score) >= 0.25
+        and has_severe_term
+    )
+
+
+async def _load_recent_severe_offhours_events(pool) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            WITH latest AS (
+                SELECT DISTINCT ON (ss.raw_id)
+                    ss.raw_id,
+                    ss.summary,
+                    ss.impact,
+                    ss.confidence,
+                    ss.score,
+                    ss.ticker,
+                    ss.asset_scope,
+                    ss.event_type,
+                    ss.scored_at,
+                    sr.source,
+                    sr.headline,
+                    COALESCE(sr.published_at, sr.fetched_at) AS event_ts
+                FROM sentiment_scored ss
+                JOIN sentiment_raw sr ON sr.id = ss.raw_id
+                WHERE ss.status = 'SCORED'
+                  AND ss.scored_at >= NOW() - INTERVAL '20 minutes'
+                  AND COALESCE(sr.published_at, sr.fetched_at)
+                      >= NOW() - INTERVAL '24 hours'
+                ORDER BY ss.raw_id, ss.scored_at DESC
+            )
+            SELECT *
+            FROM latest
+            WHERE LOWER(COALESCE(impact, '')) = 'high'
+            ORDER BY ABS(COALESCE(score, 0)) DESC,
+                     COALESCE(confidence, 0) DESC,
+                     event_ts DESC
+            LIMIT 20
+            """
+        )
+    return [dict(row) for row in rows if _is_severe_offhours_sentiment_event(dict(row))]
+
+
+def _render_offhours_sentiment_alert(events: list[dict]) -> str:
+    lines = tg_header(
+        "🚨 Riesgo informativo fuera de rueda",
+        subtitle="Sentiment 24/7 · no modifica el último plan formal",
+    )
+    lines += [
+        "Evento potencialmente sensible para la próxima apertura.",
+        "",
+    ]
+    for event in events[:3]:
+        ticker = str(event.get("ticker") or "MACRO").upper()
+        source = str(event.get("source") or "fuente")
+        score = float(event.get("score") or 0.0)
+        headline = str(event.get("headline") or event.get("summary") or "Sin título")
+        lines.append(
+            f"• <b>{escape(ticker)}</b> [{escape(source)}] "
+            f"score <code>{score:+.2f}</code>"
+        )
+        lines.append(f"  {escape(headline[:260])}")
+    lines += [
+        "",
+        tg_note(
+            "Se incorpora como contexto y alerta inmediata. El optimizer y las órdenes "
+            "se revalidan recién con precios frescos de la próxima rueda."
+        ),
+    ]
+    return "\n".join(lines)
+
+
+async def _send_offhours_sentiment_alerts() -> None:
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    try:
+        await db.connect()
+        pool = await db.get_pool()
+        if pool is None:
+            return
+        events = await _load_recent_severe_offhours_events(pool)
+        unseen = []
+        for event in events:
+            key = f"{SENTIMENT_OFFHOURS_ALERT_KEY_PREFIX}:{int(event['raw_id'])}"
+            if not await _redis_get(key):
+                unseen.append(event)
+        if not unseen:
+            return
+
+        notifier = TelegramNotifier(
+            cfg.scraper.telegram_bot_token,
+            cfg.scraper.telegram_chat_id,
+        )
+        if notifier.send_raw(_render_offhours_sentiment_alert(unseen)):
+            for event in unseen[:3]:
+                key = f"{SENTIMENT_OFFHOURS_ALERT_KEY_PREFIX}:{int(event['raw_id'])}"
+                await _redis_set(
+                    key,
+                    "sent",
+                    ex=SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS,
+                )
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
 
 
 # ─── Risk alert ────────────────────────────────────────────────────────────────
@@ -1121,10 +1723,24 @@ class IntradayManager:
                             if should_refresh_fills:
                                 movements = await scraper.scrape_portfolio_movements()
                                 fills = broker_fills_from_movements(movements)
+                                existing_movement_keys = await db.existing_broker_movement_keys(movements)
+                                new_movements = _new_trade_movements(movements, existing_movement_keys)
                                 saved_movements = await db.save_broker_movements(movements)
                                 saved_fills = await db.save_broker_fills(fills)
                                 reconciled_fills = await db.reconcile_broker_fills()
                                 manual_fills = await db.materialize_unmatched_broker_fills()
+                                if new_movements:
+                                    movement_event_risk = await _safe_manual_event_risk_by_ticker(
+                                        db,
+                                        [movement.ticker for movement in new_movements],
+                                    )
+                                    self.notifier.send_raw(
+                                        _render_new_movements_notice(
+                                            new_movements,
+                                            portfolio_refreshed=bool(should_refresh_portfolio),
+                                            manual_event_risk_by_ticker=movement_event_risk,
+                                        )
+                                    )
                                 last_fills_ts = time.monotonic()
                                 logger.info(
                                     "Scraper loop: movements=%d/%d fills=%d/%d reconciliados=%d manuales=%d",
@@ -1180,6 +1796,7 @@ class IntradayManager:
                 bot_busy = await _is_bot_busy()
                 alerts = await self._compute_risk_alerts(pool)
 
+                digest_alerts: list[RiskAlert] = []
                 for alert in alerts:
                     # Silenciar alertas no críticas si el bot está procesando algo manual
                     if bot_busy and alert.level not in ("CRITICAL", "STOP_TRIGGERED"):
@@ -1189,7 +1806,11 @@ class IntradayManager:
                         )
                         continue
                     if await self._should_send_alert(alert):
-                        if self._send_alert(alert):
+                        digest_alerts.append(alert)
+
+                if digest_alerts:
+                    if self._send_risk_digest(digest_alerts):
+                        for alert in digest_alerts:
                             await self._mark_alert_sent(alert)
 
                 await _heartbeat(RISK_HEARTBEAT_KEY)
@@ -1242,6 +1863,10 @@ class IntradayManager:
                     _now_art().date(),
                 )
                 live_portfolio = build_live_portfolio(snapshot, latest_prices)
+                live_portfolio = await _attach_manual_event_risk_to_live_portfolio(
+                    db,
+                    live_portfolio,
+                )
                 await cache_live_portfolio(
                     live_portfolio,
                     ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
@@ -1282,6 +1907,7 @@ class IntradayManager:
                         revalidations = await self._compute_intraday_revalidations(
                             pool,
                             latest_prices,
+                            _active_position_tickers(snapshot),
                         )
                         unseen_revalidations = [
                             alert for alert in revalidations
@@ -1326,14 +1952,20 @@ class IntradayManager:
         self,
         pool,
         latest_prices: list[dict],
+        active_tickers: set[str],
     ) -> list[IntradayRevalidationAlert]:
-        if not latest_prices:
+        active_tickers = {
+            str(ticker or "").upper()
+            for ticker in active_tickers or set()
+            if str(ticker or "").strip()
+        }
+        if not latest_prices or not active_tickers:
             return []
 
         latest_by_ticker = {
             str(row.get("ticker") or "").upper(): row
             for row in latest_prices
-            if str(row.get("ticker") or "").strip()
+            if str(row.get("ticker") or "").upper() in active_tickers
         }
         if not latest_by_ticker:
             return []
@@ -1354,9 +1986,10 @@ class IntradayManager:
                 FROM decision_log
                 WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
                   AND COALESCE(source, layers->>'source') = 'execution_plan'
-                  AND status IN ('APPROVED', 'EXECUTED')
+                  AND status = 'APPROVED'
                   AND decision_type = 'executable'
                   AND decision IN ('BUY', 'SELL')
+                  AND ticker = ANY($2::text[])
                   AND price_at_decision IS NOT NULL
                   AND price_at_decision > 0
                   AND (
@@ -1366,6 +1999,7 @@ class IntradayManager:
                 ORDER BY ticker, decided_at DESC, id DESC
                 """,
                 INTRADAY_REVALIDATION_LOOKBACK_DAYS,
+                sorted(active_tickers),
             )
 
         now = _now_art()
@@ -1447,9 +2081,10 @@ class IntradayManager:
         threshold = max(INTRADAY_REVALIDATION_PCT, 0.0001)
         bucket = int(abs(alert.change_pct) / threshold)
         direction = "UP" if alert.change_pct > 0 else "DOWN"
+        state, _ = IntradayManager._intraday_revalidation_state(alert)
         return (
             f"{INTRADAY_REVALIDATION_KEY_PREFIX}:{business_day}:"
-            f"{alert.decision_id}:{direction}:{bucket}"
+            f"{alert.decision_id}:{direction}:{bucket}:{state}"
         )
 
     def _render_intraday_revalidations(
@@ -1464,8 +2099,9 @@ class IntradayManager:
             "",
         ]
 
-        for alert in alerts[:5]:
-            action = self._intraday_action_text(alert)
+        max_items = max(1, INTRADAY_REVALIDATION_MAX_PER_MESSAGE)
+        for alert in alerts[:max_items]:
+            state, action = self._intraday_revalidation_state(alert)
             plan = self._plan_label(alert)
             price_time = (
                 alert.price_ts.astimezone(ART_TZ).strftime("%H:%M")
@@ -1484,10 +2120,16 @@ class IntradayManager:
                     f"Precio actual: <b>{self._fmt_price(alert.current_price)}</b> "
                     f"({price_time} ART)"
                 ),
+                f"Estado: <b>{escape(state)}</b>",
                 f"Acción sugerida: <b>{escape(action)}</b>",
             ]
             if alert.reason:
                 lines.append(f"Motivo plan: {escape(self._clean_reason(alert.reason))[:180]}")
+            lines.append("")
+
+        omitted = max(0, len(alerts) - max_items)
+        if omitted:
+            lines.append(f"+{omitted} revalidación(es) omitidas en este resumen.")
             lines.append("")
 
         lines.append(tg_note("Contexto operativo, no nueva decisión oficial. Si se ejecuta, requiere fill real para entrar a auditoría."))
@@ -1525,14 +2167,57 @@ class IntradayManager:
 
     @staticmethod
     def _intraday_action_text(alert: IntradayRevalidationAlert) -> str:
-        if alert.decision == "SELL":
-            if alert.change_pct < 0:
-                return "Evaluar si ejecutar ahora o esperar cierre"
-            return "Evaluar ejecutar recorte si el motivo sigue vigente"
+        return IntradayManager._intraday_revalidation_state(alert)[1]
 
-        if alert.change_pct > 0:
-            return "No perseguir precio automaticamente; revalidar entrada"
-        return "Evaluar si el pullback mejora entrada o esperar cierre"
+    @staticmethod
+    def _intraday_revalidation_state(alert: IntradayRevalidationAlert) -> tuple[str, str]:
+        change = float(alert.change_pct or 0.0)
+
+        if alert.decision == "SELL":
+            if change <= -0.12:
+                return (
+                    "SELL_URGENTE",
+                    "El recorte ganó urgencia; revalidar precio fresco antes de ejecutar",
+                )
+            if change < 0:
+                return (
+                    "SELL_FAVORECIDO",
+                    "El precio se movió a favor del recorte; evaluar ejecución si el motivo sigue vigente",
+                )
+            if change >= 0.08:
+                return (
+                    "PLAN_EN_REVISION",
+                    "Rebote fuerte contra la tesis de venta; esperar nuevo análisis",
+                )
+            return (
+                "SELL_VIGENTE",
+                "Evaluar ejecutar recorte si el motivo sigue vigente",
+            )
+
+        if change <= -0.15:
+            return (
+                "TESIS_EN_REVISION",
+                "Caída fuerte desde el plan; no ejecutar sin nuevo análisis",
+            )
+        if change <= -0.08:
+            return (
+                "ENTRADA_DETERIORADA",
+                "El pullback ya no es menor; esperar confirmación nueva",
+            )
+        if change < 0:
+            return (
+                "PULLBACK",
+                "Evaluar si mejora entrada o esperar cierre",
+            )
+        if change >= 0.05:
+            return (
+                "NO_PERSEGUIR",
+                "No perseguir precio automáticamente; revalidar entrada",
+            )
+        return (
+            "BUY_VIGENTE",
+            "Entrada sigue cerca del plan; confirmar precio fresco antes de operar",
+        )
 
     @staticmethod
     async def _resolve_pool(db: PortfolioDatabase):
@@ -1545,6 +2230,29 @@ class IntradayManager:
 
     async def _compute_risk_alerts(self, pool) -> list[RiskAlert]:
         async with pool.acquire() as conn:
+            active_rows = await conn.fetch(
+                """
+                WITH latest_snapshot AS (
+                    SELECT snapshot_id
+                    FROM portfolio_snapshots
+                    ORDER BY scraped_at DESC, created_at DESC
+                    LIMIT 1
+                )
+                SELECT DISTINCT UPPER(p.ticker) AS ticker
+                FROM positions p
+                JOIN latest_snapshot s ON s.snapshot_id = p.snapshot_id
+                WHERE COALESCE(p.quantity, 0) > 0
+                  AND COALESCE(p.market_value, 0) > 0
+                """
+            )
+            active_tickers = sorted({
+                str(row["ticker"] or "").upper()
+                for row in active_rows
+                if str(row["ticker"] or "").strip()
+            })
+            if not active_tickers:
+                return []
+
             rows = await conn.fetch(
                 """
                 WITH latest_prices AS (
@@ -1565,6 +2273,7 @@ class IntradayManager:
                     FROM decision_log
                     WHERE decision = 'BUY'
                       AND price_at_decision IS NOT NULL
+                      AND ticker = ANY($1::text[])
                       AND outcome_5d IS NULL
                       AND closed_at IS NULL
                       AND COALESCE(was_stopped, FALSE) IS FALSE
@@ -1580,12 +2289,16 @@ class IntradayManager:
                     p.last_price
                 FROM latest_buys b
                 JOIN latest_prices p ON p.ticker = b.ticker
-                """
+                """,
+                active_tickers,
             )
 
         alerts: list[RiskAlert] = []
+        active_ticker_set = set(active_tickers)
         for row in rows:
             ticker = str(row["ticker"]).upper()
+            if ticker not in active_ticker_set:
+                continue
             entry = _safe_float(row["price_at_decision"])
             current = _safe_float(row["last_price"])
             stop_price = _safe_float(row["stop_loss_price"])
@@ -1658,6 +2371,67 @@ class IntradayManager:
         if alert.level == "STOP_TRIGGERED":
             return STOP_TRIGGERED_ALERT_TTL_SECONDS
         return RISK_ALERT_TTL_SECONDS
+
+    def _send_risk_digest(self, alerts: list[RiskAlert]) -> bool:
+        if not alerts:
+            return False
+
+        priority = {
+            "STOP_TRIGGERED": 0,
+            "STOP_NEAR": 1,
+            "CRITICAL": 2,
+            "WARNING": 3,
+        }
+        ordered = sorted(
+            alerts,
+            key=lambda alert: (priority.get(alert.level, 99), alert.pnl_pct),
+        )
+        shown = ordered[: max(1, RISK_ALERT_MAX_PER_DIGEST)]
+        omitted = max(0, len(ordered) - len(shown))
+
+        lines = tg_header(
+            "Riesgo intradia",
+            subtitle="Resumen agrupado; no dispara ordenes automaticas",
+        )
+        current_level: str | None = None
+        for alert in shown:
+            if alert.level != current_level:
+                current_level = alert.level
+                lines += ["", tg_section(current_level)]
+            stop_txt = (
+                f" | stop {self._fmt_price(alert.stop_loss_price)}"
+                if alert.stop_loss_price
+                else ""
+            )
+            lines.append(
+                f"- <b>{escape(alert.ticker)}</b>: "
+                f"{alert.pnl_pct:+.2%} | precio {self._fmt_price(alert.current_price)} "
+                f"| entrada {self._fmt_price(alert.entry_price)}{stop_txt}"
+            )
+
+        if omitted:
+            lines += ["", f"+{omitted} alerta(s) mas omitidas en este resumen."]
+
+        lines += [
+            "",
+            tg_note(
+                "Se repite solo si cambia la severidad o vence el cooldown. "
+                "Para detalle completo usa /portfolio o el monitor."
+            ),
+        ]
+
+        try:
+            self.notifier.send_raw("\n".join(lines))
+            logger.warning(
+                "Risk digest enviado: %d alerta(s), mostradas=%d, omitidas=%d",
+                len(alerts),
+                len(shown),
+                omitted,
+            )
+            return True
+        except Exception as e:
+            logger.warning("No se pudo enviar risk digest Telegram: %s", e)
+            return False
 
     def _send_alert(self, alert: RiskAlert) -> bool:
         pnl = alert.pnl_pct * 100.0
@@ -1770,6 +2544,26 @@ async def _scheduler_main() -> None:
         replace_existing=True,
     )
     scheduler.add_job(
+        run_preclose_alerts,
+        _business_day_cron(hour=16, minute=15),
+        args=["16:15"],
+        id="preclose_alerts_1615",
+        name="Pre-close predictive alerts 16:15 ART",
+        misfire_grace_time=180,
+        max_instances=1,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_preclose_alerts,
+        _business_day_cron(hour=16, minute=45),
+        args=["16:45"],
+        id="preclose_alerts_1645",
+        name="Pre-close predictive alerts 16:45 ART",
+        misfire_grace_time=180,
+        max_instances=1,
+        replace_existing=True,
+    )
+    scheduler.add_job(
         stop_intraday_loops,
         _business_day_cron(hour=16, minute=59),
         id="intraday_stop",
@@ -1801,6 +2595,16 @@ async def _scheduler_main() -> None:
         misfire_grace_time=900,
         replace_existing=True,
     )
+    if THESIS_SHADOW_ENABLED:
+        scheduler.add_job(
+            run_thesis_shadow_job,
+            _business_day_cron(hour=17, minute=18),
+            id="thesis_shadow",
+            name="Independent thesis shadow 17:18 ART",
+            misfire_grace_time=900,
+            max_instances=1,
+            replace_existing=True,
+        )
     scheduler.add_job(
         run_update_outcomes,
         _business_day_cron(hour=21, minute=30),
@@ -1809,6 +2613,19 @@ async def _scheduler_main() -> None:
         misfire_grace_time=600,
         replace_existing=True,
     )
+    if SENTIMENT_PIPELINE_ENABLED:
+        scheduler.add_job(
+            run_sentiment_pipeline_job,
+            IntervalTrigger(
+                seconds=SENTIMENT_PIPELINE_INTERVAL_SECONDS,
+                timezone=TIMEZONE,
+            ),
+            id="sentiment_pipeline",
+            name="Sentiment pipeline context",
+            misfire_grace_time=120,
+            max_instances=1,
+            replace_existing=True,
+        )
 
     heartbeat_task = asyncio.create_task(
         _scheduler_heartbeat_loop(),
@@ -1816,7 +2633,11 @@ async def _scheduler_main() -> None:
     )
     scheduler.start()
     logger.info(
-        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 16:59 intraday off; 17:02 full; 17:05 candles; 17:10 verify; 17:12 analysis; 21:30 outcomes"
+        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 16:15/16:45 preclose alerts; 16:59 intraday off; 17:02 full; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; sentiment context=%s; thesis shadow=%s"
+        % (
+            "on" if SENTIMENT_PIPELINE_ENABLED else "off",
+            "on" if THESIS_SHADOW_ENABLED else "off",
+        )
     )
 
     # Si arrancamos durante rueda, iniciar loops de inmediato

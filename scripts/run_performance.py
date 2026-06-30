@@ -695,11 +695,19 @@ def _recent_decision_notes(row: dict) -> list[str]:
     date_txt = recent_buy_at.strftime("%d/%m") if hasattr(recent_buy_at, "strftime") else str(recent_buy_at)
     buy_price = _money_ars(row.get("recent_buy_price"))
     buy_amount = _money_ars(row.get("recent_buy_amount"))
+    source = str(row.get("source") or "")
+    status = str(row.get("status") or "")
 
-    lines.append(
-        f"      - Reversion reciente: hubo compra real el {date_txt} "
-        f"@ {buy_price} por {buy_amount}; esta linea es senal, no venta confirmada."
-    )
+    if source == "broker_movement" or status in {"EXECUTED", "EXECUTED_MANUAL"}:
+        lines.append(
+            f"      - Secuencia real: hubo compra el {date_txt} "
+            f"@ {buy_price} por {buy_amount}; esta venta tambien esta confirmada."
+        )
+    else:
+        lines.append(
+            f"      - Reversion reciente: hubo compra real el {date_txt} "
+            f"@ {buy_price} por {buy_amount}; esta linea es senal, no venta confirmada."
+        )
 
     reason = layers.get("reason") or row.get("block_reason")
     if reason:

@@ -25,23 +25,23 @@ logger = logging.getLogger(__name__)
 SECTOR_MACRO_MAP: dict[str, list] = {
     "CVX":  [("wti","up",0.40),("brent","up",0.30),("dxy","down",0.15),("vix","down",0.15)],
     "XOM":  [("wti","up",0.40),("brent","up",0.30),("dxy","down",0.15),("vix","down",0.15)],
-    "NVDA": [("sp500","up",0.35),("vix","down",0.25),("tnx","down",0.25),("dxy","down",0.15)],
-    "AMD":  [("sp500","up",0.35),("vix","down",0.25),("tnx","down",0.25),("dxy","down",0.15)],
-    "MU":   [("sp500","up",0.35),("vix","down",0.25),("tnx","down",0.20),("dxy","down",0.20)],
+    "NVDA": [("sp500","up",0.30),("dow","up",0.15),("vix","down",0.25),("tnx","down",0.15),("dxy","down",0.15)],
+    "AMD":  [("sp500","up",0.30),("dow","up",0.15),("vix","down",0.25),("tnx","down",0.15),("dxy","down",0.15)],
+    "MU":   [("sp500","up",0.30),("dow","up",0.15),("vix","down",0.25),("tnx","down",0.15),("dxy","down",0.15)],
     "MELI": [("sp500","up",0.25),("vix","down",0.20),("dxy","down",0.30),("tnx","down",0.15), ("ccl","down",0.10)],
     "GGAL": [("merval","up",0.30),("ccl","down",0.40),("vix","down",0.20),("sp500","up",0.10)],
     "YPFD": [("wti","up",0.35),("merval","up",0.25),("ccl","down",0.25),("vix","down",0.15)],
-    "_default": [("sp500","up",0.40),("vix","down",0.30),("dxy","down",0.20),("tnx","down",0.10)],
+    "_default": [("sp500","up",0.30),("dow","up",0.15),("vix","down",0.25),("dxy","down",0.20),("tnx","down",0.10)],
 }
 
 MACRO_TICKERS = {
     "wti": "CL=F", "brent": "BZ=F", "dxy": "DX-Y.NYB", "vix": "^VIX",
-    "tnx": "^TNX", "sp500": "^GSPC", "gold": "GC=F", "merval": "^MERV",
+    "tnx": "^TNX", "sp500": "^GSPC", "dow": "^DJI", "gold": "GC=F", "merval": "^MERV",
 }
 
 # ── APIs Argentina gratuitas y estables (2026) ─────────────────────────────
 DOLARAPI = "https://dolarapi.com/v1/dolares"
-ARGENTINADATOS_RIESGO = "https://argentinadatos.com/v1/finanzas/indices/riesgo-pais/ultimo"
+ARGENTINADATOS_RIESGO = "https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais/ultimo"
 BCRA_RESERVAS = "https://api.bcra.gob.ar/estadisticas/v2.0/reservas"
 
 
@@ -51,13 +51,16 @@ class MacroSnapshot:
     # Globales (igual que antes)
     wti: Optional[float] = None; brent: Optional[float] = None; dxy: Optional[float] = None
     vix: Optional[float] = None; tnx: Optional[float] = None; sp500: Optional[float] = None
+    dow: Optional[float] = None
     gold: Optional[float] = None
     # Cambios y trends
     wti_chg: Optional[float] = None; brent_chg: Optional[float] = None; dxy_chg: Optional[float] = None
     vix_chg: Optional[float] = None; tnx_chg: Optional[float] = None; sp500_chg: Optional[float] = None
+    dow_chg: Optional[float] = None
     gold_chg: Optional[float] = None
     wti_trend: Optional[float] = None; brent_trend: Optional[float] = None; dxy_trend: Optional[float] = None
     vix_trend: Optional[float] = None; sp500_trend: Optional[float] = None
+    dow_trend: Optional[float] = None
     # Argentina
     merval: Optional[float] = None; merval_chg: Optional[float] = None
     ccl: Optional[float] = None; mep: Optional[float] = None
@@ -78,6 +81,7 @@ class MacroSnapshot:
         if self.vix:   parts.append(f"VIX {self.vix:.1f} ({self.vix_chg:+.1f}%)")
         if self.tnx:   parts.append(f"10Y {self.tnx:.2f}%")
         if self.sp500: parts.append(f"SP500 {self.sp500:,.0f} ({self.sp500_chg:+.1f}%)")
+        if self.dow: parts.append(f"Dow {self.dow:,.0f} ({self.dow_chg:+.1f}%)")
         if self.merval: parts.append(f"Merval {self.merval:,.0f} ({self.merval_chg:+.1f}%)")
         if self.ccl: parts.append(f"CCL ${self.ccl:.1f}")
         if self.mep: parts.append(f"MEP ${self.mep:.1f}")
@@ -104,29 +108,32 @@ def _trend_slope(series: "pd.Series", window: int = 20) -> float:
 
 
 def _fetch_argentina() -> dict:
-    """Datos Argentina vía APIs públicas gratuitas."""
+    """Datos Argentina via APIs publicas; cada fuente falla de forma aislada."""
     data = {}
-    try:
-        # CCL y MEP
-        for tipo in ["ccl", "mep"]:
-            r = requests.get(f"{DOLARAPI}/{tipo}", timeout=8)
+    for key, endpoint in {"ccl": "contadoconliqui", "mep": "bolsa"}.items():
+        try:
+            r = requests.get(f"{DOLARAPI}/{endpoint}", timeout=8)
             r.raise_for_status()
-            data[tipo] = float(r.json()["venta"])
+            data[key] = float(r.json()["venta"])
+        except Exception as e:
+            logger.warning("Argentina macro %s fallback: %s", key, e)
 
-        # Reservas BCRA
+    try:
         r = requests.get(BCRA_RESERVAS, timeout=8)
         r.raise_for_status()
         results = r.json().get("results", [])
         if results:
             data["reservas"] = round(float(results[-1]["v"]) / 1_000_000, 0)
+    except Exception as e:
+        logger.warning("Argentina macro reservas fallback: %s", e)
 
-        # Riesgo País (ArgentinaDatos)
+    try:
         r = requests.get(ARGENTINADATOS_RIESGO, timeout=8)
         r.raise_for_status()
         data["riesgo_pais"] = int(r.json()["valor"])
-
     except Exception as e:
-        logger.warning(f"Argentina macro fallback: {e}")
+        logger.warning("Argentina macro riesgo_pais fallback: %s", e)
+
     return data
 
 
@@ -154,7 +161,7 @@ def fetch_macro() -> MacroSnapshot:
 
                 setattr(snap, key, round(current, 4))
                 setattr(snap, f"{key}_chg", round(chg_pct, 4))
-                if key in ("wti", "brent", "dxy", "vix", "sp500", "merval"):
+                if key in ("wti", "brent", "dxy", "vix", "sp500", "dow", "merval"):
                     setattr(snap, f"{key}_trend", round(_trend_slope(series, 20), 4))
             except Exception as e:
                 logger.debug(f"Macro {key}: {e}")
@@ -171,6 +178,20 @@ def fetch_macro() -> MacroSnapshot:
 
     logger.info(f"Macro completo: {snap.summary()}")
     return snap
+
+
+def _macro_indicator_signal(trend: Optional[float], chg: Optional[float]) -> float:
+    """Combine slow trend with same-day move so event shocks are not washed out."""
+    trend_signal = None if trend is None else float(np.clip(trend, -1.0, 1.0))
+    move_signal = None if chg is None else float(np.clip(float(chg) / 3.0, -1.0, 1.0))
+
+    if trend_signal is None:
+        return move_signal or 0.0
+    if move_signal is None:
+        return trend_signal
+
+    recent_weight = 0.65 if abs(float(chg or 0.0)) >= 1.0 else 0.45
+    return float(np.clip(trend_signal * (1.0 - recent_weight) + move_signal * recent_weight, -1.0, 1.0))
 
 
 def score_macro_for_ticker(ticker: str, snap: MacroSnapshot) -> tuple[float, list[str]]:
@@ -201,7 +222,7 @@ def score_macro_for_ticker(ticker: str, snap: MacroSnapshot) -> tuple[float, lis
 
         if trend is None and chg is None: continue
 
-        signal = trend if trend is not None else float(np.clip((chg or 0) / 5.0, -1.0, 1.0))
+        signal = _macro_indicator_signal(trend, chg)
         if direction == "down": signal = -signal
 
         contribution = signal * weight

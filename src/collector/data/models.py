@@ -71,10 +71,15 @@ class PortfolioSnapshot:
 
     def validate(self) -> list[str]:
         errors = []
-        if float(self.total_value_ars) <= 0:
+        invested = float(self.total_value_ars)
+        cash = float(self.cash_ars)
+        if self.positions and invested <= 0:
             errors.append("total_value_ars <= 0")
         if not self.positions:
-            errors.append("sin posiciones")
+            if cash <= 0:
+                errors.append("sin posiciones")
+            if invested > 0:
+                errors.append("tenencia valorizada positiva sin posiciones")
         return errors
 
     def to_dict(self) -> dict:

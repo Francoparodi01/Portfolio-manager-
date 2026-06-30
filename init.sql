@@ -378,6 +378,225 @@ CREATE TABLE IF NOT EXISTS ml_model_registry (
     UNIQUE (model_type, version)
 );
 
+-- Shadow thesis v1: pronosticos independientes y no ejecutables.
+-- Se mantienen fuera de decision_log para no contaminar metricas operativas.
+CREATE TABLE IF NOT EXISTS shadow_thesis_runs (
+    run_id          UUID PRIMARY KEY,
+    owner_chat_id   BIGINT NOT NULL DEFAULT 0,
+    captured_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    as_of_ts        TIMESTAMPTZ NOT NULL,
+    model_version   TEXT NOT NULL,
+    schema_version  INTEGER NOT NULL,
+    universe_count  INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'COMPLETE',
+    metadata        JSONB,
+    UNIQUE (owner_chat_id, as_of_ts, model_version)
+);
+
+CREATE TABLE IF NOT EXISTS shadow_thesis_forecasts (
+    id                  BIGSERIAL PRIMARY KEY,
+    run_id              UUID NOT NULL REFERENCES shadow_thesis_runs(run_id) ON DELETE CASCADE,
+    owner_chat_id       BIGINT NOT NULL DEFAULT 0,
+    captured_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    as_of_ts            TIMESTAMPTZ NOT NULL,
+    ticker              TEXT NOT NULL,
+    universe_role       TEXT NOT NULL CHECK (universe_role IN ('POSITION', 'CANDIDATE')),
+    horizon_sessions    INTEGER NOT NULL CHECK (horizon_sessions IN (5, 20, 40)),
+    model_version       TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL,
+    price_basis         TEXT NOT NULL DEFAULT 'canonical_cocos',
+    reference_price     FLOAT NOT NULL CHECK (reference_price > 0),
+    expected_return     FLOAT NOT NULL,
+    probability_up      FLOAT NOT NULL CHECK (probability_up >= 0 AND probability_up <= 1),
+    lower_return        FLOAT NOT NULL,
+    upper_return        FLOAT NOT NULL,
+    uncertainty         FLOAT NOT NULL CHECK (uncertainty >= 0),
+    thesis_action       TEXT NOT NULL,
+    thesis_confidence   FLOAT NOT NULL CHECK (thesis_confidence >= 0 AND thesis_confidence <= 1),
+    signal_strength     TEXT NOT NULL,
+    input_sessions      INTEGER NOT NULL,
+    feature_snapshot    JSONB NOT NULL,
+    UNIQUE (owner_chat_id, ticker, horizon_sessions, as_of_ts, model_version)
+);
+
+CREATE TABLE IF NOT EXISTS shadow_thesis_outcomes (
+    forecast_id         BIGINT PRIMARY KEY REFERENCES shadow_thesis_forecasts(id) ON DELETE CASCADE,
+    target_session_ts   TIMESTAMPTZ NOT NULL,
+    outcome_price       FLOAT NOT NULL CHECK (outcome_price > 0),
+    realized_return     FLOAT NOT NULL,
+    direction_correct   BOOLEAN NOT NULL,
+    absolute_error      FLOAT NOT NULL CHECK (absolute_error >= 0),
+    squared_error       FLOAT NOT NULL CHECK (squared_error >= 0),
+    matured_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_thesis_forecasts_latest
+    ON shadow_thesis_forecasts(owner_chat_id, ticker, as_of_ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_thesis_forecasts_pending
+    ON shadow_thesis_forecasts(owner_chat_id, as_of_ts, horizon_sessions);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_thesis_outcomes_matured
+    ON shadow_thesis_outcomes(matured_at DESC);
+
+-- Parallel causal audit for shadow forecasts. This table is intentionally
+-- independent from decision_log and does not alter forecasts or outcomes.
+CREATE TABLE IF NOT EXISTS shadow_thesis_causal_analysis (
+    id                  BIGSERIAL PRIMARY KEY,
+    forecast_id         BIGINT REFERENCES shadow_thesis_forecasts(id) ON DELETE SET NULL,
+    owner_chat_id       BIGINT NOT NULL DEFAULT 0,
+    analyzed_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    context_as_of       TIMESTAMPTZ NOT NULL,
+    ticker              TEXT NOT NULL,
+    projection_as_of    TIMESTAMPTZ NOT NULL,
+    horizon_sessions    INTEGER NOT NULL CHECK (horizon_sessions > 0),
+    expected_return     FLOAT NOT NULL CHECK (expected_return > -1),
+    probability_up      FLOAT NOT NULL CHECK (probability_up >= 0 AND probability_up <= 1),
+    macro_context       JSONB NOT NULL,
+    macro_news          JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ticker_news         JSONB NOT NULL DEFAULT '[]'::jsonb,
+    primary_driver      JSONB NOT NULL,
+    durability          JSONB NOT NULL,
+    reversal_risks      JSONB NOT NULL,
+    conclusion          TEXT NOT NULL CHECK (conclusion IN ('FUNDADO', 'ESPECULATIVO', 'MIXTO')),
+    conclusion_reason   TEXT NOT NULL,
+    evidence_gaps       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    model               TEXT NOT NULL,
+    prompt_version      TEXT NOT NULL,
+    schema_version      INTEGER NOT NULL,
+    input_fingerprint   TEXT NOT NULL,
+    raw_response        JSONB NOT NULL,
+    UNIQUE (owner_chat_id, input_fingerprint, model, prompt_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_causal_latest
+    ON shadow_thesis_causal_analysis(owner_chat_id, ticker, analyzed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_causal_forecast
+    ON shadow_thesis_causal_analysis(forecast_id)
+    WHERE forecast_id IS NOT NULL;
+
+-- Sentiment pipeline: raw news/events, LLM scoring and ticker aggregates.
+-- Default use is contextual/auditable; it must not push buys by itself.
+CREATE TABLE IF NOT EXISTS sentiment_raw (
+    id                    BIGSERIAL PRIMARY KEY,
+    fetched_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source                TEXT        NOT NULL,
+    url                   TEXT        NOT NULL,
+    url_hash              TEXT        NOT NULL,
+    headline              TEXT        NOT NULL,
+    body_snippet          TEXT,
+    published_at          TIMESTAMPTZ,
+    raw_payload           JSONB,
+    score_status          TEXT        NOT NULL DEFAULT 'PENDING_SCORE',
+    score_attempts        INTEGER     NOT NULL DEFAULT 0,
+    last_score_attempt_at TIMESTAMPTZ,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (url_hash)
+);
+
+CREATE TABLE IF NOT EXISTS sentiment_scored (
+    id           BIGSERIAL PRIMARY KEY,
+    raw_id       BIGINT      NOT NULL REFERENCES sentiment_raw(id) ON DELETE CASCADE,
+    scored_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    scorer       TEXT        NOT NULL DEFAULT 'ollama',
+    model        TEXT,
+    ticker       TEXT,
+    asset_scope  TEXT        NOT NULL DEFAULT 'unknown',
+    score        FLOAT,
+    impact       TEXT,
+    confidence   FLOAT,
+    horizon      TEXT,
+    event_type   TEXT,
+    summary      TEXT,
+    raw_response JSONB,
+    status       TEXT        NOT NULL DEFAULT 'SCORED',
+    error        TEXT,
+    UNIQUE (raw_id, scorer, model)
+);
+
+CREATE TABLE IF NOT EXISTS sentiment_aggregated (
+    id                BIGSERIAL PRIMARY KEY,
+    bucket_ts         TIMESTAMPTZ NOT NULL,
+    ticker            TEXT        NOT NULL,
+    asset_scope       TEXT        NOT NULL DEFAULT 'ticker',
+    score             FLOAT       NOT NULL DEFAULT 0.0,
+    confidence        FLOAT       NOT NULL DEFAULT 0.0,
+    event_count       INTEGER     NOT NULL DEFAULT 0,
+    high_impact_count INTEGER     NOT NULL DEFAULT 0,
+    top_summary       TEXT,
+    sources           JSONB,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (bucket_ts, ticker, asset_scope)
+);
+
+-- Eventos/catalysts manuales cargados por el operador.
+-- No scrapea fuentes externas: declara riesgos conocidos como earnings,
+-- guidance, Fed, CPI, OPEC, etc. para contextualizar y bloquear entradas.
+CREATE TABLE IF NOT EXISTS manual_market_events (
+    id              BIGSERIAL PRIMARY KEY,
+    event_date      DATE        NOT NULL,
+    event_time_hint TEXT        NOT NULL DEFAULT 'unknown',
+    ticker          TEXT,
+    title           TEXT        NOT NULL,
+    impact_scope    TEXT[]      NOT NULL DEFAULT ARRAY[]::TEXT[],
+    related_tickers TEXT[]      NOT NULL DEFAULT ARRAY[]::TEXT[],
+    severity        TEXT        NOT NULL DEFAULT 'medium',
+    active_from     TIMESTAMPTZ NOT NULL,
+    active_until    TIMESTAMPTZ NOT NULL,
+    action_policy   TEXT        NOT NULL DEFAULT 'warn_only',
+    notes           TEXT,
+    is_active       BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (event_time_hint IN ('before_open', 'during_market', 'after_close', 'unknown')),
+    CHECK (severity IN ('low', 'medium', 'high')),
+    CHECK (action_policy IN ('warn_only', 'block_new_buys', 'no_action')),
+    CHECK (active_until >= active_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_manual_market_events_active_window
+    ON manual_market_events (is_active, active_from, active_until);
+
+CREATE INDEX IF NOT EXISTS idx_manual_market_events_ticker
+    ON manual_market_events (ticker);
+
+CREATE TABLE IF NOT EXISTS intraday_preclose_alerts (
+    id              BIGSERIAL PRIMARY KEY,
+    alert_ts        TIMESTAMPTZ NOT NULL,
+    business_date   DATE        NOT NULL,
+    slot            TEXT        NOT NULL,
+    ticker          TEXT        NOT NULL,
+    alert_type      TEXT        NOT NULL,
+    severity        TEXT        NOT NULL,
+    current_price   FLOAT,
+    reference_price FLOAT,
+    change_pct      FLOAT,
+    current_weight  FLOAT,
+    reason          TEXT,
+    evidence        JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    status          TEXT        NOT NULL DEFAULT 'OPEN',
+    source          TEXT        NOT NULL DEFAULT 'preclose_v1',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (business_date, slot, ticker, alert_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_intraday_preclose_alerts_lookup
+    ON intraday_preclose_alerts (business_date DESC, ticker, alert_type);
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_extension
+        WHERE extname = 'timescaledb'
+    ) THEN
+        -- Sentiment aggregates stay as a normal table to keep simple unique keys.
+        NULL;
+    END IF;
+END
+$$;
+
 -- ── Índices ───────────────────────────────────────────────────────────────────
 -- Migration para bases existentes:
 -- las columnas deben existir antes de crear indices que dependen de ellas.
@@ -612,6 +831,24 @@ CREATE INDEX IF NOT EXISTS idx_broker_movements_executed_at
 
 CREATE INDEX IF NOT EXISTS idx_broker_movements_ticker_type
     ON broker_movements(ticker, movement_type, executed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_sentiment_raw_pending
+    ON sentiment_raw(fetched_at DESC)
+    WHERE score_status = 'PENDING_SCORE';
+
+CREATE INDEX IF NOT EXISTS idx_sentiment_raw_source_time
+    ON sentiment_raw(source, fetched_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_sentiment_scored_ticker_time
+    ON sentiment_scored(ticker, scored_at DESC)
+    WHERE status = 'SCORED';
+
+CREATE INDEX IF NOT EXISTS idx_sentiment_scored_scope_time
+    ON sentiment_scored(asset_scope, scored_at DESC)
+    WHERE status = 'SCORED';
+
+CREATE INDEX IF NOT EXISTS idx_sentiment_aggregated_lookup
+    ON sentiment_aggregated(ticker, asset_scope, bucket_ts DESC);
 
 -- ── Migration para bases existentes ───────────────────────────────────────────
 -- Si la tabla decision_log ya existe sin las columnas nuevas, agregar:

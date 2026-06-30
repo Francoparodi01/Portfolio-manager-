@@ -32,6 +32,15 @@ from src.analysis.audit_scope import (
 )
 from src.analysis.decision_engine import directional_return
 from src.analysis.fill_reconciliation import ExecutionCandidate, choose_execution_candidate
+from src.analysis.manual_market_events import (
+    MANUAL_MARKET_EVENTS_SCHEMA_SQL,
+    ManualMarketEvent,
+    manual_market_event_from_row,
+    normalize_action_policy,
+    normalize_event_time_hint,
+    normalize_severity,
+)
+from src.analysis.preclose_alerts import PRE_CLOSE_ALERTS_SCHEMA_SQL, PrecloseAlert
 from src.collector.broker_fills import BrokerFill, serialize_raw_payload
 from src.collector.broker_movements import (
     BrokerMovement,
@@ -55,6 +64,7 @@ MIN_COMPATIBLE_PRICE_RATIO = 0.5
 MAX_COMPATIBLE_PRICE_RATIO = 2.0
 CEDEAR_MIN_COMPATIBLE_PRICE_RATIO = 0.25
 CEDEAR_MAX_COMPATIBLE_PRICE_RATIO = 4.0
+MARKET_FRESHNESS_MIN_TICKERS = 50
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
@@ -90,6 +100,8 @@ class PortfolioDatabase:
         self._pool: Optional[asyncpg.Pool] = None
         self._execution_timestamp_meta_ready = False
         self._decision_audit_scope_ready = False
+        self._manual_market_events_ready = False
+        self._preclose_alerts_ready = False
 
     async def connect(self):
         if not HAS_ASYNCPG:
@@ -153,6 +165,268 @@ class PortfolioDatabase:
             return
         await ensure_decision_audit_scope_columns(conn)
         self._decision_audit_scope_ready = True
+
+    async def _ensure_manual_market_events_schema(self, conn) -> None:
+        if self._manual_market_events_ready:
+            return
+        await conn.execute(MANUAL_MARKET_EVENTS_SCHEMA_SQL)
+        self._manual_market_events_ready = True
+
+    async def ensure_manual_market_events_schema(self) -> None:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        async with self._pool.acquire() as conn:
+            await self._ensure_manual_market_events_schema(conn)
+
+    async def _ensure_preclose_alerts_schema(self, conn) -> None:
+        if self._preclose_alerts_ready:
+            return
+        await conn.execute(PRE_CLOSE_ALERTS_SCHEMA_SQL)
+        self._preclose_alerts_ready = True
+
+    async def save_preclose_alerts(
+        self,
+        alerts: list[PrecloseAlert],
+        *,
+        alert_ts: datetime,
+        slot: str,
+    ) -> int:
+        if not self._pool or not alerts:
+            return 0
+        business_date = alert_ts.astimezone(ART_TZ).date()
+        saved = 0
+        async with self._pool.acquire() as conn:
+            await self._ensure_preclose_alerts_schema(conn)
+            for alert in alerts:
+                record = alert.to_record(
+                    alert_ts=alert_ts,
+                    business_date=business_date,
+                    slot=slot,
+                )
+                status = await conn.execute(
+                    """
+                    INSERT INTO intraday_preclose_alerts (
+                        alert_ts, business_date, slot, ticker, alert_type, severity,
+                        current_price, reference_price, change_pct, current_weight,
+                        reason, evidence
+                    )
+                    VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb
+                    )
+                    ON CONFLICT (business_date, slot, ticker, alert_type) DO UPDATE SET
+                        alert_ts = EXCLUDED.alert_ts,
+                        severity = EXCLUDED.severity,
+                        current_price = EXCLUDED.current_price,
+                        reference_price = EXCLUDED.reference_price,
+                        change_pct = EXCLUDED.change_pct,
+                        current_weight = EXCLUDED.current_weight,
+                        reason = EXCLUDED.reason,
+                        evidence = EXCLUDED.evidence,
+                        status = 'OPEN',
+                        created_at = NOW()
+                    """,
+                    record["alert_ts"],
+                    record["business_date"],
+                    record["slot"],
+                    record["ticker"],
+                    record["alert_type"],
+                    record["severity"],
+                    record["current_price"],
+                    record["reference_price"],
+                    record["change_pct"],
+                    record["current_weight"],
+                    record["reason"],
+                    json.dumps(record["evidence"], ensure_ascii=False),
+                )
+                if status.startswith("INSERT") or status.startswith("UPDATE"):
+                    saved += 1
+        return saved
+
+    async def get_active_manual_market_events(
+        self,
+        *,
+        at: datetime | None = None,
+        tickers: list[str] | None = None,
+    ) -> list[ManualMarketEvent]:
+        """Load manually declared active catalysts/events.
+
+        This is intentionally read-side/lazy-migrated so reports keep working
+        after deploy even if the live DB has not been initialized separately.
+        """
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        at = at or datetime.now(timezone.utc)
+        ticker_filter = [
+            str(ticker or "").upper().strip()
+            for ticker in (tickers or [])
+            if str(ticker or "").strip()
+        ]
+        ticker_filter = list(dict.fromkeys(ticker_filter))
+
+        async with self._pool.acquire() as conn:
+            await self._ensure_manual_market_events_schema(conn)
+            rows = await conn.fetch(
+                """
+                SELECT
+                    id,
+                    event_date,
+                    event_time_hint,
+                    ticker,
+                    title,
+                    impact_scope,
+                    related_tickers,
+                    severity,
+                    active_from,
+                    active_until,
+                    action_policy,
+                    notes,
+                    is_active
+                FROM manual_market_events
+                WHERE is_active = TRUE
+                  AND active_from <= $1
+                  AND active_until >= $1
+                  AND (
+                        cardinality($2::text[]) = 0
+                     OR UPPER(COALESCE(ticker, '')) = ANY($2::text[])
+                     OR EXISTS (
+                            SELECT 1
+                            FROM unnest(related_tickers) AS related(ticker)
+                            WHERE UPPER(related.ticker) = ANY($2::text[])
+                        )
+                  )
+                ORDER BY
+                    CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                    event_date,
+                    id
+                """,
+                at,
+                ticker_filter,
+            )
+        return [manual_market_event_from_row(dict(row)) for row in rows]
+
+    async def upsert_manual_market_event(
+        self,
+        *,
+        event_date: date,
+        event_time_hint: str,
+        ticker: str | None,
+        title: str,
+        impact_scope: list[str] | tuple[str, ...] | None,
+        related_tickers: list[str] | tuple[str, ...] | None,
+        severity: str,
+        active_from: datetime,
+        active_until: datetime,
+        action_policy: str,
+        notes: str | None = None,
+    ) -> int:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        ticker_value = str(ticker or "").upper().strip() or None
+        impact_scope_value = [str(x).strip() for x in (impact_scope or []) if str(x).strip()]
+        related_value = [
+            str(x).upper().strip()
+            for x in (related_tickers or [])
+            if str(x).strip()
+        ]
+
+        async with self._pool.acquire() as conn:
+            await self._ensure_manual_market_events_schema(conn)
+            existing_id = await conn.fetchval(
+                """
+                SELECT id
+                FROM manual_market_events
+                WHERE event_date = $1
+                  AND UPPER(COALESCE(ticker, '')) = UPPER(COALESCE($2::text, ''))
+                  AND title = $3
+                  AND is_active = TRUE
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                event_date,
+                ticker_value,
+                str(title or "").strip(),
+            )
+            if existing_id:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE manual_market_events
+                    SET event_time_hint = $2,
+                        impact_scope = $3,
+                        related_tickers = $4,
+                        severity = $5,
+                        active_from = $6,
+                        active_until = $7,
+                        action_policy = $8,
+                        notes = $9,
+                        updated_at = NOW()
+                    WHERE id = $1
+                    RETURNING id
+                    """,
+                    int(existing_id),
+                    normalize_event_time_hint(event_time_hint),
+                    impact_scope_value,
+                    related_value,
+                    normalize_severity(severity),
+                    active_from,
+                    active_until,
+                    normalize_action_policy(action_policy),
+                    notes,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO manual_market_events (
+                        event_date,
+                        event_time_hint,
+                        ticker,
+                        title,
+                        impact_scope,
+                        related_tickers,
+                        severity,
+                        active_from,
+                        active_until,
+                        action_policy,
+                        notes,
+                        is_active,
+                        updated_at
+                    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TRUE,NOW())
+                    RETURNING id
+                    """,
+                    event_date,
+                    normalize_event_time_hint(event_time_hint),
+                    ticker_value,
+                    str(title or "").strip(),
+                    impact_scope_value,
+                    related_value,
+                    normalize_severity(severity),
+                    active_from,
+                    active_until,
+                    normalize_action_policy(action_policy),
+                    notes,
+                )
+        return int(row["id"])
+
+    async def deactivate_manual_market_event(self, event_id: int) -> bool:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+
+        async with self._pool.acquire() as conn:
+            await self._ensure_manual_market_events_schema(conn)
+            result = await conn.execute(
+                """
+                UPDATE manual_market_events
+                SET is_active = FALSE,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                int(event_id),
+            )
+        try:
+            return int(result.split()[-1]) > 0
+        except Exception:
+            return False
 
     async def upsert_bot_user_credentials(
         self,
@@ -704,10 +978,118 @@ class PortfolioDatabase:
                 logger.debug(f"get_portfolio_history: payload inválido — {e}")
         return result
 
-    async def get_latest_market_prices(self) -> list[dict]:
+    async def get_latest_market_prices(
+        self,
+        *,
+        fresh_only: bool = False,
+        min_fresh_tickers: int = MARKET_FRESHNESS_MIN_TICKERS,
+    ) -> list[dict]:
         if not self._pool:
             return []
         async with self._pool.acquire() as conn:
+            if fresh_only:
+                latest_day = await conn.fetchrow(
+                    """
+                    SELECT
+                        ts::date AS market_date,
+                        COUNT(DISTINCT ticker) AS ticker_count
+                    FROM market_prices
+                    WHERE last_price IS NOT NULL
+                      AND last_price > 0
+                    GROUP BY ts::date
+                    HAVING COUNT(DISTINCT ticker) >= $1
+                    ORDER BY market_date DESC
+                    LIMIT 1
+                    """,
+                    int(min_fresh_tickers),
+                )
+                if not latest_day:
+                    logger.warning(
+                        "market_prices freshness: no hay rueda con >= %s tickers; "
+                        "universo fresco queda vacio",
+                        int(min_fresh_tickers),
+                    )
+                    return []
+
+                market_date = latest_day["market_date"]
+                rows = await conn.fetch(
+                    """
+                    WITH latest_per_ticker AS (
+                        SELECT DISTINCT ON (ticker)
+                            ticker,
+                            asset_type,
+                            currency,
+                            last_price,
+                            change_pct_1d,
+                            ts,
+                            ts::date AS latest_price_date
+                        FROM market_prices
+                        WHERE last_price IS NOT NULL
+                          AND last_price > 0
+                        ORDER BY ticker, ts DESC
+                    )
+                    SELECT
+                        ticker,
+                        asset_type,
+                        currency,
+                        last_price,
+                        change_pct_1d,
+                        ts,
+                        latest_price_date,
+                        (latest_price_date < $1::date) AS excluded_by_freshness
+                    FROM latest_per_ticker
+                    ORDER BY ticker
+                    """,
+                    market_date,
+                )
+
+                fresh: list[dict] = []
+                excluded: list[dict] = []
+                for row in rows:
+                    item = dict(row)
+                    public_row = {
+                        key: item.get(key)
+                        for key in (
+                            "ticker",
+                            "asset_type",
+                            "currency",
+                            "last_price",
+                            "change_pct_1d",
+                            "ts",
+                        )
+                    }
+                    if item.get("excluded_by_freshness"):
+                        excluded.append({
+                            "ticker": item.get("ticker"),
+                            "latest_price_date": item.get("latest_price_date"),
+                        })
+                    else:
+                        fresh.append(public_row)
+
+                if excluded:
+                    sample = ", ".join(
+                        f"{str(item.get('ticker')).upper()}@{item.get('latest_price_date')}"
+                        for item in excluded[:20]
+                    )
+                    suffix = "" if len(excluded) <= 20 else f" (+{len(excluded) - 20} mas)"
+                    logger.warning(
+                        "market_prices freshness: excluidos %s tickers stale vs rueda %s "
+                        "(min_tickers=%s): %s%s",
+                        len(excluded),
+                        market_date,
+                        int(min_fresh_tickers),
+                        sample,
+                        suffix,
+                    )
+                logger.info(
+                    "market_prices freshness: incluidos=%s excluidos=%s rueda=%s tickers_rueda=%s",
+                    len(fresh),
+                    len(excluded),
+                    market_date,
+                    int(latest_day["ticker_count"] or 0),
+                )
+                return fresh
+
             rows = await conn.fetch(
                 """
                 SELECT DISTINCT ON (ticker)
@@ -756,8 +1138,16 @@ class PortfolioDatabase:
         logger.info(f"Universo Cocos: {len(tickers)} tickers disponibles")
         return tickers
 
-    async def get_cocos_universe_assets(self) -> list[dict]:
-        prices = await self.get_latest_market_prices()
+    async def get_cocos_universe_assets(
+        self,
+        *,
+        fresh_only: bool = True,
+        min_fresh_tickers: int = MARKET_FRESHNESS_MIN_TICKERS,
+    ) -> list[dict]:
+        prices = await self.get_latest_market_prices(
+            fresh_only=fresh_only,
+            min_fresh_tickers=min_fresh_tickers,
+        )
         assets = [
             {
                 **row,
@@ -1195,6 +1585,74 @@ class PortfolioDatabase:
         logger.info("%s broker movements guardados", len(rows))
         return len(rows)
 
+    async def existing_broker_movement_keys(
+        self,
+        movements: list[BrokerMovement],
+    ) -> set[tuple[str, str]]:
+        """Return movement keys already persisted before an upsert.
+
+        This is used only for notification/deduplication. Persistence remains
+        handled by save_broker_movements().
+        """
+        if not self._pool or not movements:
+            return set()
+
+        sources: list[str] = []
+        external_ids: list[str] = []
+        for movement in movements:
+            source = str(movement.source or "").strip()
+            external_id = str(movement.external_movement_id or "").strip()
+            if source and external_id:
+                sources.append(source)
+                external_ids.append(external_id)
+
+        if not sources:
+            return set()
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT bm.source, bm.external_movement_id
+                FROM broker_movements bm
+                JOIN unnest($1::text[], $2::text[]) AS k(source, external_movement_id)
+                  ON bm.source = k.source
+                 AND bm.external_movement_id = k.external_movement_id
+                """,
+                sources,
+                external_ids,
+            )
+
+        return {
+            (str(row["source"]), str(row["external_movement_id"]))
+            for row in rows
+        }
+
+    async def get_latest_broker_movement_summary(self) -> Optional[dict]:
+        if not self._pool:
+            return None
+
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    executed_at,
+                    executed_at_precision,
+                    executed_at_source,
+                    movement_type,
+                    ticker,
+                    quantity,
+                    price,
+                    amount,
+                    created_at
+                FROM broker_movements
+                WHERE movement_type IN ('BUY', 'SELL')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            )
+
+        return dict(row) if row else None
+
     async def reconcile_broker_fills(self, max_age_days: int = 3) -> int:
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
@@ -1235,6 +1693,9 @@ class PortfolioDatabase:
                 FROM decision_log
                 WHERE COALESCE(source, layers->>'source') = 'execution_plan'
                   AND COALESCE(status, '') = 'APPROVED'
+                  AND COALESCE(metric_scope, 'planner_audit') <> 'blocked_audit'
+                  AND COALESCE(decision_stage, 'approved_decision') <> 'blocked'
+                  AND COALESCE(was_blocked, FALSE) = FALSE
                 ORDER BY decided_at ASC, id ASC
                 """
             )
@@ -1309,6 +1770,12 @@ class PortfolioDatabase:
                     UPDATE decision_log
                     SET status = 'EXECUTED',
                         executed_amount_ars = $2,
+                        price_at_decision = COALESCE(price_at_decision, $4),
+                        is_executable = TRUE,
+                        was_blocked = FALSE,
+                        decision_stage = 'executed',
+                        metric_scope = 'primary',
+                        is_primary_metric = TRUE,
                         layers = COALESCE(layers, '{}'::jsonb) || $3::jsonb
                     WHERE id = $1
                     """,
@@ -1329,6 +1796,7 @@ class PortfolioDatabase:
                             }
                         }
                     ),
+                    float(fill.avg_fill_price),
                 )
                 updated += 1
                 candidates = [item for item in candidates if item.id != candidate.id]

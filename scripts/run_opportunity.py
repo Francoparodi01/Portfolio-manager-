@@ -14,9 +14,9 @@ Flujo:
 Uso:
   python scripts/run_opportunity.py
   python scripts/run_opportunity.py --universe NVDA AMD AVGO MU TSM
-  python scripts/run_opportunity.py --no-sentiment
+  python scripts/run_opportunity.py --no-telegram --no-persist
   python scripts/run_opportunity.py --no-telegram
-  python scripts/run_opportunity.py --period 1y --max 8
+  python scripts/run_opportunity.py --period 1y --max 8 --no-persist
 """
 from __future__ import annotations
 
@@ -46,13 +46,35 @@ from src.analysis.opportunity_screener import (
     render_opportunity_report,
     COCOS_UNIVERSE_DEFAULT,
 )
+from src.analysis.manual_market_events import (
+    ManualMarketEvent,
+    active_event_risk_by_ticker,
+    render_manual_market_events_html,
+)
+from src.analysis.signal_aggregator import load_sentiment_contexts
 from src.analysis.audit_scope import (
     classify_decision_audit_scope,
     ensure_decision_audit_scope_columns,
+    is_regular_market_session,
     run_id_to_db,
 )
 
 logger = get_logger(__name__)
+
+
+def _portfolio_equity_total(
+    positions: list[dict],
+    cash_ars: float,
+    snapshot_total_ars: float,
+) -> float:
+    invested = sum(
+        float(p.get("market_value", 0) or 0)
+        for p in positions or []
+    )
+    cash = max(float(cash_ars or 0.0), 0.0)
+    if invested > 0 or cash > 0:
+        return invested + cash
+    return max(float(snapshot_total_ars or 0.0), 0.0)
 
 
 async def _load_portfolio(cfg, owner_chat_id: int | None = None):
@@ -84,11 +106,11 @@ async def _load_portfolio(cfg, owner_chat_id: int | None = None):
                     )
         except Exception as exc:
             logger.warning("No se pudo auditar frescura de portfolio: %s", exc)
-        normalized_invested = sum(
-            float(p.get("market_value", 0) or 0)
-            for p in positions
+        total_ars = _portfolio_equity_total(
+            positions,
+            cash_ars,
+            float(snap.get("total_value_ars", 0) or 0),
         )
-        total_ars = normalized_invested if normalized_invested > 0 else float(snap.get("total_value_ars", 0))
         return positions, total_ars, cash_ars
     finally:
         await db.close()
@@ -160,6 +182,103 @@ async def _load_cocos_history_frames(cfg, assets: list[dict], limit: int = 260) 
     return frames
 
 
+async def _load_active_manual_market_events(cfg) -> list[ManualMarketEvent]:
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        return await db.get_active_manual_market_events()
+    finally:
+        await db.close()
+
+
+async def _load_latest_shadow_contexts(
+    cfg,
+    tickers: list[str],
+    owner_chat_id: int | None = None,
+) -> dict[str, dict]:
+    """Carga el último shadow 20r para mostrar contexto en el radar.
+
+    Es una capa descriptiva: no cambia ranking, status, sizing ni persistencia operativa.
+    """
+    clean_tickers = sorted({str(t or "").upper().strip() for t in tickers if str(t or "").strip()})
+    if not clean_tickers:
+        return {}
+
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        pool = await db.get_pool()
+        if not pool:
+            return {}
+        shadow_owner = int(owner_chat_id) if owner_chat_id is not None else 0
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (f.ticker)
+                    f.ticker,
+                    f.expected_return AS expected_return_20,
+                    f.probability_up AS probability_up_20,
+                    f.thesis_action,
+                    f.thesis_confidence,
+                    f.as_of_ts,
+                    f.model_version
+                FROM shadow_thesis_forecasts f
+                WHERE f.owner_chat_id = $1
+                  AND f.horizon_sessions = 20
+                  AND f.ticker = ANY($2::text[])
+                  AND f.run_id = (
+                      SELECT run_id
+                      FROM shadow_thesis_runs
+                      WHERE owner_chat_id = $1
+                      ORDER BY as_of_ts DESC, captured_at DESC
+                      LIMIT 1
+                  )
+                ORDER BY f.ticker, f.as_of_ts DESC
+                """,
+                shadow_owner,
+                clean_tickers,
+            )
+        return {str(row["ticker"]).upper(): dict(row) for row in rows}
+    finally:
+        await db.close()
+
+
+def _apply_manual_event_risk_to_report(report, risk_by_ticker: dict[str, str]) -> int:
+    if not report or not risk_by_ticker:
+        return 0
+
+    actionable = {
+        CandidateStatus.COMPRABLE_AHORA,
+        CandidateStatus.COMPRA_HABILITADA,
+        CandidateStatus.SWAP_CANDIDATO,
+    }
+    changed = 0
+    for candidate in getattr(report, "candidates", []) or []:
+        ticker = str(getattr(candidate, "ticker", "") or "").upper()
+        reason = risk_by_ticker.get(ticker)
+        if not reason:
+            continue
+        candidate.alerts.append(f"EVENT_RISK: {reason}")
+        if candidate.status in actionable:
+            candidate.status = CandidateStatus.VIGILANCIA_A
+            candidate.why_not_now = (
+                f"{candidate.why_not_now}; {reason}"
+                if candidate.why_not_now else reason
+            )
+            candidate.action_concreta = "No comprar ahora: catalyst/evento manual activo; revalidar post-evento."
+            changed += 1
+
+    candidates = list(getattr(report, "candidates", []) or [])
+    report.comprable_ahora = [c for c in candidates if c.status == CandidateStatus.COMPRABLE_AHORA]
+    report.compra_habilitada = [c for c in candidates if c.status == CandidateStatus.COMPRA_HABILITADA]
+    report.swap_candidatos = [c for c in candidates if c.status == CandidateStatus.SWAP_CANDIDATO]
+    report.en_vigilancia = [
+        c for c in candidates
+        if c.status in (CandidateStatus.VIGILANCIA_A, CandidateStatus.VIGILANCIA_B, CandidateStatus.VIGILANCIA_C)
+    ]
+    return changed
+
+
 def _enum_value(value) -> str:
     return str(getattr(value, "value", value) or "")
 
@@ -167,7 +286,7 @@ def _enum_value(value) -> str:
 def _radar_candidate_layers(candidate) -> dict:
     asym = candidate.asymmetry
     edge = candidate.edge
-    return {
+    payload = {
         "source": "radar",
         "candidate_status": _enum_value(candidate.status),
         "trade_type": _enum_value(candidate.trade_type),
@@ -187,7 +306,18 @@ def _radar_candidate_layers(candidate) -> dict:
         "technical_has_reconstructed_candles": candidate.technical_has_reconstructed_candles,
         "technical_candle_sources": list(candidate.technical_candle_sources or ()),
         "technical_candle_source_counts": dict(candidate.technical_candle_source_counts or {}),
+        "why_not_now": candidate.why_not_now,
+        "action_concreta": candidate.action_concreta,
+        "alerts": list(candidate.alerts or []),
+        "shadow_alignment": candidate.shadow_alignment,
+        "shadow_expected_return_20": candidate.shadow_expected_return_20,
+        "shadow_probability_up_20": candidate.shadow_probability_up_20,
+        "shadow_action": candidate.shadow_action,
     }
+    sentiment_context = getattr(candidate, "sentiment_context", None)
+    if sentiment_context is not None and hasattr(sentiment_context, "to_layers_payload"):
+        payload["sentiment_context"] = sentiment_context.to_layers_payload()
+    return payload
 
 
 def _radar_decision_type(candidate) -> str:
@@ -443,6 +573,43 @@ async def main(
     )
 
     # ── 3. Macro ───────────────────────────────────────────────────────────────
+    sentiment_contexts = {}
+    try:
+        db_sent = PortfolioDatabase(cfg.database.url)
+        await db_sent.connect()
+        pool_sent = await db_sent.get_pool()
+        if pool_sent:
+            async with pool_sent.acquire() as conn:
+                sentiment_contexts = await load_sentiment_contexts(conn, universe_filtered)
+        await db_sent.close()
+        active_contexts = [
+            ticker for ticker, ctx in sentiment_contexts.items()
+            if ticker != "MACRO" and getattr(ctx, "active", False)
+        ]
+        if active_contexts:
+            logger.info(
+                "Sentiment contextual radar disponible para %s",
+                active_contexts[:20],
+            )
+    except Exception as exc:
+        logger.debug("Sentiment contextual radar no disponible: %s", exc)
+
+    shadow_contexts = {}
+    try:
+        shadow_contexts = await _load_latest_shadow_contexts(
+            cfg,
+            universe_filtered,
+            owner_chat_id=owner_chat_id,
+        )
+        if shadow_contexts:
+            logger.info(
+                "Shadow contextual radar disponible para %s/%s tickers",
+                len(shadow_contexts),
+                len(universe_filtered),
+            )
+    except Exception as exc:
+        logger.warning("Shadow contextual radar no disponible: %s", exc)
+
     logger.info("Descargando macro...")
     macro_snap   = fetch_macro()
     macro_regime = get_macro_regime(macro_snap)
@@ -465,9 +632,32 @@ async def main(
         history_frames      = history_frames,
         asset_types          = asset_types,
         available_cash_ars  = cash_ars,
+        sentiment_contexts   = sentiment_contexts,
+        shadow_contexts      = shadow_contexts,
     )
 
+    manual_market_events: list[ManualMarketEvent] = []
+    try:
+        manual_market_events = await _load_active_manual_market_events(cfg)
+        manual_event_blocklist = active_event_risk_by_ticker(manual_market_events)
+        changed = _apply_manual_event_risk_to_report(report, manual_event_blocklist)
+        if manual_market_events:
+            logger.warning(
+                "Radar: eventos manuales activos=%s; candidatos degradados=%s",
+                [event.title for event in manual_market_events],
+                changed,
+            )
+    except Exception as exc:
+        logger.warning("Radar: no se pudieron cargar eventos manuales; sigo sin guard: %s", exc)
+
     # ── 5. Render ──────────────────────────────────────────────────────────────
+    effective_run_intent = run_intent
+    if persist and not is_regular_market_session():
+        effective_run_intent = "exploratory"
+        logger.info(
+            "Radar fuera de rueda: se persiste como exploratory/debug, no como radar_audit operativo"
+        )
+
     if persist:
         await _save_radar_candidates(
             cfg,
@@ -477,12 +667,19 @@ async def main(
             portfolio_total_ars=total_ars,
             owner_chat_id=owner_chat_id,
             run_id=radar_run_id,
-            run_intent=run_intent,
+            run_intent=effective_run_intent,
         )
     else:
         logger.info("Radar no persistido por --no-persist")
 
-    output = render_opportunity_report(report, portfolio_total_ars=total_ars)
+    output = render_opportunity_report(
+        report,
+        portfolio_total_ars=total_ars,
+        market_session_open=is_regular_market_session(),
+    )
+    event_lines = render_manual_market_events_html(manual_market_events)
+    if event_lines:
+        output = "\n".join(event_lines + ["", output])
     print(output)
 
     if not no_telegram and cfg.scraper.telegram_enabled:

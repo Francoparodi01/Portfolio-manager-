@@ -28,7 +28,8 @@ Output:
 Uso:
   python scripts/run_analysis.py
   python scripts/run_analysis.py --tickers CVX NVDA
-  python scripts/run_analysis.py --no-llm --no-sentiment
+  python scripts/run_analysis.py --no-llm --skip-radar
+  python scripts/run_analysis.py --no-llm --skip-radar --no-persist
   python scripts/run_analysis.py --no-telegram
   python scripts/run_analysis.py --no-optimizer
 """
@@ -45,6 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from datetime import datetime, time, timedelta, timezone
 from html import escape
+from types import SimpleNamespace
 from uuid import uuid4
 
 from src.core.config import get_config
@@ -67,10 +69,19 @@ from src.analysis.execution_planner import (
     ExecutionPlan,
     MIN_TRADE_ARS,
 )
+from src.analysis.manual_market_events import (
+    ManualMarketEvent,
+    active_event_risk_by_ticker,
+    manual_event_layers_for_ticker,
+    render_manual_market_events_html,
+)
 from src.analysis.opportunity_screener import (
+    CandidateStatus,
     OpportunityReport,
+    TradeType,
     run_opportunity_analysis,
 )
+from src.analysis.signal_aggregator import load_sentiment_contexts
 from src.analysis.enums import DecisionType
 from src.analysis.validators import (
     validate_execution_plan,
@@ -86,8 +97,11 @@ from src.core.telegram_format import (
 )
 from src.analysis.risk_levels import compute_risk_levels
 from src.analysis.audit_scope import (
+    ART_TZ,
     classify_decision_audit_scope,
     ensure_decision_audit_scope_columns,
+    is_art_business_day,
+    is_regular_market_session,
     run_id_to_db,
 )
 from src.collector.cocos_history import candles_to_frame
@@ -128,6 +142,151 @@ def _pct(x: float) -> str:
         return f"{float(x) * 100:.1f}%"
     except Exception:
         return "0.0%"
+
+
+def _parse_dt(value) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=ART_TZ)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _fmt_dt_art(value, fmt: str = "%d/%m %H:%M") -> str:
+    dt = _parse_dt(value)
+    if not dt:
+        return "N/A"
+    return dt.astimezone(ART_TZ).strftime(fmt)
+
+
+def _render_analysis_data_context(
+    portfolio_snapshot: dict | None,
+    latest_broker_movement: dict | None,
+) -> list[str]:
+    lines: list[str] = []
+    if portfolio_snapshot:
+        scraped_at = portfolio_snapshot.get("scraped_at")
+        confidence = portfolio_snapshot.get("confidence_score")
+        conf_txt = ""
+        try:
+            conf_txt = f" | conf {float(confidence):.2f}"
+        except Exception:
+            pass
+        lines.append(f"Datos usados: snapshot portfolio <b>{_fmt_dt_art(scraped_at)}</b>{conf_txt}.")
+        stale_reason = str(portfolio_snapshot.get("_stale_reason") or "").strip()
+        if stale_reason:
+            lines.append(
+                "⚠️ Snapshot portfolio <b>stale</b>: "
+                f"{escape(stale_reason)}. No se persisten decisiones formales."
+            )
+
+    if latest_broker_movement:
+        side = escape(str(latest_broker_movement.get("movement_type") or "").upper())
+        ticker = escape(str(latest_broker_movement.get("ticker") or "").upper())
+        created_at = latest_broker_movement.get("created_at")
+        precision = str(latest_broker_movement.get("executed_at_precision") or "").upper()
+        lines.append(
+            f"Ultimo movimiento real detectado: <b>{ticker} {side}</b> "
+            f"({_fmt_dt_art(created_at)})."
+        )
+        if precision == "DATE_ONLY":
+            lines.append("Hora broker: <b>DATE_ONLY</b>; Cocos informa fecha, no hora intradia exacta.")
+
+    return lines
+
+
+def _portfolio_snapshot_stale_reason(
+    portfolio_snapshot: dict | None,
+    now: datetime | None = None,
+    *,
+    max_age_minutes: int = 60,
+) -> str | None:
+    if not portfolio_snapshot:
+        return "no hay snapshot de portfolio disponible"
+
+    scraped_at = _parse_dt(portfolio_snapshot.get("scraped_at"))
+    if not scraped_at:
+        return "scraped_at ausente o inválido"
+
+    current = now or datetime.now(ART_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ART_TZ)
+    current = current.astimezone(ART_TZ)
+    scraped_art = scraped_at.astimezone(ART_TZ)
+
+    if scraped_art.date() != current.date():
+        return (
+            f"último snapshot {scraped_art.strftime('%d/%m %H:%M')} ART; "
+            f"rueda actual {current.strftime('%d/%m')}"
+        )
+
+    age_minutes = max(0.0, (current - scraped_art).total_seconds() / 60.0)
+    if age_minutes > max_age_minutes:
+        return (
+            f"último snapshot {scraped_art.strftime('%H:%M')} ART; "
+            f"antigüedad {age_minutes:.0f} min"
+        )
+
+    return None
+
+
+def _render_manual_event_position_exposure(
+    events: list[ManualMarketEvent] | None,
+    positions: list | None,
+    total_ars: float,
+    *,
+    compact: bool = False,
+) -> list[str]:
+    active_events = list(events or [])
+    if not active_events or not positions:
+        return []
+
+    impacted: list[tuple[str, float, float, ManualMarketEvent]] = []
+    for position in positions or []:
+        ticker = str(_get(position, "ticker", "") or "").upper().strip()
+        if not ticker:
+            continue
+        market_value = float(_get(position, "market_value", 0.0) or 0.0)
+        weight = market_value / total_ars if total_ars > 0 and market_value > 0 else 0.0
+        for event in active_events:
+            if ticker in event.impacted_tickers:
+                impacted.append((ticker, weight, market_value, event))
+                break
+
+    if not impacted:
+        return []
+
+    impacted.sort(key=lambda item: item[1], reverse=True)
+
+    if compact:
+        ticker, weight, _, event = impacted[0]
+        suffix = f" (+{len(impacted) - 1})" if len(impacted) > 1 else ""
+        return [
+            "🔴 <b>Exposición bajo evento</b>: "
+            f"{escape(ticker)} {_pct(weight)} afectado por {escape(event.title)}; "
+            f"policy <b>{escape(event.action_policy)}</b>{suffix}."
+        ]
+
+    lines = ["🔴 <b>Exposición actual bajo catalyst</b>"]
+    for ticker, weight, market_value, event in impacted[:5]:
+        policy = (
+            "bloquea compras nuevas"
+            if event.action_policy == "block_new_buys"
+            else event.action_policy.replace("_", " ")
+        )
+        concentration = " | concentración alta" if weight >= 0.25 else ""
+        lines.append(
+            f"   • <b>{escape(ticker)}</b>: {_pct(weight)} "
+            f"({_money_ars(market_value)}) afectado por <b>{escape(event.title)}</b> "
+            f"| policy: <b>{escape(policy)}</b>{concentration}"
+        )
+    lines.append(
+        "     Esto no fuerza venta automática, pero sí exige tesis explícita antes de agregar riesgo."
+    )
+    return lines
 
 
 def _rankdata(values: np.ndarray) -> np.ndarray:
@@ -415,6 +574,34 @@ def _technical_source_label(result) -> str:
         for source, count in sorted(counts.items())
     )
     return f"{mode} ({detail})"
+
+
+def _technical_data_quality(result) -> tuple[str, str]:
+    counts = getattr(result, "technical_candle_source_counts", {}) or {}
+    counts = {str(k): int(v or 0) for k, v in dict(counts).items()}
+    total = sum(counts.values())
+    if total <= 0:
+        return "SIN_DATOS", "sin velas atribuibles"
+
+    canonical = counts.get("COCOS", 0) + counts.get("TRADINGVIEW_BYMA", 0)
+    internal = counts.get("internal_snapshot", 0)
+    internal_share = internal / total if total else 0.0
+    mode = str(getattr(result, "technical_candle_source_mode", "unknown") or "unknown")
+
+    if canonical >= 200 and internal_share <= 0.10:
+        level = "ALTA"
+        reason = f"{canonical}/{total} velas canonicas; fallback {internal_share:.0%}"
+    elif canonical >= 60 and internal_share <= 0.25:
+        level = "MEDIA"
+        reason = f"{canonical}/{total} velas canonicas; fallback {internal_share:.0%}"
+    elif canonical >= 60:
+        level = "MEDIA"
+        reason = f"historia suficiente, pero fallback relevante ({internal_share:.0%})"
+    else:
+        level = "BAJA"
+        reason = f"solo {canonical} velas canonicas; fuente {mode}"
+
+    return level, reason
 
 
 def _technical_source_summary(results) -> str:
@@ -771,6 +958,19 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
     payload["sentiment"] = _layer_payload("sentiment")
     payload["risk"] = _layer_payload("risk")
     payload["sentiment_active"] = bool(getattr(result, "sentiment_active", True))
+    sentiment_context = getattr(result, "sentiment_context", None)
+    if sentiment_context is not None and hasattr(sentiment_context, "to_layers_payload"):
+        context_payload = sentiment_context.to_layers_payload()
+        context_payload["used_in_score"] = payload["sentiment_active"]
+        context_payload["input_mode"] = (
+            "weighted_input" if payload["sentiment_active"] else "disabled"
+        )
+        context_payload["reason"] = (
+            "used_as_sentiment_layer"
+            if payload["sentiment_active"]
+            else "sentiment_disabled_for_run"
+        )
+        payload["sentiment_context"] = context_payload
 
     payload["final_score"] = _safe_float(getattr(result, "final_score", 0.0))
     payload["decision_from_synthesis"] = str(getattr(result, "decision", "") or "")
@@ -789,6 +989,16 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
     payload["technical_candle_source_counts"] = dict(
         getattr(result, "technical_candle_source_counts", {}) or {}
     )
+    payload["trend_shadow"] = {
+        "regime": str(getattr(result, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"),
+        "score": _safe_float(getattr(result, "trend_score", 0.0)),
+        "components": dict(getattr(result, "trend_components", {}) or {}),
+        "structural_break_confirmed": bool(
+            getattr(result, "structural_break_confirmed", False)
+        ),
+        "overbought_momentum": bool(getattr(result, "overbought_momentum", False)),
+        "connected_to_primary_score": False,
+    }
 
     return payload
 
@@ -834,6 +1044,7 @@ async def _save_execution_plan_events(
     owner_chat_id: int | None = None,
     run_id: str | None = None,
     run_intent: str = "formal_plan",
+    manual_market_events: list[ManualMarketEvent] | None = None,
 ) -> list[int]:
     """
     Guarda eventos del ExecutionPlan en decision_log.
@@ -867,6 +1078,7 @@ async def _save_execution_plan_events(
         if str(getattr(d, "ticker", "") or "").strip()
     }
     position_price_by_ticker = _build_position_price_map(positions)
+    manual_market_events = list(manual_market_events or [])
 
     def _safe_float(x, default: float = 0.0):
         try:
@@ -957,8 +1169,14 @@ async def _save_execution_plan_events(
         }
 
         try:
+            event_layers = manual_event_layers_for_ticker(ticker, manual_market_events)
+            if event_layers:
+                extra["manual_event_risk"] = event_layers
             return _layers_payload_for_decision(r, extra=extra)
         except Exception:
+            event_layers = manual_event_layers_for_ticker(ticker, manual_market_events)
+            if event_layers:
+                extra["manual_event_risk"] = event_layers
             return extra
 
     async def _insert_event(
@@ -999,6 +1217,7 @@ async def _save_execution_plan_events(
             _price_from_result(r)
             or _safe_float(getattr(order, "price", None), None)
             or _safe_float(getattr(order, "current_price", None), None)
+            or _safe_float(getattr(order, "reference_price", None), None)
             or position_price_by_ticker.get(ticker)
         )
         vix = _safe_float(getattr(macro_snap, "vix", None), None)
@@ -1607,10 +1826,22 @@ def _execution_timing_context(now: datetime | None = None) -> dict[str, str | bo
     case the decision is valid as a signal, but execution must be measured from
     the next tradable reference, not from the close that generated the signal.
     """
-    current = now or datetime.now()
-    current_time = current.time()
-    outside_regular_session = current_time < time(10, 30) or current_time >= time(17, 0)
-    if outside_regular_session:
+    current = now or datetime.now(ART_TZ)
+    if current.tzinfo is not None:
+        current = current.astimezone(ART_TZ)
+
+    if not is_art_business_day(current):
+        return {
+            "next_session": True,
+            "headline": "Plan para próxima rueda",
+            "note": (
+                "El análisis se generó en día sin rueda; no hay ejecución operativa "
+                "hasta la próxima apertura."
+            ),
+            "order_note": "Revalidar con precio fresco de apertura antes de operar.",
+        }
+
+    if not is_regular_market_session(current):
         return {
             "next_session": True,
             "headline": "Plan para próxima rueda",
@@ -1626,6 +1857,19 @@ def _execution_timing_context(now: datetime | None = None) -> dict[str, str | bo
         "note": "El análisis se generó durante rueda; validar liquidez y spread.",
         "order_note": "Validar precio límite, liquidez y spread antes de operar.",
     }
+
+
+def _analysis_run_policy(
+    no_persist: bool,
+    run_intent: str,
+    now: datetime | None = None,
+) -> tuple[bool, str, bool]:
+    """Keep off-market recalculations exploratory while sentiment remains live."""
+    current = now or datetime.now(ART_TZ)
+    off_market_context = not is_art_business_day(current)
+    if off_market_context:
+        return True, "exploratory", True
+    return bool(no_persist), str(run_intent or "formal_plan"), False
 
 
 def _opportunity_rr(candidate) -> float:
@@ -1656,19 +1900,85 @@ def _opportunity_source_label(candidate) -> str:
     return mode or "UNKNOWN"
 
 
+def _radar_buys_for_execution(
+    opportunity_report: OpportunityReport | None,
+    total_ars: float,
+    *,
+    max_candidates: int = 3,
+) -> list[dict]:
+    """Return radar entries that passed every guard except current-cash funding."""
+    if opportunity_report is None or total_ars <= 0:
+        return []
+
+    actionable_statuses = {
+        CandidateStatus.COMPRABLE_AHORA,
+        CandidateStatus.COMPRA_HABILITADA,
+    }
+    buys: list[dict] = []
+    seen: set[str] = set()
+    for candidate in getattr(opportunity_report, "candidates", []) or []:
+        ticker = str(getattr(candidate, "ticker", "") or "").upper()
+        if not ticker or ticker in seen:
+            continue
+        if getattr(candidate, "trade_type", None) != TradeType.NEW_ENTRY:
+            continue
+        eligible = (
+            getattr(candidate, "status", None) in actionable_statuses
+            or bool(getattr(candidate, "cash_funding_required", False))
+        )
+        if not eligible:
+            continue
+
+        amount_ars = total_ars * float(
+            getattr(candidate, "sizing_suggested", 0.0) or 0.0
+        )
+        reference_price = float(getattr(candidate, "price_usd", 0.0) or 0.0)
+        if amount_ars < MIN_TRADE_ARS or reference_price <= 0:
+            continue
+
+        buys.append({
+            "ticker": ticker,
+            "amount_ars": amount_ars,
+            "score": float(getattr(candidate, "final_score", 0.0) or 0.0),
+            "reference_price": reference_price,
+            "reason": (
+                f"Radar elegible: {str(getattr(candidate, 'action_concreta', '') or 'entrada nueva')}"
+            ),
+        })
+        seen.add(ticker)
+        if len(buys) >= max(1, max_candidates):
+            break
+    return buys
+
+
 def _append_analysis_radar(
     h: list[str],
     *,
     opportunity_report: OpportunityReport,
     total_ars: float,
     available_cash_ars: float,
+    execution_plan: ExecutionPlan | None = None,
 ) -> None:
     """Render compact same-engine radar inside /analysis."""
-    h.append("<b>RADAR OPERATIVO</b>")
+    market_session_open = is_regular_market_session()
+    h.append("<b>RADAR OPERATIVO</b>" if market_session_open else "<b>RADAR PARA PRÓXIMA RUEDA</b>")
     h.append("<i>Mismo motor que /radar; no entra al EV principal ni calibra thresholds.</i>")
+    if not market_session_open:
+        h.append("Mercado cerrado/sin rueda: ideas no ejecutables hasta revalidar apertura.")
 
     cash = max(float(available_cash_ars or 0.0), 0.0)
-    if cash >= MIN_TRADE_ARS:
+    planned_external = [
+        order.ticker
+        for order in (getattr(execution_plan, "buy_orders", []) or [])
+        if order.priority >= 3
+    ]
+    planned_external_set = set(planned_external)
+    if planned_external:
+        h.append(
+            "Funding resuelto por el plan de ventas: "
+            f"<b>{escape(', '.join(planned_external))}</b>."
+        )
+    elif cash >= MIN_TRADE_ARS:
         h.append(f"Cash ejecutable: <b>{_money_ars(cash)}</b>")
     else:
         h.append("Sin cash ejecutable: compras nuevas solo via funding o swap.")
@@ -1681,6 +1991,7 @@ def _append_analysis_radar(
         c for c in raw_actionable
         if str(getattr(c, "trade_type", "") or "").upper() != "SWAP_CANDIDATE"
         and not str(getattr(c, "swap_vs", "") or "").strip()
+        and str(getattr(c, "ticker", "") or "").upper() not in planned_external_set
     ]
     swaps = (
         [
@@ -1690,13 +2001,19 @@ def _append_analysis_radar(
         ]
         + list(getattr(opportunity_report, "swap_candidatos", []) or [])
     )
-    watch = list(getattr(opportunity_report, "en_vigilancia", []) or [])
+    watch = [
+        c for c in (getattr(opportunity_report, "en_vigilancia", []) or [])
+        if str(getattr(c, "ticker", "") or "").upper() not in planned_external_set
+    ]
 
-    shown_any = False
+    shown_any = bool(planned_external)
 
     if actionable:
         shown_any = True
-        title = "Compras con cash" if cash >= MIN_TRADE_ARS else "Candidatos sin funding"
+        if not market_session_open:
+            title = "Candidatos para próxima rueda"
+        else:
+            title = "Compras con cash" if cash >= MIN_TRADE_ARS else "Candidatos sin funding"
         h.append(f"<b>{escape(title)}</b>")
         for c in actionable[:3]:
             suggested = float(total_ars or 0.0) * float(getattr(c, "sizing_suggested", 0.0) or 0.0)
@@ -1715,7 +2032,11 @@ def _append_analysis_radar(
             if getattr(c, "why_not_now", ""):
                 h.append(f"   Motivo: {escape(str(c.why_not_now))}")
             elif getattr(c, "action_concreta", ""):
-                h.append(f"   Accion: {escape(str(c.action_concreta))}")
+                action_text = str(c.action_concreta)
+                if market_session_open:
+                    h.append(f"   Accion: {escape(action_text)}")
+                else:
+                    h.append(f"   Revalidar al abrir: {escape(action_text)}. No ejecutar ahora.")
 
     if swaps:
         shown_any = True
@@ -1761,6 +2082,252 @@ def _append_analysis_radar(
         h.append(f"Fuente tecnica radar: <b>{escape(' | '.join(top_sources))}</b>")
 
 
+def _compact_chg(value) -> str:
+    try:
+        return f"{float(value):+.1f}%"
+    except Exception:
+        return "N/A"
+
+
+def _compact_num(value, decimals: int = 1) -> str:
+    try:
+        return f"{float(value):,.{decimals}f}".replace(",", ".")
+    except Exception:
+        return "N/A"
+
+
+def _compact_reason(text: str, max_len: int = 72) -> str:
+    clean = " ".join(str(text or "").split())
+    if not clean:
+        return "sin motivo operativo claro"
+    if "Optimizer suger" in clean and "score" in clean:
+        return "optimizer diverge; score no confirma"
+    if len(clean) <= max_len:
+        return clean
+    return clean[: max_len - 1].rstrip() + "..."
+
+
+def _compact_ic_line(ic_metrics: dict | None) -> str:
+    ic_data = ic_metrics or {}
+    by_h = ic_data.get("by_horizon", {}) or {}
+    parts = []
+    ic_5d = None
+    ic_10d = None
+    for hz in ("5d", "10d"):
+        data = by_h.get(hz, {}) or {}
+        ic = data.get("ic")
+        n_obs = int(data.get("n_obs", 0) or 0)
+        if ic is None or n_obs < 5:
+            continue
+        if hz == "5d":
+            ic_5d = float(ic)
+        if hz == "10d":
+            ic_10d = float(ic)
+        quality = str(data.get("quality") or _ic_quality(float(ic))).upper()
+        parts.append(f"IC {hz.upper()} <code>{float(ic):+.3f}</code> {escape(quality)}")
+    if not parts:
+        return "IC: sin muestra suficiente"
+    regime = _build_ic_text_regime(ic_5d=ic_5d, ic_10d=ic_10d)
+    return " | ".join(parts) + f" | {regime.icon} {escape(regime.label)}"
+
+
+def _optimizer_compact_line(rebalance_report) -> str:
+    opt = _get(rebalance_report, "optimization", rebalance_report)
+    if not opt:
+        return "Optimizer: sin datos"
+    engine = str(_get(opt, "actual_engine", "") or _get(opt, "method", "N/A"))
+    engine_note = str(_get(opt, "engine_note", "") or "")
+    note = ""
+    if "PyPortfolioOpt" in engine_note:
+        note = " | PyPortfolioOpt"
+    elif engine == "FALLBACK_MAX_SHARPE" or "fallback" in engine_note.lower():
+        note = " | fallback"
+    sharpe = float(_get(opt, "sharpe_ratio", 0.0) or 0.0)
+    return f"Optimizer: <b>{escape(engine)}</b>{note} | Sharpe <b>{sharpe:.2f}</b>"
+
+
+def _render_compact_report(
+    results,
+    macro_snap,
+    total_ars: float,
+    cash_ars: float,
+    rebalance_report,
+    positions: list,
+    *,
+    ic_metrics: dict | None = None,
+    execution_plan: ExecutionPlan | None = None,
+    portfolio_snapshot: dict | None = None,
+    latest_broker_movement: dict | None = None,
+    no_persist: bool = False,
+    off_market_context: bool = False,
+    manual_market_events: list[ManualMarketEvent] | None = None,
+) -> str:
+    plan = execution_plan
+    timing_ctx = _execution_timing_context()
+    decision_map = {d.ticker: d for d in (plan.decisions if plan else [])}
+    gate = plan.gate if plan else "NORMAL"
+    current_w = _current_weights(positions, total_ars)
+    now_txt = datetime.now(ART_TZ).strftime("%d/%m %H:%M")
+    plan_title = (
+        "SIMULACIÓN CONTEXTUAL"
+        if off_market_context
+        else ("PLAN MAÑANA" if timing_ctx["next_session"] else "PLAN AHORA")
+    )
+    lines: list[str] = [
+        f"🧠 <b>ANÁLISIS — {now_txt} ART</b>",
+        f"💼 <b>{_money_ars(total_ars)}</b> | Cash <b>{_money_ars(cash_ars)}</b> | Régimen: <b>{escape(str(gate))}</b>",
+    ]
+    context_lines = _render_analysis_data_context(portfolio_snapshot, latest_broker_movement)
+    if context_lines:
+        lines.extend(context_lines[:2])
+    event_lines = render_manual_market_events_html(
+        manual_market_events or [],
+        compact=True,
+    )
+    if event_lines:
+        lines.extend(event_lines)
+    exposure_lines = _render_manual_event_position_exposure(
+        manual_market_events or [],
+        positions,
+        total_ars,
+        compact=True,
+    )
+    if exposure_lines:
+        lines.extend(exposure_lines)
+    if timing_ctx["next_session"]:
+        lines.append("⚠️ Fuera de rueda — validar apertura, no perseguir gaps.")
+    if off_market_context:
+        lines.append(
+            "🛰 Sentiment sigue activo; esta simulación no reemplaza el último plan formal."
+        )
+    elif no_persist:
+        lines.append("🧪 Modo prueba — no guarda eventos en decision_log.")
+    lines.append("")
+
+    lines.append(f"━━━ <b>{plan_title}</b> ━━━")
+    if plan and (plan.sell_orders or plan.buy_orders or plan.blocked_orders):
+        compact_sell_label = "REVALIDAR SELL" if timing_ctx["next_session"] else "SELL"
+        compact_buy_label = "REVALIDAR BUY" if timing_ctx["next_session"] else "BUY"
+        for order in sorted(plan.sell_orders, key=lambda x: x.priority):
+            d = decision_map.get(order.ticker)
+            score = f"score {float(d.score):+.3f}" if d and d.score is not None else ""
+            lines.append(f"🔴 {compact_sell_label} {escape(order.ticker)} -{_money_ars(order.amount_ars)} {escape(score)}".rstrip())
+        for order in sorted(plan.buy_orders, key=lambda x: x.priority):
+            d = decision_map.get(order.ticker)
+            score = f"score {float(d.score):+.3f}" if d and d.score is not None else ""
+            lines.append(f"🟢 {compact_buy_label} {escape(order.ticker)} +{_money_ars(order.amount_ars)} {escape(score)}".rstrip())
+        for order in sorted(plan.blocked_orders, key=lambda x: x.priority)[:4]:
+            d = decision_map.get(order.ticker)
+            score = f"score {float(d.score):+.3f}" if d and d.score is not None else ""
+            reason = _compact_reason(order.reason, 46)
+            lines.append(f"🔵 WATCH {escape(order.ticker)} bloqueado {escape(score)} ({escape(reason)})".rstrip())
+        fees = float(plan.fee_sell_ars or 0.0) + float(plan.fee_buy_ars or 0.0)
+        if plan.gross_sell_ars:
+            lines.append(
+                f"Ventas: <b>{_money_ars(plan.gross_sell_ars)}</b> | "
+                f"Compras: <b>{_money_ars(plan.gross_buy_ars)}</b> | "
+                f"Fees: <b>{_money_ars(fees)}</b> | Cash post: <b>{_money_ars(plan.cash_after)}</b>"
+            )
+        else:
+            lines.append(
+                f"Compras: <b>{_money_ars(plan.gross_buy_ars)}</b> | "
+                f"Fees: <b>{_money_ars(fees)}</b> | Cash post: <b>{_money_ars(plan.cash_after)}</b>"
+            )
+    else:
+        lines.append("🟡 Sin órdenes ejecutables. Mantener y esperar mejor setup.")
+    lines.append("Nota: plan sin fill no entra al EV operativo.")
+    lines.append("")
+
+    lines.append("━━━ <b>CARTERA</b> ━━━")
+    action_priority = {
+        DecisionType.SELL_FULL.value: 0,
+        DecisionType.SELL_PARTIAL.value: 1,
+        DecisionType.BUY.value: 2,
+        DecisionType.BLOCKED.value: 3,
+        DecisionType.WATCH.value: 4,
+        DecisionType.HOLD.value: 5,
+    }
+    sorted_results = sorted(
+        results or [],
+        key=lambda r: (
+            action_priority.get(
+                getattr(decision_map.get(str(getattr(r, "ticker", "")).upper()), "action", DecisionType.HOLD).value
+                if decision_map.get(str(getattr(r, "ticker", "")).upper()) else DecisionType.HOLD.value,
+                5,
+            ),
+            -abs(float(getattr(r, "final_score", 0.0) or 0.0)),
+        ),
+    )
+    for r in sorted_results:
+        ticker = str(getattr(r, "ticker", "") or "").upper()
+        if not ticker:
+            continue
+        d = decision_map.get(ticker)
+        action = d.action.value if d else "HOLD"
+        icon = _action_icon(d.action if d else DecisionType.HOLD)
+        score = float(getattr(r, "final_score", getattr(r, "score", 0.0)) or 0.0)
+        tech = _layer_weighted(r, "technical")
+        macro = _layer_weighted(r, "macro")
+        sent = _layer_weighted(r, "sentiment")
+        technical_regime = str(getattr(r, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL")
+        trend_score = float(getattr(r, "trend_score", 0.0) or 0.0)
+        cw = float(current_w.get(ticker, 0.0))
+        tw = float(d.target_weight if d else cw)
+        if action == DecisionType.HOLD.value and d and d.reason_secondary:
+            tail = f"hold — {_compact_reason(d.reason_secondary, 58)}"
+        elif action == DecisionType.WATCH.value and d and d.reason_secondary:
+            tail = f"watch — {_compact_reason(d.reason_secondary, 58)}"
+        elif action == DecisionType.BLOCKED.value and d and d.reason_secondary:
+            tail = f"bloqueado — {_compact_reason(d.reason_secondary, 54)}"
+        else:
+            tail = action
+        lines.append(
+            f"{icon} <b>{escape(ticker)}</b> <code>{score:+.3f}</code> "
+            f"T<code>{tech:+.3f}</code> M<code>{macro:+.3f}</code> S<code>{sent:+.3f}</code> "
+            f"R=<b>{escape(technical_regime)}</b> trend=<code>{trend_score:+.3f}</code> "
+            f"{_pct(cw)}→{_pct(tw)} {escape(tail)}"
+        )
+        if (
+            str(getattr(r, "technical_signal", "HOLD") or "HOLD") == "SELL"
+            and float(getattr(macro_snap, "sp500_chg", 0.0) or 0.0) > 1.0
+            and float(getattr(macro_snap, "vix", 99.0) or 99.0) < 18.0
+        ):
+            lines.append("⚠️ Divergencia técnico/macro: SELL técnico con contexto risk-on.")
+    lines.append("T=técnico | M=macro | S=sentiment")
+    lines.append("")
+
+    lines.append("━━━ <b>MACRO</b> ━━━")
+    lines.append(
+        f"SP500 {_compact_num(getattr(macro_snap, 'sp500', None), 0)} {_compact_chg(getattr(macro_snap, 'sp500_chg', None))} | "
+        f"VIX {_compact_num(getattr(macro_snap, 'vix', None), 1)} | "
+        f"WTI ${_compact_num(getattr(macro_snap, 'wti', None), 1)} {_compact_chg(getattr(macro_snap, 'wti_chg', None))}"
+    )
+    lines.append(
+        f"DXY {_compact_num(getattr(macro_snap, 'dxy', None), 1)} | "
+        f"10Y {_compact_num(getattr(macro_snap, 'tnx', None), 2)}% | "
+        f"Merval {_compact_num(getattr(macro_snap, 'merval', None), 0)}"
+    )
+    riesgo = getattr(macro_snap, "riesgo_pais", None)
+    rp_icon = "🔴" if (riesgo or 0) > 1000 else "🟡" if (riesgo or 0) > 600 else "🟢"
+    lines.append(
+        f"AR: CCL ${_compact_num(getattr(macro_snap, 'ccl', None), 0)} | "
+        f"MEP ${_compact_num(getattr(macro_snap, 'mep', None), 0)} | "
+        f"Riesgo país {riesgo or 'N/A'}pb {rp_icon}"
+    )
+    lines.append("")
+
+    lines.append("━━━ <b>SISTEMA</b> ━━━")
+    lines.append(_compact_ic_line(ic_metrics))
+    lines.append(_optimizer_compact_line(rebalance_report))
+    lines.append("No es asesoramiento financiero.")
+
+    report = "\n".join(lines)
+    valid_html, errors = validate_telegram_html(report)
+    if not valid_html:
+        logger.warning("run_analysis compact HTML potencialmente invalido: %s", errors[:3])
+    return report
+
+
 def render_report(
     results,
     macro_snap,
@@ -1774,6 +2341,12 @@ def render_report(
     ic_metrics:       dict | None = None,
     execution_plan:   ExecutionPlan | None = None,
     opportunity_report: OpportunityReport | None = None,
+    portfolio_snapshot: dict | None = None,
+    latest_broker_movement: dict | None = None,
+    radar_skipped: bool = False,
+    no_persist: bool = False,
+    off_market_context: bool = False,
+    manual_market_events: list[ManualMarketEvent] | None = None,
 ) -> str:
     plan = execution_plan
     gate = plan.gate if plan else "NORMAL"
@@ -1781,6 +2354,22 @@ def render_report(
 
     result_by_ticker = _result_map(results)
     timing_ctx = _execution_timing_context()
+    if radar_skipped:
+        return _render_compact_report(
+            results,
+            macro_snap,
+            total_ars,
+            cash_ars,
+            rebalance_report,
+            positions,
+            ic_metrics=ic_metrics,
+            execution_plan=execution_plan,
+            portfolio_snapshot=portfolio_snapshot,
+            latest_broker_movement=latest_broker_movement,
+            no_persist=no_persist,
+            off_market_context=off_market_context,
+            manual_market_events=manual_market_events,
+        )
 
     # ── Header ────────────────────────────────────────────────────────────────
     h.extend(tg_header("🧠 Análisis de cartera", subtitle=f"{datetime.now().strftime('%d/%m/%Y %H:%M')} ART"))
@@ -1788,12 +2377,32 @@ def render_report(
         f"💼 Portfolio: <b>{_money_ars(total_ars)}</b> | "
         f"Cash libre: <b>{_money_ars(cash_ars)}</b>"
     )
+    h.extend(_render_analysis_data_context(portfolio_snapshot, latest_broker_movement))
+    event_lines = render_manual_market_events_html(manual_market_events or [])
+    if event_lines:
+        h.extend(event_lines)
+    exposure_lines = _render_manual_event_position_exposure(
+        manual_market_events or [],
+        positions,
+        total_ars,
+    )
+    if exposure_lines:
+        h.extend(exposure_lines)
     if timing_ctx["next_session"]:
         h.append(f"🕒 <b>{timing_ctx['headline']}</b> — {timing_ctx['note']}")
+    if off_market_context:
+        h.append(
+            "🛰 <b>Contexto fuera de rueda</b> — sentiment sigue activo, pero este "
+            "cálculo no reemplaza el último plan formal ni guarda decisiones."
+        )
+    elif no_persist:
+        h.append("🧪 <b>Modo prueba</b> — no guarda eventos en decision_log.")
     h.append("")
 
     # ── DECISIÓN DE HOY — desde ExecutionPlan, nunca desde optimizer ──────────
-    h.append(tg_section("Decisión de cartera"))
+    h.append(tg_section(
+        "Simulación contextual" if off_market_context else "Decisión de cartera"
+    ))
 
     if gate == "BLOCKED":
         h.append("🔴 <b>NO OPERAR / DEFENSIVO</b>")
@@ -1805,7 +2414,15 @@ def render_report(
 
     if plan and plan.main_action:
         main_order = plan.main_action
-        verb = "VENDER" if main_order.side.value == "SELL" else "COMPRAR"
+        next_session_plan = bool(timing_ctx["next_session"] or off_market_context)
+        if next_session_plan:
+            verb = (
+                "REVALIDAR VENTA"
+                if main_order.side.value == "SELL"
+                else "REVALIDAR COMPRA"
+            )
+        else:
+            verb = "VENDER" if main_order.side.value == "SELL" else "COMPRAR"
         icon = "🔴" if main_order.side.value == "SELL" else "🟢"
         partial_tag = " <i>(parcial)</i>" if main_order.partial else ""
 
@@ -1836,7 +2453,13 @@ def render_report(
             h.append(f"   {_render_signal_line(score, tech, macro, sent)}")
 
         h.append(f"   Motivo: {escape(main_order.reason)}")
-        h.append("   Estado: plan aprobado; no es ejecución real hasta que exista fill confirmado.")
+        if next_session_plan:
+            h.append(
+                "   Estado: idea para próxima rueda; no ejecutar sin precio fresco, "
+                "liquidez y spread de apertura."
+            )
+        else:
+            h.append("   Estado: plan aprobado/tentativo; no es ejecución real ni entra al EV hasta fill confirmado.")
 
         if main_order.partial and main_order.theoretical_ars > main_order.amount_ars:
             h.append(
@@ -1894,7 +2517,7 @@ def render_report(
 
     if plan:
         h.append(f"   {timing_ctx['headline']}: {timing_ctx['note']}")
-        h.append("   Confirmación requerida: Cocos movements/fill real.")
+        h.append("   Confirmación requerida: fill real en Cocos movements.")
 
         purchases = (
             "$0 ARS"
@@ -1902,8 +2525,8 @@ def render_report(
             else _money_ars(plan.gross_buy_ars)
         )
         h.append(
-            f"   Ventas: <b>{_money_ars(plan.gross_sell_ars)}</b> | "
-            f"Compras: <b>{purchases}</b> | "
+            f"   Plan ventas: <b>{_money_ars(plan.gross_sell_ars)}</b> | "
+            f"Plan compras: <b>{purchases}</b> | "
             f"Cash post-plan: <b>{_money_ars(plan.cash_after)}</b>"
         )
 
@@ -1925,9 +2548,11 @@ def render_report(
         step = 1
 
         for o in sorted(plan.sell_orders, key=lambda x: x.priority):
+            sell_verb = "Revalidar venta" if timing_ctx["next_session"] else "Vender"
             h.append(
-                f"   {step}. 🔴 Vender <b>{o.ticker}</b>: "
-                f"-{_money_ars(o.amount_ars)}"
+                f"   {step}. 🔴 {sell_verb} <b>{o.ticker}</b>: "
+                f"<b>{int(o.quantity_est)} nominal(es)</b> × "
+                f"{_money_ars(o.reference_price)} = -{_money_ars(o.amount_ars)}"
             )
 
             if o.action == DecisionType.SELL_FULL:
@@ -1938,13 +2563,16 @@ def render_report(
 
         for o in sorted(plan.buy_orders, key=lambda x: x.priority):
             ext_icon = "🌍" if o.priority >= 3 else "📈"
+            buy_verb = "Revalidar compra" if timing_ctx["next_session"] else "Comprar"
             partial_tag = " <i>(parcial)</i>" if o.partial else ""
             d = next((x for x in plan.decisions if x.ticker == o.ticker), None)
             score_tag = f" | score {d.score:+.3f}" if d and d.score is not None else ""
 
             h.append(
-                f"   {step}. {ext_icon} Comprar <b>{o.ticker}</b>: "
-                f"+{_money_ars(o.amount_ars)}{partial_tag}{score_tag}"
+                f"   {step}. {ext_icon} {buy_verb} <b>{o.ticker}</b>: "
+                f"<b>{int(o.quantity_est)} nominal(es)</b> × "
+                f"{_money_ars(o.reference_price)} = +{_money_ars(o.amount_ars)}"
+                f"{partial_tag}{score_tag}"
             )
             h.append(f"      Condición: {timing_ctx['order_note']}")
             step += 1
@@ -2057,9 +2685,31 @@ def render_report(
             f"score <code>{score:+.3f}</code> | <b>{signal_label}</b> | "
             f"peso {_pct(cw)} → {_pct(tw)}"
         )
+        h.append(
+            f"   Régimen técnico: <b>{escape(str(getattr(r, 'technical_regime', 'TRANSITIONAL')))}</b> | "
+            f"trend shadow <code>{float(getattr(r, 'trend_score', 0.0) or 0.0):+.3f}</code>"
+        )
+        if (
+            str(getattr(r, "technical_signal", "HOLD") or "HOLD") == "SELL"
+            and float(getattr(macro_snap, "sp500_chg", 0.0) or 0.0) > 1.0
+            and float(getattr(macro_snap, "vix", 99.0) or 99.0) < 18.0
+        ):
+            h.append("   ⚠️ <b>Divergencia técnico/macro:</b> SELL técnico con contexto risk-on.")
 
         if d and d.reason_secondary:
             h.append(f"   Motivo: {escape(d.reason_secondary)}.")
+            if (
+                "Optimizer sugería" in str(d.reason_secondary)
+                and action_str in {
+                    DecisionType.HOLD.value,
+                    DecisionType.WATCH.value,
+                    DecisionType.BLOCKED.value,
+                }
+            ):
+                h.append(
+                    "   Lectura: optimizer teórico y señal operativa divergen; "
+                    "no se ejecuta sin confirmación del score."
+                )
         else:
             h.append(f"   Lectura: {escape(lectura)}.")
 
@@ -2072,6 +2722,11 @@ def render_report(
 
         source_mode = str(
             getattr(r, "technical_candle_source_mode", "unknown") or "unknown"
+        )
+        data_quality, data_quality_reason = _technical_data_quality(r)
+        h.append(
+            f"   Datos: <b>{escape(data_quality)}</b> — "
+            f"{escape(data_quality_reason)}"
         )
         if source_mode != "official":
             h.append(f"   Fuente técnica: <b>{escape(_technical_source_label(r))}</b>")
@@ -2168,11 +2823,19 @@ def render_report(
     if opt:
         method = escape(str(_get(opt, "method", "N/A")))
         obj_str = escape(str(_get(opt, "method_reason", _get(opt, "reason", "N/A"))))
+        actual_engine_raw = str(_get(opt, "actual_engine", "") or _get(opt, "method", "N/A"))
+        engine_note_raw = str(_get(opt, "engine_note", "") or "")
+        actual_engine = escape(actual_engine_raw)
+        engine_note = escape(engine_note_raw)
         ret = float(_get(opt, "expected_return_annual", 0.0) or 0.0)
         vol = float(_get(opt, "expected_vol_annual", 0.0) or 0.0)
         sharpe = float(_get(opt, "sharpe_ratio", 0.0) or 0.0)
 
         h.append(f"Método: <b>{method}</b> | {obj_str}")
+        h.append(
+            f"Motor real: <b>{actual_engine}</b>"
+            + (f" — {engine_note}" if engine_note else "")
+        )
 
         if 0 < ret < 2.0:
             h.append(
@@ -2207,12 +2870,29 @@ def render_report(
 
     # ── RADAR COCOS — compacto dentro de /analisis ────────────────────────────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    if radar_skipped:
+        h.append(tg_section("Radar Cocos"))
+        h.append("Omitido en modo rapido para acelerar el plan de cartera.")
+        h.append("Usa <code>/radar</code> o <code>/analisis_full</code> para revisar oportunidades del universo.")
+        h.append("")
+        h.append(tg_note("Plan informativo hasta fill confirmado. No es asesoramiento financiero."))
+        report = "\n".join(h)
+        valid_html, errors = validate_telegram_html(report)
+        if not valid_html:
+            logger.warning("run_analysis HTML potencialmente invalido: %s", errors[:3])
+        return report
+
     if opportunity_report is not None:
         _append_analysis_radar(
             h,
             opportunity_report=opportunity_report,
             total_ars=total_ars,
-            available_cash_ars=getattr(opportunity_report, "available_cash_ars", cash_ars),
+            available_cash_ars=(
+                execution_plan.cash_after
+                if execution_plan is not None
+                else getattr(opportunity_report, "available_cash_ars", cash_ars)
+            ),
+            execution_plan=execution_plan,
         )
         h.append("")
         h.append(tg_note("Plan y radar son informativos hasta fill confirmado. No es asesoramiento financiero."))
@@ -2325,6 +3005,24 @@ def render_report(
 # PIPELINE PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _portfolio_equity_total(
+    positions: list[dict],
+    cash_ars: float | int | None,
+    snapshot_total_ars: float | int | None,
+) -> float:
+    """Valor total de cartera para pesos/sizing: posiciones + cash.
+
+    `snapshot_total_ars` queda solo como fallback defensivo. La fuente operativa
+    para pesos debe incluir cash explícito; si se usa solo invertido, el optimizer
+    infla posiciones cuando hay mucho efectivo.
+    """
+    invested = sum(float(p.get("market_value", 0) or 0) for p in positions or [])
+    cash = max(float(cash_ars or 0.0), 0.0)
+    if invested > 0 or cash > 0:
+        return invested + cash
+    return max(float(snapshot_total_ars or 0.0), 0.0)
+
+
 async def _load_portfolio(cfg, owner_chat_id: int | None = None):
     db = PortfolioDatabase(cfg.database.url)
     await db.connect()
@@ -2353,13 +3051,23 @@ async def _load_portfolio(cfg, owner_chat_id: int | None = None):
         except Exception as exc:
             logger.warning("No se pudo auditar frescura de portfolio: %s", exc)
 
-        normalized_invested = sum(
-            float(p.get("market_value", 0) or 0)
-            for p in positions
+        total_ars = _portfolio_equity_total(
+            positions,
+            cash_ars,
+            float(snap.get("total_value_ars", 0) or 0),
         )
-        total_ars = normalized_invested if normalized_invested > 0 else float(snap.get("total_value_ars", 0))
         history   = await db.get_portfolio_history(limit=60, owner_chat_id=owner_chat_id)
-        return positions, total_ars, cash_ars, history
+        latest_broker_movement = await db.get_latest_broker_movement_summary()
+        return positions, total_ars, cash_ars, history, snap, latest_broker_movement
+    finally:
+        await db.close()
+
+
+async def _load_active_manual_market_events(cfg) -> list[ManualMarketEvent]:
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        return await db.get_active_manual_market_events()
     finally:
         await db.close()
 
@@ -2401,26 +3109,69 @@ async def main(
     no_llm:           bool,
     no_sentiment:     bool,
     no_optimizer:     bool = False,
+    skip_radar:       bool = False,
+    no_persist:       bool = False,
     owner_chat_id:    int | None = None,
     run_intent:       str = "formal_plan",
 ):
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
     analysis_run_id = str(uuid4())
+    no_persist, run_intent, off_market_context = _analysis_run_policy(
+        no_persist,
+        run_intent,
+    )
+    if off_market_context:
+        logger.info(
+            "Analisis fuera de rueda: modo exploratory/no-persist; sentiment permanece activo"
+        )
 
     # ── 1. Posiciones ──────────────────────────────────────────────────────────
     if tickers_override:
         positions = [{"ticker": t, "market_value": 0} for t in tickers_override]
         total_ars = cash_ars = 0.0
         history   = []
+        portfolio_snapshot = None
+        latest_broker_movement = None
     else:
-        positions, total_ars, cash_ars, history = await _load_portfolio(
+        (
+            positions,
+            total_ars,
+            cash_ars,
+            history,
+            portfolio_snapshot,
+            latest_broker_movement,
+        ) = await _load_portfolio(
             cfg,
             owner_chat_id=owner_chat_id,
         )
+        snapshot_stale_reason = _portfolio_snapshot_stale_reason(portfolio_snapshot)
+        if snapshot_stale_reason:
+            if isinstance(portfolio_snapshot, dict):
+                portfolio_snapshot["_stale_reason"] = snapshot_stale_reason
+            logger.error(
+                "Snapshot portfolio stale para plan formal: %s; fuerzo no-persist/exploratory",
+                snapshot_stale_reason,
+            )
+            no_persist = True
+            run_intent = "exploratory"
 
     tickers = [p["ticker"] for p in positions]
     logger.info(f"Pipeline: {tickers} | periodo={period}")
+
+    manual_market_events: list[ManualMarketEvent] = []
+    manual_event_blocklist: dict[str, str] = {}
+    try:
+        manual_market_events = await _load_active_manual_market_events(cfg)
+        manual_event_blocklist = active_event_risk_by_ticker(manual_market_events)
+        if manual_market_events:
+            logger.warning(
+                "Eventos/catalysts manuales activos: %s; blocklist compras=%s",
+                [event.title for event in manual_market_events],
+                sorted(manual_event_blocklist),
+            )
+    except Exception as exc:
+        logger.warning("No se pudieron cargar eventos manuales; sigo sin guard: %s", exc)
 
     # ── 2. Macro ───────────────────────────────────────────────────────────────
     logger.info("Descargando macro...")
@@ -2461,11 +3212,52 @@ async def main(
     risk_map = {p["ticker"]: p for p in portfolio_risk.positions}
 
     # ── 5. Sentiment ───────────────────────────────────────────────────────────
+    sentiment_contexts = {}
+    try:
+        db_sent = PortfolioDatabase(cfg.database.url)
+        await db_sent.connect()
+        pool_sent = await db_sent.get_pool()
+        if pool_sent:
+            async with pool_sent.acquire() as conn:
+                sentiment_contexts = await load_sentiment_contexts(conn, tickers)
+        await db_sent.close()
+        active_contexts = [
+            ticker for ticker, ctx in sentiment_contexts.items()
+            if ticker != "MACRO" and getattr(ctx, "active", False)
+        ]
+        if active_contexts:
+            logger.info("Sentiment contextual disponible para %s", active_contexts)
+    except Exception as exc:
+        logger.debug("Sentiment contextual no disponible: %s", exc)
+
     sentiment_map = {}
     if not no_sentiment:
-        logger.info("Analizando sentiment...")
+        logger.info("Cargando sentiment contextual...")
+        macro_context = sentiment_contexts.get("MACRO")
         for ticker in tickers:
-            sentiment_map[ticker] = fetch_sentiment(ticker)
+            context = sentiment_contexts.get(ticker)
+            scoring_context = context
+            if scoring_context is None or not getattr(scoring_context, "active", False):
+                if macro_context is not None and getattr(macro_context, "active", False):
+                    scoring_context = macro_context
+                else:
+                    scoring_context = None
+            if scoring_context is None:
+                continue
+            raw_score = float(getattr(scoring_context, "score", 0.0) or 0.0)
+            confidence = float(getattr(scoring_context, "confidence", 0.0) or 0.0)
+            guarded_score = max(-1.0, min(1.0, raw_score * max(confidence, 0.2)))
+            sentiment_contexts[ticker] = scoring_context
+            sentiment_map[ticker] = SimpleNamespace(
+                score=guarded_score,
+                active=True,
+                top_headlines=[
+                    {
+                        "title": getattr(scoring_context, "top_summary", ""),
+                        "source": "sentiment_aggregated",
+                    }
+                ],
+            )
     else:
         logger.info("Sentiment omitido (--no-sentiment)")
 
@@ -2480,6 +3272,7 @@ async def main(
             "volatility_annual": 0.0, "sharpe": 0.0, "action": "MANTENER",
         })
         sent        = sentiment_map.get(ticker)
+        sentiment_active = bool(sent and getattr(sent, "active", False))
         macro_score, macro_reasons = score_macro_for_ticker(ticker, macro_snap)
 
         if not tech:
@@ -2494,12 +3287,25 @@ async def main(
             risk_position     = risk_p,
             sentiment_score   = sent.score if sent else 0.0,
             technical_score_raw = getattr(tech, "score_raw", 0.0),
-            skip_sentiment    = no_sentiment,
+            skip_sentiment    = no_sentiment or not sentiment_active,
             technical_candle_source_mode=getattr(tech, "candle_source_mode", "unknown"),
             technical_has_reconstructed_candles=getattr(tech, "has_reconstructed_candles", False),
             technical_candle_sources=getattr(tech, "candle_sources", ()),
             technical_candle_source_counts=getattr(tech, "candle_source_counts", {}),
         )
+        result.technical_signal = str(getattr(tech, "signal", "HOLD") or "HOLD")
+        result.technical_regime = str(
+            getattr(tech, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"
+        )
+        result.trend_score = float(getattr(tech, "trend_score", 0.0) or 0.0)
+        result.trend_components = dict(getattr(tech, "trend_components", {}) or {})
+        result.structural_break_confirmed = bool(
+            getattr(tech, "structural_break_confirmed", False)
+        )
+        result.overbought_momentum = bool(getattr(tech, "overbought_momentum", False))
+        context = sentiment_contexts.get(ticker)
+        if context is not None:
+            result.sentiment_context = context
 
         if not no_llm:
             result = synthesize_with_llm_local(
@@ -2544,7 +3350,9 @@ async def main(
         elif not universe_tickers:
             logger.info("Universo Cocos: todos los tickers ya están en cartera.")
 
-        if universe_tickers:
+        if skip_radar:
+            logger.info("Radar interno omitido (--skip-radar); usando solo cartera para plan operativo")
+        elif universe_tickers:
             logger.info(
                 "Analizando universo Cocos: %s activos por segmento %s",
                 len(universe_tickers),
@@ -2567,13 +3375,34 @@ async def main(
             u_tech_map     = {s.ticker: s for s in u_tech_signals}
 
             u_sent_map = {}
+            universe_sentiment_contexts = {}
             if not no_sentiment:
-                strong_tech = [
-                    s.ticker for s in u_tech_signals
-                    if s.signal == "BUY" and s.strength > 0.40
-                ]
-                for ticker in strong_tech[:8]:
-                    u_sent_map[ticker] = fetch_sentiment(ticker)
+                try:
+                    db_sent = PortfolioDatabase(cfg.database.url)
+                    await db_sent.connect()
+                    pool_sent = await db_sent.get_pool()
+                    if pool_sent:
+                        async with pool_sent.acquire() as conn:
+                            universe_sentiment_contexts = await load_sentiment_contexts(conn, universe_tickers)
+                    await db_sent.close()
+                except Exception as exc:
+                    logger.debug("Sentiment contextual universo no disponible: %s", exc)
+                for ticker in universe_tickers:
+                    context = universe_sentiment_contexts.get(ticker)
+                    if context is None or not getattr(context, "active", False):
+                        continue
+                    raw_score = float(getattr(context, "score", 0.0) or 0.0)
+                    confidence = float(getattr(context, "confidence", 0.0) or 0.0)
+                    u_sent_map[ticker] = SimpleNamespace(
+                        score=max(-1.0, min(1.0, raw_score * max(confidence, 0.2))),
+                        active=True,
+                        top_headlines=[
+                            {
+                                "title": getattr(context, "top_summary", ""),
+                                "source": "sentiment_aggregated",
+                            }
+                        ],
+                    )
 
             for ticker in universe_tickers:
                 u_tech = u_tech_map.get(ticker)
@@ -2581,6 +3410,7 @@ async def main(
                     continue
                 u_macro_score, _ = score_macro_for_ticker(ticker, macro_snap)
                 u_sent           = u_sent_map.get(ticker)
+                u_sentiment_active = bool(u_sent and getattr(u_sent, "active", False))
                 u_result         = blend_scores(
                     ticker              = ticker,
                     technical_signal    = u_tech.signal,
@@ -2593,12 +3423,15 @@ async def main(
                     },
                     sentiment_score     = u_sent.score if u_sent else 0.0,
                     technical_score_raw = getattr(u_tech, "score_raw", 0.0),
-                    skip_sentiment      = no_sentiment,
+                    skip_sentiment      = no_sentiment or not u_sentiment_active,
                     technical_candle_source_mode=getattr(u_tech, "candle_source_mode", "unknown"),
                     technical_has_reconstructed_candles=getattr(u_tech, "has_reconstructed_candles", False),
                     technical_candle_sources=getattr(u_tech, "candle_sources", ()),
                     technical_candle_source_counts=getattr(u_tech, "candle_source_counts", {}),
                 )
+                context = universe_sentiment_contexts.get(ticker)
+                if context is not None:
+                    u_result.sentiment_context = context
                 universe_results.append(u_result)
 
             n_strong = sum(
@@ -2634,6 +3467,7 @@ async def main(
                 history_frames=universe_frames,
                 asset_types=asset_types,
                 available_cash_ars=cash_ars,
+                sentiment_contexts=sentiment_contexts,
             )
             if opportunity_report.externos:
                 external_universe_tickers = [c.ticker for c in opportunity_report.externos]
@@ -2705,6 +3539,11 @@ async def main(
                 cash_before         = cash_ars,
                 portfolio_value_ars = total_ars,
                 gate                = gate_state,
+                external_buys       = _radar_buys_for_execution(
+                    opportunity_report,
+                    total_ars,
+                ),
+                blocked_buy_tickers = manual_event_blocklist,
             )
             logger.info(
                 f"ExecutionPlan: sells={_money_ars(execution_plan.gross_sell_ars)} "
@@ -2742,7 +3581,9 @@ async def main(
             )
 
     # ── 9.5 Guardar eventos del ExecutionPlan en decision_log ─────────────────
-    if execution_plan and total_ars > 0:
+    if no_persist:
+        logger.info("Paso 9.5: omitido por --no-persist; no se guarda decision_log")
+    elif execution_plan and total_ars > 0:
         logger.info(
             "Paso 9.5: guardando eventos ExecutionPlan — "
             "APPROVED/BLOCKED con source=execution_plan"
@@ -2759,6 +3600,7 @@ async def main(
                 owner_chat_id=owner_chat_id,
                 run_id=analysis_run_id,
                 run_intent=run_intent,
+                manual_market_events=manual_market_events,
             )
             logger.info(f"Eventos ExecutionPlan guardados en DB: ids={saved}")
         except Exception as e:
@@ -2795,6 +3637,12 @@ async def main(
         ic_metrics       = ic_metrics,
         execution_plan   = execution_plan,
         opportunity_report = opportunity_report,
+        portfolio_snapshot = portfolio_snapshot,
+        latest_broker_movement = latest_broker_movement,
+        radar_skipped = skip_radar,
+        no_persist = no_persist,
+        off_market_context = off_market_context,
+        manual_market_events = manual_market_events,
     )
 
     # Validación de consistencia del header vs plan (no bloquea el envío)
@@ -2827,6 +3675,16 @@ if __name__ == "__main__":
     p.add_argument("--no-llm",       action="store_true")
     p.add_argument("--no-sentiment", action="store_true")
     p.add_argument("--no-optimizer", action="store_true")
+    p.add_argument(
+        "--no-persist",
+        action="store_true",
+        help="Ejecuta el analisis sin guardar eventos en decision_log",
+    )
+    p.add_argument(
+        "--skip-radar",
+        action="store_true",
+        help="Omite el radar interno de universo dentro de /analisis para acelerar el plan de cartera",
+    )
     p.add_argument("--owner-chat-id", type=int, default=None)
     p.add_argument(
         "--run-intent",
@@ -2842,6 +3700,8 @@ if __name__ == "__main__":
         no_llm           = args.no_llm,
         no_sentiment     = args.no_sentiment,
         no_optimizer     = args.no_optimizer,
+        skip_radar       = args.skip_radar,
+        no_persist       = args.no_persist,
         owner_chat_id    = args.owner_chat_id,
         run_intent       = args.run_intent,
     ))

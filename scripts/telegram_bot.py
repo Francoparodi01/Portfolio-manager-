@@ -114,6 +114,25 @@ SETTINGS_AWAIT_PASSWORD = "await_password"
 PORTFOLIO_SYNC_PENDING_KEY = "portfolio_sync_pending"
 NO_AUTO_MENU_ACTIONS = {"settings", "settings_reconfigure"}
 
+BOT_COMMAND_SPECS: list[tuple[str, str]] = [
+    ("menu", "Abrir panel principal"),
+    ("help", "Como leer el bot"),
+    ("portfolio", "Ver cartera actual"),
+    ("analisis", "Plan de cartera"),
+    ("analisis_test", "Probar analisis sin guardar"),
+    ("analisis_full", "Vista completa sin guardar"),
+    ("analisis_debug", "Diagnostico sin guardar"),
+    ("mercado", "Contexto mercado/noticias"),
+    ("radar", "Radar compacto"),
+    ("shadow", "Tesis shadow 5/20/40"),
+    ("performance", "Performance operativa"),
+    ("ledger", "Decision Ledger"),
+    ("policy", "Arbol operativo"),
+    ("bot_vs_humano", "Bot vs humano"),
+    ("confianza", "Confianza del sistema"),
+    ("status", "Estado del sistema"),
+]
+
 ADMIN_CHAT_IDS: set[int] = {
     int(x)
     for x in os.getenv("ADMIN_CHAT_IDS", "").replace(";", ",").split(",")
@@ -541,6 +560,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("🧭 Confianza",        callback_data="confidence_audit"),
             InlineKeyboardButton("🔭 Radar",            callback_data="radar"),
+            InlineKeyboardButton("🔬 Shadow",           callback_data="shadow"),
         ],
         [
             InlineKeyboardButton("📈 Regression",       callback_data="regression"),
@@ -549,6 +569,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
     ]
     final_row = [
         InlineKeyboardButton("Decision Ledger", callback_data="decision_ledger"),
+        InlineKeyboardButton("Policy Tree", callback_data="policy_tree"),
         InlineKeyboardButton("🩺 Status", callback_data="status"),
     ]
     if _multiuser_enabled():
@@ -573,12 +594,55 @@ def menu_text() -> str:
         "📅 <b>Resumen semanal</b> — performance de la semana\n"
         "📊 <b>Performance</b> — métricas canónicas y dataset operativo\n"
         "Decision Ledger — atribución económica de decisiones y swaps\n"
+        "Policy Tree — ruta operativa de datos, señal, cartera y ejecución\n"
         "🧭 <b>Confianza</b> — auditoría operativa del sistema\n"
         "🔭 <b>Radar</b> — oportunidades operables del universo\n"
+        "🔬 <b>Shadow</b> — tesis de precio 5/20/40 sin ejecución\n"
         "📈 <b>Regression</b> — auditoría de señales y outcomes\n"
         "Bot vs Humano — compara planes aprobados contra movimientos reales\n"
         "🩺 <b>Status</b> — estado del sistema y DB\n"
         f"{settings_line}\n"
+    )
+
+
+def help_text() -> str:
+    return (
+        "📘 <b>Cómo leer Cocos Copilot</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "El bot no ejecuta órdenes. Analiza cartera, mercado y movimientos reales; "
+        "después audita si las decisiones agregaron valor.\n\n"
+        "<b>Comandos de análisis</b>\n"
+        "• <code>/analisis</code>: plan ejecutivo. Es la vista formal manual.\n"
+        "• <code>/analisis_full</code>: misma lógica con más detalle y radar; no guarda eventos.\n"
+        "• <code>/analisis_debug</code>: diagnóstico técnico; no guarda eventos.\n"
+        "• <code>/mercado</code>: macro/noticias; soporte contextual, no performance.\n"
+        "• <code>/shadow</code>: última tesis experimental 5/20/40; no ejecuta órdenes.\n"
+        "• <code>/shadow AMD</code>: detalle shadow por ticker.\n\n"
+        "<b>Score</b>\n"
+        "Número entre -1 y +1. Positivo favorece compra/aumento; negativo favorece venta/reducción. "
+        "No es probabilidad de ganar ni garantía.\n\n"
+        "<b>Capas</b>\n"
+        "• <b>Técnico</b>: precio, tendencia, momentum, medias, RSI, MACD y volatilidad.\n"
+        "• <b>Macro</b>: SP500, Dow, VIX, petróleo, tasas, dólar, CCL/MEP, Merval y riesgo país.\n"
+        "• <b>Sentiment</b>: noticias recientes agregadas por ticker/mercado. Desde 15/06 19:44 usa política "
+        "<code>event_time_v2</code>: pesa por fecha real de evento, no por hora de scoreo.\n"
+        "• <b>Riesgo</b>: concentración, drawdown, exposición y guards operativos.\n\n"
+        "<b>T / M / S</b>\n"
+        "En el análisis compacto: <code>T</code>=técnico, <code>M</code>=macro, <code>S</code>=sentiment. "
+        "Son aportes al score, no plata ganada/perdida.\n\n"
+        "<b>IC</b>\n"
+        "Information Coefficient: mide si el ranking del bot se parece al retorno posterior. "
+        "IC positivo ayuda; IC negativo pide cautela. Con muestra chica se usa como termómetro, no como sentencia.\n\n"
+        "<b>Régimen</b>\n"
+        "Resume si el sistema está en modo normal, cautela o defensivo. Puede bloquear compras aunque haya señales buenas.\n\n"
+        "<b>Optimizer</b>\n"
+        "Desde 15/06 el motor intenta correr Black-Litterman real con PyPortfolioOpt. "
+        "Si falla la librería o el problema no converge, cae a <code>FALLBACK_MAX_SHARPE</code> y lo muestra en el reporte.\n\n"
+        "<b>Performance real</b>\n"
+        "Solo entra al EV operativo cuando hay fill/movement confirmado en Cocos. "
+        "Radar, planes sin fill, pruebas y debug quedan separados para no contaminar métricas.\n\n"
+        "<b>Regla operativa</b>\n"
+        "Fuera de rueda el plan es tentativo. Se valida con precio fresco de apertura antes de actuar."
     )
 
 
@@ -752,6 +816,17 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
     inv_pct  = total_invested / total_account if total_account > 0 else 0.0
     cash_pct = cash / total_account if total_account > 0 else 0.0
 
+    if valuation_mode == "live_market_prices":
+        primary_value = total_account
+        primary_pct = ""
+        secondary_value = total_invested
+        secondary_pct = f"  ({_pct(inv_pct)})"
+    else:
+        primary_value = total_invested
+        primary_pct = f"  ({_pct(inv_pct)})"
+        secondary_value = total_account
+        secondary_pct = ""
+
     # Concentración sobre capital invertido
     max_weight = 0.0
     max_ticker = "—"
@@ -780,8 +855,8 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🕐 {ts_exact}  ·  {age_text}",
         "",
-        f"💰 {total_label} <b>{_money(total_invested)}</b>  ({_pct(inv_pct)})",
-        f"📈 {invested_label} <b>{_money(total_account)}</b>",
+        f"💰 {total_label} <b>{_money(primary_value)}</b>{primary_pct}",
+        f"📈 {invested_label} <b>{_money(secondary_value)}</b>{secondary_pct}",
         f"💵 Cash disponible <b>{_money(cash)}</b>  ({_pct(cash_pct)})",
         f"📦 {len(positions)} posiciones  ·  {conc_icon} Concentración {conc_lbl}",
     ]
@@ -834,13 +909,13 @@ async def action_weekly_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int
 
 async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     owner_args = _owner_cli_args(chat_id)
-    sync_note = await sync_operational_state(full=True)
+    sync_note = await sync_operational_state(full=False)
     report = await run_first_existing_script(
         [
-            ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--no-sentiment", *owner_args],
-            ["scripts/run_analysis.py", "--no-llm", "--no-sentiment", *owner_args],
-            ["scripts/run_analysis.py", "--no-telegram", *owner_args],
-            ["scripts/run_analysis.py", *owner_args],
+            ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--skip-radar", *owner_args],
+            ["scripts/run_analysis.py", "--no-llm", "--skip-radar", *owner_args],
+            ["scripts/run_analysis.py", "--no-telegram", "--skip-radar", *owner_args],
+            ["scripts/run_analysis.py", "--skip-radar", *owner_args],
         ],
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
@@ -850,6 +925,63 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
 # ─────────────────────────────────────────────────────────────────────────────
 # Acción: Performance
 # ─────────────────────────────────────────────────────────────────────────────
+
+async def action_analysis_test(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    owner_args = _owner_cli_args(chat_id)
+    sync_note = await sync_operational_state(full=False)
+    report = await run_first_existing_script(
+        [
+            ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--skip-radar", "--no-persist", *owner_args],
+            ["scripts/run_analysis.py", "--no-llm", "--skip-radar", "--no-persist", *owner_args],
+            ["scripts/run_analysis.py", "--no-telegram", "--skip-radar", "--no-persist", *owner_args],
+            ["scripts/run_analysis.py", "--skip-radar", "--no-persist", *owner_args],
+        ],
+        timeout=COMMAND_TIMEOUT_SECONDS,
+    )
+    await send_text(context, chat_id, sync_note + report)
+
+
+async def action_analysis_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    owner_args = _owner_cli_args(chat_id)
+    sync_note = await sync_operational_state(full=True)
+    report = await run_first_existing_script(
+        [
+            ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--no-persist", "--run-intent", "exploratory", *owner_args],
+            ["scripts/run_analysis.py", "--no-llm", "--no-persist", "--run-intent", "exploratory", *owner_args],
+            ["scripts/run_analysis.py", "--no-telegram", "--no-persist", "--run-intent", "exploratory", *owner_args],
+            ["scripts/run_analysis.py", "--no-persist", "--run-intent", "exploratory", *owner_args],
+        ],
+        timeout=COMMAND_TIMEOUT_SECONDS,
+    )
+    await send_text(context, chat_id, sync_note + report)
+
+
+async def action_analysis_debug(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    owner_args = _owner_cli_args(chat_id)
+    sync_note = await sync_operational_state(full=True)
+    report = await run_first_existing_script(
+        [
+            ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--no-persist", "--run-intent", "exploratory", *owner_args],
+            ["scripts/run_analysis.py", "--no-llm", "--no-persist", "--run-intent", "exploratory", *owner_args],
+        ],
+        timeout=COMMAND_TIMEOUT_SECONDS,
+    )
+    await send_text(context, chat_id, sync_note + report)
+
+
+async def action_market_context(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    report = await run_python_script(
+        "scripts/run_market_context.py",
+        "--no-telegram",
+        "--score-limit",
+        "40",
+        "--lookback-hours",
+        "12",
+        *_owner_cli_args(chat_id),
+        timeout=300,
+    )
+    await send_text(context, chat_id, report)
+
 
 async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     sync_note = await sync_operational_state(full=False)
@@ -890,6 +1022,20 @@ async def action_decision_ledger(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     await send_text(context, chat_id, sync_note + report)
 
 
+async def action_policy_tree(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    report = await run_python_script(
+        "scripts/run_policy_tree.py",
+        "--days",
+        "30",
+        "--limit",
+        "8",
+        "--no-telegram",
+        *_owner_cli_args(chat_id),
+        timeout=120,
+    )
+    await send_text(context, chat_id, report)
+
+
 async def action_confidence_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     report = await run_python_script(
         "scripts/run_confidence_audit.py",
@@ -923,6 +1069,21 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
     if not report:
         return "⚠️ Radar sin output."
 
+    # Preservar el bloque de catalysts manuales antes de compactar el radar.
+    event_prefix: list[str] = []
+    raw_lines = report.splitlines()
+    for idx, line in enumerate(raw_lines):
+        plain_line = re.sub(r"<[^>]+>", "", line)
+        if (
+            "Eventos/catalysts manuales activos" in plain_line
+            or "Evento manual activo" in plain_line
+        ):
+            j = idx
+            while j < len(raw_lines) and raw_lines[j].strip():
+                event_prefix.append(raw_lines[j])
+                j += 1
+            break
+
     # Sacar tags HTML simples para parsear más fácil, pero mantener texto legible.
     text = report
     text = re.sub(r"</?b>", "", text)
@@ -937,6 +1098,16 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
     universe = universe_match.group(1).strip() if universe_match else "—"
     gate = gate_match.group(1).strip() if gate_match else "—"
     vix = vix_match.group(1).strip() if vix_match else "—"
+    market_open_now = (
+        _is_business_day_now()
+        and _is_market_hours_now()
+        and _market_closed_reason_now() is None
+    )
+    market_closed = (
+        "Mercado cerrado/sin rueda" in text
+        or "Candidato para próxima rueda" in text
+        or not market_open_now
+    )
 
     # Detectar bloques por ticker: líneas tipo "━━ KKR ━━ ..."
     ticker_blocks = re.split(r"\n(?=━━\s+[A-Z0-9.-]+\s+━━)", text)
@@ -955,7 +1126,11 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
         rr = re.search(r"R/R\s*([0-9.]+)x", block)
         edge = re.search(r"Edge:\s*[🟢🟡🟠🔴]?\s*([+-]?\d+\.\d+)", block)
         sizing_ars = re.search(r"≈\s*\$([0-9.]+)\s*ARS", block)
-        action = re.search(r"🎯 Acción sugerida:\s*(.+)", block)
+        shadow = re.search(r"🔬 Shadow:\s*([A-ZÁÉÍÓÚÑ ]+)\s*—\s*(.+)", block)
+        action = re.search(
+            r"🎯 (?:Acción sugerida|Revalidación requerida):\s*(.+)",
+            block,
+        )
         compete = re.search(r"Compite con:\s*([A-Z0-9.-]+)", block)
 
         tag = "🆕"
@@ -977,6 +1152,8 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
             "edge": edge.group(1) if edge else "—",
             "ars": sizing_ars.group(1) if sizing_ars else "—",
             "action": action_text,
+            "shadow_label": shadow.group(1).strip() if shadow else "",
+            "shadow_note": shadow.group(2).strip() if shadow else "",
         })
 
     if not items:
@@ -984,14 +1161,34 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
 
     top = items[:max_items]
 
-    lines = [
-        "🔭 <b>Radar de oportunidades — compacto</b>",
+    title = (
+        "🔭 <b>Radar para próxima rueda — compacto</b>"
+        if market_closed
+        else "🔭 <b>Radar de oportunidades — compacto</b>"
+    )
+    top_title = (
+        "<b>Ideas para revalidar al abrir</b>"
+        if market_closed
+        else "<b>Top ideas</b>"
+    )
+
+    lines = []
+    if event_prefix:
+        lines.extend(event_prefix)
+        lines.append("")
+
+    lines += [
+        title,
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🔍 Universo: {universe}",
-        f"Estado operativo: <b>{gate}</b> | VIX {vix}",
+        f"Gate: <b>{gate}</b> | VIX {vix}",
+    ]
+    if market_closed:
+        lines.append("Mercado cerrado/sin rueda: ideas no ejecutables hasta revalidar apertura.")
+    lines += [
         "Nota: radar detecta ideas; no confirma ejecución ni entra al EV principal.",
         "",
-        "<b>Top ideas</b>",
+        top_title,
     ]
 
     for i, item in enumerate(top, start=1):
@@ -1003,9 +1200,14 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
         )
 
         if item["ars"] != "—":
-            lines.append(f"   💰 Sizing aprox: <b>${item['ars']} ARS</b>")
+            sizing_label = "Sizing teórico aprox" if market_closed else "Sizing aprox"
+            lines.append(f"   💰 {sizing_label}: <b>${item['ars']} ARS</b>")
 
-        lines.append(f"   🎯 {item['action']}")
+        if item["shadow_label"]:
+            lines.append(f"   🔬 Shadow: <b>{item['shadow_label']}</b> — {item['shadow_note']}")
+
+        action_prefix = "Revalidar" if market_closed else "🎯"
+        lines.append(f"   {action_prefix}: {item['action']}")
 
     lines += [
         "",
@@ -1026,13 +1228,13 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
             [
                 "scripts/run_opportunity.py",
                 "--no-telegram",
-                "--no-sentiment",
                 "--period",
                 "1y",
                 "--top",
                 "6",
                 "--min-score",
                 "0.10",
+                "--no-persist",
                 *_owner_cli_args(chat_id),
             ],
         ],
@@ -1043,11 +1245,31 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
         report = (
             "⚠️ Radar sin output.\n"
             "Runner esperado:\n"
-            "<code>scripts/run_opportunity.py --no-telegram --no-sentiment --period 1y --top 6 --min-score 0.10</code>"
+            "<code>scripts/run_opportunity.py --no-telegram --period 1y --top 6 --min-score 0.10 --no-persist</code>"
         )
     else:
         report = compact_radar_report(report, max_items=6)
 
+    await send_text(context, chat_id, report)
+
+
+async def action_shadow(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    ticker: str | None = None,
+) -> None:
+    args = [
+        "--latest-report",
+        "--telegram-format",
+        *_owner_cli_args(chat_id),
+    ]
+    if ticker:
+        args.extend(["--tickers", str(ticker).upper()])
+    report = await run_python_script(
+        "scripts/run_thesis_shadow.py",
+        *args,
+        timeout=90,
+    )
     await send_text(context, chat_id, report)
 
 
@@ -1061,11 +1283,12 @@ async def action_radar_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
             [
                 "scripts/run_opportunity.py",
                 "--no-telegram",
-                "--no-sentiment",
                 "--period",
                 "1y",
                 "--max",
                 "8",
+                "--no-persist",
+                *_owner_cli_args(chat_id),
             ],
         ],
         timeout=COMMAND_TIMEOUT_SECONDS,
@@ -1622,6 +1845,19 @@ CALLBACK_ALIASES: dict[str, str] = {
     "analisis":         "analysis",
     "run_analysis":     "analysis",
     "analisis_semanal": "analysis",
+    "analysis_test":    "analysis_test",
+    "analisis_test":    "analysis_test",
+    "run_analysis_test":"analysis_test",
+    "analysis_full":    "analysis_full",
+    "analisis_full":    "analysis_full",
+    "run_analysis_full":"analysis_full",
+    "analysis_debug":   "analysis_debug",
+    "analisis_debug":   "analysis_debug",
+    "run_analysis_debug":"analysis_debug",
+    "market_context":   "market_context",
+    "mercado":          "market_context",
+    "noticias":         "market_context",
+    "contexto":         "market_context",
     # Resumen semanal
     "weekly_summary":   "weekly_summary",
     "summary":          "weekly_summary",
@@ -1640,6 +1876,11 @@ CALLBACK_ALIASES: dict[str, str] = {
     "decision_ledger":  "decision_ledger",
     "ledger":           "decision_ledger",
     "atribucion":       "decision_ledger",
+    # Policy Tree
+    "policy_tree":      "policy_tree",
+    "policy":           "policy_tree",
+    "decision_tree":    "policy_tree",
+    "arbol":            "policy_tree",
     # Confianza operativa
     "confidence":       "confidence_audit",
     "confianza":        "confidence_audit",
@@ -1655,6 +1896,10 @@ CALLBACK_ALIASES: dict[str, str] = {
     "opportunities":    "radar",
     "opportunity_radar":"radar",
     "oportunidades":    "radar",
+    # Tesis shadow
+    "shadow":           "shadow",
+    "thesis_shadow":    "shadow",
+    "tesis":            "shadow",
     # Regression
     "regression":       "regression_audit",
     "regression_audit": "regression_audit",
@@ -1670,15 +1915,20 @@ CALLBACK_ALIASES: dict[str, str] = {
 
 ACTION_LOADING_TEXT: dict[str, str] = {
     "calibration":   "DCL: auditando decisiones y outcomes...",
+    "analysis_test": "Probando analisis sin guardar...",
+    "analysis_debug": "Generando diagnostico sin guardar...",
+    "market_context": "Revisando mercado y noticias...",
     "portfolio":     "💼 Leyendo último portfolio...",
     "analysis":      "🧠 Generando plan de cartera...",
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
     "override_audit": "Comparando planes del bot contra movimientos reales...",
     "decision_ledger": "Calculando atribución económica...",
+    "policy_tree":   "Construyendo árbol operativo...",
     "confidence_audit": "🧭 Auditando confianza del sistema...",
     "radar":         "🔭 Generando radar de oportunidades...",
     "radar_full":    "🔭 Generando radar completo...",
+    "shadow":        "🔬 Leyendo la última tesis shadow...",
     "regression_audit": "📈 Ejecutando auditoría de regresión...",
     "status":        "🩺 Verificando estado del sistema...",
     "settings":      "⚙️ Abriendo configuración...",
@@ -1690,14 +1940,20 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
     dispatch = {
         "portfolio":      action_portfolio,
         "analysis":       action_analysis,
+        "analysis_test":  action_analysis_test,
+        "analysis_full":  action_analysis_full,
+        "analysis_debug": action_analysis_debug,
+        "market_context": action_market_context,
         "weekly_summary": action_weekly_summary,
         "performance":    action_performance,
         "override_audit": action_override_audit,
         "decision_ledger": action_decision_ledger,
+        "policy_tree":    action_policy_tree,
         "confidence_audit": action_confidence_audit,
         "calibration":    action_calibration,
         "radar":          action_radar,
         "radar_full": action_radar_full,
+        "shadow":         action_shadow,
         "regression_audit": action_regression_audit,
         "status":         action_status,
         "settings":       action_settings,
@@ -1729,6 +1985,16 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await start_handler(update, context)
+
+
+async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_allowed_chat(update, context):
+        return
+    await update.message.reply_text(
+        help_text(),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def _dispatch_command(
@@ -1763,6 +2029,18 @@ async def portfolio_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 async def analysis_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "analysis")
 
+async def analysis_test_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "analysis_test")
+
+async def analysis_full_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "analysis_full")
+
+async def analysis_debug_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "analysis_debug")
+
+async def market_context_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "market_context")
+
 async def weekly_summary_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "weekly_summary")
 
@@ -1778,6 +2056,10 @@ async def decision_ledger_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> No
     await _dispatch_command(u, c, "decision_ledger")
 
 
+async def policy_tree_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "policy_tree")
+
+
 async def confidence_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "confidence_audit")
 
@@ -1787,6 +2069,30 @@ async def calibration_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def radar_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "radar")
+
+async def shadow_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    args = list(getattr(c, "args", None) or [])
+    if not args:
+        await _dispatch_command(u, c, "shadow")
+        return
+    if not await ensure_allowed_chat(u, c):
+        return
+    chat_id = u.effective_chat.id
+    ticker = re.sub(r"[^A-Za-z0-9.\-]", "", str(args[0])).upper()
+    if not ticker:
+        await send_text(c, chat_id, "Uso: <code>/shadow AMD</code>")
+        return
+    await answer_loading(u, f"🔬 Leyendo shadow de {ticker}...")
+    t0 = time.time()
+    logger.info("[BOT] action=shadow_ticker ticker=%s chat_id=%s", ticker, chat_id)
+    try:
+        await action_shadow(c, chat_id, ticker=ticker)
+        logger.info("[BOT] action=shadow_ticker OK en %.2fs", time.time() - t0)
+    except Exception as e:
+        logger.exception("[BOT] action=shadow_ticker falló")
+        await send_text(c, chat_id, f"❌ Error en <b>shadow {ticker}</b>:\n<code>{e}</code>")
+    finally:
+        await send_menu(c, chat_id)
 
 async def status_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "status")
@@ -1936,7 +2242,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not await ensure_allowed_chat(update, context):
         return
 
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest as exc:
+        if "query is too old" in str(exc).lower():
+            logger.info("[BOT] callback vencido; continúa la acción sin popup: %s", raw_action)
+        else:
+            raise
 
     if not action:
         await send_text(
@@ -2009,6 +2321,16 @@ async def bot_heartbeat_loop(_app: Application) -> None:
 
 
 async def post_init(app: Application) -> None:
+    try:
+        from telegram import BotCommand, MenuButtonCommands
+
+        commands = [BotCommand(command, description) for command, description in BOT_COMMAND_SPECS]
+        await app.bot.set_my_commands(commands)
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("[BOT] Menu nativo de Telegram configurado")
+    except Exception as exc:
+        logger.warning("[BOT] No pude configurar menu nativo de Telegram: %s", exc)
+
     app.bot_data["heartbeat_task"] = asyncio.create_task(
         bot_heartbeat_loop(app),
         name="bot_heartbeat",
@@ -2034,10 +2356,20 @@ def build_app() -> Application:
     # Comandos principales
     app.add_handler(CommandHandler("start",            start_handler))
     app.add_handler(CommandHandler("menu",             menu_handler))
+    app.add_handler(CommandHandler("help",             help_handler))
     app.add_handler(CommandHandler("portfolio",        portfolio_handler))
     app.add_handler(CommandHandler("analisis",         analysis_handler))
     app.add_handler(CommandHandler("analysis",         analysis_handler))
     app.add_handler(CommandHandler("analisis_semanal", analysis_handler))
+    app.add_handler(CommandHandler("analisis_test",    analysis_test_handler))
+    app.add_handler(CommandHandler("analysis_test",    analysis_test_handler))
+    app.add_handler(CommandHandler("analysis_full",    analysis_full_handler))
+    app.add_handler(CommandHandler("analisis_full",    analysis_full_handler))
+    app.add_handler(CommandHandler("analysis_debug",   analysis_debug_handler))
+    app.add_handler(CommandHandler("analisis_debug",   analysis_debug_handler))
+    app.add_handler(CommandHandler("mercado",          market_context_handler))
+    app.add_handler(CommandHandler("market_context",   market_context_handler))
+    app.add_handler(CommandHandler("noticias",         market_context_handler))
     app.add_handler(CommandHandler("resumen",          weekly_summary_handler))
     app.add_handler(CommandHandler("weekly_summary",   weekly_summary_handler))
     app.add_handler(CommandHandler("resumen_semanal",  weekly_summary_handler))
@@ -2045,6 +2377,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("ledger",           decision_ledger_handler))
     app.add_handler(CommandHandler("decision_ledger",  decision_ledger_handler))
     app.add_handler(CommandHandler("atribucion",       decision_ledger_handler))
+    app.add_handler(CommandHandler("policy",           policy_tree_handler))
+    app.add_handler(CommandHandler("policy_tree",      policy_tree_handler))
+    app.add_handler(CommandHandler("decision_tree",    policy_tree_handler))
+    app.add_handler(CommandHandler("arbol",            policy_tree_handler))
     app.add_handler(CommandHandler("override",         override_audit_handler))
     app.add_handler(CommandHandler("overrides",        override_audit_handler))
     app.add_handler(CommandHandler("bot_vs_humano",    override_audit_handler))
@@ -2056,6 +2392,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("dcl",              calibration_handler))
     app.add_handler(CommandHandler("radar",            radar_handler))
     app.add_handler(CommandHandler("radar_full", radar_full_handler))
+    app.add_handler(CommandHandler("shadow",           shadow_handler))
     app.add_handler(CommandHandler("regression", regression_audit_handler))
     app.add_handler(CommandHandler("regression_audit", regression_audit_handler))
     app.add_handler(CommandHandler("status",           status_handler))

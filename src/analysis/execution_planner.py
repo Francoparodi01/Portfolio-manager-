@@ -25,6 +25,7 @@ Principio MVP:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -140,6 +141,11 @@ class AssetSignal:
     macro: float
     sentiment: float
     explanation: Optional[str] = None
+    technical_regime: str = "TRANSITIONAL"
+    trend_score: float = 0.0
+    structural_break_confirmed: bool = False
+    stop_triggered: bool = False
+    overbought_momentum: bool = False
 
 
 @dataclass
@@ -196,6 +202,9 @@ class DecisionIntent:
     score: Optional[float] = None
     conviction: Optional[float] = None
     theoretical_ars: float = 0.0
+    sell_cause: Optional[str] = None
+    funding_for: dict[str, float] = field(default_factory=dict)
+    funded_by: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -351,6 +360,26 @@ def signal_label_for_render(score: Optional[float]) -> str:
     return label
 
 
+def _nearest_whole_nominals(amount_ars: float, reference_price: float) -> int:
+    if amount_ars <= 0 or reference_price <= 0:
+        return 0
+    return max(0, int(math.floor((amount_ars / reference_price) + 0.5)))
+
+
+def _affordable_whole_nominals(
+    wanted_ars: float,
+    available_ars: float,
+    reference_price: float,
+    cost_rate: float,
+) -> int:
+    if wanted_ars <= 0 or available_ars <= 0 or reference_price <= 0:
+        return 0
+    max_by_target = int(math.floor(wanted_ars / reference_price + 1e-9))
+    nominal_cost = reference_price * (1 + max(0.0, cost_rate))
+    max_by_cash = int(math.floor(available_ars / nominal_cost + 1e-9))
+    return max(0, min(max_by_target, max_by_cash))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS DE GUARDIAS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -402,6 +431,7 @@ def _sell_guard(
     w_cur: float,
     w_opt: float,
     delta: float,
+    signal: Optional[AssetSignal] = None,
 ) -> tuple[DecisionType, str, str]:
     """
     Devuelve:
@@ -415,6 +445,32 @@ def _sell_guard(
     rango, label = classify_score(score)
     high_concentration = w_cur >= MAX_WEIGHT_CONC
     hard_concentration = w_cur >= MAX_WEIGHT_HARD_CONC
+
+    strong_uptrend = bool(
+        signal is not None
+        and signal.technical_regime == "STRONG_UPTREND"
+    )
+    defensive_exit = bool(
+        signal is not None
+        and (signal.stop_triggered or signal.structural_break_confirmed)
+    )
+    clearly_negative = score is not None and score < SCORE_NEG_DEBIL_LOW
+    if strong_uptrend and defensive_exit:
+        trigger = "stop activado" if signal and signal.stop_triggered else "ruptura estructural confirmada"
+        return (
+            DecisionType.SELL_PARTIAL,
+            f"Salida defensiva: {trigger}",
+            f"régimen de tendencia fuerte invalidado por {trigger}",
+        )
+    if strong_uptrend and not defensive_exit and not clearly_negative:
+        detail = "momentum sobrecomprado implica no agregar, no vender" if (
+            signal and signal.overbought_momentum
+        ) else "la tendencia fuerte sigue estructuralmente válida"
+        return (
+            DecisionType.HOLD,
+            "Venta bloqueada por régimen de tendencia fuerte",
+            f"{detail}; SELL requiere stop, ruptura estructural o score < {SCORE_NEG_DEBIL_LOW:+.2f}",
+        )
 
     # Score no disponible: no vender salvo concentración.
     if score is None:
@@ -445,7 +501,7 @@ def _sell_guard(
             DecisionType.HOLD,
             f"Venta bloqueada: score positivo {score:+.3f}",
             f"Optimizer sugería reducir {w_cur:.1%} → {w_opt:.1%}, "
-            "pero la señal del activo es positiva y no hay concentración excesiva",
+            "pero la señal positiva domina sobre el rebalanceo; concentración queda en vigilancia",
         )
 
     # Score neutral: bloquear salvo concentración media.
@@ -543,6 +599,7 @@ def derive_decision_intents(
                 w_cur=w_cur,
                 w_opt=w_opt,
                 delta=delta,
+                signal=sig,
             )
 
             # Si el guard permitió vender, respetar liquidación completa.
@@ -563,6 +620,7 @@ def derive_decision_intents(
                     w_cur=w_cur,
                     w_opt=w_opt,
                     delta=delta,
+                    signal=sig,
                 )
 
         # ── BUY ─────────────────────────────────────────────────────────────
@@ -613,12 +671,234 @@ def derive_decision_intents(
     }
 
     intents.sort(key=lambda x: priority_order.get(x.action, 9))
+    _link_optimizer_rotations(intents, portfolio_value_ars)
     return intents
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # RECONCILIAR FONDOS → EXECUTION PLAN
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _independent_sell_amount(
+    decision: DecisionIntent,
+    portfolio_value_ars: float,
+) -> float:
+    total = max(0.0, float(decision.theoretical_ars or 0.0))
+    if decision.score is not None and decision.score < SCORE_NEU_LOW:
+        return total
+    independent_target = max(
+        float(decision.target_weight or 0.0),
+        MAX_WEIGHT_CONC,
+    )
+    independent_delta = max(
+        0.0,
+        float(decision.current_weight or 0.0) - independent_target,
+    )
+    return min(total, independent_delta * portfolio_value_ars)
+
+
+def _link_optimizer_rotations(
+    decisions: list[DecisionIntent],
+    portfolio_value_ars: float,
+) -> None:
+    """Attach conditional sell amounts to their optimizer buy destinations."""
+    for decision in decisions:
+        decision.funding_for.clear()
+        decision.funded_by.clear()
+
+    buys = sorted(
+        (
+            d for d in decisions
+            if (d.action == DecisionType.BUY or d.delta_weight > 0)
+            and float(d.theoretical_ars or 0.0) > 0
+        ),
+        key=lambda d: (
+            -(float(d.conviction) if d.conviction is not None else 0.0),
+            -(float(d.score) if d.score is not None else 0.0),
+            d.ticker,
+        ),
+    )
+    remaining_buy = {
+        d.ticker: max(0.0, float(d.theoretical_ars or 0.0)) for d in buys
+    }
+
+    sells = sorted(
+        (
+            d for d in decisions
+            if d.action in (DecisionType.SELL_FULL, DecisionType.SELL_PARTIAL)
+        ),
+        key=lambda d: (
+            float(d.score) if d.score is not None else float("inf"),
+            -float(d.current_weight or 0.0),
+            d.ticker,
+        ),
+    )
+    for sell in sells:
+        independent = _independent_sell_amount(sell, portfolio_value_ars)
+        conditional = max(0.0, float(sell.theoretical_ars or 0.0) - independent)
+        if conditional <= 1.0:
+            sell.sell_cause = (
+                "signal"
+                if sell.score is not None and sell.score < SCORE_NEU_LOW
+                else "concentration"
+            )
+            continue
+
+        sell.sell_cause = "concentration+funding" if independent > 1.0 else "funding"
+        remaining_sell = conditional
+        for buy in buys:
+            demand = remaining_buy[buy.ticker]
+            if demand <= 1.0:
+                continue
+            allocated = min(remaining_sell, demand)
+            sell.funding_for[buy.ticker] = round(allocated, 0)
+            buy.funded_by[sell.ticker] = round(allocated, 0)
+            remaining_sell -= allocated
+            remaining_buy[buy.ticker] -= allocated
+            if remaining_sell <= 1.0:
+                break
+
+
+def _reconcile_conditional_sell_amounts(
+    decisions: list[DecisionIntent],
+    *,
+    cash_before: float,
+    portfolio_value_ars: float,
+    min_trade_ars: float,
+    cost_rate: float,
+) -> list[str]:
+    """
+    Evita ventas huérfanas después de que los guards bloquean compras.
+
+    Una venta neutral/positiva puede tener dos componentes:
+      - independiente: bajar concentración hasta MAX_WEIGHT_CONC;
+      - condicional: reducir más para financiar una rotación del optimizer.
+
+    La parte condicional solo sobrevive si hay compras core ejecutables que
+    necesiten ese capital. Las ventas respaldadas por score negativo se
+    consideran independientes y no dependen de una compra destino.
+    """
+    sell_actions = {DecisionType.SELL_FULL, DecisionType.SELL_PARTIAL}
+    sell_decisions = [d for d in decisions if d.action in sell_actions]
+    if not sell_decisions or portfolio_value_ars <= 0:
+        return []
+
+    _link_optimizer_rotations(decisions, portfolio_value_ars)
+    decisions_by_ticker = {d.ticker: d for d in decisions}
+    parts: dict[str, tuple[float, float]] = {}
+    independent_gross = 0.0
+
+    for decision in sell_decisions:
+        total = max(0.0, float(decision.theoretical_ars or 0.0))
+        independent = _independent_sell_amount(decision, portfolio_value_ars)
+
+        conditional = max(0.0, total - independent)
+        parts[decision.ticker] = (independent, conditional)
+        independent_gross += independent
+
+    core_buy_cost = sum(
+        max(0.0, float(d.theoretical_ars or 0.0)) * (1 + cost_rate)
+        for d in decisions
+        if d.action == DecisionType.BUY
+        and float(d.theoretical_ars or 0.0) >= min_trade_ars
+    )
+    independent_available = max(0.0, cash_before) + independent_gross * (1 - cost_rate)
+    conditional_net_needed = max(0.0, core_buy_cost - independent_available)
+
+    # Si hace falta financiación adicional, usar primero la venta con score más
+    # débil. Esto evita liquidar una posición relativamente más fuerte antes.
+    ordered = sorted(
+        sell_decisions,
+        key=lambda d: (
+            float(d.score) if d.score is not None else float("inf"),
+            -float(d.current_weight or 0.0),
+            d.ticker,
+        ),
+    )
+    conditional_allocations: dict[str, float] = {}
+    net_per_gross = max(1e-9, 1 - cost_rate)
+    for decision in ordered:
+        _, conditional = parts[decision.ticker]
+        linked_executable = sum(
+            amount
+            for buy_ticker, amount in decision.funding_for.items()
+            if decisions_by_ticker.get(buy_ticker) is not None
+            and decisions_by_ticker[buy_ticker].action == DecisionType.BUY
+        )
+        eligible_conditional = min(conditional, linked_executable)
+        if conditional_net_needed <= 0 or eligible_conditional <= 0:
+            conditional_allocations[decision.ticker] = 0.0
+            continue
+        allocation = min(eligible_conditional, conditional_net_needed / net_per_gross)
+        conditional_allocations[decision.ticker] = allocation
+        conditional_net_needed = max(
+            0.0,
+            conditional_net_needed - allocation * net_per_gross,
+        )
+
+    warnings: list[str] = []
+    for decision in sell_decisions:
+        independent, conditional = parts[decision.ticker]
+        if conditional <= 1.0:
+            continue
+
+        allocated = conditional_allocations.get(decision.ticker, 0.0)
+        retained = min(
+            float(decision.theoretical_ars or 0.0),
+            independent + allocated,
+        )
+        raw_target = float(decision.target_weight or 0.0)
+
+        if retained < min_trade_ars:
+            decision.action = DecisionType.WATCH
+            decision.target_weight = decision.current_weight
+            decision.delta_weight = 0.0
+            decision.theoretical_ars = 0.0
+            decision.reason_primary = "Venta condicional cancelada"
+            linked = ", ".join(decision.funding_for) or "sin destino"
+            decision.reason_secondary = (
+                f"Optimizer sugería reducir hasta {raw_target:.1%} para financiar "
+                f"{linked}, pero ninguna compra vinculada quedó ejecutable"
+            )
+            warnings.append(
+                f"{decision.ticker}: venta de financiación cancelada; compra destino bloqueada"
+            )
+            continue
+
+        actual_delta = retained / portfolio_value_ars
+        actual_target = max(0.0, float(decision.current_weight or 0.0) - actual_delta)
+        decision.action = DecisionType.SELL_PARTIAL
+        decision.target_weight = round(actual_target, 4)
+        decision.delta_weight = round(-actual_delta, 4)
+        decision.theoretical_ars = round(retained, 0)
+        decision.reason_primary = (
+            f"Reducir exposición independiente: {decision.current_weight:.1%} "
+            f"→ {actual_target:.1%} ({-actual_delta:+.1%})"
+        )
+
+        trimmed = max(0.0, conditional - allocated)
+        details = [
+            f"target optimizer {raw_target:.1%}",
+            f"venta independiente ${independent:,.0f}",
+        ]
+        if allocated > 1.0:
+            details.append(f"financiación habilitada ${allocated:,.0f}")
+            active_destinations = [
+                ticker for ticker in decision.funding_for
+                if decisions_by_ticker.get(ticker) is not None
+                and decisions_by_ticker[ticker].action == DecisionType.BUY
+            ]
+            if active_destinations:
+                details.append(f"destino {', '.join(active_destinations)}")
+        if trimmed > 1.0:
+            details.append(f"financiación bloqueada ${trimmed:,.0f}")
+        decision.reason_secondary = "; ".join(details)
+        warnings.append(
+            f"{decision.ticker}: venta ajustada a ${retained:,.0f}; "
+            f"${trimmed:,.0f} dependían de compras no ejecutables"
+        )
+
+    return warnings
 
 def reconcile_funding(
     decisions: list[DecisionIntent],
@@ -631,6 +911,7 @@ def reconcile_funding(
     slippage_pct: float = SLIPPAGE_PCT,
     external_buys: Optional[list[dict]] = None,
     allow_new_entries: bool = True,
+    blocked_buy_tickers: Optional[dict[str, str]] = None,
 ) -> ExecutionPlan:
     """
     Convierte decisiones conceptuales en órdenes ejecutables con cash real.
@@ -648,8 +929,21 @@ def reconcile_funding(
     buy_orders: list[OrderIntent] = []
     blocked_orders: list[OrderIntent] = []
     pending_buys: list[str] = []
+    blocked_buy_tickers = {
+        str(ticker or "").upper().strip(): str(reason or "").strip()
+        for ticker, reason in (blocked_buy_tickers or {}).items()
+        if str(ticker or "").strip()
+    }
 
     cost_rate = fee_pct + slippage_pct
+
+    warnings.extend(_reconcile_conditional_sell_amounts(
+        decisions,
+        cash_before=cash_before,
+        portfolio_value_ars=portfolio_value_ars,
+        min_trade_ars=min_trade_ars,
+        cost_rate=cost_rate,
+    ))
 
     # ── PASO 1: Ventas ejecutables ──────────────────────────────────────────
     sell_decisions = [
@@ -659,24 +953,58 @@ def reconcile_funding(
 
     for d in sell_decisions:
         amount = d.theoretical_ars
+        pos = current_positions.get(d.ticker)
+        ref_price = pos.price if pos and pos.price > 0 else 0.0
+        held_nominals = int(math.floor(float(pos.quantity or 0.0) + 1e-9)) if pos else 0
 
-        if amount < min_trade_ars:
+        if ref_price <= 0 or held_nominals <= 0:
             warnings.append(
-                f"{d.ticker}: venta ignorada (${amount:,.0f} < mínimo ${min_trade_ars:,.0f})"
+                f"{d.ticker}: venta no ejecutable; falta precio o cantidad nominal actual"
             )
             continue
 
-        pos = current_positions.get(d.ticker)
-        ref_price = pos.price if pos and pos.price > 0 else 0.0
-        qty_est = amount / ref_price if ref_price > 0 else 0.0
+        if d.action == DecisionType.SELL_FULL:
+            nominal_qty = held_nominals
+        else:
+            nominal_qty = min(
+                held_nominals,
+                _nearest_whole_nominals(amount, ref_price),
+            )
+
+        executable_amount = nominal_qty * ref_price
+        if nominal_qty <= 0 or executable_amount < min_trade_ars:
+            warnings.append(
+                f"{d.ticker}: venta teórica ${amount:,.0f} no alcanza un nominal operable "
+                f"a ${ref_price:,.0f}"
+            )
+            continue
+
+        theoretical_amount = float(d.theoretical_ars or 0.0)
+        if d.action != DecisionType.SELL_FULL and portfolio_value_ars > 0:
+            theoretical_target = float(d.target_weight or 0.0)
+            actual_delta = executable_amount / portfolio_value_ars
+            actual_target = max(0.0, float(d.current_weight or 0.0) - actual_delta)
+            d.target_weight = round(actual_target, 4)
+            d.delta_weight = round(-actual_delta, 4)
+            d.reason_primary = (
+                f"Reducir exposición operable: vender {nominal_qty} nominal(es); "
+                f"peso estimado {d.current_weight:.1%} → {actual_target:.1%} "
+                f"(target teórico {theoretical_target:.1%})"
+            )
+
+        if abs(executable_amount - theoretical_amount) > 1:
+            warnings.append(
+                f"{d.ticker}: venta ajustada de ${theoretical_amount:,.0f} a "
+                f"{nominal_qty} nominal(es) por ${executable_amount:,.0f}"
+            )
 
         sell_orders.append(OrderIntent(
             ticker=d.ticker,
             side=OrderSide.SELL,
             action=d.action,
-            amount_ars=round(amount, 0),
-            theoretical_ars=round(d.theoretical_ars, 0),
-            quantity_est=round(qty_est, 4),
+            amount_ars=round(executable_amount, 0),
+            theoretical_ars=round(theoretical_amount, 0),
+            quantity_est=float(nominal_qty),
             reference_price=ref_price,
             reason=d.reason_primary,
             priority=0 if d.action == DecisionType.SELL_FULL else 1,
@@ -708,23 +1036,30 @@ def reconcile_funding(
 
     for d in buy_decisions:
         wanted = d.theoretical_ars
-        max_affordable = available / (1 + cost_rate) if cost_rate >= 0 else available
-        executable = min(wanted, max_affordable)
+        pos = current_positions.get(d.ticker)
+        ref_price = pos.price if pos and pos.price > 0 else 0.0
+
+        event_block_reason = blocked_buy_tickers.get(d.ticker)
+        if event_block_reason:
+            d.action = DecisionType.BLOCKED
+            d.reason_primary = "Compra bloqueada por evento/catalyst manual"
+            d.reason_secondary = event_block_reason
+            warnings.append(f"{d.ticker}: compra bloqueada por evento manual activo")
+            continue
+
+        nominal_qty = _affordable_whole_nominals(
+            wanted,
+            available,
+            ref_price,
+            cost_rate,
+        )
+        executable = nominal_qty * ref_price
 
         if executable < min_trade_ars:
             pending_buys.append(d.ticker)
             d.action = DecisionType.WATCH
 
-            if executable > 0:
-                d.reason_secondary = (
-                    f"Señal positiva, pero solo hay ${executable:,.0f} ejecutables "
-                    f"(< mínimo ${min_trade_ars:,.0f}); requiere más funding"
-                )
-                warnings.append(
-                    f"{d.ticker}: compra reducida a ${executable:,.0f} "
-                    f"(< mínimo ${min_trade_ars:,.0f}) — queda pendiente"
-                )
-            else:
+            if available <= 0:
                 d.reason_secondary = (
                     f"Señal positiva sin cash disponible; requiere venta financiadora o swap "
                     f"para habilitar los ${wanted:,.0f} teóricos"
@@ -732,6 +1067,30 @@ def reconcile_funding(
                 warnings.append(
                     f"{d.ticker}: sin cash para ejecutar compra "
                     f"(quería ${wanted:,.0f}) — queda pendiente"
+                )
+            elif ref_price <= 0:
+                d.reason_secondary = (
+                    "Señal positiva, pero falta precio actual para convertir el monto "
+                    "en nominales operables"
+                )
+                warnings.append(
+                    f"{d.ticker}: compra pendiente; falta precio actual para calcular nominales"
+                )
+            elif available >= ref_price * (1 + cost_rate):
+                d.reason_secondary = (
+                    f"Señal positiva, pero el target ${wanted:,.0f} no alcanza un nominal "
+                    f"de ${ref_price:,.0f} sin exceder el sizing"
+                )
+                warnings.append(
+                    f"{d.ticker}: target ${wanted:,.0f} menor a un nominal de ${ref_price:,.0f}"
+                )
+            elif available > 0:
+                d.reason_secondary = (
+                    f"Señal positiva, pero el cash ${available:,.0f} no alcanza un nominal "
+                    f"de ${ref_price:,.0f} más costos; requiere más funding"
+                )
+                warnings.append(
+                    f"{d.ticker}: sin funding para un nominal de ${ref_price:,.0f}"
                 )
             continue
 
@@ -744,15 +1103,15 @@ def reconcile_funding(
             action=d.action,
             amount_ars=round(executable, 0),
             theoretical_ars=round(wanted, 0),
-            quantity_est=0.0,
-            reference_price=0.0,
+            quantity_est=float(nominal_qty),
+            reference_price=ref_price,
             reason=d.reason_primary
                    + (
                        f" (parcial: ${executable:,.0f} de ${wanted:,.0f})"
                        if is_partial else ""
                    ),
             priority=2,
-            funded_by=list(sell_tickers),
+            funded_by=[ticker for ticker in d.funded_by if ticker in sell_tickers],
             partial=is_partial,
         ))
 
@@ -771,6 +1130,24 @@ def reconcile_funding(
             wanted = float(ext.get("amount_ars", 0.0) or 0.0)
             score = float(ext.get("score", 0.0) or 0.0)
             reason = ext.get("reason", "Candidato radar externo")
+            ref_price = float(ext.get("reference_price", 0.0) or 0.0)
+
+            event_block_reason = blocked_buy_tickers.get(ticker)
+            if event_block_reason:
+                warnings.append(f"{ticker} (radar): compra bloqueada por evento manual activo")
+                blocked_orders.append(OrderIntent(
+                    ticker=ticker,
+                    side=OrderSide.BUY,
+                    action=DecisionType.BLOCKED,
+                    amount_ars=0.0,
+                    theoretical_ars=round(wanted, 0),
+                    quantity_est=0.0,
+                    reference_price=ref_price,
+                    reason=event_block_reason,
+                    priority=3,
+                    funded_by=list(sell_tickers),
+                ))
+                continue
 
             if score < SCORE_BUY_MIN:
                 pending_buys.append(ticker)
@@ -779,11 +1156,26 @@ def reconcile_funding(
                 )
                 continue
 
-            max_affordable = available / (1 + cost_rate) if cost_rate >= 0 else available
-            executable = min(wanted, max_affordable)
+            nominal_qty = _affordable_whole_nominals(
+                wanted,
+                available,
+                ref_price,
+                cost_rate,
+            )
+            executable = nominal_qty * ref_price
 
             if executable < min_trade_ars:
                 pending_buys.append(ticker)
+                if ref_price <= 0:
+                    blocked_reason = "Falta precio actual para calcular nominales operables"
+                elif available < ref_price * (1 + cost_rate):
+                    blocked_reason = (
+                        f"Funding insuficiente para un nominal de ${ref_price:,.0f} más costos"
+                    )
+                else:
+                    blocked_reason = (
+                        f"Sizing ${wanted:,.0f} menor a un nominal de ${ref_price:,.0f}"
+                    )
                 blocked_orders.append(OrderIntent(
                     ticker=ticker,
                     side=OrderSide.BUY,
@@ -791,8 +1183,8 @@ def reconcile_funding(
                     amount_ars=0.0,
                     theoretical_ars=round(wanted, 0),
                     quantity_est=0.0,
-                    reference_price=0.0,
-                    reason="Sin cash disponible; requiere venta financiadora o swap",
+                    reference_price=ref_price,
+                    reason=blocked_reason,
                     priority=3,
                     funded_by=list(sell_tickers),
                 ))
@@ -807,8 +1199,8 @@ def reconcile_funding(
                 action=DecisionType.BUY,
                 amount_ars=round(executable, 0),
                 theoretical_ars=round(wanted, 0),
-                quantity_est=0.0,
-                reference_price=0.0,
+                quantity_est=float(nominal_qty),
+                reference_price=ref_price,
                 reason=reason + (" (parcial)" if is_partial else ""),
                 priority=3,
                 funded_by=list(sell_tickers),
@@ -944,6 +1336,11 @@ def build_signals_from_synthesis(results: list) -> dict[str, AssetSignal]:
             technical=round(layers.get("technical", 0.0), 4),
             macro=round(layers.get("macro", 0.0), 4),
             sentiment=round(layers.get("sentiment", 0.0), 4),
+            technical_regime=str(getattr(r, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"),
+            trend_score=round(float(getattr(r, "trend_score", 0.0) or 0.0), 4),
+            structural_break_confirmed=bool(getattr(r, "structural_break_confirmed", False)),
+            stop_triggered=bool(getattr(r, "stop_triggered", False)),
+            overbought_momentum=bool(getattr(r, "overbought_momentum", False)),
         )
 
     return out

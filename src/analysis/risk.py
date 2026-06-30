@@ -204,10 +204,27 @@ def compute_portfolio_drawdown(history) -> float:
     return (cur - peak) / peak if peak > 0 else 0.0
 
 
+def _portfolio_equity_total_for_risk(positions, total_ars, cash_ars) -> float:
+    """Normaliza el denominador de riesgo a equity total.
+
+    Compatibilidad:
+    - callers viejos podían pasar solo valor invertido en `total_ars`;
+    - callers nuevos pasan equity total en `total_ars`.
+
+    Tomamos el máximo entre el total recibido y posiciones+cash para evitar
+    duplicar cash y, a la vez, no subestimar el denominador.
+    """
+    invested = sum(float(p.get("market_value", 0) or 0) for p in positions or [])
+    cash = max(float(cash_ars or 0.0), 0.0)
+    supplied_total = max(float(total_ars or 0.0), 0.0)
+    return max(supplied_total, invested + cash)
+
+
 def build_portfolio_risk_report(positions, prices_map, total_ars, cash_ars, history, vix=None):
     drawdown  = compute_portfolio_drawdown(history)
-    total_all = total_ars + cash_ars
-    cash_pct  = cash_ars / total_all if total_all > 0 else 0.0
+    equity_total = _portfolio_equity_total_for_risk(positions, total_ars, cash_ars)
+    cash = max(float(cash_ars or 0.0), 0.0)
+    cash_pct  = cash / equity_total if equity_total > 0 else 0.0
 
     vix_m = 1.0
     if vix and vix > VIX_EXTREME:
@@ -223,7 +240,7 @@ def build_portfolio_risk_report(positions, prices_map, total_ars, cash_ars, hist
         dd_s = "OK"
 
     pr = PortfolioRisk(
-        total_value_ars=total_ars, cash_pct=cash_pct,
+        total_value_ars=equity_total, cash_pct=cash_pct,
         drawdown_current=drawdown, drawdown_status=dd_s,
         vix_level=vix, sizing_multiplier=vix_m,
     )
@@ -232,9 +249,9 @@ def build_portfolio_risk_report(positions, prices_map, total_ars, cash_ars, hist
         ticker = pos.get("ticker", "")
         prices = prices_map.get(ticker)
         mv     = float(pos.get("market_value", 0) or 0)
-        m      = compute_asset_risk(ticker, prices, mv, total_ars, vix, drawdown)
+        m      = compute_asset_risk(ticker, prices, mv, equity_total, vix, drawdown)
 
-        current_pct = mv / total_ars if total_ars > 0 else 0.0
+        current_pct = mv / equity_total if equity_total > 0 else 0.0
         delta       = m.suggested_pct_adj - current_pct
         action      = "AUMENTAR" if delta > 0.05 else "REDUCIR" if delta < -0.05 else "MANTENER"
 

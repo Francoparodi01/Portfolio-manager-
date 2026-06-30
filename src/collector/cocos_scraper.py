@@ -69,6 +69,7 @@ SELECTOR_VERSION = "v1"
 SESSION_FILE = "/app/secrets/cocos_session.json"
 
 CEDEAR_SEGMENTS = ("Top", "ETF", "Otros", "Nuevos")
+MARKET_PRICE_RE = r"(\d{1,3}(?:\.\d{3})*,\d{1,2})"
 FILL_DISCOVERY_PATHS = (
     "/activity",
     "/activities",
@@ -557,11 +558,7 @@ class CocosCapitalScraper:
                 )
                 await self._page.wait_for_load_state("domcontentloaded", timeout=60_000)
                 # Esperar al menos un assetWrapper (posición) — verificado Mar 2026
-                await self._page.wait_for_selector(
-                    "[class*='assetWrapper']",
-                    timeout=self._cfg.timeout_ms,
-                    state="visible",
-                )
+                await self._wait_for_portfolio_loaded(timeout=self._cfg.timeout_ms)
 
                 dom_hash, raw_hash = await self._check_dom_fingerprint("portfolio")
                 positions, confidence = await self._extract_positions()
@@ -607,6 +604,34 @@ class CocosCapitalScraper:
                     raise
                 await asyncio.sleep(self._cfg.retry_backoff_s * (attempt + 1))
 
+    async def _wait_for_portfolio_loaded(self, *, timeout: int) -> None:
+        """
+        Espera una cartera cargada, con o sin posiciones.
+
+        Cuando la cartera esta 100% cash, Cocos no renderiza assetWrapper.
+        En ese caso muestra Instrumentos vacio + CTA "Ir al mercado", que es
+        un estado valido y no debe tratarse como timeout.
+        """
+        await self._page.wait_for_function(
+            """
+            () => {
+                const text = document.body?.innerText || "";
+                const hasPortfolioChrome =
+                    text.includes("Tenencia valorizada") &&
+                    text.includes("Peso Argentino") &&
+                    text.includes("Instrumentos");
+                const hasPositionRows =
+                    document.querySelectorAll("[class*='assetWrapper']").length > 0;
+                const hasCashOnlyEmptyState =
+                    text.includes("Ir al mercado") &&
+                    text.includes("Dinero") &&
+                    text.includes("Total dinero");
+                return hasPortfolioChrome && (hasPositionRows || hasCashOnlyEmptyState);
+            }
+            """,
+            timeout=timeout,
+        )
+
     async def _extract_positions(self) -> tuple[list[Position], ConfidenceResult]:
         """
         Extrae posiciones usando dos estrategias:
@@ -620,6 +645,31 @@ class CocosCapitalScraper:
         rows = await self._page.query_selector_all("[class*='assetWrapper']")
         expected_positions = len(rows) if rows is not None else None
         logger.info(f"assetWrapper encontrados: {expected_positions}")
+
+        if not rows:
+            try:
+                text = await self._page.inner_text("body")
+                cash_only = (
+                    "Tenencia valorizada" in text
+                    and "Peso Argentino" in text
+                    and "Instrumentos" in text
+                    and "Ir al mercado" in text
+                )
+                if cash_only:
+                    logger.info("Portfolio cash-only detectado: 0 posiciones")
+                    checks = [
+                        ("portfolio_loaded", True, 2.0),
+                        ("parse_success", True, 3.0),
+                        ("cash_only_empty_state", True, 2.0),
+                        ("prices_positive", True, 3.0),
+                    ]
+                    return positions, ConfidenceResult.compute(
+                        checks,
+                        expected_positions=0,
+                        positions_parsed=0,
+                    )
+            except Exception as e:
+                logger.debug("No se pudo evaluar cash-only portfolio: %s", e)
 
         for row in rows:
             try:
@@ -979,7 +1029,7 @@ class CocosCapitalScraper:
                             if _re.fullmatch(r"[A-Z][A-Z0-9\.]{1,5}", word):
                                 ticker = normalize_ticker(word)
                         if price is None:
-                            m = _re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2})", line)
+                            m = _re.search(MARKET_PRICE_RE, line)
                             if m:
                                 price = parse_decimal(m.group(1))
                         m_chg = _re.search(r"([+\-]?\d+,\d+)\s*%", line)
@@ -1028,7 +1078,7 @@ class CocosCapitalScraper:
                         price = None
                         change = Decimal("0")
                         for j in range(i + 1, min(i + 8, len(lines))):
-                            m = _re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2})", lines[j])
+                            m = _re.search(MARKET_PRICE_RE, lines[j])
                             if m and price is None:
                                 price = parse_decimal(m.group(1))
                             m_chg = _re.search(r"([+\-]?\d+,\d+)\s*%", lines[j])

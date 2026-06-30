@@ -59,6 +59,8 @@ class ConfidenceResult:
 
     @property
     def parsed_ratio(self) -> Optional[float]:
+        if self.expected_positions == 0 and self.positions_parsed == 0:
+            return 1.0
         if self.expected_positions is None or self.expected_positions <= 0:
             return None
         return self.positions_parsed / self.expected_positions

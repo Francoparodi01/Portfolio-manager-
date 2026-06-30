@@ -35,6 +35,15 @@ def _fmt_price_ars(value) -> str:
     return _fmt_ars(value, digits=2)
 
 
+def _compact_event_reason(value: str, max_len: int = 190) -> str:
+    clean = " ".join(str(value or "").split())
+    if not clean:
+        return ""
+    if len(clean) <= max_len:
+        return clean
+    return clean[: max_len - 1].rstrip() + "…"
+
+
 @dataclass(frozen=True)
 class PortfolioMoveAlert:
     ticker: str
@@ -196,20 +205,24 @@ def render_live_portfolio_alert(
     total = _safe_float(live_portfolio.get("total_value_ars"))
     invested = _safe_float(live_portfolio.get("invested_ars"))
     cash = _safe_float(live_portfolio.get("cash_ars"))
-    positions = sorted(
-        live_portfolio.get("positions") or [],
-        key=lambda p: _safe_float(p.get("market_value")),
-        reverse=True,
-    )
-
+    manual_event_risk = {
+        str(ticker or "").upper(): str(reason or "")
+        for ticker, reason in dict(
+            live_portfolio.get("manual_event_risk_by_ticker") or {}
+        ).items()
+    }
     lines = tg_header("📣 Movimiento relevante en cartera", subtitle="Alerta intradía sobre valuación estimada")
 
     for alert in alerts:
         icon = "🟢" if alert.direction == "UP" else "🔴"
         lines.append(
             f"{icon} <b>{escape(alert.ticker)}</b> "
-            f"{alert.change_pct_1d:+.2%} hoy · peso {_safe_float(alert.weight_live):.1%}"
+            f"{alert.change_pct_1d:+.2%} hoy · peso {_safe_float(alert.weight_live):.1%} "
+            f"· valor {_fmt_ars(alert.market_value)} ARS"
         )
+        event_reason = _compact_event_reason(manual_event_risk.get(alert.ticker))
+        if event_reason:
+            lines.append(f"   ⚠️ EVENT_RISK activo: {escape(event_reason)}")
 
     lines += [
         "",
@@ -217,18 +230,8 @@ def render_live_portfolio_alert(
         f"📈 Invertido: <b>${invested:,.0f} ARS</b>".replace(",", "."),
         f"💵 Cash: <b>${cash:,.0f} ARS</b>".replace(",", "."),
         "",
-        tg_section("Portfolio actualizado"),
+        tg_note("Mensaje compacto: solo muestra tickers afectados. Para cartera completa usa /portfolio o el monitor."),
     ]
-
-    for position in positions:
-        ticker = escape(str(position.get("ticker", "")).upper())
-        value = _safe_float(position.get("market_value"))
-        weight = _safe_float(position.get("weight_in_portfolio"))
-        change = position.get("change_pct_1d")
-        change_txt = f" · {change:+.2%}" if change is not None else ""
-        lines.append(
-            f"• <b>{ticker}</b>: ${value:,.0f} ARS · {weight:.1%}{change_txt}".replace(",", ".")
-        )
 
     lines.append("")
     lines.append(tg_note("Valuación live estimada con market_prices; posiciones/cash desde último snapshot real. No confirma fills."))

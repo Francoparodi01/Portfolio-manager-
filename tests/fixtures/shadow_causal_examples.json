@@ -1,0 +1,132 @@
+{
+  "examples": [
+    {
+      "context_as_of": "2026-06-21T03:30:00Z",
+      "projection": {
+        "ticker": "CVX",
+        "expected_return": 0.24,
+        "probability_up": 0.80,
+        "horizon_sessions": 20,
+        "as_of_ts": "2026-06-20T20:00:00Z"
+      },
+      "macro_context": {
+        "source": "synthetic_manual_validation",
+        "sp500_chg": -0.4,
+        "vix": 24.8,
+        "wti": 92.0,
+        "wti_chg": 6.2,
+        "brent": 95.0,
+        "scenario_note": "Hypothetical oil supply shock used only to validate the audit contract."
+      },
+      "macro_news": [
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-21T03:00:00Z",
+          "headline": "Scenario: a shipping disruption adds a geopolitical risk premium to crude"
+        }
+      ],
+      "ticker_news": [
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-20T16:00:00Z",
+          "headline": "Scenario: Chevron maintains upstream output guidance despite higher crude volatility"
+        },
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-19T16:00:00Z",
+          "headline": "Scenario: refining margins weaken while upstream prices improve"
+        },
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-18T16:00:00Z",
+          "headline": "Scenario: potential sanctions changes create uncertainty for global oil flows"
+        }
+      ]
+    },
+    {
+      "context_as_of": "2026-06-21T03:30:00Z",
+      "projection": {
+        "ticker": "AMD",
+        "expected_return": 0.18,
+        "probability_up": 0.74,
+        "horizon_sessions": 20,
+        "as_of_ts": "2026-06-20T20:00:00Z"
+      },
+      "macro_context": {
+        "source": "synthetic_manual_validation",
+        "sp500_chg": 1.1,
+        "vix": 16.2,
+        "tnx": 4.35,
+        "dxy_chg": -0.2,
+        "scenario_note": "Hypothetical AI-demand and valuation scenario used only for contract validation."
+      },
+      "macro_news": [
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-21T02:50:00Z",
+          "headline": "Scenario: hyperscalers keep capital expenditure plans focused on AI infrastructure"
+        }
+      ],
+      "ticker_news": [
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-20T15:00:00Z",
+          "headline": "Scenario: AMD reports expanding accelerator demand from cloud customers"
+        },
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-19T15:00:00Z",
+          "headline": "Scenario: analysts flag valuation expansion after a prolonged semiconductor rally"
+        },
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-18T15:00:00Z",
+          "headline": "Scenario: supply constraints may delay near-term accelerator revenue recognition"
+        }
+      ]
+    },
+    {
+      "context_as_of": "2026-06-21T03:30:00Z",
+      "projection": {
+        "ticker": "YPF",
+        "expected_return": 0.21,
+        "probability_up": 0.72,
+        "horizon_sessions": 20,
+        "as_of_ts": "2026-06-20T20:00:00Z"
+      },
+      "macro_context": {
+        "source": "synthetic_manual_validation",
+        "wti": 84.0,
+        "wti_chg": 2.3,
+        "merval_chg": 3.1,
+        "ccl": 1490.0,
+        "riesgo_pais": 780,
+        "scenario_note": "Hypothetical Argentina energy scenario used only for contract validation."
+      },
+      "macro_news": [
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-21T03:10:00Z",
+          "headline": "Scenario: Argentina energy exports improve while sovereign risk remains elevated"
+        }
+      ],
+      "ticker_news": [
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-20T14:00:00Z",
+          "headline": "Scenario: YPF expands Vaca Muerta production and transport capacity"
+        },
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-19T14:00:00Z",
+          "headline": "Scenario: fuel pricing policy remains exposed to domestic political decisions"
+        },
+        {
+          "source": "manual_scenario",
+          "published_at": "2026-06-18T14:00:00Z",
+          "headline": "Scenario: peso volatility increases the gap between local and ADR returns"
+        }
+      ]
+    }
+  ]
+}

@@ -390,4 +390,3 @@ No debe convertirse automáticamente en compra. Primero debe demostrar que:
 | Análisis | `scripts/run_analysis.py`, `src/analysis/synthesis.py`, `src/analysis/optimizer.py`, `src/analysis/execution_planner.py` |
 | Radar | `scripts/run_opportunity.py`, `src/analysis/opportunity_screener.py` |
 | Shadow | `scripts/run_thesis_shadow.py`, `src/analysis/thesis_shadow.py`, `src/analysis/thesis_shadow_store.py` |
-

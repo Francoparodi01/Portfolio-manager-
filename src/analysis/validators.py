@@ -101,7 +101,23 @@ def validate_execution_plan(plan: ExecutionPlan) -> None:
                 f"{o.ticker}: está en buy_orders pero tiene decisión SELL_FULL"
             )
 
-    # 8. Un ticker con target_weight=0 no puede tener action=HOLD en decisions
+    # 8. Toda orden ejecutable debe representar nominales enteros y un monto real.
+    for o in plan.sell_orders + plan.buy_orders:
+        quantity = float(o.quantity_est or 0.0)
+        price = float(o.reference_price or 0.0)
+        if quantity < 1 or abs(quantity - round(quantity)) > 1e-9:
+            errors.append(
+                f"{o.ticker}: cantidad no operable {quantity}; se requieren nominales enteros"
+            )
+        if price <= 0:
+            errors.append(f"{o.ticker}: orden ejecutable sin precio de referencia")
+        elif abs(o.amount_ars - quantity * price) > 1:
+            errors.append(
+                f"{o.ticker}: monto ${o.amount_ars:,.0f} no coincide con "
+                f"{quantity:.0f} nominal(es) × ${price:,.0f}"
+            )
+
+    # 9. Un ticker con target_weight=0 no puede tener action=HOLD en decisions
     for d in plan.decisions:
         if d.target_weight <= 0.005 and d.current_weight > 0.005 and d.action == DecisionType.HOLD:
             errors.append(

@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.analysis.trend_regime import TrendRegime, assess_trend
+
 try:
     import pandas as pd
     import numpy as np
@@ -66,21 +68,44 @@ class Signal:
     has_reconstructed_candles: bool = False
     candle_sources: tuple[str, ...] = field(default_factory=tuple)
     candle_source_counts: dict[str, int] = field(default_factory=dict)
+    technical_regime: str = TrendRegime.TRANSITIONAL.value
+    trend_score: float = 0.0
+    trend_components: dict[str, float] = field(default_factory=dict)
+    structural_break_confirmed: bool = False
+    overbought_momentum: bool = False
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_telegram(self) -> str:
         icon = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(self.signal, "⚪")
         bar  = "█" * int(self.strength * 5) + "░" * (5 - int(self.strength * 5))
+        if self.signal == "HOLD":
+            signal_metric = (
+                f"Neutralidad: {bar} {self.strength:.0%}  |  "
+                f"Sesgo técnico: {self.score_raw:+.2f}"
+            )
+        else:
+            signal_metric = (
+                f"Fuerza: {bar} {self.strength:.0%}  |  "
+                f"Score técnico: {self.score_raw:+.2f}"
+            )
         reasons_txt = "\n".join(f"  • {r}" for r in self.reasons)
+        regime_note = ""
+        if (
+            self.technical_regime == TrendRegime.STRONG_UPTREND.value
+            and self.overbought_momentum
+        ):
+            regime_note = "\n  • Régimen fuerte: sobrecompra implica no agregar; no es SELL operativo por sí sola."
         source_txt = _format_candle_source_label(
             self.candle_source_mode,
             self.candle_source_counts,
         )
         return (
             f"{icon} <b>{self.ticker}</b> — <b>{self.signal}</b>\n"
-            f"Precio: <b>${self.price_usd:.2f}</b>  |  Fuerza: {bar} {self.strength:.0%}\n"
+            f"Precio: <b>${self.price_usd:.2f}</b>  |  {signal_metric}\n"
+            f"Régimen: <b>{escape(self.technical_regime)}</b>  |  "
+            f"Trend shadow: <code>{self.trend_score:+.3f}</code>\n"
             f"Fuente técnica: <b>{source_txt}</b>\n"
-            f"{reasons_txt}"
+            f"{reasons_txt}{regime_note}"
         )
 
 
@@ -435,6 +460,7 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
         strength  = 1.0 - abs(score) / MAX_SCORE
         reasons   = (reasons_buy + reasons_sell)[:4] or ["Sin señal clara — esperar confirmación"]
 
+    trend = assess_trend(ind)
     return Signal(
         ticker=ind.ticker,
         signal=direction,
@@ -442,6 +468,11 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
         score_raw=round(score, 4),
         reasons=reasons,
         price_usd=ind.close,
+        technical_regime=trend.regime.value,
+        trend_score=trend.trend_score,
+        trend_components=trend.components,
+        structural_break_confirmed=trend.structural_break_confirmed,
+        overbought_momentum=trend.overbought_momentum,
     )
 
 
@@ -506,15 +537,72 @@ def analyze_portfolio_from_frames(frames: dict[str, "pd.DataFrame"]) -> list[Sig
     return sorted(signals, key=lambda s: (priority.get(s.signal, 3), -s.strength))
 
 
-def build_telegram_report(signals: list[Signal], total_value_ars: float) -> str:
+def _macro_is_clearly_risk_on(macro_snapshot) -> bool:
+    if macro_snapshot is None:
+        return False
+    try:
+        return (
+            float(getattr(macro_snapshot, "sp500_chg", 0.0) or 0.0) > 1.0
+            and float(getattr(macro_snapshot, "vix", 99.0) or 99.0) < 18.0
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _macro_report_lines(macro_snapshot) -> list[str]:
+    if macro_snapshot is None:
+        return []
+
+    def _fmt(value, suffix=""):
+        try:
+            return f"{float(value):.1f}{suffix}"
+        except (TypeError, ValueError):
+            return "N/A"
+
+    return [
+        "<b>Contexto macro</b>",
+        "SP500 "
+        f"{_fmt(getattr(macro_snapshot, 'sp500_chg', None), '%')} | "
+        f"VIX {_fmt(getattr(macro_snapshot, 'vix', None))} | "
+        f"WTI ${_fmt(getattr(macro_snapshot, 'wti', None))} "
+        f"({_fmt(getattr(macro_snapshot, 'wti_chg', None), '%')})",
+    ]
+
+
+def build_telegram_report(
+    signals: list[Signal],
+    total_value_ars: float,
+    *,
+    macro_snapshot=None,
+    sentiment_events: list[dict] | None = None,
+) -> str:
     """Render compacto para el scheduler diario."""
     if not signals:
         return "Análisis técnico: sin señales operativas disponibles."
     for signal in signals:
         signal.reasons = [escape(str(reason)) for reason in signal.reasons]
-    blocks = "\n\n".join(signal.to_telegram() for signal in signals)
+    risk_on = _macro_is_clearly_risk_on(macro_snapshot)
+    blocks = []
+    for signal in signals:
+        block = signal.to_telegram()
+        if signal.signal == "SELL" and risk_on:
+            block += "\n⚠️ <b>Divergencia técnico/macro:</b> SELL técnico con mercado claramente risk-on."
+        blocks.append(block)
+
+    context_lines = _macro_report_lines(macro_snapshot)
+    events = list(sentiment_events or [])[:3]
+    if events:
+        context_lines.extend(["", "<b>Eventos del día</b>"])
+        for event in events:
+            summary = escape(str(event.get("summary") or event.get("headline") or "").strip())
+            source = escape(str(event.get("source") or "contexto"))
+            if summary:
+                context_lines.append(f"• [{source}] {summary[:180]}")
+
+    context = ("\n" + "\n".join(context_lines) + "\n") if context_lines else ""
     return (
         f"<b>Análisis técnico</b>\n"
         f"Valor cartera: <b>${total_value_ars:,.0f} ARS</b>\n\n"
-        f"{blocks}"
+        f"{'\n\n'.join(blocks)}"
+        f"{context}"
     )

@@ -142,8 +142,27 @@ def _needs_open_revalidation(decided_at: datetime | None) -> bool:
     dt = decided_at or datetime.now()
     if dt.tzinfo is not None:
         dt = dt.astimezone(ART_TZ)
+    if dt.weekday() >= 5:
+        return True
     local_time = dt.time()
     return local_time >= time(17, 0) or local_time < time(10, 30)
+
+
+def is_art_business_day(value: datetime | None = None) -> bool:
+    dt = value or datetime.now(ART_TZ)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(ART_TZ)
+    return dt.weekday() < 5
+
+
+def is_regular_market_session(value: datetime | None = None) -> bool:
+    dt = value or datetime.now(ART_TZ)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(ART_TZ)
+    if not is_art_business_day(dt):
+        return False
+    local_time = dt.time()
+    return time(10, 30) <= local_time < time(17, 0)
 
 
 def classify_decision_audit_scope(

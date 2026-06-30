@@ -14,7 +14,10 @@ ARQUITECTURA NUEVA: Risk engine en SERIE antes del optimizer.
 from __future__ import annotations
 
 import logging
+import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from .macro import MacroSnapshot, score_macro_for_ticker
@@ -52,6 +55,9 @@ class OptimizationResult:
     sharpe_ratio: float
     n_assets: int
     views_used: dict[str, float] = field(default_factory=dict)
+    actual_engine: str = ""
+    engine_note: str = ""
+    cash_weight: float = 0.0
 
 
 @dataclass
@@ -96,6 +102,8 @@ class RebalanceReport:
             "━" * 38,
             f"{icon} <b>PORTFOLIO OPTIMIZER</b>",
             f"   Método: <b>{opt.method}</b>",
+            f"   Motor real: <b>{opt.actual_engine or opt.method}</b>"
+            + (f" — <i>{opt.engine_note}</i>" if opt.engine_note else ""),
             f"   Motivo: <i>{opt.method_reason}</i>",
             f"   {gate_icons.get(self.risk_gate_state, '⚪')} Risk gate: "
             f"<b>{self.risk_gate_state}</b>"
@@ -317,9 +325,9 @@ def _fetch_returns(tickers: list[str], history_frames: Optional[dict[str, object
 
 # ── Utilidades ────────────────────────────────────────────────────────────────
 
-def _portfolio_stats(weights, mu, cov):
+def _portfolio_stats(weights, mu, cov, cash_weight: float = 0.0):
     w = np.array(weights)
-    ret = float(w @ mu)
+    ret = float(w @ mu) + max(0.0, float(cash_weight)) * RF_ANNUAL
     vol = float(np.sqrt(w @ cov @ w))
     sharpe = (ret - RF_ANNUAL) / vol if vol > 1e-10 else 0.0
     return ret, vol, sharpe
@@ -390,12 +398,61 @@ def _dynamic_w_max(
 
 # ── Black-Litterman ───────────────────────────────────────────────────────────
 
+def _optimizer_diagnostic_payload(
+    *, universe, score_map, lower_bounds, upper_bounds, covariance, error=None,
+) -> dict:
+    cov_values = np.asarray(covariance, dtype=float)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "error_type": type(error).__name__ if error is not None else None,
+        "error": str(error) if error is not None else None,
+        "universe": list(universe),
+        "scores": {ticker: float(score_map.get(ticker, 0.0)) for ticker in universe},
+        "lower_bounds": {
+            ticker: float(value) for ticker, value in zip(universe, lower_bounds)
+        },
+        "upper_bounds": {
+            ticker: float(value) for ticker, value in zip(universe, upper_bounds)
+        },
+        "sum_lower_bounds": float(np.sum(lower_bounds)),
+        "sum_upper_bounds": float(np.sum(upper_bounds)),
+        "cash_floor": max(0.0, 1.0 - float(np.sum(upper_bounds))),
+        "covariance": {
+            row_ticker: {
+                col_ticker: float(cov_values[row_idx, col_idx])
+                for col_idx, col_ticker in enumerate(universe)
+            }
+            for row_idx, row_ticker in enumerate(universe)
+        },
+    }
+
+
+def _write_optimizer_diagnostic(payload: dict, path: str | Path | None = None) -> Path:
+    output = Path(path or "logs/optimizer_diagnostics_latest.json")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return output
+
+
 def _optimize_black_litterman(returns, universe, score_map, tau=TAU,
                                risk_aversion=RISK_AVERSION, w_max_arr=None):
+    lower_bounds = np.full(len(universe), W_MIN)
+    upper_bounds = (
+        w_max_arr.astype(float)
+        if w_max_arr is not None
+        else np.full(len(universe), W_MAX)
+    )
+    cov_bl = returns.cov() * 252
     try:
-        from pypfopt import BlackLittermanModel, EfficientFrontier, risk_models, expected_returns
+        import pandas as pd
+        from pypfopt import expected_returns, risk_models
+        from pypfopt.black_litterman import BlackLittermanModel
+        from pypfopt.efficient_frontier import EfficientFrontier
 
-        mu_hist = expected_returns.mean_historical_return(
+        expected_returns.mean_historical_return(
             returns, returns_data=True, compounding=True, frequency=252)
         cov_bl = risk_models.CovarianceShrinkage(
             returns, returns_data=True, frequency=252).ledoit_wolf()
@@ -408,7 +465,7 @@ def _optimize_black_litterman(returns, universe, score_map, tau=TAU,
             view_conf[ticker] = min(0.35 + abs(score) * 0.85, 0.95)
 
         bl = BlackLittermanModel(
-            cov_matrix=cov_bl, pi="market",
+            cov_matrix=cov_bl, pi="equal",
             absolute_views=viewdict,
             view_confidences=list(view_conf.values()),
             tau=tau, risk_aversion=risk_aversion,
@@ -416,22 +473,83 @@ def _optimize_black_litterman(returns, universe, score_map, tau=TAU,
         bl_returns = bl.bl_returns()
         bl_cov = bl.bl_cov()
 
-        ef = EfficientFrontier(bl_returns, bl_cov, weight_bounds=(W_MIN, W_MAX))
-        if w_max_arr is not None:
-            ef.weight_bounds = list(zip([W_MIN] * len(universe), w_max_arr.tolist()))
-        ef.max_sharpe(risk_free_rate=RF_ANNUAL)
-        cleaned = ef.clean_weights()
+        if np.any(lower_bounds > upper_bounds):
+            raise ValueError("BL bounds invalid: lower_bound > upper_bound")
+        if float(lower_bounds.sum()) > 1.0 + 1e-9:
+            raise ValueError(
+                f"BL bounds infeasible: sum(lower_bounds)={lower_bounds.sum():.4f} > 1"
+            )
 
-        weights = np.array([cleaned.get(t, W_MIN) for t in universe])
-        weights = np.clip(weights, W_MIN, w_max_arr if w_max_arr is not None else np.full(len(universe), W_MAX))
-        weights /= weights.sum()
+        cash_floor = max(0.0, 1.0 - float(upper_bounds.sum()))
+        ef_returns = bl_returns.copy()
+        ef_cov = bl_cov.copy()
+        ef_lower = lower_bounds.copy()
+        ef_upper = upper_bounds.copy()
+
+        if cash_floor > 1e-9:
+            cash_ticker = "__CASH__"
+            ef_returns = pd.concat([
+                ef_returns,
+                pd.Series({cash_ticker: RF_ANNUAL}, dtype=float),
+            ])
+            ef_cov = ef_cov.reindex(
+                index=[*universe, cash_ticker],
+                columns=[*universe, cash_ticker],
+                fill_value=0.0,
+            )
+            ef_cov.loc[cash_ticker, cash_ticker] = 1e-10
+            ef_lower = np.append(ef_lower, cash_floor)
+            ef_upper = np.append(ef_upper, cash_floor)
+            logger.info(
+                "BL caps sum %.2f%%; fixed cash %.2f%% without inflating caps",
+                upper_bounds.sum() * 100,
+                cash_floor * 100,
+            )
+
+        ef = EfficientFrontier(
+            ef_returns,
+            ef_cov,
+            weight_bounds=(ef_lower, ef_upper),
+        )
+        if w_max_arr is not None:
+            logger.info(
+                "BL bounds: %s",
+                {t: f"{lo:.0%}-{hi:.0%}" for t, lo, hi in zip(universe, lower_bounds, upper_bounds)},
+            )
+        ef.max_sharpe(risk_free_rate=RF_ANNUAL)
+        raw = dict(zip(ef.tickers, np.asarray(ef.weights, dtype=float)))
+        weights = np.array([raw.get(t, W_MIN) for t in universe], dtype=float)
+        weights = np.clip(weights, W_MIN, upper_bounds)
+        cash_weight = float(raw.get("__CASH__", 0.0))
         logger.info(f"BL weights: { {t: f'{v:.1%}' for t, v in zip(universe, weights)} }")
-        return weights
+        note = "PyPortfolioOpt BL; equal prior + score views; max_sharpe"
+        if cash_weight > 1e-9:
+            note += f"; cash {cash_weight:.1%} from caps"
+        return weights, "BLACK_LITTERMAN", note
     except Exception as e:
-        logger.warning(f"Black-Litterman falló ({e}) — usando fallback")
+        if type(e).__name__ == "OptimizationError":
+            payload = _optimizer_diagnostic_payload(
+                universe=universe,
+                score_map=score_map,
+                lower_bounds=lower_bounds,
+                upper_bounds=upper_bounds,
+                covariance=cov_bl,
+                error=e,
+            )
+            try:
+                diagnostic_path = _write_optimizer_diagnostic(payload)
+                logger.error("BL diagnostic saved to %s", diagnostic_path)
+            except Exception as diagnostic_error:
+                logger.error("Could not save BL diagnostic: %s", diagnostic_error)
+            logger.error("BL diagnostic: %s", json.dumps(payload, ensure_ascii=False))
+        logger.warning(f"Black-Litterman falló ({type(e).__name__}: {e}) — usando fallback")
         mu = returns.mean().values * 252
         cov = returns.cov().values * 252
-        return _optimize_max_sharpe_np(mu, cov, universe, w_max_arr)
+        return (
+            _optimize_max_sharpe_np(mu, cov, universe, w_max_arr),
+            "FALLBACK_MAX_SHARPE",
+            f"BL no disponible ({type(e).__name__}); fallback numpy max-sharpe",
+        )
 
 
 # ── Optimizadores numpy (fallback) ────────────────────────────────────────────
@@ -607,10 +725,12 @@ def run_optimizer(
 
         # ── PASO 6: Seleccionar método y optimizar ────────────────────────────
         method, reason = _select_method(macro_regime, vix, gate_state)
+        actual_engine = method
+        engine_note = ""
 
         if method == "BLACK_LITTERMAN":
             tau = TAU * 0.5 if macro_regime.get("market") == "risk_off" else TAU
-            raw_weights = _optimize_black_litterman(
+            raw_weights, actual_engine, engine_note = _optimize_black_litterman(
                 returns, universe, score_map, tau=tau,
                 risk_aversion=RISK_AVERSION, w_max_arr=w_max_arr,
             )
@@ -622,10 +742,13 @@ def run_optimizer(
             raw_weights = _optimize_max_sharpe_np(mu_ann, cov, universe, w_max_arr)
 
         weights_optimal = dict(zip(universe, raw_weights))
+        cash_weight = max(0.0, 1.0 - float(np.sum(raw_weights)))
 
         # ── PASO 7: Stats del portfolio óptimo ───────────────────────────────
         w_arr = np.array([weights_optimal[t] for t in universe])
-        exp_ret, exp_vol, sharpe = _portfolio_stats(w_arr, mu_ann, cov)
+        exp_ret, exp_vol, sharpe = _portfolio_stats(
+            w_arr, mu_ann, cov, cash_weight=cash_weight,
+        )
 
         opt_result = OptimizationResult(
             method=method, method_reason=reason,
@@ -635,6 +758,9 @@ def run_optimizer(
             sharpe_ratio=round(sharpe, 3),
             n_assets=n,
             views_used={t: round(score_map[t], 3) for t in universe if t in score_map},
+            actual_engine=actual_engine,
+            engine_note=engine_note,
+            cash_weight=round(cash_weight, 6),
         )
 
         # ── PASO 8: Calcular trades ───────────────────────────────────────────

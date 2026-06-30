@@ -24,6 +24,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from types import SimpleNamespace
 from typing import Optional
 
 from src.analysis.execution_planner import MIN_TRADE_ARS
@@ -211,7 +212,12 @@ class OpportunityCandidate:
     tech_score:          float = 0.0
     macro_score:         float = 0.0
     sentiment_score:     float = 0.0
+    sentiment_context:   object | None = None
     momentum_score:      float = 0.0
+    shadow_expected_return_20: float | None = None
+    shadow_probability_up_20:  float | None = None
+    shadow_action:             str = ""
+    shadow_alignment:          str = "SIN SHADOW"
     technical_candle_source_mode: str = "unknown"
     technical_has_reconstructed_candles: bool = False
     technical_candle_sources: tuple[str, ...] = field(default_factory=tuple)
@@ -225,6 +231,7 @@ class OpportunityCandidate:
     invalidation:        list[str] = field(default_factory=list)
     why_not_now:         str   = ""
     action_concreta:     str   = ""
+    cash_funding_required: bool = False
     # Competencia
     competes_with:       list[str] = field(default_factory=list)
     swap_vs:             str   = ""
@@ -829,6 +836,7 @@ def _apply_cash_constraint(
             CandidateStatus.COMPRA_HABILITADA,
         )
     ):
+        candidate.cash_funding_required = True
         candidate.status = CandidateStatus.VIGILANCIA_A
         candidate.action_concreta = "Esperar funding o evaluar swap"
         cash_reason = "sin cash ejecutable; requiere funding o swap"
@@ -842,6 +850,61 @@ def _apply_cash_constraint(
 # ══════════════════════════════════════════════════════════════════════════════
 # CAPA 4 — ENTRY ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _shadow_alignment_from_context(shadow: object | None) -> tuple[str, float | None, float | None, str]:
+    """Reader-facing shadow label for radar candidates.
+
+    Descriptive only: it must not alter status, score, ranking, sizing, or planner behavior.
+    """
+    if not shadow:
+        return "SIN SHADOW", None, None, ""
+
+    def _get(name: str, default=None):
+        if isinstance(shadow, dict):
+            return shadow.get(name, default)
+        return getattr(shadow, name, default)
+
+    try:
+        expected_20 = float(_get("expected_return_20"))
+    except (TypeError, ValueError):
+        expected_20 = None
+    try:
+        probability_20 = float(_get("probability_up_20"))
+    except (TypeError, ValueError):
+        probability_20 = None
+    action = str(_get("thesis_action", "") or "").upper()
+
+    if expected_20 is None or probability_20 is None:
+        return "SIN SHADOW", expected_20, probability_20, action
+    if action in {"EXIT_WATCH", "AVOID"} or expected_20 <= 0.0 or probability_20 <= 0.48:
+        return "SHADOW CONTRADICE", expected_20, probability_20, action
+    if (
+        action not in {"CONTEXT_REVIEW", "REVIEW", "ABSTAIN"}
+        and expected_20 >= 0.08
+        and probability_20 >= 0.60
+    ):
+        return "SHADOW CONFIRMA", expected_20, probability_20, action
+    return "SHADOW DÉBIL", expected_20, probability_20, action
+
+
+def _shadow_reader_note(candidate: OpportunityCandidate) -> str:
+    if candidate.shadow_alignment == "SHADOW CONFIRMA":
+        return (
+            f"Shadow confirma continuidad: 20r {candidate.shadow_expected_return_20:+.1%}, "
+            f"P+ {candidate.shadow_probability_up_20:.0%}"
+        )
+    if candidate.shadow_alignment == "SHADOW DÉBIL":
+        return (
+            f"Shadow débil: 20r {candidate.shadow_expected_return_20:+.1%}, "
+            f"P+ {candidate.shadow_probability_up_20:.0%}. Momentum actual; no perseguir sin pullback/catalyst."
+        )
+    if candidate.shadow_alignment == "SHADOW CONTRADICE":
+        return (
+            f"Shadow contradice: 20r {candidate.shadow_expected_return_20:+.1%}, "
+            f"P+ {candidate.shadow_probability_up_20:.0%}. Tratar como vigilancia, no entrada automática."
+        )
+    return "Sin shadow disponible para validar continuidad."
+
 
 def _build_entry_reasons(
     c: OpportunityCandidate,
@@ -959,14 +1022,17 @@ def run_opportunity_analysis(
     history_frames:      Optional[dict[str, "pd.DataFrame"]] = None,
     asset_types:          Optional[dict[str, str]] = None,
     available_cash_ars:  float = 0.0,
+    sentiment_contexts:  Optional[dict[str, object]] = None,
+    shadow_contexts:     Optional[dict[str, object]] = None,
 ) -> OpportunityReport:
     from src.analysis.technical import analyze_portfolio_from_frames
     from src.analysis.macro import score_macro_for_ticker
-    from src.analysis.sentiment import fetch_sentiment
     from src.analysis.synthesis import blend_scores
 
     portfolio_tickers = [p.get("ticker", "").upper() for p in portfolio_positions]
     portfolio_scores  = portfolio_scores or {}
+    sentiment_contexts = sentiment_contexts or {}
+    shadow_contexts = shadow_contexts or {}
     if exclude_portfolio:
         held = set(portfolio_tickers)
         universe = [ticker for ticker in universe if ticker.upper() not in held]
@@ -1042,11 +1108,24 @@ def run_opportunity_analysis(
 
     sent_map = {}
     if not no_sentiment:
+        macro_context = sentiment_contexts.get("MACRO")
         for ticker in top_tech_tickers:
-            try:
-                sent_map[ticker] = fetch_sentiment(ticker)
-            except Exception:
-                pass
+            context = sentiment_contexts.get(ticker)
+            scoring_context = context
+            if scoring_context is None or not getattr(scoring_context, "active", False):
+                if macro_context is not None and getattr(macro_context, "active", False):
+                    scoring_context = macro_context
+                else:
+                    scoring_context = None
+            if scoring_context is None:
+                continue
+            raw_score = float(getattr(scoring_context, "score", 0.0) or 0.0)
+            confidence = float(getattr(scoring_context, "confidence", 0.0) or 0.0)
+            sentiment_contexts[ticker] = scoring_context
+            sent_map[ticker] = SimpleNamespace(
+                score=max(-1.0, min(1.0, raw_score * max(confidence, 0.2))),
+                active=True,
+            )
 
     candidates = []
     for screener_m in passed:
@@ -1058,6 +1137,7 @@ def run_opportunity_analysis(
         macro_score, _ = score_macro_for_ticker(ticker, macro_snap)
         sent           = sent_map.get(ticker)
         sent_score     = sent.score if sent else 0.0
+        sentiment_active = bool(sent and getattr(sent, "active", False))
         momentum_s     = _momentum_score(screener_m)
 
         synth = blend_scores(
@@ -1073,7 +1153,7 @@ def run_opportunity_analysis(
             },
             sentiment_score     = sent_score,
             technical_score_raw = getattr(tech, "score_raw", 0.0),
-            skip_sentiment      = no_sentiment,
+            skip_sentiment      = no_sentiment or not sentiment_active,
             technical_candle_source_mode=getattr(tech, "candle_source_mode", "unknown"),
             technical_has_reconstructed_candles=getattr(tech, "has_reconstructed_candles", False),
             technical_candle_sources=getattr(tech, "candle_sources", ()),
@@ -1140,6 +1220,10 @@ def run_opportunity_analysis(
         if asym.rr_alert:
             alerts.append(asym.rr_alert)
 
+        shadow_alignment, shadow_er20, shadow_p20, shadow_action = _shadow_alignment_from_context(
+            shadow_contexts.get(ticker)
+        )
+
         cand = OpportunityCandidate(
             ticker               = ticker,
             status               = status,
@@ -1149,7 +1233,12 @@ def run_opportunity_analysis(
             tech_score           = round(float(tech_score_raw), 4),
             macro_score          = round(float(macro_score), 4),
             sentiment_score      = round(float(sent_score), 4),
+            sentiment_context    = sentiment_contexts.get(ticker),
             momentum_score       = round(float(momentum_s), 4),
+            shadow_expected_return_20 = shadow_er20,
+            shadow_probability_up_20  = shadow_p20,
+            shadow_action             = shadow_action,
+            shadow_alignment          = shadow_alignment,
             technical_candle_source_mode=getattr(tech, "candle_source_mode", "unknown"),
             technical_has_reconstructed_candles=getattr(tech, "has_reconstructed_candles", False),
             technical_candle_sources=tuple(getattr(tech, "candle_sources", ()) or ()),
@@ -1258,6 +1347,7 @@ def run_opportunity_analysis(
 def render_opportunity_report(
     report:              OpportunityReport,
     portfolio_total_ars: float = 0.0,
+    market_session_open: bool = True,
 ) -> str:
     from html import escape
 
@@ -1329,6 +1419,15 @@ def render_opportunity_report(
         symbol = {"BA.C": "BAC", "BRKB": "BRKB"}.get(raw, raw.replace(".", ""))
         return f"https://www.tradingview.com/chart/?symbol=BYMA%3A{symbol}"
 
+    def _render_action_text(c: OpportunityCandidate) -> tuple[str, str]:
+        action = str(c.action_concreta or "").strip() or "Revisar setup"
+        if market_session_open:
+            return "Acción sugerida", action
+        return (
+            "Revalidación requerida",
+            f"Revalidar al abrir: {action}. No ejecutar ahora con mercado cerrado.",
+        )
+
     def _swap_context(c: OpportunityCandidate) -> str:
         """Texto de contexto para swaps según su intensidad."""
         if not c.swap_vs or c.trade_type != TradeType.SWAP_CANDIDATE:
@@ -1369,6 +1468,8 @@ def render_opportunity_report(
     h.append(f"💵 Cash libre: <b>{_money(report.available_cash_ars)}</b>")
     if report.available_cash_ars < MIN_TRADE_ARS:
         h.append("   Sin cash ejecutable: nuevas entradas solo via funding o swap.")
+    if not market_session_open:
+        h.append("   Mercado cerrado/sin rueda: ideas para revalidar en la próxima apertura.")
     if report.vix_level:
         h.append(f"   VIX: {report.vix_level:.1f}")
     h.append("   Nota: radar detecta ideas; no cuenta como ejecución real ni entra al EV principal.")
@@ -1407,6 +1508,8 @@ def render_opportunity_report(
             f"momentum {c.momentum_score:+.3f} | sent {c.sentiment_score:+.3f}</code>"
         )
         h.append(f"Fuente técnica: <b>{escape(_technical_source_label(c))}</b>")
+        if c.shadow_alignment != "SIN SHADOW":
+            h.append(f"🔬 Shadow: <b>{escape(c.shadow_alignment)}</b> — {escape(_shadow_reader_note(c))}")
         h.append(f"Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
 
         # Contradicción técnica — nota explícita
@@ -1467,7 +1570,8 @@ def render_opportunity_report(
             elif c.vs_portfolio_note:
                 h.append(f"   → {escape(c.vs_portfolio_note)}")
 
-        h.append(f"🎯 <b>Acción sugerida:</b> {escape(c.action_concreta)}")
+        action_label, action_text = _render_action_text(c)
+        h.append(f"🎯 <b>{escape(action_label)}:</b> {escape(action_text)}")
         if c.why_not_now:
             h.append(f"   <i>Freno actual: {escape(c.why_not_now)}</i>")
         h.append("")
@@ -1486,6 +1590,8 @@ def render_opportunity_report(
             f"{rr_str} | ${c.price_usd:.2f}{edge_str}{near_tag}"
         )
         h.append(f"   Fuente técnica: <b>{escape(_technical_source_label(c))}</b>")
+        if c.shadow_alignment != "SIN SHADOW":
+            h.append(f"   🔬 Shadow: <b>{escape(c.shadow_alignment)}</b> — {escape(_shadow_reader_note(c))}")
         h.append(f"   Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
         # Contradicción técnica en compacto
         if c.tech_contradiction:
@@ -1506,17 +1612,26 @@ def render_opportunity_report(
             h.append(f"   ⏸ Por qué no entra: <i>{escape(c.why_not_now)}</i>")
         for alert in c.alerts[:1]:
             h.append(f"   ⚠️ {escape(alert)}")
-        h.append(f"   🎯 Acción: {escape(c.action_concreta)}")
+        action_label, action_text = _render_action_text(c)
+        compact_label = "Acción" if market_session_open else "Revalidar"
+        h.append(f"   🎯 {compact_label}: {escape(action_text)}")
         h.append("")
 
     # ── COMPRABLE AHORA ───────────────────────────────────────────────────────
     if report.comprable_ahora:
-        h.append(tg_section(f"🟢 Comprable ahora ({len(report.comprable_ahora)})"))
-        h.append(
-            f"<i>Cumple todos los umbrales: score ≥ {SCORE_COMPRABLE_DURO}, "
-            f"conviction ≥ {CONVICTION_COMPRABLE:.0%}, R/R ≥ {RR_COMPRABLE:.1f}x, "
-            f"edge positivo, gate NORMAL.</i>"
-        )
+        if market_session_open:
+            h.append(tg_section(f"🟢 Comprable ahora ({len(report.comprable_ahora)})"))
+            h.append(
+                f"<i>Cumple todos los umbrales: score ≥ {SCORE_COMPRABLE_DURO}, "
+                f"conviction ≥ {CONVICTION_COMPRABLE:.0%}, R/R ≥ {RR_COMPRABLE:.1f}x, "
+                f"edge positivo, gate NORMAL.</i>"
+            )
+        else:
+            h.append(tg_section(f"🟡 Candidato para próxima rueda ({len(report.comprable_ahora)})"))
+            h.append(
+                "<i>Cumple umbrales con datos disponibles, pero no es ejecutable ahora. "
+                "Revalidar precio fresco, liquidez y spread al abrir.</i>"
+            )
         h.append("")
         for c in report.comprable_ahora:
             _render_full(c)
@@ -1599,6 +1714,8 @@ def render_opportunity_report(
                 f"  <b>{c.ticker}</b>: score <code>{c.final_score:+.3f}</code> | "
                 f"{rr_str} | ${c.price_usd:.2f}"
             )
+            if c.shadow_alignment != "SIN SHADOW":
+                h.append(f"   🔬 Shadow: <b>{escape(c.shadow_alignment)}</b> — {escape(_shadow_reader_note(c))}")
             if c.asymmetry and c.asymmetry.rr_alert:
                 h.append(f"   ⚠️ {escape(c.asymmetry.rr_alert)}")
             h.append(f"   Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
