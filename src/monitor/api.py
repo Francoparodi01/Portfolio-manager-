@@ -324,7 +324,7 @@ async def security_headers_middleware(request: web.Request, handler):
         "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
         "base-uri 'none'; frame-ancestors 'none'",
     )
-    if request.path.startswith("/api/"):
+    if request.path == "/" or request.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
     return response
 
@@ -341,7 +341,15 @@ async def cors_middleware(request: web.Request, handler):
 
 
 async def index(_request: web.Request) -> web.Response:
-    return web.FileResponse(STATIC_DIR / "index.html")
+    return web.Response(
+        text=(STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+        content_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 async def auth_status(_request: web.Request) -> web.Response:
@@ -647,17 +655,110 @@ async def performance_view(request: web.Request) -> web.Response:
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         await ensure_decision_audit_scope_columns(conn)
-        summary = await conn.fetchrow("""
-            WITH real AS (
+        perf_base_cte = """
+            WITH fill_link AS (
                 SELECT
-                    COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
-                    COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
-                    COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d
-                FROM decision_log
-                WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                    decision_log_id,
+                    MIN(executed_at) AS fill_executed_at
+                FROM broker_fills
+                WHERE decision_log_id IS NOT NULL
+                GROUP BY decision_log_id
+            ),
+            perf_base AS (
+                SELECT
+                    dl.id,
+                    COALESCE(fl.fill_executed_at, dl.next_executable_at, dl.decided_at) AS effective_at,
+                    dl.decided_at,
+                    dl.ticker,
+                    dl.decision,
+                    dl.status,
+                    COALESCE(dl.metric_scope, 'debug') AS metric_scope,
+                    COALESCE(dl.run_intent, 'unknown') AS run_intent,
+                    COALESCE(dl.source, dl.layers->>'source') AS source,
+                    COALESCE(dl.layers->>'reason', dl.block_reason, '') AS reason,
+                    dl.final_score,
+                    dl.confidence,
+                    dl.outcome_basis,
+                    COALESCE(dl.is_primary_metric, FALSE) AS is_primary_metric,
+                    COALESCE(dl.executable_was_correct, dl.was_correct) AS was_correct,
+                    COALESCE(dl.executable_outcome_5d, dl.outcome_5d) AS outcome_5d,
+                    COALESCE(dl.executable_outcome_10d, dl.outcome_10d) AS outcome_10d,
+                    COALESCE(dl.executable_outcome_20d, dl.outcome_20d) AS outcome_20d,
+                    dl.next_executable_at,
+                    dl.next_executable_price,
+                    dl.decision_type,
+                    dl.signal_strength,
+                    COALESCE(dl.delta_weight::float, 0.0) AS delta_weight,
+                    CASE
+                        WHEN dl.final_score IS NOT NULL AND ABS(dl.final_score) > 0.08
+                            THEN 'SIGNAL_GENUINE'
+                        WHEN COALESCE(dl.layers->>'reason', dl.block_reason, '') ILIKE '%rebalance%'
+                          OR COALESCE(dl.layers->>'reason', dl.block_reason, '') ILIKE '%concentr%'
+                          OR ABS(COALESCE(dl.delta_weight::float, 0.0)) >= 0.05
+                            THEN 'REBALANCE'
+                        ELSE 'WEAK_MECHANICAL'
+                    END AS signal_family,
+                    CASE
+                        WHEN (dl.layers #>> '{trend_shadow,score}') ~ '^-?[0-9]+([.][0-9]+)?$'
+                            THEN (dl.layers #>> '{trend_shadow,score}')::float
+                        ELSE NULL
+                    END AS trend_shadow_score,
+                    dl.layers #>> '{trend_shadow,regime}' AS trend_shadow_regime,
+                    ca.conclusion AS causal_conclusion,
+                    ca.conclusion_reason AS causal_reason,
+                    ca.analyzed_at AS causal_analyzed_at,
+                    CASE
+                        WHEN UPPER(dl.decision) <> 'BUY' THEN 'NO_BUY'
+                        WHEN (
+                            CASE
+                                WHEN (dl.layers #>> '{trend_shadow,score}') ~ '^-?[0-9]+([.][0-9]+)?$'
+                                    THEN (dl.layers #>> '{trend_shadow,score}')::float
+                                ELSE NULL
+                            END
+                        ) >= 0.15
+                         AND ca.conclusion = 'FUNDADO'
+                            THEN 'SHADOW_CAUSAL'
+                        WHEN (
+                            CASE
+                                WHEN (dl.layers #>> '{trend_shadow,score}') ~ '^-?[0-9]+([.][0-9]+)?$'
+                                    THEN (dl.layers #>> '{trend_shadow,score}')::float
+                                ELSE NULL
+                            END
+                        ) >= 0.15
+                          OR dl.layers #>> '{trend_shadow,regime}' = 'STRONG_UPTREND'
+                            THEN 'SHADOW_ONLY'
+                        WHEN ca.conclusion = 'FUNDADO'
+                            THEN 'CAUSAL_ONLY'
+                        WHEN dl.layers #>> '{trend_shadow,score}' IS NULL AND ca.conclusion IS NULL
+                            THEN 'NO_EVIDENCE'
+                        ELSE 'UNCONFIRMED'
+                    END AS buy_confirmation
+                FROM decision_log dl
+                LEFT JOIN fill_link fl ON fl.decision_log_id = dl.id
+                LEFT JOIN LATERAL (
+                    SELECT
+                        conclusion,
+                        conclusion_reason,
+                        analyzed_at
+                    FROM shadow_thesis_causal_analysis ca
+                    WHERE UPPER(ca.ticker) = UPPER(dl.ticker)
+                      AND ca.analyzed_at <= COALESCE(fl.fill_executed_at, dl.next_executable_at, dl.decided_at)
+                    ORDER BY ca.analyzed_at DESC
+                    LIMIT 1
+                ) ca ON TRUE
+            )
+        """
+        summary = await conn.fetchrow(perf_base_cte + """
+            , real AS (
+                SELECT
+                    outcome_5d,
+                    outcome_10d,
+                    outcome_20d
+                FROM perf_base
+                WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
                   AND outcome_basis = 'canonical_cocos'
-                  AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
-                  AND COALESCE(executable_was_correct, was_correct) IS NOT NULL
+                  AND outcome_5d IS NOT NULL
+                  AND was_correct IS NOT NULL
                   AND is_primary_metric = TRUE
             )
             SELECT
@@ -672,66 +773,364 @@ async def performance_view(request: web.Request) -> web.Response:
                 MIN(outcome_5d) AS worst_5d
             FROM real
         """, days)
-        by_ticker = await conn.fetch("""
+        by_ticker = await conn.fetch(perf_base_cte + """
             SELECT
                 ticker,
                 COUNT(*) AS n,
-                AVG(COALESCE(executable_outcome_5d, outcome_5d)) AS avg_5d,
-                AVG(CASE WHEN COALESCE(executable_outcome_5d, outcome_5d) > 0 THEN 1.0 ELSE 0.0 END) AS win_rate_5d
-            FROM decision_log
-            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                AVG(outcome_5d) AS avg_5d,
+                AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) AS win_rate_5d
+            FROM perf_base
+            WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND outcome_basis = 'canonical_cocos'
-              AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
-              AND COALESCE(executable_was_correct, was_correct) IS NOT NULL
+              AND outcome_5d IS NOT NULL
+              AND was_correct IS NOT NULL
               AND is_primary_metric = TRUE
             GROUP BY ticker
             ORDER BY n DESC, avg_5d DESC
             LIMIT 12
         """, days)
-        score_points = await conn.fetch("""
+        score_points = await conn.fetch(perf_base_cte + """
             SELECT
                 decided_at,
+                effective_at,
                 ticker,
                 decision,
                 status,
-                COALESCE(metric_scope, 'debug') AS metric_scope,
-                COALESCE(run_intent, 'unknown') AS run_intent,
-                COALESCE(source, layers->>'source') AS source,
+                metric_scope,
+                run_intent,
+                source,
                 final_score,
                 confidence,
-                COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
-                COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
-                COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
+                outcome_5d,
+                outcome_10d,
+                outcome_20d,
                 next_executable_at,
                 next_executable_price
-            FROM decision_log
-            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+            FROM perf_base
+            WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND outcome_basis = 'canonical_cocos'
-              AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
+              AND outcome_5d IS NOT NULL
               AND final_score IS NOT NULL
-              AND COALESCE(metric_scope, 'debug') IN ('primary', 'planner_audit')
-            ORDER BY decided_at DESC
+              AND metric_scope IN ('primary', 'planner_audit')
+            ORDER BY effective_at DESC, decided_at DESC
             LIMIT 160
         """, days)
-        status_counts = await conn.fetch("""
+        status_counts = await conn.fetch(perf_base_cte + """
             SELECT
-                COALESCE(metric_scope, 'debug') AS metric_scope,
-                COALESCE(source, layers->>'source', 'sin_source') AS source,
+                metric_scope,
+                COALESCE(source, 'sin_source') AS source,
                 COALESCE(status, 'UNKNOWN') AS status,
                 COUNT(*) AS n,
-                COUNT(COALESCE(executable_outcome_5d, outcome_5d)) FILTER (WHERE outcome_basis = 'canonical_cocos') AS closed_5d
-            FROM decision_log
-            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                COUNT(outcome_5d) FILTER (WHERE outcome_basis = 'canonical_cocos') AS closed_5d
+            FROM perf_base
+            WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
             GROUP BY 1, 2, 3
             ORDER BY n DESC
             LIMIT 16
         """, days)
+        window_counts = await conn.fetchrow(perf_base_cte + """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                ) AS closed_any_5d,
+                COUNT(*) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                      AND is_primary_metric = TRUE
+                ) AS closed_primary_5d,
+                COUNT(*) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                      AND is_primary_metric = FALSE
+                ) AS closed_audit_5d,
+                COUNT(*) FILTER (
+                    WHERE outcome_5d IS NULL
+                      AND is_primary_metric = TRUE
+                ) AS pending_primary_5d
+            FROM perf_base
+            WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+        """, days)
+        bot_prediction_summary = await conn.fetchrow(perf_base_cte + """
+            , bot AS (
+                SELECT
+                    *,
+                    outcome_5d AS directional_5d
+                FROM perf_base
+                WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND source = 'execution_plan'
+                  AND metric_scope IN ('planner_audit', 'primary')
+                  AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
+            )
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                ) AS closed_5d,
+                COUNT(*) FILTER (WHERE outcome_5d IS NULL) AS pending_5d,
+                AVG(CASE
+                    WHEN COALESCE(was_correct, directional_5d > 0) THEN 1.0
+                    ELSE 0.0
+                END) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                      AND directional_5d IS NOT NULL
+                ) AS win_rate_5d,
+                AVG(directional_5d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                ) AS avg_directional_5d,
+                MAX(directional_5d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                ) AS best_directional_5d,
+                MIN(directional_5d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                ) AS worst_directional_5d
+            FROM bot
+        """, days)
+        bot_direction_breakdown = await conn.fetch(perf_base_cte + """
+            , bot AS (
+                SELECT *
+                FROM perf_base
+                WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND source = 'execution_plan'
+                  AND metric_scope IN ('planner_audit', 'primary')
+                  AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
+            ),
+            agg AS (
+                SELECT
+                    decision,
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d IS NOT NULL
+                    ) AS closed_5d,
+                    COUNT(*) FILTER (WHERE outcome_5d IS NULL) AS pending_5d,
+                    AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d IS NOT NULL
+                    ) AS win_rate_5d,
+                    AVG(outcome_5d) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d IS NOT NULL
+                    ) AS avg_5d,
+                    AVG(outcome_5d) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d > 0
+                    ) AS avg_win_5d,
+                    AVG(outcome_5d) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d < 0
+                    ) AS avg_loss_5d,
+                    MAX(outcome_5d) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d IS NOT NULL
+                    ) AS best_5d,
+                    MIN(outcome_5d) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d IS NOT NULL
+                    ) AS worst_5d
+                FROM bot
+                GROUP BY decision
+            )
+            SELECT
+                *,
+                CASE
+                    WHEN avg_loss_5d IS NOT NULL AND avg_loss_5d < 0
+                        THEN avg_win_5d / ABS(avg_loss_5d)
+                    ELSE NULL
+                END AS payoff_ratio
+            FROM agg
+            ORDER BY decision
+        """, days)
+        bot_signal_breakdown = await conn.fetch(perf_base_cte + """
+            , bot AS (
+                SELECT *
+                FROM perf_base
+                WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND source = 'execution_plan'
+                  AND metric_scope IN ('planner_audit', 'primary')
+                  AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
+            ),
+            agg AS (
+                SELECT
+                    signal_family,
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d IS NOT NULL
+                    ) AS closed_5d,
+                    COUNT(*) FILTER (WHERE outcome_5d IS NULL) AS pending_5d,
+                    AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d IS NOT NULL
+                    ) AS win_rate_5d,
+                    AVG(outcome_5d) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d IS NOT NULL
+                    ) AS avg_5d,
+                    AVG(outcome_5d) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d > 0
+                    ) AS avg_win_5d,
+                    AVG(outcome_5d) FILTER (
+                        WHERE outcome_basis = 'canonical_cocos'
+                          AND outcome_5d < 0
+                    ) AS avg_loss_5d
+                FROM bot
+                GROUP BY signal_family
+            )
+            SELECT
+                *,
+                CASE
+                    WHEN avg_loss_5d IS NOT NULL AND avg_loss_5d < 0
+                        THEN avg_win_5d / ABS(avg_loss_5d)
+                    ELSE NULL
+                END AS payoff_ratio
+            FROM agg
+            ORDER BY closed_5d DESC, total DESC, signal_family
+        """, days)
+        source_breakdown = await conn.fetch(perf_base_cte + """
+            SELECT
+                COALESCE(source, 'sin_source') AS source,
+                metric_scope,
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                      AND was_correct IS NOT NULL
+                ) AS closed_5d,
+                AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                      AND was_correct IS NOT NULL
+                ) AS win_rate_5d,
+                AVG(outcome_5d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                      AND was_correct IS NOT NULL
+                ) AS avg_5d,
+                MIN(outcome_5d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                      AND was_correct IS NOT NULL
+                ) AS worst_5d,
+                MAX(outcome_5d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                      AND was_correct IS NOT NULL
+                ) AS best_5d
+            FROM perf_base
+            WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+            GROUP BY source, metric_scope
+            HAVING COUNT(*) > 0
+            ORDER BY closed_5d DESC, total DESC, source, metric_scope
+            LIMIT 12
+        """, days)
+        buy_confirmation_breakdown = await conn.fetch(perf_base_cte + """
+            , bot_buy AS (
+                SELECT *
+                FROM perf_base
+                WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND source = 'execution_plan'
+                  AND metric_scope IN ('planner_audit', 'primary')
+                  AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
+                  AND decision = 'BUY'
+            )
+            SELECT
+                buy_confirmation,
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                ) AS closed_5d,
+                COUNT(*) FILTER (WHERE outcome_5d IS NULL) AS pending_5d,
+                AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                ) AS win_rate_5d,
+                AVG(outcome_5d) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                      AND outcome_5d IS NOT NULL
+                ) AS avg_5d,
+                AVG(trend_shadow_score) AS avg_shadow_score,
+                COUNT(*) FILTER (WHERE causal_conclusion = 'FUNDADO') AS causal_founded,
+                COUNT(*) FILTER (WHERE causal_conclusion = 'ESPECULATIVO') AS causal_speculative,
+                COUNT(*) FILTER (WHERE causal_conclusion = 'MIXTO') AS causal_mixed
+            FROM bot_buy
+            GROUP BY buy_confirmation
+            ORDER BY closed_5d DESC, total DESC, buy_confirmation
+        """, days)
+        evitable_loss = await conn.fetchrow(perf_base_cte + """
+            , strong_negative_sell AS (
+                SELECT *
+                FROM perf_base
+                WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND source = 'execution_plan'
+                  AND metric_scope IN ('planner_audit', 'primary')
+                  AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
+                  AND decision = 'SELL'
+                  AND final_score < -0.08
+                  AND outcome_basis = 'canonical_cocos'
+                  AND outcome_5d IS NOT NULL
+            )
+            SELECT
+                COUNT(*) AS closed_5d,
+                COUNT(*) FILTER (WHERE outcome_5d > 0) AS correct_sells,
+                COUNT(*) FILTER (WHERE outcome_5d < 0) AS false_alarms,
+                AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) AS hit_rate,
+                AVG(outcome_5d) AS avg_directional_5d,
+                AVG(outcome_5d) FILTER (WHERE outcome_5d > 0) AS avg_avoided_loss_5d,
+                SUM(outcome_5d) FILTER (WHERE outcome_5d > 0) AS total_avoided_loss_5d,
+                AVG(outcome_5d) FILTER (WHERE outcome_5d < 0) AS avg_false_alarm_5d,
+                MIN(outcome_5d) AS worst_false_alarm_5d,
+                MAX(outcome_5d) AS best_avoided_loss_5d
+            FROM strong_negative_sell
+        """, days)
+        bot_prediction_recent = await conn.fetch(perf_base_cte + """
+            SELECT
+                decided_at,
+                effective_at,
+                ticker,
+                decision,
+                status,
+                metric_scope,
+                signal_family,
+                buy_confirmation,
+                trend_shadow_score,
+                trend_shadow_regime,
+                causal_conclusion,
+                final_score,
+                outcome_5d,
+                outcome_5d AS directional_5d,
+                CASE
+                    WHEN outcome_5d IS NULL THEN NULL
+                    ELSE COALESCE(
+                        was_correct,
+                        outcome_5d > 0
+                    )
+                END AS bot_was_right
+            FROM perf_base
+            WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND source = 'execution_plan'
+              AND metric_scope IN ('planner_audit', 'primary')
+              AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
+            ORDER BY effective_at DESC, decided_at DESC
+            LIMIT 12
+        """, days)
 
     summary_dict = _row(summary)
-    win_rate = summary_dict.get("win_rate_5d") or 0
-    avg_win = summary_dict.get("avg_win_5d") or 0
-    avg_loss = abs(summary_dict.get("avg_loss_5d") or 0)
-    summary_dict["ev_5d"] = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+    if int(summary_dict.get("closed_5d") or 0) > 0:
+        win_rate = summary_dict.get("win_rate_5d") or 0
+        avg_win = summary_dict.get("avg_win_5d") or 0
+        avg_loss = abs(summary_dict.get("avg_loss_5d") or 0)
+        summary_dict["ev_5d"] = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+    else:
+        summary_dict["ev_5d"] = None
 
     return _json({
         "ok": True,
@@ -740,6 +1139,14 @@ async def performance_view(request: web.Request) -> web.Response:
         "by_ticker": [_row(r) for r in by_ticker],
         "score_points": [_row(r) for r in score_points],
         "status_counts": [_row(r) for r in status_counts],
+        "window_counts": _row(window_counts),
+        "bot_predictions": _row(bot_prediction_summary),
+        "bot_direction_breakdown": [_row(r) for r in bot_direction_breakdown],
+        "bot_signal_breakdown": [_row(r) for r in bot_signal_breakdown],
+        "source_breakdown": [_row(r) for r in source_breakdown],
+        "buy_confirmation_breakdown": [_row(r) for r in buy_confirmation_breakdown],
+        "evitable_loss": _row(evitable_loss),
+        "bot_prediction_recent": [_row(r) for r in bot_prediction_recent],
     })
 
 
@@ -1106,6 +1513,7 @@ async def radar_audit(request: web.Request) -> web.Response:
             "avg_mfe_10d": _mean([_float(item.get("mfe_10d")) for item in items if item.get("mfe_10d") is not None]),
             "high_path_risk": high_path_risk,
         },
+        "chart_items": items,
         "recent": items[:40],
     })
 
@@ -1289,6 +1697,127 @@ async def fills(request: web.Request) -> web.Response:
     })
 
 
+async def shadow_view(request: web.Request) -> web.Response:
+    """Latest independent 5/20/40 forecasts and their matured outcomes."""
+    try:
+        owner_chat_id = int(request.query.get("owner_chat_id", "0"))
+    except (TypeError, ValueError):
+        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        schema_ready = await conn.fetchval(
+            """
+            SELECT
+                to_regclass('public.shadow_thesis_runs') IS NOT NULL
+                AND to_regclass('public.shadow_thesis_forecasts') IS NOT NULL
+                AND to_regclass('public.shadow_thesis_outcomes') IS NOT NULL
+            """
+        )
+        if not schema_ready:
+            return _json({
+                "ok": True,
+                "available": False,
+                "owner_chat_id": owner_chat_id,
+                "note": "Schema shadow no instalado",
+                "run": None,
+                "forecasts": [],
+                "metrics": [],
+            })
+
+        latest_run = await conn.fetchrow(
+            """
+            SELECT
+                run_id, owner_chat_id, captured_at, as_of_ts, model_version,
+                schema_version, universe_count, status, metadata
+            FROM shadow_thesis_runs
+            WHERE owner_chat_id = $1
+            ORDER BY as_of_ts DESC, captured_at DESC
+            LIMIT 1
+            """,
+            owner_chat_id,
+        )
+        if not latest_run:
+            return _json({
+                "ok": True,
+                "available": False,
+                "owner_chat_id": owner_chat_id,
+                "note": "Todavia no hay corridas shadow para este owner",
+                "run": None,
+                "forecasts": [],
+                "metrics": [],
+            })
+
+        forecasts = await conn.fetch(
+            """
+            SELECT
+                f.ticker,
+                f.universe_role,
+                f.as_of_ts,
+                f.horizon_sessions,
+                f.reference_price,
+                f.expected_return,
+                f.probability_up,
+                f.lower_return,
+                f.upper_return,
+                f.uncertainty,
+                f.thesis_action,
+                f.thesis_confidence,
+                f.signal_strength,
+                f.input_sessions,
+                o.target_session_ts,
+                o.outcome_price,
+                o.realized_return,
+                o.direction_correct,
+                o.absolute_error,
+                o.matured_at
+            FROM shadow_thesis_forecasts f
+            LEFT JOIN shadow_thesis_outcomes o ON o.forecast_id = f.id
+            WHERE f.run_id = $1
+            ORDER BY
+                CASE WHEN f.universe_role = 'POSITION' THEN 0 ELSE 1 END,
+                f.ticker,
+                f.horizon_sessions
+            """,
+            latest_run["run_id"],
+        )
+        metrics = await conn.fetch(
+            """
+            SELECT
+                f.horizon_sessions,
+                COUNT(o.forecast_id)::integer AS samples,
+                AVG(CASE WHEN o.direction_correct THEN 1.0 ELSE 0.0 END)
+                    AS directional_accuracy,
+                AVG(o.absolute_error) AS mean_absolute_error,
+                AVG(f.expected_return) FILTER (WHERE o.forecast_id IS NOT NULL)
+                    AS mean_expected_return,
+                AVG(o.realized_return) AS mean_realized_return
+            FROM shadow_thesis_forecasts f
+            LEFT JOIN shadow_thesis_outcomes o ON o.forecast_id = f.id
+            WHERE f.owner_chat_id = $1
+            GROUP BY f.horizon_sessions
+            ORDER BY f.horizon_sessions
+            """,
+            owner_chat_id,
+        )
+
+    return _json({
+        "ok": True,
+        "available": True,
+        "owner_chat_id": owner_chat_id,
+        "run": _row(latest_run),
+        "forecasts": [_row(row) for row in forecasts],
+        "metrics": [_row(row) for row in metrics],
+        "axis": {
+            "x": "horizon_sessions",
+            "y": "return",
+            "x_label": "Horizonte (ruedas)",
+            "y_label": "Retorno proyectado / observado",
+        },
+        "note": "Shadow es experimental y no modifica decision_log ni genera ordenes.",
+    })
+
+
 SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"bot\d+:[A-Za-z0-9_-]+", re.I), "bot***"),
     (re.compile(r"(password=)[^\s&]+", re.I), r"\1***"),
@@ -1349,6 +1878,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/override-audit", override_audit)
     app.router.add_get("/api/decision-ledger", decision_ledger)
     app.router.add_get("/api/radar-audit", radar_audit)
+    app.router.add_get("/api/shadow", shadow_view)
     app.router.add_get("/api/human-activity", human_activity)
     app.router.add_get("/api/fills", fills)
     app.router.add_get("/api/logs/recent", logs_recent)
