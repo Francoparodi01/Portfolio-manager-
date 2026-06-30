@@ -19,6 +19,7 @@ Quantia organiza ese flujo completo. Separa análisis, decisión, ejecución y a
 ```mermaid
 flowchart TD
     A["Broker / mercado / noticias"] --> B["Ingesta"]
+    Q["Eventos manuales / catalysts"] --> H["Sentiment y eventos"]
     B --> C["Normalización y calidad de datos"]
     C --> D[("PostgreSQL / TimescaleDB")]
 
@@ -57,8 +58,13 @@ flowchart TD
 | Execution planner | Convierte teoría en acciones operables: nominales enteros, cash disponible, guards y bloqueos. |
 | Radar | Busca oportunidades externas y swaps posibles contra holdings actuales. |
 | Shadow | Proyecta tendencia de precio a 5, 20 y 40 ruedas como capa experimental separada. |
+| Eventos manuales | Permite cargar catalysts conocidos, como earnings o eventos binarios, que el precio todavía no explica solo. |
 | Auditoría | Compara planes, fills reales, decisiones humanas, outcomes, edge y regresión de señales. |
 | Interfaces | Bot de Telegram para operación diaria y monitor web read-only para control del sistema. |
+
+## Escala operativa
+
+En una corrida real reciente, el radar procesó **313 tickers**, filtró **136** por screener y rankeó **84 ideas** antes de mostrar el top operativo. El scheduler ejecuta más de **10 jobs programados** por rueda hábil, incluyendo apertura, monitoreo intradía, alertas pre-cierre, scrape EOD, análisis, shadow y outcomes. La suite focalizada actual cubre **50 tests** sobre planner, cash, shadow, sentiment, eventos manuales y guards defensivos.
 
 ## Stack técnico
 
@@ -99,16 +105,14 @@ Telegram resuelve el uso rápido: portfolio, análisis, radar, shadow, performan
 
 ## Qué aprendí construyéndolo
 
-El mayor valor no estuvo en agregar más indicadores. Estuvo en diseñar contratos entre capas:
+Los bugs de producción cambiaron el diseño más que los indicadores.
 
-- qué dato entra;
-- qué módulo puede usarlo;
-- cuándo una idea es solo vigilancia;
-- cuándo una orden es operable;
-- cuándo una decisión cuenta para performance;
-- cómo auditar si el sistema realmente aportó edge.
+- Un bug en `price_at_decision` mostró que una decisión sin precio confiable contamina todos los outcomes posteriores. La solución fue tomar el precio desde la referencia de la orden cuando existe, y completar desde el fill real si la decisión llega incompleta.
+- Las ventas generadas solo por rebalanceo podían sonar como tesis bajista. Separé venta operativa, rebalanceo, vigilancia y bloqueo para que el texto no prometa una causalidad que el sistema no probó.
+- Black-Litterman puede devolver pesos teóricos agresivos o infeasible. Por eso el optimizer no decide órdenes: el execution planner vuelve a validar cash, nominales, concentración, precio fresco y guards.
+- Radar puede detectar momentum tarde. Shadow y radar audit quedaron como capas separadas para medir si una idea siguió a favor o fue ruido de corto plazo.
 
-Ese diseño cambió el proyecto. Pasó de ser un bot de señales a un sistema de decisión con trazabilidad.
+El proyecto pasó de ser un bot de señales a un sistema de decisión con trazabilidad porque cada capa tiene un contrato: qué dato acepta, qué puede decidir y cuándo debe abstenerse.
 
 ## Estado actual
 
