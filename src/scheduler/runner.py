@@ -109,6 +109,7 @@ STOP_TRIGGERED_ALERT_TTL_SECONDS = int(os.getenv("STOP_TRIGGERED_ALERT_TTL_SECON
 SENTIMENT_PIPELINE_ENABLED = os.getenv("SENTIMENT_PIPELINE_ENABLED", "true").lower() == "true"
 SENTIMENT_PIPELINE_INTERVAL_SECONDS = int(os.getenv("SENTIMENT_PIPELINE_INTERVAL_SECONDS", "900"))
 SENTIMENT_PIPELINE_SCORE_LIMIT = int(os.getenv("SENTIMENT_PIPELINE_SCORE_LIMIT", "20"))
+SENTIMENT_OLLAMA_TIMEOUT_SECONDS = float(os.getenv("SENTIMENT_OLLAMA_TIMEOUT_SECONDS", "15"))
 SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS = int(
     os.getenv("SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS", "604800")
 )
@@ -1337,6 +1338,8 @@ async def run_sentiment_pipeline_job() -> None:
         "scripts/run_sentiment_pipeline.py",
         "--score-limit",
         str(SENTIMENT_PIPELINE_SCORE_LIMIT),
+        "--timeout-seconds",
+        str(SENTIMENT_OLLAMA_TIMEOUT_SECONDS),
     ]
     logger.info("sentiment_pipeline iniciando: %s", " ".join(cmd))
     try:
