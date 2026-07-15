@@ -35,6 +35,31 @@ def _fmt_price_ars(value) -> str:
     return _fmt_ars(value, digits=2)
 
 
+def _fmt_pct(value, *, signed: bool = True, digits: int = 2) -> str:
+    if value is None:
+        return "N/A"
+    sign = "+" if signed else ""
+    return f"{_safe_float(value):{sign}.{digits}%}"
+
+
+def _price_source_label(source: str) -> str:
+    return "mercado" if source == "market_prices" else "snapshot"
+
+
+def _opening_state(day_change, covered: int, positions_count: int) -> str:
+    coverage_ratio = (covered / positions_count) if positions_count else 0.0
+    if positions_count and coverage_ratio < 0.8:
+        return "REVISION: cobertura incompleta"
+    if day_change is None:
+        return "SIN VARIACION COMPARABLE"
+    change = _safe_float(day_change)
+    if change >= 0.01:
+        return "POSITIVO"
+    if change <= -0.01:
+        return "NEGATIVO"
+    return "ESTABLE"
+
+
 def _compact_event_reason(value: str, max_len: int = 190) -> str:
     clean = " ".join(str(value or "").split())
     if not clean:
@@ -256,45 +281,65 @@ def render_opening_portfolio_report(
         key=lambda p: _safe_float(p.get("market_value")),
         reverse=True,
     )
+    state = _opening_state(day_change, covered, positions_count)
+    coverage_ratio = (covered / positions_count) if positions_count else 0.0
+    top_movers = sorted(
+        [p for p in positions if p.get("change_pct_1d") is not None],
+        key=lambda p: abs(_safe_float(p.get("change_pct_1d"))),
+        reverse=True,
+    )[:3]
 
-    lines = tg_header(title, subtitle="Primer control con precios frescos de apertura") + [
-        f"Total apertura: <b>${total:,.0f} ARS</b>".replace(",", "."),
-        f"Invertido: <b>${invested:,.0f} ARS</b>".replace(",", "."),
-        f"Cash: <b>${cash:,.0f} ARS</b>".replace(",", "."),
+    lines = tg_header(title, subtitle="Marca post-open de la cartera; no confirma operaciones") + [
+        tg_section("Lectura rapida"),
+        f"Estado: <b>{state}</b>",
         (
-            f"Variacion post-open: <b>{day_change:+.2%}</b> "
+            f"Movimiento cartera: <b>{_fmt_pct(day_change)}</b> "
             f"(<b>{_fmt_ars(day_pnl, signed=True)} ARS</b>)"
             if day_change is not None
-            else "Variacion post-open: <b>N/A</b>"
+            else "Movimiento cartera: <b>N/A</b>"
         ),
-        f"Cobertura precios: <b>{covered}/{positions_count}</b>",
+        f"Precios de mercado: <b>{covered}/{positions_count}</b> ({coverage_ratio:.0%})",
+        "",
+        tg_section("Resumen"),
+        f"Total: <b>{_fmt_ars(total)} ARS</b>",
+        f"Invertido: <b>{_fmt_ars(invested)} ARS</b>",
+        f"Cash: <b>{_fmt_ars(cash)} ARS</b>",
+    ]
+
+    if top_movers:
+        lines += ["", tg_section("Movimientos relevantes")]
+        for position in top_movers:
+            ticker = escape(str(position.get("ticker", "") or "").upper())
+            change = position.get("change_pct_1d")
+            day_pnl_pos = position.get("day_pnl_ars")
+            lines.append(
+                f"- <b>{ticker}</b>: {_fmt_pct(change)} "
+                f"({_fmt_ars(day_pnl_pos, signed=True)} ARS)"
+            )
+
+    lines += [
         "",
         tg_section("Posiciones"),
+        "Peso / dia / valor / fuente",
     ]
 
     for position in positions:
         ticker = escape(str(position.get("ticker", "") or "").upper())
         value = _safe_float(position.get("market_value"))
         weight = _safe_float(position.get("weight_in_portfolio"))
-        price = _safe_float(position.get("current_price"))
         change = position.get("change_pct_1d")
         day_pnl_pos = position.get("day_pnl_ars")
         source = str(position.get("price_source") or "snapshot")
-        change_txt = f" · {change:+.2%}" if change is not None else ""
-        pnl_txt = (
-            f" · PnL dia {_fmt_ars(day_pnl_pos, signed=True)}"
-            if day_pnl_pos is not None
-            else ""
-        )
-        source_txt = "mkt" if source == "market_prices" else "snap"
+        source_txt = _price_source_label(source)
+        pnl_txt = f" ({_fmt_ars(day_pnl_pos, signed=True)} ARS)" if day_pnl_pos is not None else ""
         lines.append(
-            f"• <b>{ticker}</b>: {_fmt_ars(value)} ARS · {weight:.1%} "
-            f"· {_fmt_price_ars(price)}{change_txt}{pnl_txt} · {source_txt}"
+            f"- <b>{ticker}</b>: {weight:.1%} | dia {_fmt_pct(change)}{pnl_txt} "
+            f"| {_fmt_ars(value)} ARS | {source_txt}"
         )
 
     lines.append("")
     warning = str(live_portfolio.get("post_open_warning") or "").strip()
     if warning:
         lines.append(f"<b>Advertencia:</b> {escape(warning)}")
-    lines.append(tg_note("Plan EOD = próxima rueda. Este reporte marca cartera post-open con precios operables; no confirma operaciones."))
+    lines.append(tg_note("Plan EOD = proxima rueda. Este reporte marca cartera post-open con precios operables; no confirma operaciones."))
     return "\n".join(lines)
