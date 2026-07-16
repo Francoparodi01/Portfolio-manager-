@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0.0",
+  "packet_type": "decision_evidence",
+  "packet_id": "de_2026-07-15_axp_reduce",
+  "run_id": "run_qwen_lab",
+  "as_of": "2026-07-15T16:50:00-03:00",
+  "timezone": "America/Argentina/Buenos_Aires",
+  "locale": "es-AR",
+  "data_completeness": "0.98",
+  "policy_version": "decision_explainer_v1",
+  "ticker": "AXP",
+  "effective_action": "rebalance",
+  "decision_scope": "rebalance",
+  "decision_type": "SELL_PARTIAL",
+  "coverage": {
+    "priced_weight_pct": "0.98",
+    "missing_tickers": []
+  },
+  "evidence_items": [
+    {
+      "kind": "numeric",
+      "fact_id": "weights.current.axp",
+      "label": "Peso actual de AXP",
+      "value": "0.366",
+      "unit": "ratio",
+      "source": "portfolio",
+      "as_of": "2026-07-15T16:50:00-03:00"
+    },
+    {
+      "kind": "numeric",
+      "fact_id": "weights.target.axp",
+      "label": "Peso objetivo de AXP",
+      "value": "0.300",
+      "unit": "ratio",
+      "source": "planner",
+      "as_of": "2026-07-15T16:50:00-03:00"
+    },
+    {
+      "kind": "constraint",
+      "fact_id": "planner.reason.overweight",
+      "code": "overweight",
+      "triggered": true,
+      "source": "planner"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0.0",
+  "packet_type": "market_report",
+  "packet_id": "mr_2026-07-15_open",
+  "run_id": "run_qwen_lab",
+  "as_of": "2026-07-15T11:00:00-03:00",
+  "timezone": "America/Argentina/Buenos_Aires",
+  "locale": "es-AR",
+  "data_completeness": "0.95",
+  "policy_version": "market_report_v1",
+  "coverage": {
+    "priced_weight_pct": "0.95",
+    "missing_tickers": []
+  },
+  "top_level_reason_codes": [
+    "portfolio_positive_open",
+    "coverage_complete"
+  ],
+  "evidence_items": [
+    {
+      "kind": "numeric",
+      "fact_id": "portfolio.total_value_ars",
+      "label": "Valor total de cartera",
+      "value": "2023053",
+      "unit": "ARS",
+      "source": "portfolio",
+      "as_of": "2026-07-15T11:00:00-03:00"
+    },
+    {
+      "kind": "numeric",
+      "fact_id": "portfolio.day_change_pct",
+      "label": "Variacion diaria de cartera",
+      "value": "0.0051",
+      "unit": "ratio",
+      "source": "portfolio",
+      "as_of": "2026-07-15T11:00:00-03:00"
+    },
+    {
+      "kind": "numeric",
+      "fact_id": "coverage.priced_weight_pct",
+      "label": "Cobertura valorizada",
+      "value": "0.95",
+      "unit": "ratio",
+      "source": "portfolio",
+      "as_of": "2026-07-15T11:00:00-03:00"
+    }
+  ]
+}

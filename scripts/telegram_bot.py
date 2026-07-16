@@ -118,6 +118,7 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("menu", "Abrir panel principal"),
     ("help", "Como leer el bot"),
     ("portfolio", "Ver cartera actual"),
+    ("ia_preview", "Preview IA read-only"),
     ("analisis", "Plan de cartera"),
     ("analisis_test", "Probar analisis sin guardar"),
     ("analisis_full", "Vista completa sin guardar"),
@@ -568,6 +569,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
         ]
     ]
     final_row = [
+        InlineKeyboardButton("IA Preview", callback_data="ia_preview"),
         InlineKeyboardButton("Decision Ledger", callback_data="decision_ledger"),
         InlineKeyboardButton("Policy Tree", callback_data="policy_tree"),
         InlineKeyboardButton("🩺 Status", callback_data="status"),
@@ -887,6 +889,18 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
     ]
 
     await send_text(context, chat_id, "\n".join(lines))
+
+
+async def action_ia_preview(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Read-only deterministic market preview. Does not call Ollama or publish trades."""
+    report = await run_python_script(
+        "scripts/run_qwen_daily_preview.py",
+        "--mode",
+        "template",
+        *_owner_cli_args(chat_id),
+        timeout=90,
+    )
+    await send_text(context, chat_id, report)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1839,6 +1853,10 @@ CALLBACK_ALIASES: dict[str, str] = {
     "portfolio":        "portfolio",
     "current_portfolio":"portfolio",
     "ver_portfolio":    "portfolio",
+    "ia_preview":       "ia_preview",
+    "ai_preview":       "ia_preview",
+    "qwen_preview":     "ia_preview",
+    "preview_ia":       "ia_preview",
     # Análisis
     "weekly_analysis":  "analysis",
     "analysis":         "analysis",
@@ -1918,6 +1936,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "analysis_test": "Probando analisis sin guardar...",
     "analysis_debug": "Generando diagnostico sin guardar...",
     "market_context": "Revisando mercado y noticias...",
+    "ia_preview":    "Generando IA Preview read-only...",
     "portfolio":     "💼 Leyendo último portfolio...",
     "analysis":      "🧠 Generando plan de cartera...",
     "weekly_summary":"📅 Generando resumen semanal...",
@@ -1939,6 +1958,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
 async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     dispatch = {
         "portfolio":      action_portfolio,
+        "ia_preview":     action_ia_preview,
         "analysis":       action_analysis,
         "analysis_test":  action_analysis_test,
         "analysis_full":  action_analysis_full,
@@ -2025,6 +2045,9 @@ async def _dispatch_command(
 
 async def portfolio_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "portfolio")
+
+async def ia_preview_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "ia_preview")
 
 async def analysis_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "analysis")
@@ -2358,6 +2381,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("menu",             menu_handler))
     app.add_handler(CommandHandler("help",             help_handler))
     app.add_handler(CommandHandler("portfolio",        portfolio_handler))
+    app.add_handler(CommandHandler("ia_preview",       ia_preview_handler))
+    app.add_handler(CommandHandler("qwen_preview",     ia_preview_handler))
     app.add_handler(CommandHandler("analisis",         analysis_handler))
     app.add_handler(CommandHandler("analysis",         analysis_handler))
     app.add_handler(CommandHandler("analisis_semanal", analysis_handler))
