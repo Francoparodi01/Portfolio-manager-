@@ -40,14 +40,10 @@ tests/*
 !tests/test_cash_only_portfolio.py
 !tests/test_offhours_sentiment_policy.py
 !tests/test_shadow_causal.py
-!tests/test_llm_narratives.py
-!tests/test_llm_packet_builder.py
 !tests/test_manual_market_events.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json
-!tests/fixtures/llm_market_report_packet.json
-!tests/fixtures/llm_decision_evidence_packet.json
 .agents/
 playwright-report/
 test-results/
