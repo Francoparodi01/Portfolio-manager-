@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import os
 import re
@@ -15,9 +16,21 @@ from aiohttp import web
 
 from src.analysis.audit_scope import ensure_decision_audit_scope_columns
 from src.analysis.decision_ledger import fetch_decision_ledger
+from src.analysis.override_classification import (
+    classify_override as _classify_override,
+    dominant_override_status,
+    override_delta as _override_delta,
+    override_opposite_ratio as _override_opposite_ratio,
+    override_same_ratio as _override_same_ratio,
+)
 from src.core.config import get_config
 from src.core.logger import redact_secrets
-from src.core.market_calendar import is_trading_day, market_closed_reason
+from src.core.market_calendar import (
+    is_settlement_day,
+    is_trading_day,
+    market_closed_reason,
+    market_session_note,
+)
 from src.core.redis_client import client as redis_client
 
 
@@ -149,48 +162,6 @@ def _float(value, default: float = 0.0) -> float:
         return default
 
 
-def _override_target(item: dict) -> float:
-    return max(_float(item.get("target_amount_ars")), 1.0)
-
-
-def _override_same_ratio(item: dict) -> float:
-    return _float(item.get("same_amount_ars")) / _override_target(item)
-
-
-def _override_opposite_ratio(item: dict) -> float:
-    return _float(item.get("opposite_amount_ars")) / _override_target(item)
-
-
-def _classify_override(item: dict) -> str:
-    if item.get("match_basis") == "pending_open_revalidation" or item.get("match_start_at") is None:
-        return "PENDING_OPEN"
-
-    same_ratio = _override_same_ratio(item)
-    opposite_ratio = _override_opposite_ratio(item)
-    if same_ratio < 0.15 and opposite_ratio >= 0.15:
-        return "OPPOSITE"
-    if same_ratio >= 1.35:
-        return "OVERFOLLOWED"
-    if same_ratio >= 0.75:
-        return "FOLLOWED"
-    if same_ratio >= 0.15:
-        return "PARTIAL"
-    return "IGNORED"
-
-
-def _override_delta(status: str, outcome_5d) -> float | None:
-    if outcome_5d is None:
-        return None
-    outcome = _float(outcome_5d)
-    if status in {"IGNORED", "OPPOSITE"}:
-        return -outcome
-    if status == "PARTIAL":
-        return -0.5 * outcome
-    if status in {"FOLLOWED", "OVERFOLLOWED"}:
-        return 0.0
-    return None
-
-
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
@@ -204,14 +175,6 @@ def _override_intent_summary(items: list[dict]) -> dict:
         )
         groups.setdefault(key, []).append(item)
 
-    status_rank = {
-        "PENDING_OPEN": 0,
-        "OVERFOLLOWED": 5,
-        "FOLLOWED": 4,
-        "PARTIAL": 3,
-        "OPPOSITE": 2,
-        "IGNORED": 1,
-    }
     by_status: dict[str, int] = {}
     bot_returns: list[float] = []
     deltas: list[float] = []
@@ -219,7 +182,7 @@ def _override_intent_summary(items: list[dict]) -> dict:
 
     for group in groups.values():
         statuses = [str(row.get("override_status") or "UNKNOWN") for row in group]
-        dominant = max(statuses, key=lambda st: status_rank.get(st, 0)) if statuses else "UNKNOWN"
+        dominant = dominant_override_status(statuses)
         by_status[dominant] = by_status.get(dominant, 0) + 1
 
         group_returns = [
@@ -341,8 +304,11 @@ async def cors_middleware(request: web.Request, handler):
 
 
 async def index(_request: web.Request) -> web.Response:
+    html = _request.app.get("index_html")
+    if html is None:
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     return web.Response(
-        text=(STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+        text=html,
         content_type="text/html",
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -371,15 +337,33 @@ async def health(request: web.Request) -> web.Response:
     except Exception:
         db_ok = False
 
-    redis_ok = await _redis_ping()
+    redis_results = await asyncio.gather(
+        _redis_ping(),
+        _redis_get(SCHEDULER_HEARTBEAT_KEY),
+        _redis_get(BOT_HEARTBEAT_KEY),
+        _redis_get(MARKET_HEARTBEAT_KEY),
+        _redis_get(RISK_HEARTBEAT_KEY),
+        _redis_get(MONITOR_STATE_KEY),
+        _redis_get(BOT_BUSY_KEY),
+        return_exceptions=True,
+    )
+    redis_ok = bool(redis_results[0]) if not isinstance(redis_results[0], Exception) else False
+    redis_values = [
+        None if isinstance(value, Exception) else value
+        for value in redis_results[1:]
+    ]
     keys = {
-        "scheduler": await _redis_get(SCHEDULER_HEARTBEAT_KEY),
-        "bot": await _redis_get(BOT_HEARTBEAT_KEY),
-        "market": await _redis_get(MARKET_HEARTBEAT_KEY),
-        "risk": await _redis_get(RISK_HEARTBEAT_KEY),
-        "monitor_state": await _redis_get(MONITOR_STATE_KEY),
-        "bot_busy": await _redis_get(BOT_BUSY_KEY),
+        "scheduler": redis_values[0],
+        "bot": redis_values[1],
+        "market": redis_values[2],
+        "risk": redis_values[3],
+        "monitor_state": redis_values[4],
+        "bot_busy": redis_values[5],
     }
+    scheduler_age = _age_seconds(keys["scheduler"])
+    bot_age = _age_seconds(keys["bot"])
+    market_age = _age_seconds(keys["market"])
+    risk_age = _age_seconds(keys["risk"])
 
     now = _now_art()
     business = is_trading_day(now)
@@ -392,22 +376,24 @@ async def health(request: web.Request) -> web.Response:
         "market": {
             "business_day": business,
             "open": market_open,
+            "settlement_day": is_settlement_day(now),
             "closed_reason": market_closed_reason(now),
+            "session_note": market_session_note(now),
             "now_art": now.isoformat(),
         },
         "services": {
             "scheduler": {
-                "heartbeat_age_seconds": _age_seconds(keys["scheduler"]),
-                "alive": (_age_seconds(keys["scheduler"]) or 999999) < 90,
+                "heartbeat_age_seconds": scheduler_age,
+                "alive": (scheduler_age or 999999) < 90,
             },
             "telegram_bot": {
-                "heartbeat_age_seconds": _age_seconds(keys["bot"]),
-                "alive": (_age_seconds(keys["bot"]) or 999999) < 90,
+                "heartbeat_age_seconds": bot_age,
+                "alive": (bot_age or 999999) < 90,
                 "busy": bool(keys["bot_busy"]),
             },
             "intraday_monitor_state": keys["monitor_state"],
-            "market_heartbeat_age_seconds": _age_seconds(keys["market"]),
-            "risk_heartbeat_age_seconds": _age_seconds(keys["risk"]),
+            "market_heartbeat_age_seconds": market_age,
+            "risk_heartbeat_age_seconds": risk_age,
         },
     })
 
@@ -524,7 +510,9 @@ async def candles(request: web.Request) -> web.Response:
         "market": {
             "business_day": business,
             "open": business and _is_market_hours(now),
+            "settlement_day": is_settlement_day(now),
             "closed_reason": market_closed_reason(now),
+            "session_note": market_session_note(now),
             "expects_daily_candle": business and now.time() >= time(18, 0),
         },
         "coverage": _row(coverage),
@@ -1341,6 +1329,15 @@ async def override_audit(request: web.Request) -> web.Response:
             "bot_wins_ignored": bot_wins,
             "human_wins_ignored": human_wins,
         },
+        "matches": [
+            {
+                "ticker": item.get("ticker"),
+                "decision": item.get("decision"),
+                "decided_at": item.get("decided_at"),
+                "override_status": item.get("override_status"),
+            }
+            for item in items
+        ],
         "recent": items[:30],
     })
 
@@ -1867,6 +1864,7 @@ async def create_app() -> web.Application:
 
     app = web.Application(middlewares=[security_headers_middleware, cors_middleware, auth_middleware])
     app["pool"] = pool
+    app["index_html"] = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     app.router.add_get("/", index)
     app.router.add_get("/api/auth/status", auth_status)
     app.router.add_get("/api/health", health)

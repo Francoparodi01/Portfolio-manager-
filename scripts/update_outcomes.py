@@ -1,7 +1,7 @@
 """
 scripts/update_outcomes.py
 ──────────────────────────
-Rellena outcome_5d / outcome_10d / outcome_20d / was_correct
+Rellena outcome_5d / outcome_10d / outcome_20d / outcome_40d / was_correct
 para todas las decisiones guardadas donde ya pasaron ≥5 días.
 
 Incluye THEORETICAL del optimizer — son las ideas puras que necesitamos
@@ -44,6 +44,7 @@ async def _count_pending(db: PortfolioDatabase, lookback_days: int) -> dict:
             COUNT(*) FILTER (WHERE outcome_5d IS NULL)  AS sin_5d,
             COUNT(*) FILTER (WHERE outcome_10d IS NULL) AS sin_10d,
             COUNT(*) FILTER (WHERE outcome_20d IS NULL) AS sin_20d,
+            COUNT(*) FILTER (WHERE outcome_40d IS NULL) AS sin_40d,
             COUNT(*) FILTER (
                 WHERE price_at_decision IS NULL OR price_at_decision <= 0
             ) AS sin_price,
@@ -59,6 +60,7 @@ async def _count_pending(db: PortfolioDatabase, lookback_days: int) -> dict:
         if not db._pool:
             raise RuntimeError("DB pool no inicializado")
         async with db._pool.acquire() as conn:
+            await db._ensure_outcome_horizon_columns(conn)
             rows = await conn.fetch(query, str(lookback_days))
         return {
             "rows": [dict(r) for r in rows],
@@ -87,14 +89,14 @@ async def main(
             if "rows" in pending:
                 print(
                     f"\n   {'status':<14} {'source':<16} {'decision':<8} "
-                    f"{'basis':<18} {'total':>6} {'sin_5d':>8} {'sin_px':>8}"
+                    f"{'basis':<18} {'total':>6} {'sin_5d':>8} {'sin_40d':>8} {'sin_px':>8}"
                 )
                 print("   " + "─" * 90)
                 for r in pending["rows"]:
                     print(
                         f"   {str(r['status']):<14} {str(r['source']):<16} "
                         f"{str(r['decision']):<8} {str(r['outcome_basis']):<18} "
-                        f"{r['total']:>6} {r['sin_5d']:>8} {r['sin_price']:>8}"
+                        f"{r['total']:>6} {r['sin_5d']:>8} {r['sin_40d']:>8} {r['sin_price']:>8}"
                     )
             elif "error" in pending:
                 print(f"\n   ⚠️ Error de diagnóstico: {pending['error']}")

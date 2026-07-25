@@ -104,6 +104,8 @@ from src.analysis.audit_scope import (
     is_regular_market_session,
     run_id_to_db,
 )
+from src.analysis.decision_context import build_decision_run_context
+from src.analysis.feature_snapshot import build_feature_snapshot_from_layers
 from src.collector.cocos_history import candles_to_frame
 from src.collector.portfolio_quality import (
     PRICE_STATUS_FRESH,
@@ -883,7 +885,14 @@ async def _compute_information_coefficient(
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
+def _layers_payload_for_decision(
+    result,
+    extra: dict | None = None,
+    *,
+    run_id: str | None = None,
+    decided_at: datetime | None = None,
+    portfolio_snapshot_id: str | None = None,
+) -> dict:
     """
     Payload completo para decision_log.layers.
 
@@ -942,6 +951,18 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
 
     payload.setdefault("source", "optimizer")
 
+    def _attach_feature_snapshot_and_context() -> dict:
+        feature_snapshot = build_feature_snapshot_from_layers(payload)
+        payload["feature_snapshot"] = feature_snapshot.to_dict()
+        if run_id:
+            payload["run_context"] = build_decision_run_context(
+                run_id=run_id,
+                decided_at=decided_at,
+                portfolio_snapshot_id=portfolio_snapshot_id,
+                feature_snapshot_id=feature_snapshot.feature_snapshot_id,
+            ).to_dict()
+        return payload
+
     if result is None:
         payload["technical"] = {"weighted": 0.0, "raw": 0.0, "weight": 0.0, "reason": "result_missing"}
         payload["macro"] = {"weighted": 0.0, "raw": 0.0, "weight": 0.0, "reason": "result_missing"}
@@ -951,7 +972,7 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
         payload["technical_has_reconstructed_candles"] = False
         payload["technical_candle_sources"] = []
         payload["technical_candle_source_counts"] = {}
-        return payload
+        return _attach_feature_snapshot_and_context()
 
     payload["technical"] = _layer_payload("technical")
     payload["macro"] = _layer_payload("macro")
@@ -999,8 +1020,13 @@ def _layers_payload_for_decision(result, extra: dict | None = None) -> dict:
         "overbought_momentum": bool(getattr(result, "overbought_momentum", False)),
         "connected_to_primary_score": False,
     }
+    payload["reversion_shadow"] = {
+        "score": _safe_float(getattr(result, "reversion_score", 0.0)),
+        "components": dict(getattr(result, "reversion_components", {}) or {}),
+        "connected_to_primary_score": False,
+    }
 
-    return payload
+    return _attach_feature_snapshot_and_context()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GUARDAR DECISIONES DEL EXECUTION PLAN EN DECISION_LOG
@@ -1032,6 +1058,16 @@ def _build_position_price_map(positions: list | None) -> dict[str, float]:
     return prices
 
 
+def _portfolio_snapshot_id_from_snapshot(portfolio_snapshot: dict | None) -> str | None:
+    if not portfolio_snapshot:
+        return None
+    scraped_at = portfolio_snapshot.get("scraped_at")
+    if isinstance(scraped_at, datetime):
+        return scraped_at.isoformat()
+    text = str(scraped_at or "").strip()
+    return text or None
+
+
 async def _save_execution_plan_events(
     *,
     cfg,
@@ -1041,6 +1077,7 @@ async def _save_execution_plan_events(
     macro_regime,
     total_ars: float,
     positions: list | None = None,
+    portfolio_snapshot: dict | None = None,
     owner_chat_id: int | None = None,
     run_id: str | None = None,
     run_intent: str = "formal_plan",
@@ -1078,6 +1115,7 @@ async def _save_execution_plan_events(
         if str(getattr(d, "ticker", "") or "").strip()
     }
     position_price_by_ticker = _build_position_price_map(positions)
+    portfolio_snapshot_id = _portfolio_snapshot_id_from_snapshot(portfolio_snapshot)
     manual_market_events = list(manual_market_events or [])
 
     def _safe_float(x, default: float = 0.0):
@@ -1146,7 +1184,16 @@ async def _save_execution_plan_events(
 
         return None
 
-    def _layers_for(ticker: str, r, d, order, *, status: str, decision_type: str) -> dict:
+    def _layers_for(
+        ticker: str,
+        r,
+        d,
+        order,
+        *,
+        status: str,
+        decision_type: str,
+        decided_at: datetime,
+    ) -> dict:
         extra = {
             "source": "execution_plan",
             "status": status,
@@ -1172,11 +1219,26 @@ async def _save_execution_plan_events(
             event_layers = manual_event_layers_for_ticker(ticker, manual_market_events)
             if event_layers:
                 extra["manual_event_risk"] = event_layers
-            return _layers_payload_for_decision(r, extra=extra)
+            return _layers_payload_for_decision(
+                r,
+                extra=extra,
+                run_id=run_id,
+                decided_at=decided_at,
+                portfolio_snapshot_id=portfolio_snapshot_id,
+            )
         except Exception:
             event_layers = manual_event_layers_for_ticker(ticker, manual_market_events)
             if event_layers:
                 extra["manual_event_risk"] = event_layers
+            if run_id:
+                feature_snapshot = build_feature_snapshot_from_layers(extra)
+                extra["feature_snapshot"] = feature_snapshot.to_dict()
+                extra["run_context"] = build_decision_run_context(
+                    run_id=run_id,
+                    decided_at=decided_at,
+                    portfolio_snapshot_id=portfolio_snapshot_id,
+                    feature_snapshot_id=feature_snapshot.feature_snapshot_id,
+                ).to_dict()
             return extra
 
     async def _insert_event(
@@ -1228,6 +1290,7 @@ async def _save_execution_plan_events(
                 getattr(order, "reason", "") or "Bloqueado por guards"
             )
 
+        decided_at = datetime.now(timezone.utc)
         layers_payload = _layers_for(
             ticker,
             r,
@@ -1235,12 +1298,12 @@ async def _save_execution_plan_events(
             order,
             status=status,
             decision_type=decision_type,
+            decided_at=decided_at,
         )
 
         if forced_reason:
             layers_payload["forced_reason"] = forced_reason
 
-        decided_at = datetime.now(timezone.utc)
         audit_scope = classify_decision_audit_scope(
             source="execution_plan",
             status=status,
@@ -3299,6 +3362,8 @@ async def main(
         )
         result.trend_score = float(getattr(tech, "trend_score", 0.0) or 0.0)
         result.trend_components = dict(getattr(tech, "trend_components", {}) or {})
+        result.reversion_score = float(getattr(tech, "reversion_score", 0.0) or 0.0)
+        result.reversion_components = dict(getattr(tech, "reversion_components", {}) or {})
         result.structural_break_confirmed = bool(
             getattr(tech, "structural_break_confirmed", False)
         )
@@ -3432,6 +3497,22 @@ async def main(
                 context = universe_sentiment_contexts.get(ticker)
                 if context is not None:
                     u_result.sentiment_context = context
+                u_result.technical_signal = str(getattr(u_tech, "signal", "HOLD") or "HOLD")
+                u_result.technical_regime = str(
+                    getattr(u_tech, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"
+                )
+                u_result.trend_score = float(getattr(u_tech, "trend_score", 0.0) or 0.0)
+                u_result.trend_components = dict(getattr(u_tech, "trend_components", {}) or {})
+                u_result.reversion_score = float(getattr(u_tech, "reversion_score", 0.0) or 0.0)
+                u_result.reversion_components = dict(
+                    getattr(u_tech, "reversion_components", {}) or {}
+                )
+                u_result.structural_break_confirmed = bool(
+                    getattr(u_tech, "structural_break_confirmed", False)
+                )
+                u_result.overbought_momentum = bool(
+                    getattr(u_tech, "overbought_momentum", False)
+                )
                 universe_results.append(u_result)
 
             n_strong = sum(
@@ -3597,6 +3678,7 @@ async def main(
                 macro_regime=macro_regime,
                 total_ars=total_ars,
                 positions=positions,
+                portfolio_snapshot=portfolio_snapshot,
                 owner_chat_id=owner_chat_id,
                 run_id=analysis_run_id,
                 run_intent=run_intent,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -64,6 +65,30 @@ class TelegramNotifier:
             return ok
         except Exception as e:
             logger.warning(f"Telegram document error: {e}")
+            return False
+
+    def send_photo(self, path: str | Path, caption: str = "") -> bool:
+        if not self._enabled:
+            return False
+        try:
+            file_path = Path(path)
+            with file_path.open("rb") as f:
+                data = {"chat_id": self._chat_id}
+                if caption:
+                    data["caption"] = caption
+                    data["parse_mode"] = "HTML"
+                r = requests.post(
+                    f"{self._base}/sendPhoto",
+                    data=data,
+                    files={"photo": (file_path.name, f, "image/png")},
+                    timeout=45,
+                )
+            ok = r.status_code == 200
+            if not ok:
+                logger.warning(f"Telegram photo error {r.status_code}: {r.text}")
+            return ok
+        except Exception as e:
+            logger.warning(f"Telegram photo error: {e}")
             return False
 
     # ── RUTINARIAS SILENCIADAS ─────────────────────────────────────────────

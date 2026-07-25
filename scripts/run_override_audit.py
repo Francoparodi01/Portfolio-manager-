@@ -24,6 +24,12 @@ import asyncpg
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.analysis.override_classification import (
+    classify_override as _classify,
+    dominant_override_status,
+    override_delta as _override_delta,
+    override_same_ratio as _same_ratio,
+)
 from src.collector.notifier import TelegramNotifier
 from src.core.config import get_config
 from src.core.telegram_format import (
@@ -105,51 +111,6 @@ STATUS_LABELS = {
 }
 
 
-def _target(row: dict) -> float:
-    return max(_as_float(row.get("target_amount_ars")), 1.0)
-
-
-def _same_ratio(row: dict) -> float:
-    return _as_float(row.get("same_amount_ars")) / _target(row)
-
-
-def _opposite_ratio(row: dict) -> float:
-    return _as_float(row.get("opposite_amount_ars")) / _target(row)
-
-
-def _classify(row: dict) -> str:
-    if row.get("match_basis") == "pending_open_revalidation" or row.get("match_start_at") is None:
-        return "PENDING_OPEN"
-
-    same_ratio = _same_ratio(row)
-    opposite_ratio = _opposite_ratio(row)
-
-    if same_ratio < 0.15 and opposite_ratio >= 0.15:
-        return "OPPOSITE"
-    if same_ratio >= 1.35:
-        return "OVERFOLLOWED"
-    if same_ratio >= 0.75:
-        return "FOLLOWED"
-    if same_ratio >= 0.15:
-        return "PARTIAL"
-    return "IGNORED"
-
-
-def _override_delta(status: str, bot_outcome: float | None) -> float | None:
-    if bot_outcome is None:
-        return None
-    # Positive means the human override beat the bot instruction.
-    if status == "IGNORED":
-        return -float(bot_outcome)
-    if status == "OPPOSITE":
-        return -float(bot_outcome)
-    if status in {"FOLLOWED", "OVERFOLLOWED"}:
-        return 0.0
-    if status == "PARTIAL":
-        return -0.5 * float(bot_outcome)
-    return None
-
-
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
@@ -164,18 +125,10 @@ def _intent_level_summary(rows: list[dict]) -> dict:
     override_deltas: list[float] = []
     closed_intents = 0
     by_status: dict[str, int] = {}
-    status_rank = {
-        "OVERFOLLOWED": 5,
-        "FOLLOWED": 4,
-        "PARTIAL": 3,
-        "OPPOSITE": 2,
-        "IGNORED": 1,
-        "PENDING_OPEN": 0,
-    }
 
     for group_rows in groups.values():
         statuses = [str(r.get("override_status") or "UNKNOWN") for r in group_rows]
-        dominant = max(statuses, key=lambda st: status_rank.get(st, 0)) if statuses else "UNKNOWN"
+        dominant = dominant_override_status(statuses)
         by_status[dominant] = by_status.get(dominant, 0) + 1
 
         group_bot_returns = [

@@ -25,7 +25,7 @@ Datos usados:
     Usa decision_log, no precios históricos crudos.
 
     final_score     = score generado por el análisis
-    outcome_5d/10d  = retorno posterior guardado en DB
+    outcome_5d/10d/20d/40d = retorno posterior guardado en DB
     decision        = BUY / SELL / SELL_PARTIAL / SELL_FULL
     source          = optimizer / execution_plan / radar / manual
     decision_type   = theoretical / executable / blocked / manual / pilot
@@ -59,7 +59,7 @@ except Exception:
     HAS_STATSMODELS = False
 
 
-DEFAULT_HORIZONS = ("5d", "10d", "20d")
+DEFAULT_HORIZONS = ("5d", "10d", "20d", "40d")
 ACTIVE_ACTIONS = ("BUY", "SELL", "SELL_PARTIAL", "SELL_FULL")
 NULL_TEXT_VALUES = {"", "none", "nan", "nat", "<na>", "null"}
 
@@ -213,6 +213,11 @@ async def load_decision_log(
             "outcome_5d",
             "outcome_10d",
             "outcome_20d",
+            "outcome_40d",
+            "executable_outcome_5d",
+            "executable_outcome_10d",
+            "executable_outcome_20d",
+            "executable_outcome_40d",
             "outcome_basis",
             "was_correct",
             "guard_triggered",
@@ -329,6 +334,14 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
         "outcome_5d",
         "outcome_10d",
         "outcome_20d",
+        "outcome_40d",
+        "executable_outcome_5d",
+        "executable_outcome_10d",
+        "executable_outcome_20d",
+        "executable_outcome_40d",
+        "technical_raw_score",
+        "trend_score",
+        "reversion_score",
         "theoretical_amount_ars",
         "executed_amount_ars",
         "current_weight",
@@ -365,7 +378,16 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
     # Outcome sanity:
     # outcome normal: 0.078 = +7.8%.
     # si viene como 7.8, lo convertimos.
-    for col in ["outcome_5d", "outcome_10d", "outcome_20d"]:
+    for col in [
+        "outcome_5d",
+        "outcome_10d",
+        "outcome_20d",
+        "outcome_40d",
+        "executable_outcome_5d",
+        "executable_outcome_10d",
+        "executable_outcome_20d",
+        "executable_outcome_40d",
+    ]:
         if col in out.columns:
             med = out[col].dropna().abs().median()
             if pd.notna(med) and med > 2:
@@ -430,6 +452,9 @@ def _extract_layers(raw: Any) -> dict[str, float]:
         "macro_score": 0.0,
         "sentiment_score": 0.0,
         "risk_score": 0.0,
+        "technical_raw_score": None,
+        "trend_score": None,
+        "reversion_score": None,
     }
 
     raw = _json_load_maybe(raw)
@@ -454,6 +479,15 @@ def _extract_layers(raw: Any) -> dict[str, float]:
                     continue
         return 0.0
 
+    def pick_first(obj: dict, keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            if key in obj and obj[key] is not None:
+                try:
+                    return float(obj[key])
+                except Exception:
+                    continue
+        return None
+
     if isinstance(raw, dict):
         # Caso posible: {"layers": [...]}
         if "layers" in raw and isinstance(raw["layers"], list):
@@ -470,12 +504,24 @@ def _extract_layers(raw: Any) -> dict[str, float]:
 
         for name, value in raw.items():
             n = str(name).lower()
+            if n == "trend_shadow" and isinstance(value, dict):
+                result["trend_score"] = pick_first(value, ("score", "raw", "weighted"))
+                continue
+            if n == "reversion_shadow" and isinstance(value, dict):
+                result["reversion_score"] = pick_first(value, ("score", "raw", "weighted"))
+                continue
+
             target = layer_name_map.get(n)
             if target is None:
                 continue
 
             if isinstance(value, dict):
                 v = pick_value(value)
+                if target == "technical_score":
+                    result["technical_raw_score"] = pick_first(
+                        value,
+                        ("raw", "score", "value", "final"),
+                    )
             else:
                 try:
                     v = float(value)
@@ -921,8 +967,8 @@ def run_regression_audit_sync(
         # Acciones realmente usadas por el modelo, luego de exigir outcome disponible.
         if "decision" in hdf.columns:
             all_actions_used.update(
-        sorted(hdf["decision"].dropna().unique().tolist())
-        )
+                sorted(hdf["decision"].dropna().unique().tolist())
+            )
 
         usable_rows_max_horizon = max(usable_rows_max_horizon, len(hdf))
         if "id" in hdf.columns:
@@ -964,6 +1010,27 @@ def run_regression_audit_sync(
                 cost_threshold=cost_threshold,
             )
         )
+
+        trend_reversion_features = [
+            "final_score",
+            "trend_score",
+            "reversion_score",
+        ]
+        trend_reversion_features = [
+            f for f in trend_reversion_features if f in hdf.columns
+        ]
+        if len(trend_reversion_features) >= 2:
+            models.append(
+                fit_ols_model(
+                    df=hdf,
+                    horizon=horizon,
+                    model_name="score_trend_reversion",
+                    target_col=target_col,
+                    features=trend_reversion_features,
+                    min_n=config.min_n,
+                    cost_threshold=cost_threshold,
+                )
+            )
 
         # Modelo contexto
         context_features = [
@@ -1349,8 +1416,9 @@ def _render_model_scorecard(report: RegressionAuditReport) -> list[str]:
     if not report.models:
         return ["⚠️ No hay suficientes datos cerrados para correr regresión."]
 
+    model_width = 22
     rows = [
-        f"{'Hz':<4}{'Modelo':<16}{'n':>3} {'R2':>6} {'RMSE':>7} {'IC':>7} "
+        f"{'Hz':<4}{'Modelo':<{model_width}}{'n':>3} {'R2':>6} {'RMSE':>7} {'IC':>7} "
         f"{'Coef':>8} {'p':>6} {'Ret@.08':>8} {'Mad':>5}"
     ]
 
@@ -1358,7 +1426,7 @@ def _render_model_scorecard(report: RegressionAuditReport) -> list[str]:
         maturity, _ = sample_maturity(model.n)
         rows.append(
             f"{model.horizon:<4}"
-            f"{model.model_name:<16}"
+            f"{model.model_name:<{model_width}}"
             f"{model.n:>3} "
             f"{_fmt_float(model.r2, 3):>6} "
             f"{_fmt_pct(model.rmse):>7} "

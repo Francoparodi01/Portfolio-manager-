@@ -102,6 +102,7 @@ class PortfolioDatabase:
         self._decision_audit_scope_ready = False
         self._manual_market_events_ready = False
         self._preclose_alerts_ready = False
+        self._outcome_horizon_ready = False
 
     async def connect(self):
         if not HAS_ASYNCPG:
@@ -183,6 +184,18 @@ class PortfolioDatabase:
             return
         await conn.execute(PRE_CLOSE_ALERTS_SCHEMA_SQL)
         self._preclose_alerts_ready = True
+
+    async def _ensure_outcome_horizon_columns(self, conn) -> None:
+        if self._outcome_horizon_ready:
+            return
+        await conn.execute(
+            """
+            ALTER TABLE decision_log
+                ADD COLUMN IF NOT EXISTS outcome_40d FLOAT,
+                ADD COLUMN IF NOT EXISTS executable_outcome_40d FLOAT;
+            """
+        )
+        self._outcome_horizon_ready = True
 
     async def save_preclose_alerts(
         self,
@@ -2205,6 +2218,7 @@ class PortfolioDatabase:
             (5, "outcome_5d"),
             (10, "outcome_10d"),
             (20, "outcome_20d"),
+            (40, "outcome_40d"),
         ]:
             target_day = decided_day + timedelta(days=horizon)
             if target_day > now.astimezone(ART_TZ).date():
@@ -2277,6 +2291,7 @@ class PortfolioDatabase:
             (5, "executable_outcome_5d"),
             (10, "executable_outcome_10d"),
             (20, "executable_outcome_20d"),
+            (40, "executable_outcome_40d"),
         ]:
             target_day = start_day + timedelta(days=horizon)
             if target_day > now.astimezone(ART_TZ).date():
@@ -2341,7 +2356,7 @@ class PortfolioDatabase:
     ) -> int:
         """
         Busca decisiones sin outcome donde han pasado >=5 días y llena
-        outcome_5d / outcome_10d / outcome_20d / was_correct usando la serie
+        outcome_5d / outcome_10d / outcome_20d / outcome_40d / was_correct usando la serie
         canonica de market_candles.
 
         price_at_decision y market_candles usan la misma unidad operativa
@@ -2355,12 +2370,28 @@ class PortfolioDatabase:
             lookback_cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
             async with self._pool.acquire() as conn:
+                await self._ensure_outcome_horizon_columns(conn)
                 if owner_chat_id is None:
                     rows = await conn.fetch(
                         """
                         SELECT id, ticker, price_at_decision, decided_at, decision
                         FROM decision_log
-                        WHERE (outcome_5d IS NULL OR executable_outcome_5d IS NULL)
+                        WHERE (
+                              outcome_5d IS NULL
+                           OR executable_outcome_5d IS NULL
+                           OR (
+                                decided_at <= NOW() - INTERVAL '10 days'
+                                AND (outcome_10d IS NULL OR executable_outcome_10d IS NULL)
+                              )
+                           OR (
+                                decided_at <= NOW() - INTERVAL '20 days'
+                                AND (outcome_20d IS NULL OR executable_outcome_20d IS NULL)
+                              )
+                           OR (
+                                decided_at <= NOW() - INTERVAL '40 days'
+                                AND (outcome_40d IS NULL OR executable_outcome_40d IS NULL)
+                              )
+                        )
                           AND COALESCE(outcome_basis, '') <> 'legacy_external'
                           AND price_at_decision IS NOT NULL
                           AND price_at_decision > 0
@@ -2378,7 +2409,22 @@ class PortfolioDatabase:
                         """
                         SELECT id, ticker, price_at_decision, decided_at, decision
                         FROM decision_log
-                        WHERE (outcome_5d IS NULL OR executable_outcome_5d IS NULL)
+                        WHERE (
+                              outcome_5d IS NULL
+                           OR executable_outcome_5d IS NULL
+                           OR (
+                                decided_at <= NOW() - INTERVAL '10 days'
+                                AND (outcome_10d IS NULL OR executable_outcome_10d IS NULL)
+                              )
+                           OR (
+                                decided_at <= NOW() - INTERVAL '20 days'
+                                AND (outcome_20d IS NULL OR executable_outcome_20d IS NULL)
+                              )
+                           OR (
+                                decided_at <= NOW() - INTERVAL '40 days'
+                                AND (outcome_40d IS NULL OR executable_outcome_40d IS NULL)
+                              )
+                        )
                           AND owner_chat_id = $3
                           AND COALESCE(outcome_basis, '') <> 'legacy_external'
                           AND price_at_decision IS NOT NULL
@@ -2512,6 +2558,7 @@ class PortfolioDatabase:
                                 outcome_5d        = COALESCE($2, outcome_5d),
                                 outcome_10d       = COALESCE($3, outcome_10d),
                                 outcome_20d       = COALESCE($4, outcome_20d),
+                                outcome_40d       = COALESCE($14, outcome_40d),
                                 was_correct       = COALESCE($5, was_correct),
                                 outcome_filled_at = NOW(),
                                 outcome_basis       = $6,
@@ -2521,6 +2568,7 @@ class PortfolioDatabase:
                                 executable_outcome_5d  = COALESCE($10, executable_outcome_5d),
                                 executable_outcome_10d = COALESCE($11, executable_outcome_10d),
                                 executable_outcome_20d = COALESCE($12, executable_outcome_20d),
+                                executable_outcome_40d = COALESCE($15, executable_outcome_40d),
                                 executable_was_correct = COALESCE($13, executable_was_correct)
                             WHERE id = $1
                             """,
@@ -2537,6 +2585,8 @@ class PortfolioDatabase:
                             executable_outcomes.get("executable_outcome_10d"),
                             executable_outcomes.get("executable_outcome_20d"),
                             executable_was_correct,
+                            outcomes.get("outcome_40d"),
+                            executable_outcomes.get("executable_outcome_40d"),
                         )
                     updated += 1
                     logger.debug(f"outcome actualizado: {ticker} id={row['id']} {outcomes}")
@@ -2569,6 +2619,7 @@ class PortfolioDatabase:
         )
 
         async with self._pool.acquire() as conn:
+            await self._ensure_outcome_horizon_columns(conn)
             rows = await conn.fetch(
                 """
                 SELECT id, ticker, price_at_decision, decided_at, decision
@@ -2612,6 +2663,7 @@ class PortfolioDatabase:
                             outcome_5d          = NULL,
                             outcome_10d         = NULL,
                             outcome_20d         = NULL,
+                            outcome_40d         = NULL,
                             was_correct         = NULL,
                             outcome_filled_at   = NULL,
                             outcome_basis       = $2,
@@ -2641,6 +2693,7 @@ class PortfolioDatabase:
                             outcome_5d          = NULL,
                             outcome_10d         = NULL,
                             outcome_20d         = NULL,
+                            outcome_40d         = NULL,
                             was_correct         = NULL,
                             outcome_filled_at   = NULL,
                             outcome_basis       = $2,
@@ -2681,6 +2734,7 @@ class PortfolioDatabase:
                             outcome_5d        = $2,
                             outcome_10d       = $3,
                             outcome_20d       = $4,
+                            outcome_40d       = $8,
                             was_correct       = $5,
                             outcome_filled_at = NOW(),
                             outcome_basis       = $6,
@@ -2694,6 +2748,7 @@ class PortfolioDatabase:
                         was_correct,
                         outcome_basis,
                         basis_ratio,
+                        outcomes.get("outcome_40d"),
                     )
                 updated += 1
             except Exception as e:
@@ -2723,6 +2778,7 @@ class PortfolioDatabase:
 
         async with self._pool.acquire() as conn:
             await self._ensure_decision_audit_scope_columns(conn)
+            await self._ensure_outcome_horizon_columns(conn)
             # Cargar filas raw — el cálculo de retorno del trader se hace en Python
             raw_rows = await conn.fetch(
                 """
@@ -2731,6 +2787,7 @@ class PortfolioDatabase:
                     COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
                     COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
                     COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
+                    COALESCE(executable_outcome_40d, outcome_40d) AS outcome_40d,
                     COALESCE(executable_was_correct, was_correct) AS was_correct,
                     size_pct,
                     COALESCE(source, layers->>'source', 'sin_source') AS source,
@@ -2839,22 +2896,27 @@ class PortfolioDatabase:
         by_source: dict = {}
         ret_10d_list    = []
         ret_20d_list    = []
+        ret_40d_list    = []
 
         for r in raw_rows:
             direction  = str(r["decision"]).upper()
             out5       = float(r["outcome_5d"] or 0.0)
             out10      = float(r["outcome_10d"]) if r["outcome_10d"] is not None else None
             out20      = float(r["outcome_20d"]) if r["outcome_20d"] is not None else None
+            out40      = float(r["outcome_40d"]) if r["outcome_40d"] is not None else None
 
             trader_ret   = out5
             trader_ret10 = out10
             trader_ret20 = out20
+            trader_ret40 = out40
 
             trader_returns.append(trader_ret)
             if trader_ret10 is not None:
                 ret_10d_list.append(trader_ret10)
             if trader_ret20 is not None:
                 ret_20d_list.append(trader_ret20)
+            if trader_ret40 is not None:
+                ret_40d_list.append(trader_ret40)
 
             # Agrupar por ticker (no por ticker+decision)
             tk = str(r["ticker"]).upper()
@@ -2939,6 +3001,7 @@ class PortfolioDatabase:
             "avg_return_5d":   avg_ret,
             "avg_return_10d":  sum(ret_10d_list) / len(ret_10d_list) if ret_10d_list else None,
             "avg_return_20d":  sum(ret_20d_list) / len(ret_20d_list) if ret_20d_list else None,
+            "avg_return_40d":  sum(ret_40d_list) / len(ret_40d_list) if ret_40d_list else None,
             "best_trade":      max(trader_returns) if trader_returns else None,
             "worst_trade":     min(trader_returns) if trader_returns else None,
             "ev":              ev,

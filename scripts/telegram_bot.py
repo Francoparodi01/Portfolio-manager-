@@ -113,6 +113,7 @@ SETTINGS_AWAIT_USERNAME = "await_username"
 SETTINGS_AWAIT_PASSWORD = "await_password"
 PORTFOLIO_SYNC_PENDING_KEY = "portfolio_sync_pending"
 NO_AUTO_MENU_ACTIONS = {"settings", "settings_reconfigure"}
+FAST_ACTIONS = {"status"}
 
 BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("menu", "Abrir panel principal"),
@@ -126,6 +127,7 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("radar", "Radar compacto"),
     ("shadow", "Tesis shadow 5/20/40"),
     ("performance", "Performance operativa"),
+    ("viability", "Viabilidad bot-only"),
     ("ledger", "Decision Ledger"),
     ("policy", "Arbol operativo"),
     ("bot_vs_humano", "Bot vs humano"),
@@ -558,17 +560,20 @@ def main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Performance",      callback_data="performance"),
         ],
         [
+            InlineKeyboardButton("Viability",           callback_data="viability"),
+            InlineKeyboardButton("Bot vs Humano",       callback_data="override_audit"),
+        ],
+        [
             InlineKeyboardButton("🧭 Confianza",        callback_data="confidence_audit"),
             InlineKeyboardButton("🔭 Radar",            callback_data="radar"),
             InlineKeyboardButton("🔬 Shadow",           callback_data="shadow"),
         ],
         [
             InlineKeyboardButton("📈 Regression",       callback_data="regression"),
-            InlineKeyboardButton("Bot vs Humano",       callback_data="override_audit"),
+            InlineKeyboardButton("Decision Ledger",     callback_data="decision_ledger"),
         ]
     ]
     final_row = [
-        InlineKeyboardButton("Decision Ledger", callback_data="decision_ledger"),
         InlineKeyboardButton("Policy Tree", callback_data="policy_tree"),
         InlineKeyboardButton("🩺 Status", callback_data="status"),
     ]
@@ -593,6 +598,7 @@ def menu_text() -> str:
         "🧠 <b>Plan de cartera</b> — rotación y acciones sugeridas\n"
         "📅 <b>Resumen semanal</b> — performance de la semana\n"
         "📊 <b>Performance</b> — métricas canónicas y dataset operativo\n"
+        "Viability — bot-only vs manual-only por horizonte, neto de costos\n"
         "Decision Ledger — atribución económica de decisiones y swaps\n"
         "Policy Tree — ruta operativa de datos, señal, cartera y ejecución\n"
         "🧭 <b>Confianza</b> — auditoría operativa del sistema\n"
@@ -607,42 +613,25 @@ def menu_text() -> str:
 
 def help_text() -> str:
     return (
-        "📘 <b>Cómo leer Cocos Copilot</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "El bot no ejecuta órdenes. Analiza cartera, mercado y movimientos reales; "
-        "después audita si las decisiones agregaron valor.\n\n"
-        "<b>Comandos de análisis</b>\n"
-        "• <code>/analisis</code>: plan ejecutivo. Es la vista formal manual.\n"
-        "• <code>/analisis_full</code>: misma lógica con más detalle y radar; no guarda eventos.\n"
-        "• <code>/analisis_debug</code>: diagnóstico técnico; no guarda eventos.\n"
-        "• <code>/mercado</code>: macro/noticias; soporte contextual, no performance.\n"
-        "• <code>/shadow</code>: última tesis experimental 5/20/40; no ejecuta órdenes.\n"
-        "• <code>/shadow AMD</code>: detalle shadow por ticker.\n\n"
-        "<b>Score</b>\n"
-        "Número entre -1 y +1. Positivo favorece compra/aumento; negativo favorece venta/reducción. "
-        "No es probabilidad de ganar ni garantía.\n\n"
-        "<b>Capas</b>\n"
-        "• <b>Técnico</b>: precio, tendencia, momentum, medias, RSI, MACD y volatilidad.\n"
-        "• <b>Macro</b>: SP500, Dow, VIX, petróleo, tasas, dólar, CCL/MEP, Merval y riesgo país.\n"
-        "• <b>Sentiment</b>: noticias recientes agregadas por ticker/mercado. Desde 15/06 19:44 usa política "
-        "<code>event_time_v2</code>: pesa por fecha real de evento, no por hora de scoreo.\n"
-        "• <b>Riesgo</b>: concentración, drawdown, exposición y guards operativos.\n\n"
-        "<b>T / M / S</b>\n"
-        "En el análisis compacto: <code>T</code>=técnico, <code>M</code>=macro, <code>S</code>=sentiment. "
-        "Son aportes al score, no plata ganada/perdida.\n\n"
-        "<b>IC</b>\n"
-        "Information Coefficient: mide si el ranking del bot se parece al retorno posterior. "
-        "IC positivo ayuda; IC negativo pide cautela. Con muestra chica se usa como termómetro, no como sentencia.\n\n"
-        "<b>Régimen</b>\n"
-        "Resume si el sistema está en modo normal, cautela o defensivo. Puede bloquear compras aunque haya señales buenas.\n\n"
-        "<b>Optimizer</b>\n"
-        "Desde 15/06 el motor intenta correr Black-Litterman real con PyPortfolioOpt. "
-        "Si falla la librería o el problema no converge, cae a <code>FALLBACK_MAX_SHARPE</code> y lo muestra en el reporte.\n\n"
-        "<b>Performance real</b>\n"
-        "Solo entra al EV operativo cuando hay fill/movement confirmado en Cocos. "
-        "Radar, planes sin fill, pruebas y debug quedan separados para no contaminar métricas.\n\n"
-        "<b>Regla operativa</b>\n"
-        "Fuera de rueda el plan es tentativo. Se valida con precio fresco de apertura antes de actuar."
+        "<b>Como leer Quantia</b>\n"
+        "El bot informa y audita. No ejecuta ordenes.\n\n"
+        "<b>Uso rapido</b>\n"
+        "<code>/portfolio</code>: cartera actual y concentracion.\n"
+        "<code>/analisis</code>: plan operativo compacto.\n"
+        "<code>/radar</code>: oportunidades no ejecutadas.\n"
+        "<code>/performance</code>: resultado real con fills/movimientos.\n"
+        "<code>/ledger</code>: atribucion economica de decisiones.\n"
+        "<code>/bot_vs_humano</code>: planes vs movimientos reales.\n"
+        "<code>/status</code>: salud de DB, mercado y snapshots.\n\n"
+        "<b>Lectura</b>\n"
+        "Score: direccion de la senal, no probabilidad.\n"
+        "T/M/S: aporte tecnico, macro y sentiment al score.\n"
+        "IC: calidad historica del ranking; muestra chica pide cautela.\n"
+        "EV: retorno observado neto cuando corresponde.\n\n"
+        "<b>Alcance</b>\n"
+        "Ejecucion real: solo fills/movimientos confirmados.\n"
+        "Plan: decision operativa pendiente de validacion.\n"
+        "Radar/shadow/debug: auditoria o exploracion; no contaminan performance."
     )
 
 
@@ -994,6 +983,55 @@ async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
         timeout=240,
     )
     await send_text(context, chat_id, sync_note + report)
+
+
+async def action_viability(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    chart_path = Path("/tmp") / f"cocos_viability_{chat_id}_{int(time.time())}.png"
+    rc, out, err, elapsed = await run_cmd(
+        [
+            sys.executable,
+            "scripts/run_viability_audit.py",
+            "--days",
+            "180",
+            "--no-telegram",
+            "--chart-out",
+            str(chart_path),
+        ],
+        timeout=240,
+    )
+    if rc != 0:
+        await send_text(
+            context,
+            chat_id,
+            (
+                "⚠️ <b>No pude completar viability audit</b>\n"
+                f"Tiempo: <b>{elapsed:.1f}s</b>\n"
+                f"<code>{html_text(err[-2200:] or out[-2200:] or 'Sin detalle')}</code>"
+            ),
+        )
+        return
+
+    try:
+        if chart_path.exists():
+            with chart_path.open("rb") as photo:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo,
+                    caption="<b>Viability Audit 180d</b>",
+                    parse_mode=ParseMode.HTML,
+                )
+    finally:
+        try:
+            chart_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    report = "\n".join(
+        line
+        for line in (out or "").splitlines()
+        if not line.startswith("[chart]")
+    ).strip()
+    await send_text(context, chat_id, report)
 
 
 async def action_override_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -1365,15 +1403,13 @@ async def action_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Non
     ]
 
     # ── Estado de DB / snapshots ──────────────────────────────────────────────
+    db = None
     if get_config and PortfolioDatabase:
         try:
             cfg = get_config()
             db  = PortfolioDatabase(cfg.database.url)
             await db.connect()
-            try:
-                snap = await db.get_latest_snapshot()
-            finally:
-                await db.close()
+            snap = await db.get_latest_snapshot()
 
             if snap:
                 ts_raw         = snap.get("scraped_at") or snap.get("timestamp")
@@ -1400,30 +1436,27 @@ async def action_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Non
 
     # ── Market data ───────────────────────────────────────────────────────────
     try:
-        if get_config and PortfolioDatabase:
-            cfg  = get_config()
-            db   = PortfolioDatabase(cfg.database.url)
+        if db:
             pool = None
-            await db.connect()
-            try:
-                pool = getattr(db, "_pool", None) or getattr(db, "_db_pool", None)
-                if pool:
-                    async with pool.acquire() as conn:
-                        row = await conn.fetchrow(
-                            "SELECT MAX(ts) AS latest_ts FROM market_prices"
-                        )
-                        mkt_ts = row["latest_ts"] if row else None
-                    age_text_mkt, mins_mkt = _age_label(mkt_ts)
-                    mkt_icon2, mkt_suffix = _freshness_badge(
-                        mins_mkt,
-                        business_day=business,
+            pool = getattr(db, "_pool", None) or getattr(db, "_db_pool", None)
+            if pool:
+                async with pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT MAX(ts) AS latest_ts FROM market_prices"
                     )
-                    lines.append(f"{mkt_icon2} Market data: <b>{age_text_mkt}</b>{mkt_suffix}")
-                    lines.append(f"   {_fmt_dt_art(mkt_ts)}")
-            finally:
-                await db.close()
+                    mkt_ts = row["latest_ts"] if row else None
+                age_text_mkt, mins_mkt = _age_label(mkt_ts)
+                mkt_icon2, mkt_suffix = _freshness_badge(
+                    mins_mkt,
+                    business_day=business,
+                )
+                lines.append(f"{mkt_icon2} Market data: <b>{age_text_mkt}</b>{mkt_suffix}")
+                lines.append(f"   {_fmt_dt_art(mkt_ts)}")
     except Exception as e:
         lines.append(f"⚠️ No pude leer market_prices: <code>{e}</code>")
+    finally:
+        if db:
+            await db.close()
 
     lines += [
         "",
@@ -1867,6 +1900,9 @@ CALLBACK_ALIASES: dict[str, str] = {
     "performance":      "performance",
     "perf":             "performance",
     "run_performance":  "performance",
+    "viability":        "viability",
+    "viabilidad":       "viability",
+    "bot_only":         "viability",
     # Bot vs Humano
     "override_audit":   "override_audit",
     "overrides":        "override_audit",
@@ -1922,6 +1958,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "analysis":      "🧠 Generando plan de cartera...",
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
+    "viability":     "Auditando viabilidad bot-only...",
     "override_audit": "Comparando planes del bot contra movimientos reales...",
     "decision_ledger": "Calculando atribución económica...",
     "policy_tree":   "Construyendo árbol operativo...",
@@ -1946,6 +1983,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "market_context": action_market_context,
         "weekly_summary": action_weekly_summary,
         "performance":    action_performance,
+        "viability":      action_viability,
         "override_audit": action_override_audit,
         "decision_ledger": action_decision_ledger,
         "policy_tree":    action_policy_tree,
@@ -2006,7 +2044,8 @@ async def _dispatch_command(
         return
     chat_id = update.effective_chat.id
     loading = ACTION_LOADING_TEXT.get(action, "🔄 Procesando...")
-    await answer_loading(update, loading)
+    if action not in FAST_ACTIONS:
+        await answer_loading(update, loading)
     t0 = time.time()
     logger.info("[BOT] action=%s chat_id=%s", action, chat_id)
     try:
@@ -2046,6 +2085,10 @@ async def weekly_summary_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def performance_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "performance")
+
+
+async def viability_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "viability")
 
 
 async def override_audit_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2261,14 +2304,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     loading = ACTION_LOADING_TEXT.get(action, "🔄 Procesando...")
-    try:
-        await query.edit_message_text(
-            text=loading,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-    except Exception:
-        await send_text(context, chat_id, loading)
+    if action not in FAST_ACTIONS:
+        try:
+            await query.edit_message_text(
+                text=loading,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            await send_text(context, chat_id, loading)
 
     t0 = time.time()
     logger.info("[BOT] callback raw=%s → %s chat_id=%s", raw_action, action, chat_id)
@@ -2374,6 +2418,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("weekly_summary",   weekly_summary_handler))
     app.add_handler(CommandHandler("resumen_semanal",  weekly_summary_handler))
     app.add_handler(CommandHandler("performance",      performance_handler))
+    app.add_handler(CommandHandler("viability",        viability_handler))
+    app.add_handler(CommandHandler("viabilidad",       viability_handler))
     app.add_handler(CommandHandler("ledger",           decision_ledger_handler))
     app.add_handler(CommandHandler("decision_ledger",  decision_ledger_handler))
     app.add_handler(CommandHandler("atribucion",       decision_ledger_handler))

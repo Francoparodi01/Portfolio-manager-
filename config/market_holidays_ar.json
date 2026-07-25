@@ -1,6 +1,12 @@
 {
   "market": "BYMA",
   "timezone": "America/Argentina/Buenos_Aires",
+  "source": "BYMA Calendario Bursatil",
+  "source_url": "https://www.byma.com.ar/mercado/calendario-bursatil",
+  "notes": {
+    "reference_3": "Jornada sin Liquidacion | Jornada con Negociacion",
+    "reference_4": "Jornada sin Negociacion ni Liquidacion"
+  },
   "closures": [
     {
       "date": "2026-01-01",
@@ -16,11 +22,6 @@
       "date": "2026-02-17",
       "name": "Carnaval",
       "category": "feriado_inamovible"
-    },
-    {
-      "date": "2026-03-23",
-      "name": "Dia no laborable",
-      "category": "no_laborable"
     },
     {
       "date": "2026-03-24",
@@ -63,11 +64,6 @@
       "category": "feriado_inamovible"
     },
     {
-      "date": "2026-07-10",
-      "name": "Dia no laborable",
-      "category": "no_laborable"
-    },
-    {
       "date": "2026-08-17",
       "name": "Paso a la Inmortalidad del Gral. Jose de San Martin",
       "category": "feriado_trasladable"
@@ -83,11 +79,6 @@
       "category": "feriado_trasladable"
     },
     {
-      "date": "2026-12-07",
-      "name": "Dia no laborable",
-      "category": "no_laborable"
-    },
-    {
       "date": "2026-12-08",
       "name": "Dia de la Inmaculada Concepcion de Maria",
       "category": "feriado_inamovible"
@@ -96,6 +87,48 @@
       "date": "2026-12-25",
       "name": "Navidad",
       "category": "feriado_inamovible"
+    },
+    {
+      "date": "2026-12-31",
+      "name": "Jornada sin Negociacion ni Liquidacion",
+      "category": "sin_negociacion_ni_liquidacion"
+    }
+  ],
+  "special_sessions": [
+    {
+      "date": "2026-03-23",
+      "name": "Dia no Laborable con Fines Turisticos",
+      "category": "sin_liquidacion_con_negociacion",
+      "trading": true,
+      "settlement": false
+    },
+    {
+      "date": "2026-07-10",
+      "name": "Dia no Laborable con Fines Turisticos",
+      "category": "sin_liquidacion_con_negociacion",
+      "trading": true,
+      "settlement": false
+    },
+    {
+      "date": "2026-11-06",
+      "name": "Dia del Bancario",
+      "category": "sin_liquidacion_con_negociacion",
+      "trading": true,
+      "settlement": false
+    },
+    {
+      "date": "2026-12-07",
+      "name": "Dia no Laborable con Fines Turisticos",
+      "category": "sin_liquidacion_con_negociacion",
+      "trading": true,
+      "settlement": false
+    },
+    {
+      "date": "2026-12-24",
+      "name": "Nochebuena",
+      "category": "sin_liquidacion_con_negociacion",
+      "trading": true,
+      "settlement": false
     }
   ]
 }

@@ -8,6 +8,12 @@ from zoneinfo import ZoneInfo
 import asyncpg
 
 from src.analysis.audit_scope import ensure_decision_audit_scope_columns
+from src.analysis.override_classification import (
+    classify_override,
+    override_opposite_ratio as _opposite_ratio,
+    override_same_ratio as _same_ratio,
+    override_target as _target,
+)
 from src.core.telegram_format import (
     header as tg_header,
     note as tg_note,
@@ -110,35 +116,6 @@ def _row(row) -> dict:
         else:
             out[key] = value
     return out
-
-
-def _target(row: dict) -> float:
-    return max(_as_float(row.get("target_amount_ars")), 1.0)
-
-
-def _same_ratio(row: dict) -> float:
-    return _as_float(row.get("same_amount_ars")) / _target(row)
-
-
-def _opposite_ratio(row: dict) -> float:
-    return _as_float(row.get("opposite_amount_ars")) / _target(row)
-
-
-def classify_override(row: dict) -> str:
-    if row.get("match_basis") == "pending_open_revalidation" or row.get("match_start_at") is None:
-        return "PENDING_OPEN"
-
-    same_ratio = _same_ratio(row)
-    opposite_ratio = _opposite_ratio(row)
-    if same_ratio < 0.15 and opposite_ratio >= 0.15:
-        return "OPPOSITE"
-    if same_ratio >= 1.35:
-        return "OVERFOLLOWED"
-    if same_ratio >= 0.75:
-        return "FOLLOWED"
-    if same_ratio >= 0.15:
-        return "PARTIAL"
-    return "IGNORED"
 
 
 def _directional_pnl(amount_ars, outcome) -> float | None:

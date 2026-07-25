@@ -24,6 +24,7 @@ pyotp>=2.9,<3.0
 # ── Datos y análisis cuantitativo ─────────────────────────
 pandas>=2.2,<3.0
 numpy>=1.26,<2.0
+Pillow>=10.0,<11.0
 yfinance>=0.2.40,<1.0
 ta>=0.11,<1.0
 scipy>=1.12,<2.0

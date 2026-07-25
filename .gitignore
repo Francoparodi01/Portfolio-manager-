@@ -41,6 +41,12 @@ tests/*
 !tests/test_offhours_sentiment_policy.py
 !tests/test_shadow_causal.py
 !tests/test_manual_market_events.py
+!tests/test_viability_audit.py
+!tests/test_decision_context.py
+!tests/test_override_classification.py
+!tests/test_decision_timeline.py
+!tests/test_feature_snapshot.py
+!tests/test_output_perf.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json

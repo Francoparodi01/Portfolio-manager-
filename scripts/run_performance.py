@@ -176,9 +176,9 @@ def _dataset_friendly_breakdown(dataset_stats: list[dict]) -> list[dict]:
         label = _dataset_bucket(row)
         bucket = buckets.setdefault(
             label,
-            {"label": label, "n": 0, "con_5d": 0, "con_10d": 0, "con_20d": 0},
+            {"label": label, "n": 0, "con_5d": 0, "con_10d": 0, "con_20d": 0, "con_40d": 0},
         )
-        for key in ("n", "con_5d", "con_10d", "con_20d"):
+        for key in ("n", "con_5d", "con_10d", "con_20d", "con_40d"):
             bucket[key] += int(row.get(key) or 0)
     order = {
         "Ejecución real confirmada": 0,
@@ -334,6 +334,9 @@ async def _get_decision_dataset_stats(
                 COUNT(COALESCE(executable_outcome_20d, outcome_20d)) FILTER (
                     WHERE outcome_basis = 'canonical_cocos'
                 ) AS con_20d,
+                COUNT(COALESCE(executable_outcome_40d, outcome_40d)) FILTER (
+                    WHERE outcome_basis = 'canonical_cocos'
+                ) AS con_40d,
                 COUNT(*) FILTER (
                     WHERE outcome_basis = 'legacy_external'
                 ) AS legacy_external
@@ -428,12 +431,13 @@ def render_dataset_operativo(stats: dict) -> list[str]:
         con_5d = int(row.get("con_5d") or 0)
         con_10d = int(row.get("con_10d") or 0)
         con_20d = int(row.get("con_20d") or 0)
+        con_40d = int(row.get("con_40d") or 0)
         legacy_external = int(row.get("legacy_external") or 0)
 
         line = (
             f"   • <code>{label}</code>: "
             f"<b>{n}</b> eventos | "
-            f"5D {con_5d} | 10D {con_10d} | 20D {con_20d}"
+            f"5D {con_5d} | 10D {con_10d} | 20D {con_20d} | 40D {con_40d}"
         )
         if legacy_external:
             line += f" | legacy {legacy_external}"
@@ -464,6 +468,7 @@ def _dataset_totals(dataset_stats: list[dict]) -> dict:
         "closed_5d": 0,
         "closed_10d": 0,
         "closed_20d": 0,
+        "closed_40d": 0,
         "legacy": 0,
     }
     for row in dataset_stats:
@@ -471,6 +476,7 @@ def _dataset_totals(dataset_stats: list[dict]) -> dict:
         totals["closed_5d"] += int(row.get("con_5d") or 0)
         totals["closed_10d"] += int(row.get("con_10d") or 0)
         totals["closed_20d"] += int(row.get("con_20d") or 0)
+        totals["closed_40d"] += int(row.get("con_40d") or 0)
         totals["legacy"] += int(row.get("legacy_external") or 0)
     return totals
 
@@ -542,7 +548,8 @@ def _render_dataset_friendly(stats: dict) -> list[str]:
             f"   Eventos: <b>{_fmt_count(totals['events'])}</b> | "
             f"5D cerrados: <b>{_fmt_count(totals['closed_5d'])}</b> | "
             f"10D: {_fmt_count(totals['closed_10d'])} | "
-            f"20D: {_fmt_count(totals['closed_20d'])}"
+            f"20D: {_fmt_count(totals['closed_20d'])} | "
+            f"40D: {_fmt_count(totals['closed_40d'])}"
         )
     ]
     if totals["legacy"]:
@@ -563,7 +570,8 @@ def _render_dataset_friendly(stats: dict) -> list[str]:
             f"<b>{int(row.get('n') or 0)}</b> eventos | "
             f"5D {int(row.get('con_5d') or 0)} | "
             f"10D {int(row.get('con_10d') or 0)} | "
-            f"20D {int(row.get('con_20d') or 0)}"
+            f"20D {int(row.get('con_20d') or 0)} | "
+            f"40D {int(row.get('con_40d') or 0)}"
         )
     if len(friendly_rows) > 8:
         lines.append(f"   - ... {len(friendly_rows) - 8} grupos más")
@@ -818,6 +826,7 @@ def render_performance_report(stats: dict) -> str:
         f"   5d:  {_pct(stats.get('avg_return_5d'))}",
         f"   10d: {_pct(stats.get('avg_return_10d'))}",
         f"   20d: {_pct(stats.get('avg_return_20d'))}",
+        f"   40d: {_pct(stats.get('avg_return_40d'))}",
         f"   Mejor trade: {_pct(stats.get('best_trade'))}",
         f"   Peor trade:  {_pct(stats.get('worst_trade'))}",
         f"   Pendientes operativos: <b>{_fmt_count(pending)}</b>",

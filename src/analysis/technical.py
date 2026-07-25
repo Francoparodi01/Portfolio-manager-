@@ -71,6 +71,8 @@ class Signal:
     technical_regime: str = TrendRegime.TRANSITIONAL.value
     trend_score: float = 0.0
     trend_components: dict[str, float] = field(default_factory=dict)
+    reversion_score: float = 0.0
+    reversion_components: dict[str, float] = field(default_factory=dict)
     structural_break_confirmed: bool = False
     overbought_momentum: bool = False
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -306,6 +308,8 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
       5. Señales contradictorias → reducir puntuación, no eliminar.
     """
     score = 0.0
+    reversion_raw = 0.0
+    reversion_components: dict[str, float] = {}
     reasons_buy:  list[str] = []
     reasons_sell: list[str] = []
 
@@ -355,39 +359,59 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
     # ── 2. MOMENTUM — RSI ────────────────────────────────────────────────────
     if rsi < 30:
         score += 2.5
+        reversion_raw += 2.5
+        reversion_components["rsi"] = 2.5
         reasons_buy.append(f"RSI {rsi:.1f} — sobreventa severa (potencial reversión)")
     elif rsi < 40:
         score += 1.5
+        reversion_raw += 1.5
+        reversion_components["rsi"] = 1.5
         reasons_buy.append(f"RSI {rsi:.1f} — zona de sobreventa")
     elif rsi > 70:
         score -= 2.5
+        reversion_raw -= 2.5
+        reversion_components["rsi"] = -2.5
         reasons_sell.append(f"RSI {rsi:.1f} — sobrecompra severa")
     elif rsi > 60:
         score -= 1.5
+        reversion_raw -= 1.5
+        reversion_components["rsi"] = -1.5
         reasons_sell.append(f"RSI {rsi:.1f} — zona de sobrecompra")
 
     # ── 3. MOMENTUM — Estocástico ─────────────────────────────────────────────
     # Cruces del estocástico son señales tempranas de reversión
     if ind.stoch_k < 20 and ind.stoch_k > ind.stoch_d:
         score += 1.5
+        reversion_raw += 1.5
+        reversion_components["stochastic"] = 1.5
         reasons_buy.append(f"Estocástico {ind.stoch_k:.1f} — cruce alcista en sobreventa")
     elif ind.stoch_k > 80 and ind.stoch_k < ind.stoch_d:
         score -= 1.5
+        reversion_raw -= 1.5
+        reversion_components["stochastic"] = -1.5
         reasons_sell.append(f"Estocástico {ind.stoch_k:.1f} — cruce bajista en sobrecompra")
     elif ind.stoch_k < 30:
         score += 0.8
+        reversion_raw += 0.8
+        reversion_components["stochastic"] = 0.8
         reasons_buy.append(f"Estocástico {ind.stoch_k:.1f} — zona de sobreventa")
     elif ind.stoch_k > 70:
         score -= 0.8
+        reversion_raw -= 0.8
+        reversion_components["stochastic"] = -0.8
         reasons_sell.append(f"Estocástico {ind.stoch_k:.1f} — zona de sobrecompra")
 
     # ── 4. MOMENTUM — Williams %R ────────────────────────────────────────────
     wr = ind.williams_r
     if wr < -80:
         score += 1.0
+        reversion_raw += 1.0
+        reversion_components["williams_r"] = 1.0
         reasons_buy.append(f"Williams %R {wr:.1f} — sobreventa extrema")
     elif wr > -20:
         score -= 1.0
+        reversion_raw -= 1.0
+        reversion_components["williams_r"] = -1.0
         reasons_sell.append(f"Williams %R {wr:.1f} — sobrecompra")
 
     # ── 5. MACD ───────────────────────────────────────────────────────────────
@@ -413,10 +437,14 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
         if c <= ind.bb_lower * 1.005:
             # Precio toca/rompe banda inferior → rebote probable
             score += 2.0
+            reversion_raw += 2.0
+            reversion_components["bollinger"] = 2.0
             reasons_buy.append(f"Precio en banda inferior Bollinger (BB%={bb_pos:.1%})")
         elif c >= ind.bb_upper * 0.995:
             # Precio toca/rompe banda superior → sobreextensión
             score -= 2.0
+            reversion_raw -= 2.0
+            reversion_components["bollinger"] = -2.0
             reasons_sell.append(f"Precio en banda superior Bollinger (BB%={bb_pos:.1%})")
         # Squeeze de Bollinger (compresión de volatilidad → explosión próxima)
         if ind.bb_width < 0.05:
@@ -461,6 +489,7 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
         reasons   = (reasons_buy + reasons_sell)[:4] or ["Sin señal clara — esperar confirmación"]
 
     trend = assess_trend(ind)
+    reversion_score = max(-1.0, min(1.0, reversion_raw / 7.0))
     return Signal(
         ticker=ind.ticker,
         signal=direction,
@@ -471,6 +500,11 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
         technical_regime=trend.regime.value,
         trend_score=trend.trend_score,
         trend_components=trend.components,
+        reversion_score=round(reversion_score, 4),
+        reversion_components={
+            key: round(value, 4)
+            for key, value in reversion_components.items()
+        },
         structural_break_confirmed=trend.structural_break_confirmed,
         overbought_momentum=trend.overbought_momentum,
     )

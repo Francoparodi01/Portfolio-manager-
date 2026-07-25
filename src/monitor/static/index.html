@@ -1076,6 +1076,31 @@
         align-items: center;
         justify-content: center;
       }
+      .scatter-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin: 8px 0 6px;
+      }
+      .scatter-filter {
+        min-width: 0;
+        height: 26px;
+        padding: 0 9px;
+        border-radius: 5px;
+        font-size: 10.5px;
+        font-family: var(--mono);
+        color: var(--muted);
+      }
+      .scatter-filter.active {
+        border-color: var(--teal);
+        color: var(--teal);
+        background: rgba(60, 196, 224, 0.1);
+      }
+      .scatter-meta {
+        min-height: 16px;
+        margin: 0 0 6px;
+      }
       .inline-link {
         height: auto;
         min-width: 0;
@@ -1853,6 +1878,20 @@
             </div>
             <div class="card">
               <h2>Score vs Outcome</h2>
+              <div class="scatter-toolbar" aria-label="Filtro de decision humana">
+                <button class="scatter-filter active" type="button" data-scatter-filter="all">All</button>
+                <button class="scatter-filter" type="button" data-scatter-filter="followed">Seguidas</button>
+                <button class="scatter-filter" type="button" data-scatter-filter="ignored">Ignoradas</button>
+                <button class="scatter-filter" type="button" data-scatter-filter="partial">Parciales</button>
+                <button class="scatter-filter" type="button" data-scatter-filter="opposite">Opuestas</button>
+                <button class="scatter-filter" type="button" data-scatter-filter="unmatched">Sin match</button>
+              </div>
+              <div class="scatter-toolbar" aria-label="Filtro de score">
+                <button class="scatter-filter active" type="button" data-score-filter="signal">Con score</button>
+                <button class="scatter-filter" type="button" data-score-filter="zero">Score 0</button>
+                <button class="scatter-filter" type="button" data-score-filter="all">Todos</button>
+              </div>
+              <div class="chart-note scatter-meta" id="scoreScatterMeta"></div>
               <svg
                 class="chart"
                 id="scoreScatter"
@@ -2459,6 +2498,8 @@
         totpRequired: false,
         performanceDays: 30,
         selectedTicker: "",
+        scatterOverrideFilter: "all",
+        scatterScoreFilter: "signal",
         performanceData: null,
         shadowData: null,
         selectedShadowTicker: "",
@@ -2629,6 +2670,12 @@
           button.disabled = isLoading;
         });
         $("clearTickerFilter").disabled = isLoading;
+        document.querySelectorAll("[data-scatter-filter]").forEach((button) => {
+          button.disabled = isLoading;
+        });
+        document.querySelectorAll("[data-score-filter]").forEach((button) => {
+          button.disabled = isLoading;
+        });
         const card = $("scoreScatter").closest(".card");
         if (card) card.classList.toggle("loading-soft", isLoading);
       }
@@ -2646,6 +2693,26 @@
           button.classList.toggle(
             "active",
             Number(button.dataset.period) === state.performanceDays,
+          );
+        });
+      }
+
+      function setScatterOverrideFilter(value) {
+        state.scatterOverrideFilter = value || "all";
+        document.querySelectorAll("[data-scatter-filter]").forEach((button) => {
+          button.classList.toggle(
+            "active",
+            button.dataset.scatterFilter === state.scatterOverrideFilter,
+          );
+        });
+      }
+
+      function setScatterScoreFilter(value) {
+        state.scatterScoreFilter = value || "signal";
+        document.querySelectorAll("[data-score-filter]").forEach((button) => {
+          button.classList.toggle(
+            "active",
+            button.dataset.scoreFilter === state.scatterScoreFilter,
           );
         });
       }
@@ -2732,9 +2799,62 @@
         IGNORED: { color: "#6b7c87", width: 1.5, opacity: 0.55 },
         OPPOSITE: { color: "#f5bc4e", width: 2.2, opacity: 1 },
       };
+      const SCATTER_FILTER_LABEL = {
+        all: "All",
+        followed: "seguidas",
+        ignored: "ignoradas",
+        partial: "parciales",
+        opposite: "opuestas",
+        unmatched: "sin match",
+      };
+      const SCATTER_SCORE_LABEL = {
+        signal: "con score",
+        zero: "score 0",
+        all: "todos",
+      };
 
       function overrideLookupKey(ticker, decision, decided_at) {
         return `${ticker}_${String(decision).toUpperCase()}_${fmtShortDate(decided_at)}`;
+      }
+
+      function overrideStatusForPoint(point) {
+        const overrideKey = overrideLookupKey(
+          point.ticker,
+          point.decision,
+          point.decided_at,
+        );
+        return state.overrideLookup[overrideKey] || "UNMATCHED";
+      }
+
+      function pointMatchesScatterFilter(point) {
+        const status = overrideStatusForPoint(point);
+        switch (state.scatterOverrideFilter) {
+          case "followed":
+            return status === "FOLLOWED" || status === "OVERFOLLOWED";
+          case "ignored":
+            return status === "IGNORED";
+          case "partial":
+            return status === "PARTIAL";
+          case "opposite":
+            return status === "OPPOSITE";
+          case "unmatched":
+            return status === "UNMATCHED";
+          default:
+            return true;
+        }
+      }
+
+      function pointMatchesScoreFilter(point) {
+        const score = Number(point.final_score);
+        if (!Number.isFinite(score)) return false;
+        switch (state.scatterScoreFilter) {
+          case "zero":
+            return score === 0;
+          case "all":
+            return true;
+          default:
+            return score !== 0;
+        }
       }
 
       function renderScatter(svg, points) {
@@ -2770,12 +2890,7 @@
               ((Number(p.outcome_5d) - minY) / spanY) * (height - pad * 2);
             const fillColor =
               Number(p.outcome_5d) >= 0 ? "var(--green)" : "var(--red)";
-            const overrideKey = overrideLookupKey(
-              p.ticker,
-              p.decision,
-              p.decided_at,
-            );
-            const overrideStatus = state.overrideLookup[overrideKey] || null;
+            const overrideStatus = overrideStatusForPoint(p);
             const stroke = OVERRIDE_STROKE[overrideStatus] || {
               color: "none",
               width: 0,
@@ -3053,11 +3168,14 @@
         const closed = Number(s.closed_5d || 0);
         const auditClosed = Number(counts.closed_audit_5d || 0);
         const pendingPrimary = Number(counts.pending_primary_5d || 0);
-        const points = (data.score_points || []).filter((row) => {
+        const eligiblePoints = (data.score_points || []).filter((row) => {
           const score = Number(row.final_score);
-          if (!Number.isFinite(score) || score === 0) return false;
+          const outcome = Number(row.outcome_5d);
+          if (!Number.isFinite(score) || !Number.isFinite(outcome)) return false;
           return !state.selectedTicker || row.ticker === state.selectedTicker;
         });
+        const scoreFilteredPoints = eligiblePoints.filter(pointMatchesScoreFilter);
+        const points = scoreFilteredPoints.filter(pointMatchesScatterFilter);
         $("decisionUpdated").textContent =
           `act. hace ${ageFromIso(data.generated_at)} · período ${state.performanceDays === 365 ? "All" : state.performanceDays + "d"}`;
         $("selectedTickerPill").textContent = state.selectedTicker
@@ -3154,6 +3272,8 @@
         if (state.selectedTicker)
           $("decisionUpdated").textContent +=
             ` · scatter filtrado por ${state.selectedTicker}`;
+        $("scoreScatterMeta").textContent =
+          `${fmtNumber(points.length)} / ${fmtNumber(scoreFilteredPoints.length)} puntos · ${SCATTER_SCORE_LABEL[state.scatterScoreFilter] || "con score"} · ${SCATTER_FILTER_LABEL[state.scatterOverrideFilter] || "All"}`;
         $("tickerBars").innerHTML = renderBarRows(
           (data.by_ticker || []).slice(0, 8).map((row) => ({
             label: row.ticker,
@@ -3169,7 +3289,7 @@
         const s = data.summary || {};
         const byStatus = s.by_status || {};
         state.overrideLookup = {};
-        (data.recent || []).forEach((row) => {
+        (data.matches || data.recent || []).forEach((row) => {
           const key = overrideLookupKey(
             row.ticker,
             row.decision,
@@ -4017,7 +4137,7 @@
             fills,
             logs,
           ] = await Promise.all([
-            api("/api/override-audit?days=90"),
+            api(`/api/override-audit?days=${state.performanceDays}`),
             api(`/api/performance?days=${state.performanceDays}`),
             api("/api/radar-audit?days=90"),
             api("/api/shadow"),
@@ -4048,7 +4168,7 @@
         setRefreshState(true, "performance");
         try {
           let [overrides, performance] = await Promise.all([
-            api("/api/override-audit?days=90"),
+            api(`/api/override-audit?days=${state.performanceDays}`),
             api(`/api/performance?days=${state.performanceDays}`),
           ]);
           renderOverrideAudit(overrides);
@@ -4085,6 +4205,30 @@
           } catch (err) {
             setError(err.message);
           }
+        });
+      });
+
+      document.querySelectorAll("[data-scatter-filter]").forEach((button) => {
+        button.addEventListener("click", () => {
+          setScatterOverrideFilter(button.dataset.scatterFilter || "all");
+          setDecisionLoading(true);
+          requestAnimationFrame(() => {
+            if (state.performanceData)
+              renderPerformanceView(state.performanceData);
+            setDecisionLoading(false);
+          });
+        });
+      });
+
+      document.querySelectorAll("[data-score-filter]").forEach((button) => {
+        button.addEventListener("click", () => {
+          setScatterScoreFilter(button.dataset.scoreFilter || "signal");
+          setDecisionLoading(true);
+          requestAnimationFrame(() => {
+            if (state.performanceData)
+              renderPerformanceView(state.performanceData);
+            setDecisionLoading(false);
+          });
         });
       });
 

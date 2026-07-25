@@ -7,7 +7,7 @@ Usa datos generados por el sistema:
     - final_score
     - layers
     - decision
-    - outcome_5d / outcome_10d / outcome_20d
+    - outcome_5d / outcome_10d / outcome_20d / outcome_40d
     - source
     - decision_type
     - status
@@ -161,7 +161,7 @@ async def main() -> None:
 
     parser.add_argument(
         "--horizon",
-        choices=["5d", "10d", "20d", "all"],
+        choices=["5d", "10d", "20d", "40d", "all"],
         default="all",
         help="Horizonte a auditar. Default: all",
     )

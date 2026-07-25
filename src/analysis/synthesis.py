@@ -69,6 +69,8 @@ class SynthesisResult:
     technical_regime: str = "TRANSITIONAL"
     trend_score: float = 0.0
     trend_components: dict[str, float] = field(default_factory=dict)
+    reversion_score: float = 0.0
+    reversion_components: dict[str, float] = field(default_factory=dict)
     structural_break_confirmed: bool = False
     overbought_momentum: bool = False
     stop_triggered: bool = False
