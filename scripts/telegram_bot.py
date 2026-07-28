@@ -124,6 +124,7 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("analisis_full", "Vista completa sin guardar"),
     ("analisis_debug", "Diagnostico sin guardar"),
     ("mercado", "Contexto mercado/noticias"),
+    ("ticker", "Analisis tecnico por accion"),
     ("radar", "Radar compacto"),
     ("shadow", "Tesis shadow 5/20/40"),
     ("performance", "Performance operativa"),
@@ -556,6 +557,9 @@ def main_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧠 Plan de cartera", callback_data="weekly_analysis"),
         ],
         [
+            InlineKeyboardButton("Analisis ticker",      callback_data="ticker_analysis"),
+        ],
+        [
             InlineKeyboardButton("📅 Resumen semanal",  callback_data="weekly_summary"),
             InlineKeyboardButton("📊 Performance",      callback_data="performance"),
         ],
@@ -596,6 +600,7 @@ def menu_text() -> str:
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "💼 <b>Portfolio</b> — último snapshot de la cartera\n"
         "🧠 <b>Plan de cartera</b> — rotación y acciones sugeridas\n"
+        "<b>Analisis ticker</b> — tecnico + grafico por accion\n"
         "📅 <b>Resumen semanal</b> — performance de la semana\n"
         "📊 <b>Performance</b> — métricas canónicas y dataset operativo\n"
         "Viability — bot-only vs manual-only por horizonte, neto de costos\n"
@@ -618,6 +623,7 @@ def help_text() -> str:
         "<b>Uso rapido</b>\n"
         "<code>/portfolio</code>: cartera actual y concentracion.\n"
         "<code>/analisis</code>: plan operativo compacto.\n"
+        "<code>/ticker NVDA</code>: analisis tecnico y grafico por accion.\n"
         "<code>/radar</code>: oportunidades no ejecutadas.\n"
         "<code>/performance</code>: resultado real con fills/movimientos.\n"
         "<code>/ledger</code>: atribucion economica de decisiones.\n"
@@ -970,6 +976,75 @@ async def action_market_context(context: ContextTypes.DEFAULT_TYPE, chat_id: int
         timeout=300,
     )
     await send_text(context, chat_id, report)
+
+
+async def action_ticker_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    await send_text(
+        context,
+        chat_id,
+        "<b>Analisis por accion</b>\n"
+        "Mandame el ticker con este formato:\n\n"
+        "<code>/ticker NVDA</code>\n"
+        "<code>/tecnico TSM</code>\n\n"
+        "Devuelve senal tecnica, contexto de cartera/ultima decision si existe, "
+        "y un grafico PNG. Es read-only: no guarda decision_log y no cambia thresholds.",
+    )
+
+
+async def action_ticker_analysis(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    ticker: str,
+) -> None:
+    clean_ticker = re.sub(r"[^A-Za-z0-9.\-]", "", str(ticker or "")).upper()
+    if not clean_ticker:
+        await action_ticker_prompt(context, chat_id)
+        return
+
+    chart_path = Path("/tmp") / f"cocos_ticker_{chat_id}_{clean_ticker}_{int(time.time())}.png"
+    rc, out, err, elapsed = await run_cmd(
+        [
+            sys.executable,
+            "scripts/run_ticker_analysis.py",
+            clean_ticker,
+            "--no-telegram",
+            "--chart-out",
+            str(chart_path),
+            *_owner_cli_args(chat_id),
+        ],
+        timeout=120,
+    )
+    if rc != 0:
+        await send_text(
+            context,
+            chat_id,
+            (
+                f"<b>No pude completar analisis ticker {html_text(clean_ticker)}</b>\n"
+                f"Tiempo: <b>{elapsed:.1f}s</b>\n"
+                f"<code>{html_text(err[-2200:] or out[-2200:] or 'Sin detalle')}</code>"
+            ),
+        )
+        return
+
+    try:
+        if chart_path.exists():
+            with chart_path.open("rb") as photo:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo,
+                    caption=f"<b>{html_text(clean_ticker)}</b> - grafico tecnico",
+                    parse_mode=ParseMode.HTML,
+                )
+    finally:
+        try:
+            chart_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    report = "\n".join(
+        line for line in (out or "").splitlines() if not line.startswith("[chart]")
+    ).strip()
+    await send_text(context, chat_id, report or f"Sin reporte para {html_text(clean_ticker)}.")
 
 
 async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -1891,6 +1966,10 @@ CALLBACK_ALIASES: dict[str, str] = {
     "mercado":          "market_context",
     "noticias":         "market_context",
     "contexto":         "market_context",
+    "ticker_analysis":  "ticker_analysis",
+    "ticker":           "ticker_analysis",
+    "tecnico":          "ticker_analysis",
+    "accion":           "ticker_analysis",
     # Resumen semanal
     "weekly_summary":   "weekly_summary",
     "summary":          "weekly_summary",
@@ -1954,6 +2033,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "analysis_test": "Probando analisis sin guardar...",
     "analysis_debug": "Generando diagnostico sin guardar...",
     "market_context": "Revisando mercado y noticias...",
+    "ticker_analysis": "Preparando analisis por accion...",
     "portfolio":     "💼 Leyendo último portfolio...",
     "analysis":      "🧠 Generando plan de cartera...",
     "weekly_summary":"📅 Generando resumen semanal...",
@@ -1981,6 +2061,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "analysis_full":  action_analysis_full,
         "analysis_debug": action_analysis_debug,
         "market_context": action_market_context,
+        "ticker_analysis": action_ticker_prompt,
         "weekly_summary": action_weekly_summary,
         "performance":    action_performance,
         "viability":      action_viability,
@@ -2079,6 +2160,30 @@ async def analysis_debug_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def market_context_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "market_context")
+
+async def ticker_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    args = list(getattr(c, "args", None) or [])
+    if not args:
+        await _dispatch_command(u, c, "ticker_analysis")
+        return
+    if not await ensure_allowed_chat(u, c):
+        return
+    chat_id = u.effective_chat.id
+    ticker = re.sub(r"[^A-Za-z0-9.\-]", "", str(args[0])).upper()
+    if not ticker:
+        await send_text(c, chat_id, "Uso: <code>/ticker NVDA</code>")
+        return
+    await answer_loading(u, f"Analizando {html_text(ticker)}...")
+    t0 = time.time()
+    logger.info("[BOT] action=ticker_analysis ticker=%s chat_id=%s", ticker, chat_id)
+    try:
+        await action_ticker_analysis(c, chat_id, ticker)
+        logger.info("[BOT] action=ticker_analysis OK en %.2fs", time.time() - t0)
+    except Exception as e:
+        logger.exception("[BOT] action=ticker_analysis fallo")
+        await send_text(c, chat_id, f"Error en <b>ticker {html_text(ticker)}</b>:\n<code>{html_text(e)}</code>")
+    finally:
+        await send_menu(c, chat_id)
 
 async def weekly_summary_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "weekly_summary")
@@ -2414,6 +2519,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("mercado",          market_context_handler))
     app.add_handler(CommandHandler("market_context",   market_context_handler))
     app.add_handler(CommandHandler("noticias",         market_context_handler))
+    app.add_handler(CommandHandler("ticker",           ticker_handler))
+    app.add_handler(CommandHandler("tecnico",          ticker_handler))
+    app.add_handler(CommandHandler("accion",           ticker_handler))
     app.add_handler(CommandHandler("resumen",          weekly_summary_handler))
     app.add_handler(CommandHandler("weekly_summary",   weekly_summary_handler))
     app.add_handler(CommandHandler("resumen_semanal",  weekly_summary_handler))
