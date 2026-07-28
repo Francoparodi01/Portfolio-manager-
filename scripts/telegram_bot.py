@@ -982,12 +982,41 @@ async def action_ticker_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     await send_text(
         context,
         chat_id,
-        "<b>Analisis por accion</b>\n"
+        "<b>Análisis por acción</b>\n"
         "Mandame el ticker con este formato:\n\n"
         "<code>/ticker NVDA</code>\n"
         "<code>/tecnico TSM</code>\n\n"
-        "Devuelve senal tecnica, contexto de cartera/ultima decision si existe, "
-        "y un grafico PNG. Es read-only: no guarda decision_log y no cambia thresholds.",
+        "Devuelve señal técnica, contexto de cartera/última decisión si existe, "
+        "y gráficos PNG. Es read-only: no guarda decision_log y no cambia thresholds.",
+    )
+
+
+def _ticker_chart_paths(output: str, fallback: Path) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for line in (output or "").splitlines():
+        if not line.startswith("[chart]"):
+            continue
+        raw_path = line.removeprefix("[chart]").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        key = str(path)
+        if key in seen:
+            continue
+        paths.append(path)
+        seen.add(key)
+    if not paths and fallback.exists():
+        paths.append(fallback)
+    return paths[:3]
+
+
+def _ticker_chart_caption(ticker: str, chart_path: Path, index: int, total: int) -> str:
+    chart_name = chart_path.stem.lower()
+    detail = "momentum, RSI y MACD" if "momentum" in chart_name else "precio, medias y volumen"
+    return (
+        f"<b>{html_text(ticker)}</b> - gráfico técnico "
+        f"{html_text(detail)} ({index}/{total})"
     )
 
 
@@ -1026,20 +1055,25 @@ async def action_ticker_analysis(
         )
         return
 
+    chart_paths = _ticker_chart_paths(out, chart_path)
     try:
-        if chart_path.exists():
-            with chart_path.open("rb") as photo:
+        total = len(chart_paths)
+        for index, path in enumerate(chart_paths, start=1):
+            if not path.exists():
+                continue
+            with path.open("rb") as photo:
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=photo,
-                    caption=f"<b>{html_text(clean_ticker)}</b> - grafico tecnico",
+                    caption=_ticker_chart_caption(clean_ticker, path, index, total),
                     parse_mode=ParseMode.HTML,
                 )
     finally:
-        try:
-            chart_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        for path in chart_paths or [chart_path]:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     report = "\n".join(
         line for line in (out or "").splitlines() if not line.startswith("[chart]")

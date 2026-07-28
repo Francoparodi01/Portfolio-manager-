@@ -16,7 +16,7 @@ from src.analysis.ticker_technical_report import (
     DEFAULT_CANDLE_LIMIT,
     build_ticker_technical_report_from_db,
     normalize_ticker,
-    render_ticker_technical_chart,
+    render_ticker_technical_charts,
     render_ticker_telegram_report,
 )
 from src.collector.db import PortfolioDatabase
@@ -61,8 +61,8 @@ async def main_async() -> int:
         await db.close()
 
     if args.chart_out:
-        chart_path = render_ticker_technical_chart(report, args.chart_out)
-        print(f"[chart] {chart_path}")
+        for chart_path in render_ticker_technical_charts(report, args.chart_out):
+            print(f"[chart] {chart_path}")
 
     print(render_ticker_telegram_report(report))
     return 0

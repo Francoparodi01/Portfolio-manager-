@@ -9,6 +9,7 @@ from src.analysis.ticker_technical_report import (
     build_ticker_technical_report,
     normalize_ticker,
     render_ticker_technical_chart,
+    render_ticker_technical_charts,
     render_ticker_telegram_report,
 )
 from src.analysis.technical import Signal
@@ -147,6 +148,18 @@ def test_ticker_report_chart_writes_png(tmp_path):
 
     assert chart_path.exists()
     assert chart_path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_ticker_report_charts_write_price_and_momentum_pngs(tmp_path):
+    report = build_ticker_technical_report("TSM", _frame(rows=260))
+    chart_paths = render_ticker_technical_charts(report, tmp_path / "tsm.png")
+
+    assert len(chart_paths) == 2
+    assert chart_paths[0].name == "tsm.png"
+    assert chart_paths[1].name == "tsm_momentum.png"
+    for chart_path in chart_paths:
+        assert chart_path.exists()
+        assert chart_path.read_bytes().startswith(b"\x89PNG")
 
 
 def test_normalize_ticker_rejects_empty_input():

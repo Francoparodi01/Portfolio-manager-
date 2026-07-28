@@ -1,7 +1,7 @@
 """Ticker-scoped technical report and chart rendering.
 
 This module is intentionally read-only. It reuses the existing technical
-signal engine and renders a Telegram-safe report plus an optional PNG chart.
+signal engine and renders a Telegram-safe report plus optional PNG charts.
 """
 from __future__ import annotations
 
@@ -228,102 +228,370 @@ def render_ticker_technical_chart(
     report: TickerTechnicalReport,
     output_path: str | Path,
 ) -> Path:
-    from PIL import Image, ImageDraw
+    return render_ticker_technical_charts(report, output_path)[0]
 
+
+def render_ticker_technical_charts(
+    report: TickerTechnicalReport,
+    output_path: str | Path,
+) -> list[Path]:
+    price_path = _chart_output_path(output_path)
+    momentum_path = _chart_output_path(output_path, suffix="momentum")
+    _render_price_volume_chart(report, price_path)
+    _render_momentum_chart(report, momentum_path)
+    return [price_path, momentum_path]
+
+
+def _chart_output_path(output_path: str | Path, *, suffix: str | None = None) -> Path:
     path = Path(output_path)
+    if not path.suffix:
+        path = path.with_suffix(".png")
+    if suffix:
+        path = path.with_name(f"{path.stem}_{suffix}{path.suffix}")
     path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
-    frame = _chart_frame(report.frame)
+
+def _render_price_volume_chart(report: TickerTechnicalReport, path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import mplfinance as mpf
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import FuncFormatter
+
+    frame = _chart_frame(report.frame, limit=260)
     if len(frame) < 2:
         raise ValueError(f"{report.ticker}: no hay datos suficientes para graficar")
 
-    width, height = 1280, 980
-    bg = "#0b1117"
-    panel = "#111b24"
-    text = "#eef6fb"
-    muted = "#9fb0bd"
-    grid = "#243442"
-    close_color = "#f2f5f7"
+    stats = _frame_stats(report.frame)
+    signal_color = _signal_color(report.signal.signal)
     sma20_color = "#4cb3ff"
     sma50_color = "#ffb86b"
     sma200_color = "#b88cff"
-    volume_color = "#4a677a"
-    rsi_color = "#6ee7a8"
-    warn_color = "#ffd166"
 
-    image = Image.new("RGB", (width, height), bg)
-    draw = ImageDraw.Draw(image)
-    fonts = _chart_fonts()
+    close = frame["Close"]
+    add_plots = [
+        mpf.make_addplot(close.rolling(20).mean(), color=sma20_color, width=1.2, label="SMA20"),
+        mpf.make_addplot(close.rolling(50).mean(), color=sma50_color, width=1.2, label="SMA50"),
+        mpf.make_addplot(close.rolling(200).mean(), color=sma200_color, width=2.0, label="SMA200"),
+    ]
 
-    signal_color = {
+    fig, axes = mpf.plot(
+        frame,
+        type="candle",
+        style=_mpf_style(),
+        addplot=add_plots,
+        volume=True,
+        panel_ratios=(4.2, 1.15),
+        figratio=(16, 10),
+        figscale=1.18,
+        datetime_format="%d/%m/%y",
+        xrotation=0,
+        tight_layout=False,
+        returnfig=True,
+        warn_too_much_data=10000,
+    )
+    fig.set_dpi(155)
+    fig.set_facecolor("#0b1117")
+    fig.subplots_adjust(left=0.08, right=0.965, top=0.82, bottom=0.095, hspace=0.08)
+    fig.suptitle(
+        f"{report.ticker} memo técnico",
+        x=0.035,
+        y=0.985,
+        ha="left",
+        color="#eef6fb",
+        fontsize=20,
+        fontweight="bold",
+    )
+    fig.text(
+        0.035,
+        0.94,
+        f"{_verdict(report, stats)[0]} | score {report.signal.score_raw:+.2f}",
+        color=signal_color,
+        fontsize=12,
+        fontweight="bold",
+    )
+    fig.text(
+        0.035,
+        0.915,
+        f"{len(frame)} velas | {_fmt_dt(frame.index[0])} a {_fmt_dt(frame.index[-1])} | {report.data_source}",
+        color="#9fb0bd",
+        fontsize=9,
+    )
+
+    price_ax = axes[0]
+    volume_ax = axes[2] if len(axes) > 2 else axes[-1]
+    for ax in (price_ax, volume_ax):
+        _style_mpl_axis(ax)
+    price_ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: _fmt_axis_money(value)))
+    volume_ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: _fmt_axis_volume(value)))
+    price_ax.set_ylabel("Precio", color="#9fb0bd")
+    volume_ax.set_ylabel("Volumen", color="#9fb0bd")
+    legend_handles = [
+        Line2D([0], [0], color=sma20_color, lw=1.5, label="SMA20"),
+        Line2D([0], [0], color=sma50_color, lw=1.5, label="SMA50"),
+        Line2D([0], [0], color=sma200_color, lw=2.2, label="SMA200"),
+    ]
+    price_ax.legend(
+        handles=legend_handles,
+        loc="upper left",
+        bbox_to_anchor=(0.01, 0.98),
+        ncol=3,
+        facecolor="#101820",
+        edgecolor="#22313c",
+        labelcolor="#d9e6ee",
+        framealpha=0.9,
+        fontsize=8.5,
+    )
+
+    _annotate_price_level(price_ax, stats.get("support_low"), "soporte crítico", "#ff6b6b")
+    _annotate_price_level(price_ax, stats.get("resistance_low"), "recuperación", "#ffd166")
+    _annotate_latest_average(price_ax, frame, 200, "SMA200", sma200_color)
+    _annotate_volume_gap(volume_ax, stats)
+
+    fig.savefig(path, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.18)
+    plt.close(fig)
+
+
+def _mpf_style() -> Any:
+    import mplfinance as mpf
+
+    market_colors = mpf.make_marketcolors(
+        up="#6ee7a8",
+        down="#ff6b6b",
+        edge="inherit",
+        wick="inherit",
+        volume={"up": "#376f62", "down": "#744755"},
+    )
+    return mpf.make_mpf_style(
+        base_mpf_style="nightclouds",
+        marketcolors=market_colors,
+        facecolor="#0f1a23",
+        figcolor="#0b1117",
+        gridcolor="#263541",
+        gridstyle="-",
+        y_on_right=False,
+        rc={
+            "axes.labelcolor": "#9fb0bd",
+            "font.size": 9,
+            "text.color": "#eef6fb",
+            "xtick.color": "#9fb0bd",
+            "ytick.color": "#9fb0bd",
+        },
+    )
+
+
+def _signal_color(signal: str) -> str:
+    return {
         "BUY": "#6ee7a8",
         "SELL": "#ff6b6b",
         "HOLD": "#ffd166",
-    }.get(str(report.signal.signal).upper(), muted)
+    }.get(str(signal or "").upper(), "#9fb0bd")
 
-    chart_verdict, _ = _verdict(report, _frame_stats(report.frame))
-    draw.text((54, 36), f"{report.ticker} memo técnico", fill=text, font=fonts["title"])
-    draw.text(
-        (56, 88),
-        f"{chart_verdict} | score {report.signal.score_raw:+.2f}",
-        fill=signal_color,
-        font=fonts["body"],
+
+def _style_mpl_axis(ax: Any) -> None:
+    ax.set_facecolor("#0f1a23")
+    ax.grid(True, color="#263541", linewidth=0.7, alpha=0.85)
+    ax.tick_params(colors="#9fb0bd", labelsize=8.5)
+    for spine in ax.spines.values():
+        spine.set_color("#22313c")
+
+
+def _fmt_axis_money(value: Any) -> str:
+    number = _num(value)
+    if number is None:
+        return ""
+    if abs(number) >= 1_000_000:
+        return f"${number / 1_000_000:.1f}M"
+    if abs(number) >= 1_000:
+        return f"${number / 1_000:.0f}k"
+    return f"${number:.0f}"
+
+
+def _fmt_axis_volume(value: Any) -> str:
+    number = _num(value)
+    if number is None:
+        return ""
+    if abs(number) >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M"
+    if abs(number) >= 1_000:
+        return f"{number / 1_000:.0f}k"
+    return f"{number:.0f}"
+
+
+def _annotate_price_level(ax: Any, value: Any, label: str, color: str) -> None:
+    number = _num(value)
+    if number is None:
+        return
+    ax.axhline(number, color=color, linewidth=1.0, linestyle="--", alpha=0.75)
+    ax.text(
+        0.995,
+        number,
+        f" {label} {_fmt_level(number)}",
+        transform=ax.get_yaxis_transform(),
+        color=color,
+        fontsize=8.3,
+        ha="right",
+        va="bottom",
+        bbox={
+            "facecolor": "#0b1117",
+            "edgecolor": color,
+            "alpha": 0.72,
+            "boxstyle": "round,pad=0.25",
+        },
     )
-    draw.text(
-        (56, 120),
-        f"{report.candle_count} velas | hasta {_fmt_dt(report.as_of)} | {report.data_source}",
-        fill=muted,
-        font=fonts["small"],
+
+
+def _annotate_latest_average(
+    ax: Any,
+    frame: Any,
+    period: int,
+    label: str,
+    color: str,
+) -> None:
+    try:
+        series = frame["Close"].rolling(period).mean().dropna()
+    except Exception:
+        return
+    if series.empty:
+        return
+    value = float(series.iloc[-1])
+    if not math.isfinite(value):
+        return
+    ax.text(
+        0.012,
+        value,
+        f"{label} {_fmt_level(value)}",
+        transform=ax.get_yaxis_transform(),
+        color=color,
+        fontsize=8.3,
+        ha="left",
+        va="center",
+        bbox={
+            "facecolor": "#0b1117",
+            "edgecolor": color,
+            "alpha": 0.68,
+            "boxstyle": "round,pad=0.2",
+        },
     )
 
-    price_box = (64, 166, 1216, 570)
-    vol_box = (64, 610, 1216, 730)
-    rsi_box = (64, 770, 1216, 910)
 
-    _panel(draw, price_box, panel)
-    _panel(draw, vol_box, panel)
-    _panel(draw, rsi_box, panel)
+def _annotate_volume_gap(ax: Any, stats: dict[str, float | None]) -> None:
+    missing = int(_num(stats.get("trailing_missing_volume")) or 0)
+    if missing < 3:
+        return
+    ax.text(
+        0.985,
+        0.88,
+        f"{missing} velas sin volumen",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        color="#ffd166",
+        fontsize=8.5,
+        bbox={
+            "facecolor": "#101820",
+            "edgecolor": "#375061",
+            "alpha": 0.88,
+            "boxstyle": "round,pad=0.35",
+        },
+    )
+
+
+def _macd_series(close: Any) -> tuple[Any, Any, Any]:
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    return macd, signal, macd - signal
+
+
+def _render_momentum_chart(report: TickerTechnicalReport, path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
+    frame = _chart_frame(report.frame, limit=260)
+    if len(frame) < 2:
+        raise ValueError(f"{report.ticker}: no hay datos suficientes para graficar")
 
     close = frame["Close"]
-    sma20 = close.rolling(20).mean()
-    sma50 = close.rolling(50).mean()
-    sma200 = close.rolling(200).mean()
+    dates = frame.index
     rsi = _rsi(close)
-    volume = frame["Volume"].fillna(0)
+    macd_line, macd_signal, macd_hist = _macd_series(close)
 
-    price_values = []
-    for series in (close, sma20, sma50, sma200):
-        price_values.extend(
-            float(v) for v in series.dropna().tolist() if math.isfinite(float(v))
-        )
-    min_price, max_price = _scale(price_values, pad=0.08)
-    _draw_y_grid(draw, price_box, min_price, max_price, grid, muted, fonts["mono"], _fmt_price)
+    fig, (rsi_ax, macd_ax) = plt.subplots(
+        2,
+        1,
+        sharex=True,
+        figsize=(13.2, 8.0),
+        dpi=155,
+        gridspec_kw={"height_ratios": [1.0, 1.15], "hspace": 0.14},
+    )
+    fig.set_facecolor("#0b1117")
+    for ax in (rsi_ax, macd_ax):
+        _style_mpl_axis(ax)
 
-    _draw_line(draw, price_box, close, min_price, max_price, close_color, width=4)
-    _draw_line(draw, price_box, sma20, min_price, max_price, sma20_color, width=2)
-    _draw_line(draw, price_box, sma50, min_price, max_price, sma50_color, width=2)
-    _draw_line(draw, price_box, sma200, min_price, max_price, sma200_color, width=2)
-    _draw_legend(
-        draw,
-        (88, 184),
-        [
-            ("Precio", close_color),
-            ("SMA20", sma20_color),
-            ("SMA50", sma50_color),
-            ("SMA200", sma200_color),
-        ],
-        fonts["small"],
-        muted,
+    fig.suptitle(
+        f"{report.ticker} momentum",
+        x=0.045,
+        y=0.975,
+        ha="left",
+        color="#eef6fb",
+        fontsize=20,
+        fontweight="bold",
+    )
+    fig.text(
+        0.045,
+        0.932,
+        f"RSI {_fmt_number(_rsi_value(close), decimals=1)} | MACD {_macd_label(_frame_stats(frame))}",
+        color="#9fb0bd",
+        fontsize=10,
     )
 
-    _draw_volume(draw, vol_box, volume, volume_color, muted, warn_color, fonts["small"])
-    draw.text((88, vol_box[1] + 14), "Volumen", fill=muted, font=fonts["small"])
+    rsi_ax.plot(dates, rsi, color="#6ee7a8", linewidth=1.7, label="RSI 14")
+    rsi_ax.fill_between(dates, 70, 100, color="#ff6b6b", alpha=0.08)
+    rsi_ax.fill_between(dates, 0, 30, color="#4cb3ff", alpha=0.08)
+    rsi_ax.set_ylim(0, 100)
+    rsi_ax.set_ylabel("RSI", color="#9fb0bd")
+    for level, color in ((70, "#ffd166"), (50, "#6c7c88"), (30, "#ffd166")):
+        rsi_ax.axhline(level, color=color, linewidth=0.85, alpha=0.95)
+        rsi_ax.text(
+            1.006,
+            level,
+            str(level),
+            transform=rsi_ax.get_yaxis_transform(),
+            color="#c6d2dc",
+            fontsize=8.5,
+            va="center",
+            ha="left",
+        )
+    rsi_ax.legend(loc="upper left", facecolor="#101820", edgecolor="#22313c", labelcolor="#d9e6ee")
 
-    _draw_rsi(draw, rsi_box, rsi, rsi_color, warn_color, grid, muted, fonts["mono"])
-    draw.text((88, rsi_box[1] + 10), "RSI 14", fill=muted, font=fonts["small"])
+    hist_colors = ["#6ee7a8" if value >= 0 else "#ff6b6b" for value in macd_hist.fillna(0)]
+    macd_ax.bar(dates, macd_hist, color=hist_colors, alpha=0.45, width=0.85, label="Histograma")
+    macd_ax.plot(dates, macd_line, color="#4cb3ff", linewidth=1.5, label="MACD")
+    macd_ax.plot(dates, macd_signal, color="#ffb86b", linewidth=1.3, label="Señal")
+    macd_ax.axhline(0, color="#6c7c88", linewidth=0.9)
+    macd_ax.set_ylabel("MACD", color="#9fb0bd")
+    macd_ax.legend(
+        loc="upper left",
+        ncol=3,
+        facecolor="#101820",
+        edgecolor="#22313c",
+        labelcolor="#d9e6ee",
+        fontsize=8.5,
+    )
+    macd_ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=6, maxticks=9))
+    macd_ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m/%y"))
+    macd_ax.tick_params(axis="x", rotation=0)
 
-    image.save(path, "PNG")
-    return path
+    fig.savefig(path, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.18)
+    plt.close(fig)
 
 
 def _frame_stats(frame: Any) -> dict[str, float | None]:
@@ -925,10 +1193,25 @@ def _chart_fonts() -> dict[str, object]:
     }
 
 
-def _chart_frame(frame: Any) -> Any:
+def _chart_frame(frame: Any, *, limit: int = 260) -> Any:
     out = frame.copy()
+    if "Close" not in out:
+        raise ValueError("frame sin columna Close")
+    for column in ("Open", "High", "Low"):
+        if column not in out:
+            out[column] = out["Close"]
+        else:
+            out[column] = out[column].fillna(out["Close"])
+    if "Volume" not in out:
+        out["Volume"] = 0.0
+    else:
+        out["Volume"] = out["Volume"].fillna(0.0)
     out = out[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
-    return out.tail(180)
+    try:
+        out = out.sort_index()
+    except Exception:
+        pass
+    return out.tail(int(limit))
 
 
 def _panel(draw: Any, box: tuple[int, int, int, int], fill: str) -> None:

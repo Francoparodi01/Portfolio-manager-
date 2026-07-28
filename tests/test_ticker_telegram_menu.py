@@ -24,3 +24,15 @@ def test_ticker_button_is_read_only_prompt():
     assert "/ticker NVDA" in action
     assert "no guarda decision_log" in action
     assert "no cambia thresholds" in action
+
+
+def test_ticker_action_sends_multiple_chart_paths():
+    source = (ROOT / "scripts" / "telegram_bot.py").read_text(encoding="utf-8")
+    action_start = source.index("async def action_ticker_analysis")
+    action_end = source.index("async def action_performance", action_start)
+    action = source[action_start:action_end]
+
+    assert "_ticker_chart_paths(out, chart_path)" in action
+    assert "for index, path in enumerate(chart_paths" in action
+    assert "send_photo" in action
+    assert "line.startswith(\"[chart]\")" in action
