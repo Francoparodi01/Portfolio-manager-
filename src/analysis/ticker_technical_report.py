@@ -167,51 +167,48 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
     signal = report.signal
     stats = _frame_stats(report.frame)
     verdict_title, verdict_detail = _verdict(report, stats)
-    operative_regime = _operative_regime(stats, signal)
+    operative_signal = _operative_signal_label(report)
+    recovery = _fmt_level_range(stats.get("resistance_low"), stats.get("resistance_high"))
+    support_immediate, support_critical = _support_level_labels(stats)
+    scenario = _scenario_sentence(report, stats)
     horizon_lines = _horizon_lines(stats)
-    level_lines = _level_lines(stats)
-    scenario_lines = _scenario_lines(report, stats)
     position_lines = _position_lines(report.position)
     decision_lines = _decision_lines(report.latest_decision)
     warning_lines = _data_caveat_lines(report)
 
-    reasons = [
-        f"   - {escape(str(reason))}"
-        for reason in (signal.reasons or [])[:5]
-    ]
-    if not reasons:
-        reasons = ["   - Sin razon tecnica principal."]
-
     lines = [
         f"<b>{escape(report.ticker)} - {escape(verdict_title)}</b>",
-        "----------------------------",
         escape(verdict_detail),
         "",
-        "<b>Lectura operativa</b>",
-        f"   Precio: <b>{_fmt_price(signal.price_usd)}</b>",
-        f"   Senal tecnica: <b>{escape(signal.signal)}</b> | Score: <code>{signal.score_raw:+.2f}</code>",
-        f"   Intensidad tecnica: <b>{signal.strength:.0%}</b> (no es probabilidad de acierto)",
-        f"   Regimen cuantitativo: <b>{escape(signal.technical_regime)}</b>",
-        f"   Interpretacion: <b>{escape(operative_regime)}</b>",
-        f"   Trend: <code>{signal.trend_score:+.3f}</code> | Reversion: <code>{signal.reversion_score:+.3f}</code>",
+        f"Precio: <b>{_fmt_level(signal.price_usd)}</b>",
+        f"Señal operativa: <b>{escape(operative_signal)}</b>",
+        f"Score técnico: <code>{signal.score_raw:+.2f}</code> | "
+        f"Intensidad: <b>{signal.strength:.0%}</b> <i>(no es probabilidad)</i>",
         "",
-        "<b>Lectura por horizonte</b>",
-        *horizon_lines,
+        f"Recuperación: <b>{recovery}</b>",
+        f"Soporte inmediato: <b>{support_immediate}</b>",
+        f"Soporte crítico: <b>{support_critical}</b>",
         "",
-        "<b>Niveles a mirar</b>",
-        *level_lines,
-        "",
-        "<b>Razones tecnicas</b>",
-        *reasons,
+        f"Escenario: {escape(scenario)}",
     ]
 
-    if scenario_lines:
-        lines += ["", "<b>Escenarios</b>", *scenario_lines]
+    lines += [
+        "",
+        "<b>Datos del análisis</b>",
+        *horizon_lines,
+        f"   Señal técnica interna: <b>{escape(signal.signal)}</b> | "
+        f"Régimen cuantitativo: <b>{escape(signal.technical_regime)}</b>",
+        f"   Trend: <code>{signal.trend_score:+.3f}</code> | "
+        f"Reversión: <code>{signal.reversion_score:+.3f}</code>",
+        f"   Medias: SMA20 {_fmt_level(stats.get('sma_20'))} | "
+        f"SMA50 {_fmt_level(stats.get('sma_50'))} | "
+        f"SMA200 {_fmt_level(stats.get('sma_200'))}",
+    ]
 
     if position_lines:
         lines += ["", "<b>Contexto cartera</b>", *position_lines]
     if decision_lines:
-        lines += ["", "<b>Ultima decision registrada</b>", *decision_lines]
+        lines += ["", "<b>Última decisión registrada</b>", *decision_lines]
     if warning_lines:
         lines += ["", "<b>Advertencias</b>", *warning_lines]
 
@@ -222,7 +219,7 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
         f"   Fuente: <b>{escape(source)}</b>",
         f"   Velas: <b>{report.candle_count}</b> | Hasta: <b>{escape(_fmt_dt(report.as_of))}</b>",
         "",
-        "<i>Read-only: no genera ordenes, no persiste decision_log y no cambia thresholds.</i>",
+        "<i>Read-only: no genera órdenes, no persiste decision_log y no cambia thresholds.</i>",
     ]
     return "\n".join(lines)
 
@@ -240,7 +237,7 @@ def render_ticker_technical_chart(
     if len(frame) < 2:
         raise ValueError(f"{report.ticker}: no hay datos suficientes para graficar")
 
-    width, height = 1280, 920
+    width, height = 1280, 980
     bg = "#0b1117"
     panel = "#111b24"
     text = "#eef6fb"
@@ -265,7 +262,7 @@ def render_ticker_technical_chart(
     }.get(str(report.signal.signal).upper(), muted)
 
     chart_verdict, _ = _verdict(report, _frame_stats(report.frame))
-    draw.text((54, 36), f"{report.ticker} memo tecnico", fill=text, font=fonts["title"])
+    draw.text((54, 36), f"{report.ticker} memo técnico", fill=text, font=fonts["title"])
     draw.text(
         (56, 88),
         f"{chart_verdict} | score {report.signal.score_raw:+.2f}",
@@ -274,14 +271,14 @@ def render_ticker_technical_chart(
     )
     draw.text(
         (56, 120),
-        f"{report.candle_count} candles | as of {_fmt_dt(report.as_of)} | {report.data_source}",
+        f"{report.candle_count} velas | hasta {_fmt_dt(report.as_of)} | {report.data_source}",
         fill=muted,
         font=fonts["small"],
     )
 
     price_box = (64, 166, 1216, 570)
-    vol_box = (64, 610, 1216, 736)
-    rsi_box = (64, 776, 1216, 870)
+    vol_box = (64, 610, 1216, 730)
+    rsi_box = (64, 770, 1216, 910)
 
     _panel(draw, price_box, panel)
     _panel(draw, vol_box, panel)
@@ -310,7 +307,7 @@ def render_ticker_technical_chart(
         draw,
         (88, 184),
         [
-            ("Close", close_color),
+            ("Precio", close_color),
             ("SMA20", sma20_color),
             ("SMA50", sma50_color),
             ("SMA200", sma200_color),
@@ -319,8 +316,8 @@ def render_ticker_technical_chart(
         muted,
     )
 
-    _draw_volume(draw, vol_box, volume, volume_color)
-    draw.text((88, vol_box[1] + 14), "Volume", fill=muted, font=fonts["small"])
+    _draw_volume(draw, vol_box, volume, volume_color, muted, warn_color, fonts["small"])
+    draw.text((88, vol_box[1] + 14), "Volumen", fill=muted, font=fonts["small"])
 
     _draw_rsi(draw, rsi_box, rsi, rsi_color, warn_color, grid, muted, fonts["mono"])
     draw.text((88, rsi_box[1] + 10), "RSI 14", fill=muted, font=fonts["small"])
@@ -335,6 +332,7 @@ def _frame_stats(frame: Any) -> dict[str, float | None]:
         return {}
     high = frame["High"].dropna() if "High" in frame else close
     low = frame["Low"].dropna() if "Low" in frame else close
+    volume = frame["Volume"] if "Volume" in frame else None
 
     def ret(period: int) -> float | None:
         if len(close) <= period:
@@ -387,6 +385,7 @@ def _frame_stats(frame: Any) -> dict[str, float | None]:
         "support_high": support_high,
         "resistance_low": resistance_low,
         "resistance_high": resistance_high,
+        "trailing_missing_volume": _trailing_missing_volume(volume),
     }
 
 
@@ -421,6 +420,21 @@ def _rsi_value(close: Any, period: int = 14) -> float | None:
         return value if math.isfinite(value) else None
     except Exception:
         return None
+
+
+def _trailing_missing_volume(volume: Any) -> float:
+    if volume is None:
+        return 0.0
+    try:
+        count = 0
+        for value in reversed(volume.tolist()):
+            number = _num(value)
+            if number is not None and number > 0:
+                break
+            count += 1
+        return float(count)
+    except Exception:
+        return 0.0
 
 
 def _support_zone(low: Any, close: Any) -> tuple[float | None, float | None]:
@@ -480,122 +494,112 @@ def _verdict(
 
     if has_position:
         if signal == "SELL":
-            title = "reducir o salir segun plan"
-            detail = "La senal tecnica esta deteriorada para una posicion abierta."
+            title = "reducir o salir según plan"
+            detail = "La señal técnica está deteriorada para una posición abierta."
         elif signal == "BUY":
             title = "mantener; agregar solo con plan"
-            detail = "La estructura tecnica acompana, pero el tamano debe decidirse fuera de este reporte."
+            detail = "La estructura técnica acompaña, pero el tamaño debe decidirse fuera de este reporte."
         else:
             title = "mantener sin agregar"
-            detail = "La accion no tiene confirmacion suficiente para aumentar exposicion."
+            detail = "La acción no tiene confirmación suficiente para aumentar exposición."
     else:
         if signal == "BUY":
             title = "evaluar entrada controlada"
-            detail = "Hay senal tecnica favorable, pero debe validarse contra cartera, liquidez y riesgo."
+            detail = "Hay señal técnica favorable, pero debe validarse contra cartera, liquidez y riesgo."
         elif signal == "SELL":
             title = "evitar entrada / no reingresar"
-            detail = "La accion no esta en cartera y la senal tecnica sigue negativa."
+            detail = "La acción no está en cartera y la señal técnica sigue negativa."
         elif medium == "Correctivo" or short == "Bajista":
-            title = "esperar / no abrir posicion todavia"
-            detail = "La tendencia estructural puede seguir viva, pero el timing de corto plazo no confirma entrada."
+            title = "esperar / no abrir posición"
+            if _long_state(stats) == "Alcista":
+                detail = (
+                    "La tendencia estructural sigue alcista, pero el corto plazo "
+                    "permanece bajista. No hay confirmación de entrada."
+                )
+            else:
+                detail = "El corto plazo no confirma entrada."
         else:
-            title = "esperar confirmacion"
-            detail = "No hay senal operativa clara para abrir posicion."
+            title = "esperar confirmación"
+            detail = "No hay señal operativa clara para abrir posición."
 
     if last_sell_executed and not has_position:
-        detail += " La ultima venta registrada queda alineada con control de riesgo."
+        detail += " La última venta registrada queda alineada con control de riesgo."
     return title, detail
 
 
-def _operative_regime(stats: dict[str, float | None], signal: Signal) -> str:
-    long_state = _long_state(stats)
-    medium_state = _medium_state(stats)
-    short_state = _short_state(stats)
-    ret60 = _num(stats.get("ret_60")) or 0.0
-    dist200 = _num(stats.get("dist_sma200")) or 0.0
-    ret20 = _num(stats.get("ret_20")) or 0.0
+def _operative_signal_label(report: TickerTechnicalReport) -> str:
+    signal = str(report.signal.signal or "").upper()
+    has_position = _has_position(report.position)
+    if has_position:
+        if signal == "SELL":
+            return "REDUCIR / SALIR"
+        if signal == "BUY":
+            return "MANTENER / EVALUAR AGREGAR"
+        return "MANTENER"
+    if signal == "BUY":
+        return "ENTRADA A EVALUAR"
+    return "SIN ENTRADA"
 
-    if long_state == "Alcista" and medium_state == "Correctivo" and short_state == "Bajista":
-        return "Correccion de alta volatilidad dentro de tendencia estructural alcista."
-    if long_state == "Alcista" and ret60 > 0.30 and dist200 > 0.30 and ret20 < 0:
-        return "Correccion profunda despues de una suba extraordinaria."
-    if long_state == "Alcista" and short_state == "Alcista":
-        return "Tendencia alcista con momentum favorable."
-    if long_state == "Bajista" or (medium_state == "Bajista" and short_state == "Bajista"):
-        return "Tendencia bajista; priorizar preservacion de capital."
-    if str(signal.technical_regime or "").upper() == "RANGE":
-        return "Rango operativo; exigir ruptura o piso confirmado."
-    return "Transicion tecnica; esperar confirmacion."
+
+def _support_level_labels(stats: dict[str, float | None]) -> tuple[str, str]:
+    critical = _num(stats.get("support_low"))
+    observed_high = _num(stats.get("support_high"))
+    if critical is None or observed_high is None:
+        return "N/A", "N/A"
+    immediate_low = max(critical, _round_level(observed_high * 0.97))
+    return _fmt_level_range(immediate_low, observed_high), _fmt_level(critical)
+
+
+def _scenario_sentence(
+    report: TickerTechnicalReport,
+    stats: dict[str, float | None],
+) -> str:
+    recovery = _fmt_level_range(stats.get("resistance_low"), stats.get("resistance_high"))
+    _support_immediate, support_critical = _support_level_labels(stats)
+    has_position = _has_position(report.position)
+    if not has_position:
+        if recovery != "N/A" and support_critical != "N/A":
+            return (
+                "considerar entrada si recupera las medias o confirma un piso "
+                f"con volumen. Invalidación: cierre sostenido debajo de {support_critical}."
+            )
+        if recovery != "N/A":
+            return "considerar entrada solo si recupera las medias con volumen."
+        return "permanecer fuera hasta que aparezca ruptura o piso medible."
+    if support_critical != "N/A":
+        return (
+            "mantener tamaño mientras respete soporte; revisar exposición ante "
+            f"cierre sostenido debajo de {support_critical}."
+        )
+    return "mantener tamaño; no hay nivel operativo claro para agregar."
 
 
 def _horizon_lines(stats: dict[str, float | None]) -> list[str]:
     return [
         f"   Largo plazo: <b>{_long_state(stats)}</b> - SMA200 {_fmt_pct(stats.get('dist_sma200'))}, 60r {_fmt_pct(stats.get('ret_60'))}.",
         f"   Medio plazo: <b>{_medium_state(stats)}</b> - SMA20 {_fmt_pct(stats.get('dist_sma20'))}, SMA50 {_fmt_pct(stats.get('dist_sma50'))}, 20r {_fmt_pct(stats.get('ret_20'))}.",
-        f"   Corto plazo: <b>{_short_state(stats)}</b> - {_ema_relation(stats)}, MACD {_macd_label(stats)}, RSI {_fmt_number(stats.get('rsi_14'), decimals=1)}.",
+        f"   Corto plazo: <b>{_short_state(stats)}</b> - {escape(_ema_relation(stats))}, MACD {escape(_macd_label(stats))}, RSI {_fmt_number(stats.get('rsi_14'), decimals=1)}.",
     ]
-
-
-def _level_lines(stats: dict[str, float | None]) -> list[str]:
-    lines = []
-    support = _fmt_range(stats.get("support_low"), stats.get("support_high"))
-    resistance = _fmt_range(stats.get("resistance_low"), stats.get("resistance_high"))
-    if resistance != "N/A":
-        lines.append(f"   Resistencia / recuperacion: <b>{resistance}</b>")
-    else:
-        lines.append("   Resistencia / recuperacion: <b>sin techo inmediato por medias</b>")
-    if support != "N/A":
-        lines.append(f"   Soporte observado: <b>{support}</b>")
-    else:
-        lines.append("   Soporte observado: <b>sin zona clara en ultimas ruedas</b>")
-    lines.append(
-        f"   Medias: SMA20 {_fmt_price(stats.get('sma_20'))} | "
-        f"SMA50 {_fmt_price(stats.get('sma_50'))} | "
-        f"SMA200 {_fmt_price(stats.get('sma_200'))}"
-    )
-    return lines
-
-
-def _scenario_lines(
-    report: TickerTechnicalReport,
-    stats: dict[str, float | None],
-) -> list[str]:
-    resistance = _fmt_range(stats.get("resistance_low"), stats.get("resistance_high"))
-    support = _fmt_range(stats.get("support_low"), stats.get("support_high"))
-    has_position = _has_position(report.position)
-    lines: list[str] = []
-
-    if not has_position:
-        if resistance != "N/A":
-            lines.append(f"   Entrada por momentum: recuperar y sostener <b>{resistance}</b>.")
-        if support != "N/A":
-            lines.append(f"   Entrada agresiva: piso confirmado sobre <b>{support}</b>, con volumen comprador.")
-            lines.append(f"   Invalidacion: perdida clara de <b>{support}</b>.")
-        if not lines:
-            lines.append("   Permanecer fuera hasta que aparezca ruptura o piso medible.")
-    else:
-        if resistance != "N/A":
-            lines.append(f"   Agregar: solo si recupera <b>{resistance}</b> con momentum.")
-        if support != "N/A":
-            lines.append(f"   Riesgo: revisar exposicion si pierde <b>{support}</b>.")
-        if not lines:
-            lines.append("   Mantener tamano; no hay nivel operativo claro para agregar.")
-
-    return lines
 
 
 def _data_caveat_lines(report: TickerTechnicalReport) -> list[str]:
     lines = [f"   - {escape(w)}" for w in report.warnings[:4]]
     asset_type = str(report.asset_type or "").upper()
     currency = str(report.currency or "").upper()
+    stats = _frame_stats(report.frame)
+    trailing_missing_volume = int(_num(stats.get("trailing_missing_volume")) or 0)
     if asset_type == "CEDEAR":
         lines.append(
-            "   - CEDEAR/precio local: este reporte no separa subyacente USD, CCL y liquidez todavia."
+            "   - CEDEAR/precio local: este reporte no separa subyacente USD, CCL y liquidez todavía."
         )
     elif currency and currency != "ARS":
         lines.append(f"   - Moneda de la serie: {escape(currency)}.")
     if report.signal.has_reconstructed_candles:
         lines.append("   - La serie mezcla velas oficiales con velas internas reconstruidas.")
+    if trailing_missing_volume >= 3:
+        lines.append(
+            f"   - Volumen: faltan datos informados en las últimas {trailing_missing_volume} velas."
+        )
     return lines
 
 
@@ -753,7 +757,7 @@ async def _load_latest_decision_context(
 
 def _position_lines(position: TickerPositionContext | None) -> list[str]:
     if position is None:
-        return ["   No esta en el ultimo snapshot de cartera."]
+        return ["   No está en el último snapshot de cartera."]
     lines = []
     if position.quantity is not None:
         lines.append(f"   Cantidad: <b>{position.quantity:g}</b>")
@@ -826,6 +830,13 @@ def _fmt_money(value: Any) -> str:
     return f"${number:,.0f} ARS".replace(",", ".")
 
 
+def _fmt_level(value: Any) -> str:
+    number = _num(value)
+    if number is None:
+        return "N/A"
+    return f"${number:,.0f}".replace(",", ".")
+
+
 def _fmt_pct(value: Any) -> str:
     number = _num(value)
     if number is None:
@@ -840,7 +851,7 @@ def _fmt_number(value: Any, *, decimals: int = 2) -> str:
     return f"{number:.{decimals}f}"
 
 
-def _fmt_range(low: Any, high: Any) -> str:
+def _fmt_level_range(low: Any, high: Any) -> str:
     lo = _num(low)
     hi = _num(high)
     if lo is None or hi is None:
@@ -848,8 +859,19 @@ def _fmt_range(low: Any, high: Any) -> str:
     if lo > hi:
         lo, hi = hi, lo
     if abs(hi - lo) <= max(1.0, abs(lo) * 0.002):
-        return _fmt_price((lo + hi) / 2.0)
-    return f"{_fmt_price(lo)} - {_fmt_price(hi)}"
+        return _fmt_level((lo + hi) / 2.0)
+    return f"{_fmt_level(lo)}–{_fmt_level(hi)}"
+
+
+def _round_level(value: float) -> float:
+    number = _num(value)
+    if number is None:
+        return value
+    if abs(number) >= 100_000:
+        return round(number / 1_000.0) * 1_000.0
+    if abs(number) >= 10_000:
+        return round(number / 100.0) * 100.0
+    return round(number)
 
 
 def _fmt_dt(value: Any) -> str:
@@ -1006,10 +1028,15 @@ def _draw_volume(
     box: tuple[int, int, int, int],
     volume: Any,
     color: str,
+    muted: str,
+    warn_color: str,
+    font: Any,
 ) -> None:
     values = [max(float(v), 0.0) if _num(v) is not None else 0.0 for v in volume.tolist()]
     max_value = max(values) if values else 0.0
     if max_value <= 0:
+        x1, y1, _x2, _y2 = box
+        draw.text((x1 + 24, y1 + 52), "Sin volumen informado.", fill=muted, font=font)
         return
     x1, y1, x2, y2 = box
     left = x1 + 24
@@ -1020,6 +1047,18 @@ def _draw_volume(
         x = left + int((idx / max(1, len(values))) * width)
         h = int((value / max_value) * (y2 - y1 - 58))
         draw.rectangle((x, bottom - h, x + bar_w, bottom), fill=color)
+
+    missing = int(_trailing_missing_volume(volume))
+    if missing >= 3:
+        start_idx = max(0, len(values) - missing)
+        x_start = left + int((start_idx / max(1, len(values))) * width)
+        draw.rectangle((x_start, y1 + 34, x2 - 24, bottom), outline="#375061", width=1)
+        draw.text(
+            (max(x_start + 8, x2 - 270), y1 + 44),
+            f"{missing} velas sin volumen",
+            fill=warn_color,
+            font=font,
+        )
 
 
 def _rsi(close: Any, period: int = 14) -> Any:
@@ -1041,8 +1080,11 @@ def _draw_rsi(
     font: Any,
 ) -> None:
     x1, y1, x2, y2 = box
+    inner_top = y1 + 34
+    inner_bottom = y2 - 22
+    plot_height = max(1, inner_bottom - inner_top)
     for level in (30, 50, 70):
-        y = y1 + 28 + int((1.0 - level / 100.0) * (y2 - y1 - 46))
+        y = inner_top + int((1.0 - level / 100.0) * plot_height)
         draw.line((x1 + 24, y, x2 - 24, y), fill=warn_color if level in (30, 70) else grid, width=1)
-        draw.text((x2 - 58, y - 12), str(level), fill=muted, font=font)
+        draw.text((x2 - 64, y - 8), str(level), fill=muted, font=font)
     _draw_line(draw, box, rsi, 0.0, 100.0, color, width=3)
