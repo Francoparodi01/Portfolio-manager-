@@ -175,6 +175,10 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
     position_lines = _position_lines(report.position)
     decision_lines = _decision_lines(report.latest_decision)
     warning_lines = _data_caveat_lines(report)
+    thesis_lines = _thesis_lines(stats)
+    opinion_change_lines = _opinion_change_lines(stats)
+    risk_lines = _risk_lines(report, stats)
+    confidence_lines = _confidence_lines(report, stats)
 
     lines = [
         f"<b>{escape(report.ticker)} - {escape(verdict_title)}</b>",
@@ -191,6 +195,13 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
         "",
         f"Escenario: {escape(scenario)}",
     ]
+
+    if thesis_lines:
+        lines += ["", "<b>Tesis</b>", *thesis_lines]
+    if opinion_change_lines:
+        lines += ["", "<b>Qué cambiaría la visión</b>", *opinion_change_lines]
+    if risk_lines:
+        lines += ["", "<b>Riesgos actuales</b>", *risk_lines]
 
     lines += [
         "",
@@ -218,9 +229,10 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
         "<b>Datos</b>",
         f"   Fuente: <b>{escape(source)}</b>",
         f"   Velas: <b>{report.candle_count}</b> | Hasta: <b>{escape(_fmt_dt(report.as_of))}</b>",
-        "",
-        "<i>Read-only: no genera órdenes, no persiste decision_log y no cambia thresholds.</i>",
+        "   Modo: <b>read-only</b> - no genera órdenes, no persiste decision_log y no cambia thresholds.",
     ]
+    if confidence_lines:
+        lines += ["", "<b>Confianza argumentada</b>", *confidence_lines]
     return "\n".join(lines)
 
 
@@ -850,6 +862,156 @@ def _horizon_lines(stats: dict[str, float | None]) -> list[str]:
     ]
 
 
+def _thesis_lines(stats: dict[str, float | None]) -> list[str]:
+    long_state = _long_state(stats)
+    medium_state = _medium_state(stats)
+    short_state = _short_state(stats)
+    last = _num(stats.get("last"))
+    support = _num(stats.get("support_low"))
+
+    lines: list[str] = []
+    if long_state == "Alcista":
+        lines.append("   ✓ Tendencia primaria intacta")
+    elif long_state == "Bajista":
+        lines.append("   △ Tendencia primaria deteriorada")
+    else:
+        lines.append("   • Tendencia primaria neutral")
+
+    if medium_state == "Correctivo" and long_state == "Alcista":
+        lines.append("   ✓ Corrección dentro de estructura")
+    elif medium_state == "Correctivo":
+        lines.append("   △ Corrección de medio plazo")
+    elif medium_state == "Alcista":
+        lines.append("   ✓ Medio plazo acompaña")
+    else:
+        lines.append("   • Medio plazo mixto")
+
+    if short_state == "Bajista":
+        lines.append("   △ Momentum corto plazo deteriorado")
+    elif short_state == "Alcista":
+        lines.append("   ✓ Momentum corto plazo favorable")
+    else:
+        lines.append("   • Momentum corto plazo mixto")
+
+    if last is not None and support is not None and last > support:
+        lines.append("   ✓ No hay evidencia de cambio estructural")
+    elif last is not None and support is not None:
+        lines.append("   △ Soporte crítico bajo presión")
+    return lines
+
+
+def _opinion_change_lines(stats: dict[str, float | None]) -> list[str]:
+    last = _num(stats.get("last"))
+    support = _num(stats.get("support_low"))
+    resistance = _num(stats.get("resistance_low"))
+    if last is None:
+        return []
+
+    lines: list[str] = []
+    if resistance is not None and resistance > last:
+        lines.append(
+            f"   ▲ Recuperar {_fmt_level(resistance)} "
+            f"({_fmt_signed_money(resistance - last)}, {_fmt_pct((resistance / last) - 1.0)})"
+        )
+    elif resistance is not None:
+        lines.append(f"   ▲ Sostener precio sobre {_fmt_level(resistance)}")
+
+    if lines and support is not None and support < last:
+        lines.append("   o")
+
+    if support is not None and support < last:
+        lines.append(
+            f"   ▼ Perder {_fmt_level(support)} "
+            f"({_fmt_signed_money(support - last)}, {_fmt_pct((support / last) - 1.0)})"
+        )
+    elif support is not None:
+        lines.append(f"   ▼ Recuperar soporte crítico {_fmt_level(support)}")
+
+    return lines
+
+
+def _risk_lines(report: TickerTechnicalReport, stats: dict[str, float | None]) -> list[str]:
+    risks: list[str] = []
+    if _short_state(stats) == "Bajista":
+        risks.append("   • Momentum negativo")
+    if _medium_state(stats) == "Correctivo":
+        risks.append("   • Corrección de medio plazo")
+    if int(_num(stats.get("trailing_missing_volume")) or 0) >= 3:
+        risks.append("   • Falta volumen reciente")
+    if str(report.asset_type or "").upper() == "CEDEAR":
+        risks.append("   • CEDEAR: no separa subyacente USD, CCL y liquidez todavía")
+    if not risks:
+        risks.append("   • Sin riesgo técnico dominante detectado")
+    return risks[:4]
+
+
+def _confidence_lines(
+    report: TickerTechnicalReport,
+    stats: dict[str, float | None],
+) -> list[str]:
+    result = _result_label(report)
+    follow_up = _follow_up_sentence(report, stats)
+    lines = ["¿Por qué el sistema piensa esto?"]
+
+    if _long_state(stats) == "Alcista":
+        lines.append("   ✓ Tendencia primaria alcista")
+    elif _long_state(stats) == "Bajista":
+        lines.append("   △ Tendencia primaria bajista")
+    else:
+        lines.append("   • Tendencia primaria neutral")
+
+    if _medium_state(stats) == "Correctivo" and _long_state(stats) == "Alcista":
+        lines.append("   ✓ Corrección dentro de estructura")
+    elif _medium_state(stats) == "Alcista":
+        lines.append("   ✓ Medio plazo constructivo")
+    elif _medium_state(stats) == "Correctivo":
+        lines.append("   △ Corrección de medio plazo")
+
+    if _short_state(stats) == "Bajista":
+        lines.append("   △ Momentum corto plazo deteriorado")
+    elif _short_state(stats) == "Alcista":
+        lines.append("   ✓ Momentum corto plazo favorable")
+
+    if int(_num(stats.get("trailing_missing_volume")) or 0) >= 3:
+        lines.append("   △ Volumen reciente incompleto")
+
+    lines += [
+        f"Resultado: <b>{escape(result)}</b>.",
+        escape(follow_up),
+    ]
+    return lines
+
+
+def _result_label(report: TickerTechnicalReport) -> str:
+    signal = str(report.signal.signal or "").upper()
+    has_position = _has_position(report.position)
+    if has_position:
+        if signal == "SELL":
+            return "Reducir o salir según plan"
+        if signal == "BUY":
+            return "Mantener; agregar solo con plan"
+        return "Mantener"
+    if signal == "BUY":
+        return "Evaluar entrada controlada"
+    return "No abrir posición"
+
+
+def _follow_up_sentence(
+    report: TickerTechnicalReport,
+    stats: dict[str, float | None],
+) -> str:
+    has_position = _has_position(report.position)
+    support = _fmt_level(stats.get("support_low"))
+    recovery = _fmt_level_range(stats.get("resistance_low"), stats.get("resistance_high"))
+    if not has_position:
+        if recovery != "N/A":
+            return "Agregar solo si recupera medias o confirma piso con volumen."
+        return "Esperar confirmación antes de tomar riesgo."
+    if support != "N/A":
+        return f"Mantener mientras respete {support}; revisar exposición si lo pierde."
+    return "Mantener tamaño y reevaluar si cambia el momentum."
+
+
 def _data_caveat_lines(report: TickerTechnicalReport) -> list[str]:
     lines = [f"   - {escape(w)}" for w in report.warnings[:4]]
     asset_type = str(report.asset_type or "").upper()
@@ -1096,6 +1258,14 @@ def _fmt_money(value: Any) -> str:
     if number is None:
         return "N/A"
     return f"${number:,.0f} ARS".replace(",", ".")
+
+
+def _fmt_signed_money(value: Any) -> str:
+    number = _num(value)
+    if number is None:
+        return "N/A"
+    sign = "+" if number >= 0 else "-"
+    return f"{sign}${abs(number):,.0f}".replace(",", ".")
 
 
 def _fmt_level(value: Any) -> str:

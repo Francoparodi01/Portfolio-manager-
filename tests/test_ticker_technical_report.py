@@ -98,10 +98,15 @@ def test_ticker_report_renders_context_and_valid_telegram_html():
     assert "NVDA - " in text
     assert "Señal operativa" in text
     assert "Intensidad" in text
+    assert "Tesis" in text
+    assert "Qué cambiaría la visión" in text
+    assert "Riesgos actuales" in text
     assert "Datos del análisis" in text
     assert "Contexto cartera" in text
     assert "Última decisión registrada" in text
-    assert "Read-only" in text
+    assert "Modo: <b>read-only</b>" in text
+    assert "Confianza argumentada" in text
+    assert not text.rstrip().endswith("no cambia thresholds.</i>")
     valid, errors = validate_telegram_html(text)
     assert valid, errors
 
@@ -134,6 +139,11 @@ def test_ticker_report_renders_hold_without_position_as_wait():
     assert "Soporte inmediato" in text
     assert "Soporte crítico" in text
     assert "Invalidación: cierre sostenido debajo" in text
+    assert "<b>Tesis</b>" in text
+    assert "Momentum corto plazo deteriorado" in text
+    assert "Recuperar $" in text
+    assert "▼ " in text
+    assert "Resultado: <b>No abrir posición</b>." in text
     assert "Soporte inmediato: <b>$" in text
     assert "–" in text
     assert "Razones tecnicas" not in text
