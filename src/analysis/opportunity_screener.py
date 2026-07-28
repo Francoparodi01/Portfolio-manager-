@@ -402,7 +402,7 @@ def screen_universe(
             m = ScreenerMetrics(
                 ticker=ticker,
                 passes_screen=False,
-                fail_reason="sin histórico Cocos suficiente",
+                fail_reason="sin velas Cocos suficientes",
             )
             results.append(m)
             logger.debug(f"Screener FAIL {ticker}: {m.fail_reason}")
@@ -1068,7 +1068,7 @@ def run_opportunity_analysis(
     external_tickers = {
         metric.ticker
         for metric in screener_results
-        if metric.fail_reason == "sin histórico Cocos suficiente"
+        if metric.fail_reason == "sin velas Cocos suficientes"
     }
     external_candidates = [
         OpportunityCandidate(
@@ -1077,7 +1077,7 @@ def run_opportunity_analysis(
             trade_type=TradeType.WATCHLIST,
             final_score=0.0,
             conviction=0.0,
-            why_not_now="sin histórico Cocos suficiente",
+            why_not_now="sin velas Cocos suficientes",
             action_concreta="No operar",
             alerts=["Detectado en Cocos, pero sin velas suficientes para evaluar operabilidad"],
         )

@@ -340,9 +340,21 @@ async def _get_decision_dataset_stats(
                 COUNT(*) FILTER (
                     WHERE outcome_basis = 'legacy_external'
                 ) AS legacy_external
-            FROM decision_log
+            FROM decision_log dl
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND ($2::bigint IS NULL OR owner_chat_id = $2)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM broker_fills bf
+                  WHERE bf.decision_log_id = dl.id
+                    AND COALESCE(bf.raw_payload, '{}'::jsonb) ? 'superseded_by_real'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM broker_fills live_bf
+                        WHERE live_bf.decision_log_id = dl.id
+                          AND NOT (COALESCE(live_bf.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
+                    )
+              )
             GROUP BY 1,2,3,4,5,6
             ORDER BY 1,2,3,4,5,6
             """,
@@ -401,6 +413,7 @@ async def _get_operational_context(db: PortfolioDatabase) -> dict:
                     COUNT(*) FILTER (WHERE decision_log_id IS NULL) AS unreconciled,
                     MAX(executed_at) AS latest_executed_at
                 FROM broker_fills
+                WHERE NOT (COALESCE(raw_payload, '{}'::jsonb) ? 'superseded_by_real')
                 """
             )
 

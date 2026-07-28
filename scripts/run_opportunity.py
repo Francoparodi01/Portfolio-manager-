@@ -309,10 +309,10 @@ def _radar_candidate_layers(candidate) -> dict:
         "why_not_now": candidate.why_not_now,
         "action_concreta": candidate.action_concreta,
         "alerts": list(candidate.alerts or []),
-        "shadow_alignment": candidate.shadow_alignment,
-        "shadow_expected_return_20": candidate.shadow_expected_return_20,
-        "shadow_probability_up_20": candidate.shadow_probability_up_20,
-        "shadow_action": candidate.shadow_action,
+        "shadow_alignment": getattr(candidate, "shadow_alignment", None),
+        "shadow_expected_return_20": getattr(candidate, "shadow_expected_return_20", None),
+        "shadow_probability_up_20": getattr(candidate, "shadow_probability_up_20", None),
+        "shadow_action": getattr(candidate, "shadow_action", None),
     }
     sentiment_context = getattr(candidate, "sentiment_context", None)
     if sentiment_context is not None and hasattr(sentiment_context, "to_layers_payload"):

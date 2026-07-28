@@ -10,6 +10,9 @@ from uuid import UUID
 from src.analysis.thesis_shadow import HorizonForecast, MaturedOutcome, ShadowThesis
 
 
+MAX_ABS_REALIZED_RETURN_FOR_METRICS = 5.0
+
+
 class ShadowThesisStore:
     def __init__(self, pool):
         self.pool = pool
@@ -169,21 +172,49 @@ class ShadowThesisStore:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
+                WITH scored AS (
+                    SELECT
+                        f.horizon_sessions,
+                        f.ticker,
+                        f.expected_return,
+                        o.realized_return,
+                        o.direction_correct,
+                        o.absolute_error,
+                        COALESCE(
+                            ABS(o.realized_return) <= $2::double precision,
+                            FALSE
+                        ) AS is_sane
+                    FROM shadow_thesis_forecasts f
+                    JOIN shadow_thesis_outcomes o ON o.forecast_id = f.id
+                    WHERE f.owner_chat_id = $1
+                )
                 SELECT
-                    f.horizon_sessions,
-                    COUNT(*)::integer AS samples,
-                    AVG(CASE WHEN o.direction_correct THEN 1.0 ELSE 0.0 END)
-                        AS directional_accuracy,
-                    AVG(o.absolute_error) AS mean_absolute_error,
-                    AVG(f.expected_return) AS mean_expected_return,
-                    AVG(o.realized_return) AS mean_realized_return
-                FROM shadow_thesis_forecasts f
-                JOIN shadow_thesis_outcomes o ON o.forecast_id = f.id
-                WHERE f.owner_chat_id = $1
-                GROUP BY f.horizon_sessions
-                ORDER BY f.horizon_sessions
+                    horizon_sessions,
+                    COUNT(*) FILTER (WHERE is_sane)::integer AS samples,
+                    COUNT(*) FILTER (WHERE NOT is_sane)::integer AS excluded_samples,
+                    COALESCE(
+                        ARRAY_AGG(DISTINCT ticker ORDER BY ticker)
+                            FILTER (WHERE NOT is_sane),
+                        ARRAY[]::text[]
+                    ) AS excluded_tickers,
+                    AVG(
+                        CASE
+                            WHEN is_sane AND direction_correct THEN 1.0
+                            WHEN is_sane THEN 0.0
+                        END
+                    ) AS directional_accuracy,
+                    AVG(CASE WHEN is_sane THEN absolute_error END)
+                        AS mean_absolute_error,
+                    AVG(CASE WHEN is_sane THEN expected_return END)
+                        AS mean_expected_return,
+                    AVG(CASE WHEN is_sane THEN realized_return END)
+                        AS mean_realized_return
+                FROM scored
+                GROUP BY horizon_sessions
+                ORDER BY horizon_sessions
                 """,
                 int(owner_chat_id),
+                MAX_ABS_REALIZED_RETURN_FOR_METRICS,
             )
         return [dict(row) for row in rows]
 

@@ -130,6 +130,21 @@ def _synthetic_ticker_movement_id(row: dict[str, Any], movement_type: str) -> st
     return f"synthetic:{day}:{ticker}:{movement_type}:{digest}"
 
 
+def _raw_text(row: dict[str, Any] | None, key: str) -> str:
+    if not row:
+        return ""
+    return str(row.get(key) or "").strip()
+
+
+def _raw_bool(row: dict[str, Any] | None, key: str) -> bool:
+    if not row:
+        return False
+    value = row.get(key)
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "si"}
+
+
 def _movement_type(row: dict[str, Any]) -> str:
     raw = str(
         row.get("label")
@@ -150,6 +165,50 @@ def _movement_type(row: dict[str, Any]) -> str:
     if raw:
         return raw.upper()
     return "UNKNOWN"
+
+
+def _movement_execution_day(movement: BrokerMovement) -> date:
+    executed_at = movement.executed_at
+    if executed_at.tzinfo is not None:
+        executed_at = executed_at.astimezone(ART_TZ)
+    return executed_at.date()
+
+
+def _ticket_dedupe_key(movement: BrokerMovement) -> tuple[str, str, date, date | None, str, str, str] | None:
+    side = str(movement.movement_type or "").upper().strip()
+    if side not in {"BUY", "SELL"} or not movement.ticker:
+        return None
+    raw = movement.raw_payload or {}
+    return (
+        movement.ticker.upper().strip(),
+        _raw_text(raw, "id_instrument"),
+        _movement_execution_day(movement),
+        movement.settlement_date,
+        side,
+        str(movement.currency or "").upper().strip(),
+        _raw_text(raw, "label").lower(),
+    )
+
+
+def _is_synthetic_ticket_placeholder(movement: BrokerMovement) -> bool:
+    raw = movement.raw_payload or {}
+    return (
+        str(movement.external_movement_id).startswith("synthetic:")
+        and _raw_text(raw, "id_ticket") == ""
+        and not _raw_bool(raw, "has_ticket_pdf")
+        and _raw_text(raw, "description") == ""
+    )
+
+
+def _is_real_ticket_movement(movement: BrokerMovement) -> bool:
+    raw = movement.raw_payload or {}
+    description = _raw_text(raw, "description").lower()
+    return (
+        not str(movement.external_movement_id).startswith("synthetic:")
+        and _raw_text(raw, "id_ticket") != ""
+        and _raw_bool(raw, "has_ticket_pdf")
+        and description in {"compra", "venta"}
+    )
 
 
 def _signed_amount(row: dict[str, Any], movement_type: str) -> float | None:
@@ -307,12 +366,26 @@ def broker_fills_from_movements(
     source: str = "cocos_movements",
 ) -> list[BrokerFill]:
     """Build clean execution fills from Cocos Instrumentos movements."""
+    movement_list = list(movements)
+    real_ticket_keys = {
+        key
+        for movement in movement_list
+        if _is_real_ticket_movement(movement)
+        for key in [_ticket_dedupe_key(movement)]
+        if key is not None
+    }
+
     fills: list[BrokerFill] = []
-    for movement in movements:
+    for movement in movement_list:
         side = str(movement.movement_type or "").upper().strip()
         if side not in {"BUY", "SELL"}:
             continue
         if not movement.ticker or movement.quantity is None or movement.price is None:
+            continue
+        if (
+            _is_synthetic_ticket_placeholder(movement)
+            and _ticket_dedupe_key(movement) in real_ticket_keys
+        ):
             continue
 
         quantity = abs(float(movement.quantity))

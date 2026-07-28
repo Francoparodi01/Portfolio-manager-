@@ -124,8 +124,20 @@ async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFr
         rows = await conn.fetch(
             f"""
             SELECT {", ".join(selected)}
-            FROM decision_log
+            FROM decision_log dl
             WHERE decided_at >= $1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM broker_fills bf
+                  WHERE bf.decision_log_id = dl.id
+                    AND COALESCE(bf.raw_payload, '{{}}'::jsonb) ? 'superseded_by_real'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM broker_fills live_bf
+                        WHERE live_bf.decision_log_id = dl.id
+                          AND NOT (COALESCE(live_bf.raw_payload, '{{}}'::jsonb) ? 'superseded_by_real')
+                    )
+              )
             ORDER BY decided_at ASC
             """,
             cutoff,

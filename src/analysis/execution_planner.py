@@ -825,7 +825,8 @@ def _reconcile_conditional_sell_amounts(
             if decisions_by_ticker.get(buy_ticker) is not None
             and decisions_by_ticker[buy_ticker].action == DecisionType.BUY
         )
-        eligible_conditional = min(conditional, linked_executable)
+        linked_required_gross = linked_executable * (1 + cost_rate) / net_per_gross
+        eligible_conditional = min(conditional, linked_required_gross)
         if conditional_net_needed <= 0 or eligible_conditional <= 0:
             conditional_allocations[decision.ticker] = 0.0
             continue
@@ -951,6 +952,8 @@ def reconcile_funding(
         if d.action in (DecisionType.SELL_FULL, DecisionType.SELL_PARTIAL)
     ]
 
+    active_buy_tickers = {d.ticker for d in decisions if d.action == DecisionType.BUY}
+
     for d in sell_decisions:
         amount = d.theoretical_ars
         pos = current_positions.get(d.ticker)
@@ -966,10 +969,12 @@ def reconcile_funding(
         if d.action == DecisionType.SELL_FULL:
             nominal_qty = held_nominals
         else:
-            nominal_qty = min(
-                held_nominals,
-                _nearest_whole_nominals(amount, ref_price),
-            )
+            funds_active_buy = any(ticker in active_buy_tickers for ticker in d.funding_for)
+            if funds_active_buy:
+                wanted_nominals = int(math.ceil((amount / ref_price) - 1e-9))
+            else:
+                wanted_nominals = _nearest_whole_nominals(amount, ref_price)
+            nominal_qty = min(held_nominals, wanted_nominals)
 
         executable_amount = nominal_qty * ref_price
         if nominal_qty <= 0 or executable_amount < min_trade_ars:

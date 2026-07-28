@@ -3120,7 +3120,10 @@ async def _load_portfolio(cfg, owner_chat_id: int | None = None):
             float(snap.get("total_value_ars", 0) or 0),
         )
         history   = await db.get_portfolio_history(limit=60, owner_chat_id=owner_chat_id)
-        latest_broker_movement = await db.get_latest_broker_movement_summary()
+        if hasattr(db, "get_latest_broker_movement_summary"):
+            latest_broker_movement = await db.get_latest_broker_movement_summary()
+        else:
+            latest_broker_movement = None
         return positions, total_ars, cash_ars, history, snap, latest_broker_movement
     finally:
         await db.close()

@@ -959,10 +959,12 @@ async def _load_canonical_history_frames(
     limit: int = 260,
 ) -> dict:
     frames = {}
-    latest_prices = {
-        str(row.get("ticker", "") or "").upper(): row
-        for row in await db.get_latest_market_prices()
-    }
+    latest_prices = {}
+    if hasattr(db, "get_latest_market_prices"):
+        latest_prices = {
+            str(row.get("ticker", "") or "").upper(): row
+            for row in await db.get_latest_market_prices()
+        }
     for position in positions:
         ticker = str(getattr(position, "ticker", "") or "").upper()
         asset_type = getattr(getattr(position, "asset_type", None), "value", None)

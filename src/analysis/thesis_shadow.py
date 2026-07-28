@@ -300,6 +300,7 @@ def render_shadow_report(
             lines.append(
                 f"  {int(row['horizon_sessions'])}r: n={count} "
                 f"direccion={accuracy:.1%} MAE={mae:.1%}"
+                f"{_quality_gate_suffix(row)}"
             )
     else:
         lines.extend(["", "Validacion historica: aun sin pronosticos maduros."])
@@ -350,7 +351,10 @@ def render_shadow_telegram_report(
     else:
         lines.append("⚪ No hay candidatos evaluables en esta corrida.")
 
-    mature_samples = sum(int(row.get("samples") or 0) for row in metrics)
+    mature_samples = sum(
+        int(row.get("samples") or 0) + int(row.get("excluded_samples") or 0)
+        for row in metrics
+    )
     lines.append("")
     if mature_samples:
         lines.append("<b>Validación disponible</b>")
@@ -361,6 +365,7 @@ def render_shadow_telegram_report(
                 f"· error medio {float(row.get('mean_absolute_error') or 0.0):.1%} "
                 f"· n={int(row.get('samples') or 0)}"
             )
+            lines[-1] += _quality_gate_suffix(row, telegram=True)
     else:
         lines.append("⏳ <b>Validación:</b> todavía no hay pronósticos maduros.")
         lines.append("La primera medición llega después de 5 ruedas.")
@@ -490,7 +495,10 @@ def render_shadow_ticker_telegram_report(
     if slopes:
         lines.extend(["", "<b>Tendencia base precio</b>", "• " + escape(" · ".join(slopes))])
 
-    mature_samples = sum(int(row.get("samples") or 0) for row in metrics)
+    mature_samples = sum(
+        int(row.get("samples") or 0) + int(row.get("excluded_samples") or 0)
+        for row in metrics
+    )
     lines.append("")
     if mature_samples:
         lines.append(f"Validación shadow global disponible: <b>{mature_samples}</b> outcomes maduros.")
@@ -505,6 +513,29 @@ def render_shadow_ticker_telegram_report(
         ]
     )
     return "\n".join(lines)
+
+
+def _quality_gate_suffix(row: Mapping[str, Any], *, telegram: bool = False) -> str:
+    excluded = int(row.get("excluded_samples") or 0)
+    if excluded <= 0:
+        return ""
+    tickers_raw = row.get("excluded_tickers") or ()
+    if isinstance(tickers_raw, str):
+        tickers = [tickers_raw]
+    else:
+        tickers = [str(value) for value in tickers_raw if value]
+    tickers = [ticker.upper() for ticker in tickers]
+    ticker_text = ", ".join(tickers[:6])
+    if len(tickers) > 6:
+        ticker_text = (
+            f"{ticker_text}, +{len(tickers) - 6}"
+            if ticker_text
+            else f"+{len(tickers) - 6}"
+        )
+    if telegram:
+        ticker_text = escape(ticker_text)
+        return f" · excluidos {excluded} ({ticker_text})" if ticker_text else f" · excluidos {excluded}"
+    return f" excluidos={excluded} ({ticker_text})" if ticker_text else f" excluidos={excluded}"
 
 
 def _render_telegram_thesis(

@@ -1,7 +1,10 @@
+import asyncio
+
 import pandas as pd
 
 from src.analysis.viability_audit import (
     ViabilityAuditConfig,
+    load_viability_decision_log,
     render_viability_chart,
     render_viability_audit,
     run_viability_audit_sync,
@@ -176,3 +179,52 @@ def test_viability_chart_renders_png(tmp_path):
 
     assert chart_path.exists()
     assert chart_path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_viability_loader_excludes_decisions_backed_only_by_superseded_fills(monkeypatch):
+    class _Connection:
+        def __init__(self):
+            self.statements = []
+
+        async def fetch(self, statement, *args):
+            self.statements.append(statement)
+            if "information_schema.columns" in statement:
+                return [
+                    {"column_name": name}
+                    for name in [
+                        "id",
+                        "decided_at",
+                        "ticker",
+                        "decision",
+                        "final_score",
+                        "layers",
+                        "source",
+                        "status",
+                        "decision_type",
+                        "metric_scope",
+                        "outcome_basis",
+                        "outcome_5d",
+                    ]
+                ]
+            return []
+
+        async def close(self):
+            return None
+
+    conn = _Connection()
+
+    async def _connect(_dsn):
+        return conn
+
+    monkeypatch.setattr("src.analysis.viability_audit.asyncpg.connect", _connect)
+
+    frame = asyncio.run(
+        load_viability_decision_log(
+            ViabilityAuditConfig(database_url="postgresql://unused", horizons=("5d",))
+        )
+    )
+
+    assert frame.empty
+    decision_query = conn.statements[-1]
+    assert "superseded_by_real" in decision_query
+    assert "live_bf" in decision_query

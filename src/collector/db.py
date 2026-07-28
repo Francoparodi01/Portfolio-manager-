@@ -19,17 +19,18 @@ Changelog v2:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import json
 import logging
 from pathlib import Path
 import uuid
-from typing import Optional
+from typing import Any, Mapping, Optional
 from zoneinfo import ZoneInfo
 from src.analysis.audit_scope import (
     classify_decision_audit_scope,
     ensure_decision_audit_scope_columns,
 )
+from src.analysis.decision_context import build_decision_run_context
 from src.analysis.decision_engine import directional_return
 from src.analysis.fill_reconciliation import ExecutionCandidate, choose_execution_candidate
 from src.analysis.manual_market_events import (
@@ -47,6 +48,10 @@ from src.collector.broker_movements import (
     serialize_raw_payload as serialize_movement_raw_payload,
 )
 from src.collector.data.models import AssetType, Currency, MarketCandle
+from src.collector.schema_migrations import (
+    EXECUTION_TIMESTAMP_META_SQL,
+    OUTCOME_HORIZON_SQL,
+)
 from src.core.credentials import CredentialCipher, UserCredentials
 
 try:
@@ -65,6 +70,9 @@ MAX_COMPATIBLE_PRICE_RATIO = 2.0
 CEDEAR_MIN_COMPATIBLE_PRICE_RATIO = 0.25
 CEDEAR_MAX_COMPATIBLE_PRICE_RATIO = 4.0
 MARKET_FRESHNESS_MIN_TICKERS = 50
+MANUAL_DECISION_STRATEGY_ID = "manual"
+NO_MANUAL_DECISION_COMPONENT_VERSION = "none"
+SUPERSEDED_BROKER_FILL_REASON = "cocos_ticket_replaced_provisional_movement"
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
@@ -72,6 +80,76 @@ SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
 
 def _schema_sql() -> str:
     return SCHEMA_PATH.read_text(encoding="utf-8")
+
+
+def _manual_broker_decided_at(fill_date: date) -> datetime:
+    return datetime.combine(fill_date, time(15, 0), tzinfo=ART_TZ)
+
+
+def _manual_broker_run_id(
+    *,
+    decision_source: str,
+    fill_date: date,
+    ticker: str,
+    side: str,
+    owner_chat_id: int | None,
+    external_ids: list[str],
+) -> str:
+    run_key = "|".join(
+        [
+            decision_source,
+            str(owner_chat_id or ""),
+            fill_date.isoformat(),
+            ticker,
+            side,
+            *external_ids,
+        ]
+    )
+    return f"manual:{uuid.uuid5(uuid.NAMESPACE_URL, run_key)}"
+
+
+def _manual_broker_layer_patch(
+    *,
+    decision_source: str,
+    fill_date: date,
+    ticker: str,
+    side: str,
+    owner_chat_id: int | None,
+    external_ids: list[str],
+    quantity: float,
+    avg_fill_price: float,
+    executed_amount: float,
+    fees_ars: float,
+) -> dict[str, Any]:
+    layer_key = "broker_movement" if decision_source == "broker_movement" else "broker_fill"
+    run_context = build_decision_run_context(
+        _manual_broker_run_id(
+            decision_source=decision_source,
+            fill_date=fill_date,
+            ticker=ticker,
+            side=side,
+            owner_chat_id=owner_chat_id,
+            external_ids=external_ids,
+        ),
+        strategy_id=MANUAL_DECISION_STRATEGY_ID,
+        planner_version=NO_MANUAL_DECISION_COMPONENT_VERSION,
+        optimizer_version=NO_MANUAL_DECISION_COMPONENT_VERSION,
+        model_version=NO_MANUAL_DECISION_COMPONENT_VERSION,
+        prompt_version=NO_MANUAL_DECISION_COMPONENT_VERSION,
+        decided_at=_manual_broker_decided_at(fill_date),
+    ).to_dict()
+    return {
+        "run_context": run_context,
+        layer_key: {
+            "reconciliation_mode": "manual_or_unplanned",
+            "external_fill_ids": external_ids,
+            "fill_date": fill_date.isoformat(),
+            "quantity": quantity,
+            "avg_fill_price": avg_fill_price,
+            "gross_amount_ars": executed_amount,
+            "fees_ars": fees_ars,
+        },
+    }
 
 
 def _json_payload(value) -> dict:
@@ -89,6 +167,127 @@ def _json_payload(value) -> dict:
         return dict(value)
     except Exception:
         return {"value": str(value)}
+
+
+async def _mark_superseded_broker_fills_for_real(conn, source: str, external_fill_id: str) -> list[int]:
+    rows = await conn.fetch(
+        """
+        WITH real_fill AS (
+            SELECT id, source, external_fill_id, executed_at, ticker, side, raw_payload
+            FROM broker_fills
+            WHERE source = $1
+              AND external_fill_id = $2
+              AND external_fill_id NOT LIKE 'synthetic:%'
+              AND COALESCE(raw_payload->>'id_ticket', '') <> ''
+        )
+        UPDATE broker_fills synthetic
+        SET raw_payload = COALESCE(synthetic.raw_payload, '{}'::jsonb)
+            || jsonb_build_object(
+                'superseded_by_real',
+                jsonb_build_object(
+                    'fill_id', real_fill.id,
+                    'external_fill_id', real_fill.external_fill_id,
+                    'reason', $3::text
+                )
+            )
+        FROM real_fill
+        WHERE synthetic.source = real_fill.source
+          AND synthetic.id <> real_fill.id
+          AND synthetic.external_fill_id LIKE 'synthetic:%'
+          AND NOT (COALESCE(synthetic.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
+          AND synthetic.executed_at::date = real_fill.executed_at::date
+          AND synthetic.ticker = real_fill.ticker
+          AND synthetic.side = real_fill.side
+          AND COALESCE(synthetic.raw_payload->>'id_instrument', '') = COALESCE(real_fill.raw_payload->>'id_instrument', '')
+          AND COALESCE(synthetic.raw_payload->>'settlement_date', '') = COALESCE(real_fill.raw_payload->>'settlement_date', '')
+          AND COALESCE(synthetic.raw_payload->>'label', '') = COALESCE(real_fill.raw_payload->>'label', '')
+          AND COALESCE(synthetic.raw_payload->>'id_currency', '') = COALESCE(real_fill.raw_payload->>'id_currency', '')
+          AND COALESCE(synthetic.raw_payload->>'id_ticket', '') = ''
+          AND COALESCE(synthetic.raw_payload->>'description', '') = ''
+          AND COALESCE(synthetic.raw_payload->>'has_ticket_pdf', 'false') IN ('false', 'False', '0', '')
+        RETURNING synthetic.id
+        """,
+        source,
+        external_fill_id,
+        SUPERSEDED_BROKER_FILL_REASON,
+    )
+    return [int(row["id"]) for row in rows]
+
+
+async def _mark_synthetic_broker_fill_if_real_exists(conn, source: str, external_fill_id: str) -> list[int]:
+    rows = await conn.fetch(
+        """
+        WITH synthetic_fill AS (
+            SELECT id, source, external_fill_id, executed_at, ticker, side, raw_payload
+            FROM broker_fills
+            WHERE source = $1
+              AND external_fill_id = $2
+              AND external_fill_id LIKE 'synthetic:%'
+              AND NOT (COALESCE(raw_payload, '{}'::jsonb) ? 'superseded_by_real')
+              AND COALESCE(raw_payload->>'id_ticket', '') = ''
+              AND COALESCE(raw_payload->>'description', '') = ''
+              AND COALESCE(raw_payload->>'has_ticket_pdf', 'false') IN ('false', 'False', '0', '')
+        ),
+        real_fill AS (
+            SELECT real.id, real.external_fill_id
+            FROM broker_fills real
+            JOIN synthetic_fill synthetic
+              ON real.source = synthetic.source
+             AND real.external_fill_id NOT LIKE 'synthetic:%'
+             AND real.executed_at::date = synthetic.executed_at::date
+             AND real.ticker = synthetic.ticker
+             AND real.side = synthetic.side
+             AND COALESCE(real.raw_payload->>'id_ticket', '') <> ''
+             AND COALESCE(real.raw_payload->>'id_instrument', '') = COALESCE(synthetic.raw_payload->>'id_instrument', '')
+             AND COALESCE(real.raw_payload->>'settlement_date', '') = COALESCE(synthetic.raw_payload->>'settlement_date', '')
+             AND COALESCE(real.raw_payload->>'label', '') = COALESCE(synthetic.raw_payload->>'label', '')
+             AND COALESCE(real.raw_payload->>'id_currency', '') = COALESCE(synthetic.raw_payload->>'id_currency', '')
+            ORDER BY real.id ASC
+            LIMIT 1
+        )
+        UPDATE broker_fills synthetic
+        SET raw_payload = COALESCE(synthetic.raw_payload, '{}'::jsonb)
+            || jsonb_build_object(
+                'superseded_by_real',
+                jsonb_build_object(
+                    'fill_id', real_fill.id,
+                    'external_fill_id', real_fill.external_fill_id,
+                    'reason', $3::text
+                )
+            )
+        FROM synthetic_fill, real_fill
+        WHERE synthetic.id = synthetic_fill.id
+        RETURNING synthetic.id
+        """,
+        source,
+        external_fill_id,
+        SUPERSEDED_BROKER_FILL_REASON,
+    )
+    return [int(row["id"]) for row in rows]
+
+
+async def _mark_superseded_broker_fills_for_saved_rows(conn, rows: list[tuple]) -> int:
+    marked: set[int] = set()
+    for row in rows:
+        source = str(row[0])
+        external_fill_id = str(row[1])
+        if external_fill_id.startswith("synthetic:"):
+            marked.update(
+                await _mark_synthetic_broker_fill_if_real_exists(
+                    conn,
+                    source,
+                    external_fill_id,
+                )
+            )
+        else:
+            marked.update(
+                await _mark_superseded_broker_fills_for_real(
+                    conn,
+                    source,
+                    external_fill_id,
+                )
+            )
+    return len(marked)
 
 
 # ── Migration SQL para decision_log (idempotente) ─────────────────────────────
@@ -132,33 +331,7 @@ class PortfolioDatabase:
     async def _ensure_execution_timestamp_meta_columns(self, conn) -> None:
         if self._execution_timestamp_meta_ready:
             return
-        await conn.execute(
-            """
-            ALTER TABLE broker_fills
-                ADD COLUMN IF NOT EXISTS executed_at_precision TEXT NOT NULL DEFAULT 'unknown',
-                ADD COLUMN IF NOT EXISTS executed_at_source    TEXT NOT NULL DEFAULT 'unknown';
-
-            ALTER TABLE broker_movements
-                ADD COLUMN IF NOT EXISTS executed_at_precision TEXT NOT NULL DEFAULT 'date_only',
-                ADD COLUMN IF NOT EXISTS executed_at_source    TEXT NOT NULL DEFAULT 'cocos_movements.execution_date';
-
-            UPDATE broker_movements
-            SET executed_at_precision = 'date_only'
-            WHERE executed_at_precision IS NULL
-               OR executed_at_precision = ''
-               OR executed_at_precision = 'unknown';
-
-            UPDATE broker_fills
-            SET executed_at_precision = 'date_only',
-                executed_at_source = 'cocos_movements.execution_date'
-            WHERE source = 'cocos_movements'
-              AND (
-                    executed_at_precision IS NULL
-                 OR executed_at_precision = ''
-                 OR executed_at_precision = 'unknown'
-              );
-            """
-        )
+        await conn.execute(EXECUTION_TIMESTAMP_META_SQL)
         self._execution_timestamp_meta_ready = True
 
     async def _ensure_decision_audit_scope_columns(self, conn) -> None:
@@ -188,13 +361,7 @@ class PortfolioDatabase:
     async def _ensure_outcome_horizon_columns(self, conn) -> None:
         if self._outcome_horizon_ready:
             return
-        await conn.execute(
-            """
-            ALTER TABLE decision_log
-                ADD COLUMN IF NOT EXISTS outcome_40d FLOAT,
-                ADD COLUMN IF NOT EXISTS executable_outcome_40d FLOAT;
-            """
-        )
+        await conn.execute(OUTCOME_HORIZON_SQL)
         self._outcome_horizon_ready = True
 
     async def save_preclose_alerts(
@@ -748,7 +915,6 @@ class PortfolioDatabase:
         business_day = business_day or datetime.now(ART_TZ).date()
 
         async with self._pool.acquire() as conn:
-            await self._ensure_decision_audit_scope_columns(conn)
             rows = await conn.fetch(
                 """
                 WITH ranked AS (
@@ -1292,7 +1458,7 @@ class PortfolioDatabase:
                     outcome_5d,
                     size_pct,
                     was_correct
-                FROM decision_log
+                FROM decision_log dl
                 WHERE decided_at >= $1
                   AND ($2::bigint IS NULL OR owner_chat_id = $2)
                   AND outcome_5d IS NOT NULL
@@ -1300,6 +1466,18 @@ class PortfolioDatabase:
                   AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
                   AND is_primary_metric = TRUE
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM broker_fills bf
+                      WHERE bf.decision_log_id = dl.id
+                        AND COALESCE(bf.raw_payload, '{}'::jsonb) ? 'superseded_by_real'
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM broker_fills live_bf
+                            WHERE live_bf.decision_log_id = dl.id
+                              AND NOT (COALESCE(live_bf.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
+                        )
+                  )
                 ORDER BY decided_at ASC
                 """,
                 cutoff,
@@ -1403,48 +1581,6 @@ class PortfolioDatabase:
 
         async with self._pool.acquire() as conn:
             await self._ensure_execution_timestamp_meta_columns(conn)
-            for row in rows:
-                external_id = str(row[1])
-                if external_id.startswith("synthetic:"):
-                    continue
-                await conn.execute(
-                    """
-                    UPDATE broker_fills
-                    SET external_fill_id = $2
-                    WHERE id = (
-                        SELECT id
-                        FROM broker_fills
-                        WHERE source = $1
-                          AND external_fill_id LIKE 'synthetic:%'
-                          AND executed_at::date = $3::date
-                          AND ticker = $4
-                          AND side = $5
-                          AND ABS(quantity - $6::numeric) < 0.000001
-                          AND ABS(avg_fill_price - $7::numeric) < 0.01
-                          AND ABS(
-                              COALESCE(gross_amount_ars, quantity * avg_fill_price)
-                              - COALESCE($8::numeric, $6::numeric * $7::numeric)
-                          ) < 0.01
-                        ORDER BY id
-                        LIMIT 1
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM broker_fills
-                        WHERE source = $1
-                          AND external_fill_id = $2
-                    )
-                    """,
-                    row[0],
-                    row[1],
-                    row[2],
-                    row[5],
-                    row[6],
-                    row[7],
-                    row[8],
-                    row[9],
-                )
-
             await conn.executemany(
                 """
                 INSERT INTO broker_fills (
@@ -1476,8 +1612,13 @@ class PortfolioDatabase:
                 """,
                 rows,
             )
+            superseded = await _mark_superseded_broker_fills_for_saved_rows(conn, rows)
 
-        logger.info("%s broker fills guardados", len(rows))
+        logger.info(
+            "%s broker fills guardados; %s placeholders synthetic superseded",
+            len(rows),
+            superseded,
+        )
         return len(rows)
 
     async def save_broker_movements(self, movements: list[BrokerMovement]) -> int:
@@ -1666,6 +1807,64 @@ class PortfolioDatabase:
 
         return dict(row) if row else None
 
+    async def mark_superseded_broker_fills(
+        self,
+        superseded_to_real: Mapping[int, int],
+        *,
+        reason: str = SUPERSEDED_BROKER_FILL_REASON,
+    ) -> int:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        if not superseded_to_real:
+            return 0
+
+        pairs = sorted(
+            {
+                (int(superseded_id), int(real_id))
+                for superseded_id, real_id in superseded_to_real.items()
+            }
+        )
+        superseded_ids = [pair[0] for pair in pairs]
+        real_ids = [pair[1] for pair in pairs]
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                WITH mapping AS (
+                    SELECT *
+                    FROM unnest($1::bigint[], $2::bigint[]) AS m(superseded_id, real_id)
+                ),
+                real_fills AS (
+                    SELECT
+                        mapping.superseded_id,
+                        real.id AS real_id,
+                        real.external_fill_id AS real_external_fill_id
+                    FROM mapping
+                    JOIN broker_fills real ON real.id = mapping.real_id
+                )
+                UPDATE broker_fills synthetic
+                SET raw_payload = COALESCE(synthetic.raw_payload, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'superseded_by_real',
+                        jsonb_build_object(
+                            'fill_id', real_fills.real_id,
+                            'external_fill_id', real_fills.real_external_fill_id,
+                            'reason', $3::text
+                        )
+                    )
+                FROM real_fills
+                WHERE synthetic.id = real_fills.superseded_id
+                RETURNING synthetic.id
+                """,
+                superseded_ids,
+                real_ids,
+                reason,
+            )
+
+        marked = len(rows)
+        logger.info("broker fills marcados superseded_by_real: %s", marked)
+        return marked
+
     async def reconcile_broker_fills(self, max_age_days: int = 3) -> int:
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
@@ -1690,6 +1889,7 @@ class PortfolioDatabase:
                     raw_payload
                 FROM broker_fills
                 WHERE decision_log_id IS NULL
+                  AND NOT (COALESCE(raw_payload, '{}'::jsonb) ? 'superseded_by_real')
                 ORDER BY executed_at ASC, id ASC
                 """
             )
@@ -1852,6 +2052,7 @@ class PortfolioDatabase:
                     MIN(owner_chat_id) AS owner_chat_id
                 FROM broker_fills
                 WHERE decision_log_id IS NULL
+                  AND NOT (COALESCE(raw_payload, '{}'::jsonb) ? 'superseded_by_real')
                 GROUP BY executed_at::date, ticker, side, decision_source
                 ORDER BY fill_date, ticker, side
                 """
@@ -1874,23 +2075,18 @@ class PortfolioDatabase:
                     status="EXECUTED_MANUAL",
                     decision_type=decision_source,
                 )
-                layer_key = (
-                    "broker_movement"
-                    if decision_source == "broker_movement"
-                    else "broker_fill"
+                layer_patch = _manual_broker_layer_patch(
+                    decision_source=decision_source,
+                    fill_date=fill_date,
+                    ticker=ticker,
+                    side=side,
+                    owner_chat_id=owner_chat_id,
+                    external_ids=external_ids,
+                    quantity=quantity,
+                    avg_fill_price=avg_fill_price,
+                    executed_amount=executed_amount,
+                    fees_ars=float(group["fees_ars"] or 0.0),
                 )
-
-                layer_patch = {
-                    layer_key: {
-                        "reconciliation_mode": "manual_or_unplanned",
-                        "external_fill_ids": external_ids,
-                        "fill_date": fill_date.isoformat(),
-                        "quantity": quantity,
-                        "avg_fill_price": avg_fill_price,
-                        "gross_amount_ars": executed_amount,
-                        "fees_ars": float(group["fees_ars"] or 0.0),
-                    }
-                }
 
                 decision_id = await conn.fetchval(
                     """
@@ -2794,7 +2990,7 @@ class PortfolioDatabase:
                     COALESCE(status, 'UNKNOWN') AS status,
                     COALESCE(decision_type, 'unknown') AS decision_type,
                     COALESCE(metric_scope, 'debug') AS metric_scope
-                FROM decision_log
+                FROM decision_log dl
                 WHERE decided_at >= $1
                   AND ($2::bigint IS NULL OR owner_chat_id = $2)
                   AND COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
@@ -2802,6 +2998,18 @@ class PortfolioDatabase:
                   AND outcome_basis = 'canonical_cocos'
                   AND decision IN ('BUY', 'SELL')
                   AND is_primary_metric = TRUE
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM broker_fills bf
+                      WHERE bf.decision_log_id = dl.id
+                        AND COALESCE(bf.raw_payload, '{}'::jsonb) ? 'superseded_by_real'
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM broker_fills live_bf
+                            WHERE live_bf.decision_log_id = dl.id
+                              AND NOT (COALESCE(live_bf.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
+                        )
+                  )
                 ORDER BY decided_at ASC
                 """,
                 cutoff,
@@ -2882,6 +3090,18 @@ class PortfolioDatabase:
                   AND ($1::bigint IS NULL OR dl.owner_chat_id = $1)
                   AND COALESCE(dl.outcome_basis, '') <> 'legacy_external'
                   AND COALESCE(dl.metric_scope, 'debug') IN ('primary', 'planner_audit', 'blocked_audit')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM broker_fills bf
+                      WHERE bf.decision_log_id = dl.id
+                        AND COALESCE(bf.raw_payload, '{}'::jsonb) ? 'superseded_by_real'
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM broker_fills live_bf
+                            WHERE live_bf.decision_log_id = dl.id
+                              AND NOT (COALESCE(live_bf.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
+                        )
+                  )
                 ORDER BY dl.decided_at DESC
                 LIMIT 8
                 """,
