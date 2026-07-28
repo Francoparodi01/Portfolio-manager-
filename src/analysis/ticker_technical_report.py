@@ -46,6 +46,8 @@ class TickerTechnicalReport:
     signal: Signal
     frame: Any
     data_source: str
+    asset_type: str | None = None
+    currency: str | None = None
     position: TickerPositionContext | None = None
     latest_decision: TickerDecisionContext | None = None
     warnings: list[str] = field(default_factory=list)
@@ -79,6 +81,8 @@ def build_ticker_technical_report(
     frame: Any,
     *,
     data_source: str = "market_candles",
+    asset_type: str | None = None,
+    currency: str | None = None,
     position: TickerPositionContext | None = None,
     latest_decision: TickerDecisionContext | None = None,
     warnings: list[str] | None = None,
@@ -104,6 +108,8 @@ def build_ticker_technical_report(
         signal=signal,
         frame=frame,
         data_source=data_source,
+        asset_type=asset_type,
+        currency=currency,
         position=position,
         latest_decision=latest_decision,
         warnings=list(warnings or []),
@@ -125,6 +131,8 @@ async def build_ticker_technical_report_from_db(
     rows = await db.get_market_candles(clean_ticker, limit=int(candle_limit))
     frame = candles_to_frame(rows)
     data_source = "market_candles"
+    asset_type = _first_row_value(rows, "asset_type")
+    currency = _first_row_value(rows, "currency")
 
     if len(frame) < MIN_TECHNICAL_CANDLES and allow_yfinance_fallback:
         warnings.append(
@@ -134,6 +142,8 @@ async def build_ticker_technical_report_from_db(
         if fallback is not None and len(fallback) >= MIN_TECHNICAL_CANDLES:
             frame = fallback
             data_source = "yfinance"
+            asset_type = None
+            currency = "USD"
 
     position = await _load_position_context(db, clean_ticker, owner_chat_id=owner_chat_id)
     latest_decision = await _load_latest_decision_context(
@@ -145,6 +155,8 @@ async def build_ticker_technical_report_from_db(
         clean_ticker,
         frame,
         data_source=data_source,
+        asset_type=asset_type,
+        currency=currency,
         position=position,
         latest_decision=latest_decision,
         warnings=warnings,
@@ -154,9 +166,14 @@ async def build_ticker_technical_report_from_db(
 def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
     signal = report.signal
     stats = _frame_stats(report.frame)
+    verdict_title, verdict_detail = _verdict(report, stats)
+    operative_regime = _operative_regime(stats, signal)
+    horizon_lines = _horizon_lines(stats)
+    level_lines = _level_lines(stats)
+    scenario_lines = _scenario_lines(report, stats)
     position_lines = _position_lines(report.position)
     decision_lines = _decision_lines(report.latest_decision)
-    warning_lines = [f"   - {escape(w)}" for w in report.warnings[:4]]
+    warning_lines = _data_caveat_lines(report)
 
     reasons = [
         f"   - {escape(str(reason))}"
@@ -166,19 +183,30 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
         reasons = ["   - Sin razon tecnica principal."]
 
     lines = [
-        f"<b>Analisis por accion: {escape(report.ticker)}</b>",
+        f"<b>{escape(report.ticker)} - {escape(verdict_title)}</b>",
         "----------------------------",
-        f"Senal: <b>{escape(signal.signal)}</b> | Score tecnico: <code>{signal.score_raw:+.2f}</code>",
-        f"Precio: <b>{_fmt_price(signal.price_usd)}</b> | Fuerza: <b>{signal.strength:.0%}</b>",
-        f"Regimen: <b>{escape(signal.technical_regime)}</b> | Trend: <code>{signal.trend_score:+.3f}</code> | Reversion: <code>{signal.reversion_score:+.3f}</code>",
+        escape(verdict_detail),
         "",
-        "<b>Retornos y medias</b>",
-        f"   5r {_fmt_pct(stats.get('ret_5'))} | 20r {_fmt_pct(stats.get('ret_20'))} | 60r {_fmt_pct(stats.get('ret_60'))}",
-        f"   vs SMA20 {_fmt_pct(stats.get('dist_sma20'))} | SMA50 {_fmt_pct(stats.get('dist_sma50'))} | SMA200 {_fmt_pct(stats.get('dist_sma200'))}",
+        "<b>Lectura operativa</b>",
+        f"   Precio: <b>{_fmt_price(signal.price_usd)}</b>",
+        f"   Senal tecnica: <b>{escape(signal.signal)}</b> | Score: <code>{signal.score_raw:+.2f}</code>",
+        f"   Intensidad tecnica: <b>{signal.strength:.0%}</b> (no es probabilidad de acierto)",
+        f"   Regimen cuantitativo: <b>{escape(signal.technical_regime)}</b>",
+        f"   Interpretacion: <b>{escape(operative_regime)}</b>",
+        f"   Trend: <code>{signal.trend_score:+.3f}</code> | Reversion: <code>{signal.reversion_score:+.3f}</code>",
+        "",
+        "<b>Lectura por horizonte</b>",
+        *horizon_lines,
+        "",
+        "<b>Niveles a mirar</b>",
+        *level_lines,
         "",
         "<b>Razones tecnicas</b>",
         *reasons,
     ]
+
+    if scenario_lines:
+        lines += ["", "<b>Escenarios</b>", *scenario_lines]
 
     if position_lines:
         lines += ["", "<b>Contexto cartera</b>", *position_lines]
@@ -236,10 +264,11 @@ def render_ticker_technical_chart(
         "HOLD": "#ffd166",
     }.get(str(report.signal.signal).upper(), muted)
 
-    draw.text((54, 36), f"{report.ticker} technical report", fill=text, font=fonts["title"])
+    chart_verdict, _ = _verdict(report, _frame_stats(report.frame))
+    draw.text((54, 36), f"{report.ticker} memo tecnico", fill=text, font=fonts["title"])
     draw.text(
         (56, 88),
-        f"{report.signal.signal} | score {report.signal.score_raw:+.2f} | {report.signal.technical_regime}",
+        f"{chart_verdict} | score {report.signal.score_raw:+.2f}",
         fill=signal_color,
         font=fonts["body"],
     )
@@ -304,6 +333,8 @@ def _frame_stats(frame: Any) -> dict[str, float | None]:
     close = frame["Close"].dropna()
     if close.empty:
         return {}
+    high = frame["High"].dropna() if "High" in frame else close
+    low = frame["Low"].dropna() if "Low" in frame else close
 
     def ret(period: int) -> float | None:
         if len(close) <= period:
@@ -315,22 +346,329 @@ def _frame_stats(frame: Any) -> dict[str, float | None]:
 
     last = float(close.iloc[-1])
 
-    def dist(period: int) -> float | None:
+    def avg(period: int) -> float | None:
         if len(close) < period:
             return None
-        avg = float(close.rolling(period).mean().iloc[-1])
-        if avg == 0 or not math.isfinite(avg):
+        value = float(close.rolling(period).mean().iloc[-1])
+        if not math.isfinite(value):
             return None
-        return (last / avg) - 1.0
+        return value
+
+    def dist(period: int) -> float | None:
+        value = avg(period)
+        if value is None or value == 0:
+            return None
+        return (last / value) - 1.0
+
+    ema12 = _ema_value(close, 12)
+    ema26 = _ema_value(close, 26)
+    macd_hist, macd_hist_prev = _macd_hist_values(close)
+    rsi14 = _rsi_value(close)
+    support_low, support_high = _support_zone(low, close)
+    resistance_low, resistance_high = _resistance_zone(high, last, avg(20), avg(50))
 
     return {
+        "last": last,
         "ret_5": ret(5),
         "ret_20": ret(20),
         "ret_60": ret(60),
+        "sma_20": avg(20),
+        "sma_50": avg(50),
+        "sma_200": avg(200),
         "dist_sma20": dist(20),
         "dist_sma50": dist(50),
         "dist_sma200": dist(200),
+        "ema_12": ema12,
+        "ema_26": ema26,
+        "macd_hist": macd_hist,
+        "macd_hist_prev": macd_hist_prev,
+        "rsi_14": rsi14,
+        "support_low": support_low,
+        "support_high": support_high,
+        "resistance_low": resistance_low,
+        "resistance_high": resistance_high,
     }
+
+
+def _ema_value(series: Any, span: int) -> float | None:
+    try:
+        value = float(series.ewm(span=span, adjust=False).mean().iloc[-1])
+        return value if math.isfinite(value) else None
+    except Exception:
+        return None
+
+
+def _macd_hist_values(close: Any) -> tuple[float | None, float | None]:
+    try:
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        hist = macd - signal
+        last = float(hist.dropna().iloc[-1])
+        prev = float(hist.dropna().iloc[-2]) if len(hist.dropna()) >= 2 else None
+        return (
+            last if math.isfinite(last) else None,
+            prev if prev is not None and math.isfinite(prev) else None,
+        )
+    except Exception:
+        return None, None
+
+
+def _rsi_value(close: Any, period: int = 14) -> float | None:
+    try:
+        value = float(_rsi(close, period).dropna().iloc[-1])
+        return value if math.isfinite(value) else None
+    except Exception:
+        return None
+
+
+def _support_zone(low: Any, close: Any) -> tuple[float | None, float | None]:
+    try:
+        recent_low = low.tail(40).dropna()
+        recent_close = close.tail(40).dropna()
+        if recent_low.empty or recent_close.empty:
+            return None, None
+        zone_low = float(recent_low.quantile(0.10))
+        zone_high = float(recent_close.quantile(0.25))
+        if not math.isfinite(zone_low) or not math.isfinite(zone_high):
+            return None, None
+        if zone_low > zone_high:
+            zone_low, zone_high = zone_high, zone_low
+        return zone_low, zone_high
+    except Exception:
+        return None, None
+
+
+def _resistance_zone(
+    high: Any,
+    last: float,
+    sma20: float | None,
+    sma50: float | None,
+) -> tuple[float | None, float | None]:
+    candidates = [
+        value
+        for value in (sma20, sma50)
+        if value is not None and math.isfinite(value) and value > last
+    ]
+    if candidates:
+        return min(candidates), max(candidates)
+    try:
+        recent_high = float(high.tail(20).quantile(0.75))
+        if math.isfinite(recent_high) and recent_high > last:
+            candidates.append(recent_high)
+    except Exception:
+        pass
+    if not candidates:
+        return None, None
+    return min(candidates), max(candidates)
+
+
+def _verdict(
+    report: TickerTechnicalReport,
+    stats: dict[str, float | None],
+) -> tuple[str, str]:
+    signal = str(report.signal.signal or "").upper()
+    has_position = _has_position(report.position)
+    medium = _medium_state(stats)
+    short = _short_state(stats)
+    last_sell_executed = (
+        report.latest_decision is not None
+        and str(report.latest_decision.decision or "").upper().startswith("SELL")
+        and str(report.latest_decision.status or "").upper() == "EXECUTED"
+    )
+
+    if has_position:
+        if signal == "SELL":
+            title = "reducir o salir segun plan"
+            detail = "La senal tecnica esta deteriorada para una posicion abierta."
+        elif signal == "BUY":
+            title = "mantener; agregar solo con plan"
+            detail = "La estructura tecnica acompana, pero el tamano debe decidirse fuera de este reporte."
+        else:
+            title = "mantener sin agregar"
+            detail = "La accion no tiene confirmacion suficiente para aumentar exposicion."
+    else:
+        if signal == "BUY":
+            title = "evaluar entrada controlada"
+            detail = "Hay senal tecnica favorable, pero debe validarse contra cartera, liquidez y riesgo."
+        elif signal == "SELL":
+            title = "evitar entrada / no reingresar"
+            detail = "La accion no esta en cartera y la senal tecnica sigue negativa."
+        elif medium == "Correctivo" or short == "Bajista":
+            title = "esperar / no abrir posicion todavia"
+            detail = "La tendencia estructural puede seguir viva, pero el timing de corto plazo no confirma entrada."
+        else:
+            title = "esperar confirmacion"
+            detail = "No hay senal operativa clara para abrir posicion."
+
+    if last_sell_executed and not has_position:
+        detail += " La ultima venta registrada queda alineada con control de riesgo."
+    return title, detail
+
+
+def _operative_regime(stats: dict[str, float | None], signal: Signal) -> str:
+    long_state = _long_state(stats)
+    medium_state = _medium_state(stats)
+    short_state = _short_state(stats)
+    ret60 = _num(stats.get("ret_60")) or 0.0
+    dist200 = _num(stats.get("dist_sma200")) or 0.0
+    ret20 = _num(stats.get("ret_20")) or 0.0
+
+    if long_state == "Alcista" and medium_state == "Correctivo" and short_state == "Bajista":
+        return "Correccion de alta volatilidad dentro de tendencia estructural alcista."
+    if long_state == "Alcista" and ret60 > 0.30 and dist200 > 0.30 and ret20 < 0:
+        return "Correccion profunda despues de una suba extraordinaria."
+    if long_state == "Alcista" and short_state == "Alcista":
+        return "Tendencia alcista con momentum favorable."
+    if long_state == "Bajista" or (medium_state == "Bajista" and short_state == "Bajista"):
+        return "Tendencia bajista; priorizar preservacion de capital."
+    if str(signal.technical_regime or "").upper() == "RANGE":
+        return "Rango operativo; exigir ruptura o piso confirmado."
+    return "Transicion tecnica; esperar confirmacion."
+
+
+def _horizon_lines(stats: dict[str, float | None]) -> list[str]:
+    return [
+        f"   Largo plazo: <b>{_long_state(stats)}</b> - SMA200 {_fmt_pct(stats.get('dist_sma200'))}, 60r {_fmt_pct(stats.get('ret_60'))}.",
+        f"   Medio plazo: <b>{_medium_state(stats)}</b> - SMA20 {_fmt_pct(stats.get('dist_sma20'))}, SMA50 {_fmt_pct(stats.get('dist_sma50'))}, 20r {_fmt_pct(stats.get('ret_20'))}.",
+        f"   Corto plazo: <b>{_short_state(stats)}</b> - {_ema_relation(stats)}, MACD {_macd_label(stats)}, RSI {_fmt_number(stats.get('rsi_14'), decimals=1)}.",
+    ]
+
+
+def _level_lines(stats: dict[str, float | None]) -> list[str]:
+    lines = []
+    support = _fmt_range(stats.get("support_low"), stats.get("support_high"))
+    resistance = _fmt_range(stats.get("resistance_low"), stats.get("resistance_high"))
+    if resistance != "N/A":
+        lines.append(f"   Resistencia / recuperacion: <b>{resistance}</b>")
+    else:
+        lines.append("   Resistencia / recuperacion: <b>sin techo inmediato por medias</b>")
+    if support != "N/A":
+        lines.append(f"   Soporte observado: <b>{support}</b>")
+    else:
+        lines.append("   Soporte observado: <b>sin zona clara en ultimas ruedas</b>")
+    lines.append(
+        f"   Medias: SMA20 {_fmt_price(stats.get('sma_20'))} | "
+        f"SMA50 {_fmt_price(stats.get('sma_50'))} | "
+        f"SMA200 {_fmt_price(stats.get('sma_200'))}"
+    )
+    return lines
+
+
+def _scenario_lines(
+    report: TickerTechnicalReport,
+    stats: dict[str, float | None],
+) -> list[str]:
+    resistance = _fmt_range(stats.get("resistance_low"), stats.get("resistance_high"))
+    support = _fmt_range(stats.get("support_low"), stats.get("support_high"))
+    has_position = _has_position(report.position)
+    lines: list[str] = []
+
+    if not has_position:
+        if resistance != "N/A":
+            lines.append(f"   Entrada por momentum: recuperar y sostener <b>{resistance}</b>.")
+        if support != "N/A":
+            lines.append(f"   Entrada agresiva: piso confirmado sobre <b>{support}</b>, con volumen comprador.")
+            lines.append(f"   Invalidacion: perdida clara de <b>{support}</b>.")
+        if not lines:
+            lines.append("   Permanecer fuera hasta que aparezca ruptura o piso medible.")
+    else:
+        if resistance != "N/A":
+            lines.append(f"   Agregar: solo si recupera <b>{resistance}</b> con momentum.")
+        if support != "N/A":
+            lines.append(f"   Riesgo: revisar exposicion si pierde <b>{support}</b>.")
+        if not lines:
+            lines.append("   Mantener tamano; no hay nivel operativo claro para agregar.")
+
+    return lines
+
+
+def _data_caveat_lines(report: TickerTechnicalReport) -> list[str]:
+    lines = [f"   - {escape(w)}" for w in report.warnings[:4]]
+    asset_type = str(report.asset_type or "").upper()
+    currency = str(report.currency or "").upper()
+    if asset_type == "CEDEAR":
+        lines.append(
+            "   - CEDEAR/precio local: este reporte no separa subyacente USD, CCL y liquidez todavia."
+        )
+    elif currency and currency != "ARS":
+        lines.append(f"   - Moneda de la serie: {escape(currency)}.")
+    if report.signal.has_reconstructed_candles:
+        lines.append("   - La serie mezcla velas oficiales con velas internas reconstruidas.")
+    return lines
+
+
+def _long_state(stats: dict[str, float | None]) -> str:
+    dist200 = _num(stats.get("dist_sma200"))
+    ret60 = _num(stats.get("ret_60"))
+    if dist200 is not None and dist200 > 0.15 and (ret60 is None or ret60 > 0):
+        return "Alcista"
+    if dist200 is not None and dist200 < -0.08:
+        return "Bajista"
+    return "Neutral"
+
+
+def _medium_state(stats: dict[str, float | None]) -> str:
+    ret20 = _num(stats.get("ret_20"))
+    dist20 = _num(stats.get("dist_sma20"))
+    dist50 = _num(stats.get("dist_sma50"))
+    if (ret20 is not None and ret20 < -0.10) or (
+        dist20 is not None and dist20 < -0.03 and dist50 is not None and dist50 < 0
+    ):
+        return "Correctivo"
+    if ret20 is not None and ret20 > 0.05 and dist20 is not None and dist20 > 0:
+        return "Alcista"
+    if dist20 is not None and dist20 < -0.08 and dist50 is not None and dist50 < -0.08:
+        return "Bajista"
+    return "Mixto"
+
+
+def _short_state(stats: dict[str, float | None]) -> str:
+    ema12 = _num(stats.get("ema_12"))
+    ema26 = _num(stats.get("ema_26"))
+    hist = _num(stats.get("macd_hist"))
+    if ema12 is not None and ema26 is not None and ema12 < ema26 and (hist is None or hist < 0):
+        return "Bajista"
+    if ema12 is not None and ema26 is not None and ema12 > ema26 and (hist is None or hist > 0):
+        return "Alcista"
+    return "Mixto"
+
+
+def _ema_relation(stats: dict[str, float | None]) -> str:
+    ema12 = _num(stats.get("ema_12"))
+    ema26 = _num(stats.get("ema_26"))
+    if ema12 is None or ema26 is None:
+        return "N/A"
+    return "EMA12 > EMA26" if ema12 > ema26 else "EMA12 < EMA26"
+
+
+def _macd_label(stats: dict[str, float | None]) -> str:
+    hist = _num(stats.get("macd_hist"))
+    prev = _num(stats.get("macd_hist_prev"))
+    if hist is None:
+        return "N/A"
+    direction = "positivo" if hist > 0 else "negativo" if hist < 0 else "neutral"
+    if prev is None:
+        return direction
+    accel = "mejorando" if hist > prev else "deteriorando" if hist < prev else "estable"
+    return f"{direction}, {accel}"
+
+
+def _has_position(position: TickerPositionContext | None) -> bool:
+    if position is None:
+        return False
+    qty = _num(position.quantity)
+    value = _num(position.market_value_ars)
+    return bool((qty is not None and qty > 0) or (value is not None and value > 0))
+
+
+def _first_row_value(rows: list[dict], key: str) -> str | None:
+    for row in rows or []:
+        value = row.get(key)
+        if value is not None:
+            return str(value)
+    return None
 
 
 async def _load_position_context(
@@ -493,6 +831,25 @@ def _fmt_pct(value: Any) -> str:
     if number is None:
         return "N/A"
     return f"{number:+.1%}"
+
+
+def _fmt_number(value: Any, *, decimals: int = 2) -> str:
+    number = _num(value)
+    if number is None:
+        return "N/A"
+    return f"{number:.{decimals}f}"
+
+
+def _fmt_range(low: Any, high: Any) -> str:
+    lo = _num(low)
+    hi = _num(high)
+    if lo is None or hi is None:
+        return "N/A"
+    if lo > hi:
+        lo, hi = hi, lo
+    if abs(hi - lo) <= max(1.0, abs(lo) * 0.002):
+        return _fmt_price((lo + hi) / 2.0)
+    return f"{_fmt_price(lo)} - {_fmt_price(hi)}"
 
 
 def _fmt_dt(value: Any) -> str:
