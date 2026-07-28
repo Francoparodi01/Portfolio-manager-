@@ -18,6 +18,21 @@ construir una memoria operacional confiable: datos, decisiones, fills y outcomes
 | [06-seguridad-y-publicacion.md](06-seguridad-y-publicacion.md) | seguridad, exposicion remota y publicacion del monitor |
 | [07-analisis-radar-shadow.md](07-analisis-radar-shadow.md) | como analizan cartera, oportunidades y pronosticos 5/20/40 |
 
+## Documentacion de Evaluacion
+
+| Documento | Contenido |
+|---|---|
+| [README.md](README.md) | README principal basado en evidencia del repo |
+| [business.md](business.md) | negocio, stakeholders, propuesta de valor, riesgos y metricas |
+| [requirements.md](requirements.md) | requerimientos funcionales/no funcionales, reglas y flujos |
+| [architecture.md](architecture.md) | arquitectura, componentes, limites y tradeoffs |
+| [data-model.md](data-model.md) | tablas, relaciones, fuentes de verdad y datos derivados |
+| [runbook.md](runbook.md) | operacion, env vars, jobs, diagnostico y recuperacion |
+| [testing-quality.md](testing-quality.md) | tests, cobertura, validaciones y riesgos de calidad |
+| [audit-traceability.md](audit-traceability.md) | decisiones, evidencia, metricas y capas audit-only |
+| [roadmap.md](roadmap.md) | mejoras, deuda, riesgos y cambios no recomendados todavia |
+| [validation-2026-07-28.md](validation-2026-07-28.md) | snapshot de validacion local, Docker y auditorias vivas |
+
 ## Principios del Sistema
 
 1. El scraper observa; no decide.

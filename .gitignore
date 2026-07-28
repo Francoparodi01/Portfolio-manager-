@@ -43,6 +43,7 @@ tests/*
 !tests/test_manual_market_events.py
 !tests/test_viability_audit.py
 !tests/test_broker_movement_dedupe.py
+!tests/test_broker_fill_db.py
 !tests/test_superseded_broker_fills.py
 !tests/test_decision_context.py
 !tests/test_override_classification.py
