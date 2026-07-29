@@ -52,3 +52,10 @@ backup_*.sql
 Thumbs.db
 .vscode
 .idea
+
+# Repo-only documentation and validation artifacts
+docs
+tests
+*.md
+.env.example
+.env.multiuser.example
