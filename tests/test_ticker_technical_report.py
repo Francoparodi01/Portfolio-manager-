@@ -9,6 +9,7 @@ from src.analysis.ticker_technical_report import (
     _level_label_layout,
     _log_volume_quality,
     _moving_average_series,
+    _style_moving_average_lines,
     _sma_legend_label,
     build_ticker_technical_report,
     normalize_ticker,
@@ -195,7 +196,48 @@ def test_chart_level_label_layout_offsets_close_levels():
     )
 
     assert [item[0] for item in layout] == [100.0, 104.0]
-    assert layout[1][1] - layout[0][1] >= 40.0 * 0.085
+    assert layout[1][1] - layout[0][1] >= 40.0 * 0.16
+
+
+def test_chart_level_label_layout_offsets_levels_within_15_pct():
+    layout = _level_label_layout(
+        [
+            (100.0, "soporte", "#ff6b6b"),
+            (110.0, "recuperacion", "#ffd166"),
+        ],
+        (80.0, 160.0),
+    )
+
+    assert [item[0] for item in layout] == [100.0, 110.0]
+    assert layout[1][1] - layout[0][1] >= 80.0 * 0.12
+
+
+def test_chart_styles_sma_overlays_behind_price():
+    class FakeLine:
+        def __init__(self, label):
+            self.label = label
+            self.alpha = None
+            self.zorder = None
+
+        def get_label(self):
+            return self.label
+
+        def set_alpha(self, value):
+            self.alpha = value
+
+        def set_zorder(self, value):
+            self.zorder = value
+
+    class FakeAxis:
+        lines = [FakeLine("SMA20"), FakeLine("otra")]
+
+    axis = FakeAxis()
+    _style_moving_average_lines(axis, {"SMA20", "SMA50", "SMA200"})
+
+    assert axis.lines[0].zorder is not None
+    assert axis.lines[0].alpha is not None
+    assert axis.lines[1].zorder is None
+    assert axis.lines[1].alpha is None
 
 
 def test_chart_sma_legend_label_uses_latest_series_value():

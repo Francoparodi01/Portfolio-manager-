@@ -20,8 +20,11 @@ from src.collector.cocos_history import candles_to_frame
 
 MIN_TECHNICAL_CANDLES = 60
 DEFAULT_CANDLE_LIMIT = 260
-PRICE_LEVEL_LABEL_COLLISION_PCT = 0.06
-PRICE_LEVEL_LABEL_MIN_AXIS_GAP = 0.085
+PRICE_LEVEL_LABEL_COLLISION_PCT = 0.15
+PRICE_LEVEL_LABEL_MIN_AXIS_GAP = 0.12
+PRICE_LEVEL_LABEL_MAX_AXIS_GAP = 0.16
+SMA_OVERLAY_ALPHA = 0.52
+SMA_OVERLAY_ZORDER = 0.8
 
 logger = logging.getLogger(__name__)
 
@@ -291,13 +294,20 @@ def _render_price_volume_chart(report: TickerTechnicalReport, path: Path) -> Non
     sma200_color = "#b88cff"
 
     sma_specs = [
-        (20, "SMA20", sma20_color, 1.05),
-        (50, "SMA50", sma50_color, 1.05),
-        (200, "SMA200", sma200_color, 1.8),
+        (20, "SMA20", sma20_color, 1.05, "--"),
+        (50, "SMA50", sma50_color, 1.05, "-"),
+        (200, "SMA200", sma200_color, 1.8, "-"),
     ]
     add_plots = [
-        mpf.make_addplot(series, color=color, width=width, alpha=0.78, label=label)
-        for period, label, color, width in sma_specs
+        mpf.make_addplot(
+            series,
+            color=color,
+            width=width,
+            alpha=SMA_OVERLAY_ALPHA,
+            linestyle=linestyle,
+            label=label,
+        )
+        for period, label, color, width, linestyle in sma_specs
         for series in [_moving_average_series(frame, period)]
         if not series.dropna().empty
     ]
@@ -349,6 +359,7 @@ def _render_price_volume_chart(report: TickerTechnicalReport, path: Path) -> Non
     volume_ax = axes[2] if len(axes) > 2 else axes[-1]
     for ax in (price_ax, volume_ax):
         _style_mpl_axis(ax)
+    _style_moving_average_lines(price_ax, {label for _period, label, _color, _width, _linestyle in sma_specs})
     price_ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: _fmt_axis_money(value)))
     volume_ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: _fmt_axis_volume(value)))
     price_ax.set_ylabel("Precio", color="#9fb0bd")
@@ -359,10 +370,11 @@ def _render_price_volume_chart(report: TickerTechnicalReport, path: Path) -> Non
             [0],
             color=color,
             lw=max(1.5, width),
-            alpha=0.78,
+            alpha=0.9,
+            linestyle=linestyle,
             label=_sma_legend_label(frame, period, label),
         )
-        for period, label, color, width in sma_specs
+        for period, label, color, width, linestyle in sma_specs
         if not _moving_average_series(frame, period).dropna().empty
     ]
     if legend_handles:
@@ -432,10 +444,19 @@ def _signal_color(signal: str) -> str:
 
 def _style_mpl_axis(ax: Any) -> None:
     ax.set_facecolor("#0f1a23")
-    ax.grid(True, color="#263541", linewidth=0.7, alpha=0.85)
+    ax.set_axisbelow(True)
+    ax.grid(True, color="#263541", linewidth=0.7, alpha=0.85, zorder=0)
     ax.tick_params(colors="#9fb0bd", labelsize=8.5)
     for spine in ax.spines.values():
         spine.set_color("#22313c")
+
+
+def _style_moving_average_lines(ax: Any, labels: set[str]) -> None:
+    for line in getattr(ax, "lines", []):
+        if str(line.get_label()) not in labels:
+            continue
+        line.set_zorder(SMA_OVERLAY_ZORDER)
+        line.set_alpha(SMA_OVERLAY_ALPHA)
 
 
 def _moving_average_series(frame: Any, period: int) -> Any:
@@ -478,7 +499,11 @@ def _level_label_layout(
         previous_level = float(cleaned[idx - 1][0])
         current_level = float(cleaned[idx][0])
         relative_gap = abs(current_level - previous_level) / max(abs(current_level), 1.0)
-        required_gap = min_axis_gap if relative_gap < PRICE_LEVEL_LABEL_COLLISION_PCT else min_axis_gap * 0.7
+        if relative_gap < PRICE_LEVEL_LABEL_COLLISION_PCT:
+            value_gap = max(abs(previous_level), abs(current_level), 1.0) * PRICE_LEVEL_LABEL_COLLISION_PCT
+            required_gap = max(min_axis_gap, min(value_gap, span * PRICE_LEVEL_LABEL_MAX_AXIS_GAP))
+        else:
+            required_gap = min_axis_gap * 0.7
         if label_y[idx] - label_y[idx - 1] < required_gap:
             label_y[idx] = label_y[idx - 1] + required_gap
 
