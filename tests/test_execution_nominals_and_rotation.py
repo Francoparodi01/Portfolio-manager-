@@ -327,6 +327,55 @@ def test_decision_price_warning_excludes_blocked_rows(monkeypatch):
     ]
 
 
+def test_daily_analysis_scheduler_matches_operational_analysis_scope(monkeypatch):
+    from src.scheduler import runner
+
+    commands = []
+    verified = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def _create_subprocess_exec(*cmd, stdout=None, stderr=None):
+        commands.append(cmd)
+        return _Proc()
+
+    async def _run_verify_decision_prices():
+        verified.append(True)
+
+    class _Notifier:
+        def __init__(self, *_args):
+            pass
+
+        def notify_critical_error(self, *_args):
+            raise AssertionError("daily_analysis should not report an error")
+
+    cfg = SimpleNamespace(
+        database=SimpleNamespace(url="postgresql://unused"),
+        scraper=SimpleNamespace(telegram_bot_token="token", telegram_chat_id="chat"),
+    )
+    monkeypatch.setattr(runner, "_is_business_day", lambda: True)
+    monkeypatch.setattr(runner, "get_config", lambda: cfg)
+    monkeypatch.setattr(runner, "TelegramNotifier", _Notifier)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", _create_subprocess_exec)
+    monkeypatch.setattr(runner, "run_verify_decision_prices", _run_verify_decision_prices)
+
+    asyncio.run(runner.run_daily_analysis())
+
+    assert commands == [
+        (
+            runner.sys.executable,
+            "scripts/run_analysis.py",
+            "--no-llm",
+            "--skip-radar",
+        )
+    ]
+    assert verified == [True]
+
+
 def test_fill_reconciliation_backfills_missing_decision_price():
     class _Connection:
         def __init__(self):

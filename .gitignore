@@ -49,6 +49,7 @@ tests/*
 !tests/test_override_classification.py
 !tests/test_decision_timeline.py
 !tests/test_feature_snapshot.py
+!tests/test_analysis_telegram_output.py
 !tests/test_output_perf.py
 !tests/test_manual_broker_run_context.py
 !tests/test_thesis_shadow_store.py

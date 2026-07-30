@@ -2159,15 +2159,15 @@ def _compact_num(value, decimals: int = 1) -> str:
         return "N/A"
 
 
-def _compact_reason(text: str, max_len: int = 72) -> str:
+def _compact_reason(text: str, max_len: int = 220) -> str:
     clean = " ".join(str(text or "").split())
     if not clean:
         return "sin motivo operativo claro"
-    if "Optimizer suger" in clean and "score" in clean:
-        return "optimizer diverge; score no confirma"
     if len(clean) <= max_len:
         return clean
-    return clean[: max_len - 1].rstrip() + "..."
+    if max_len <= 3:
+        return clean[:max_len]
+    return clean[: max_len - 3].rstrip() + "..."
 
 
 def _compact_ic_line(ic_metrics: dict | None) -> str:
@@ -2282,7 +2282,7 @@ def _render_compact_report(
         for order in sorted(plan.blocked_orders, key=lambda x: x.priority)[:4]:
             d = decision_map.get(order.ticker)
             score = f"score {float(d.score):+.3f}" if d and d.score is not None else ""
-            reason = _compact_reason(order.reason, 46)
+            reason = _compact_reason(order.reason, 180)
             lines.append(f"🔵 WATCH {escape(order.ticker)} bloqueado {escape(score)} ({escape(reason)})".rstrip())
         fees = float(plan.fee_sell_ars or 0.0) + float(plan.fee_buy_ars or 0.0)
         if plan.gross_sell_ars:
@@ -2337,11 +2337,11 @@ def _render_compact_report(
         cw = float(current_w.get(ticker, 0.0))
         tw = float(d.target_weight if d else cw)
         if action == DecisionType.HOLD.value and d and d.reason_secondary:
-            tail = f"hold — {_compact_reason(d.reason_secondary, 58)}"
+            tail = f"hold — {_compact_reason(d.reason_secondary)}"
         elif action == DecisionType.WATCH.value and d and d.reason_secondary:
-            tail = f"watch — {_compact_reason(d.reason_secondary, 58)}"
+            tail = f"watch — {_compact_reason(d.reason_secondary)}"
         elif action == DecisionType.BLOCKED.value and d and d.reason_secondary:
-            tail = f"bloqueado — {_compact_reason(d.reason_secondary, 54)}"
+            tail = f"bloqueado — {_compact_reason(d.reason_secondary)}"
         else:
             tail = action
         lines.append(

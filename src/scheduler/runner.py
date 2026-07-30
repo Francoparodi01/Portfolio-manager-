@@ -1171,7 +1171,7 @@ async def run_daily_analysis() -> None:
 
     cfg = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
-    cmd = [sys.executable, "scripts/run_analysis.py", "--no-llm"]
+    cmd = [sys.executable, "scripts/run_analysis.py", "--no-llm", "--skip-radar"]
     logger.info("daily_analysis iniciando: %s", " ".join(cmd))
     try:
         proc = await asyncio.create_subprocess_exec(

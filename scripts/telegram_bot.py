@@ -354,6 +354,23 @@ def _freshness_badge(minutes: Optional[float], *, business_day: bool) -> tuple[s
     return "🔴", ""
 
 
+def _split_long_line(line: str, max_len: int) -> list[str]:
+    if len(line) <= max_len:
+        return [line]
+
+    parts: list[str] = []
+    remaining = line
+    while len(remaining) > max_len:
+        cut = remaining.rfind(" ", 0, max_len)
+        if cut < max_len // 2:
+            cut = max_len
+        parts.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
 def split_message(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> list[str]:
     if not text:
         return ["⚠️ Sin contenido para mostrar."]
@@ -362,13 +379,14 @@ def split_message(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> list[str]:
     chunks: list[str] = []
     current = ""
     for line in text.splitlines():
-        candidate = current + line + "\n"
-        if len(candidate) > max_len:
-            if current.strip():
-                chunks.append(current.rstrip())
-            current = line + "\n"
-        else:
-            current = candidate
+        for part in _split_long_line(line, max_len):
+            candidate = current + part + "\n"
+            if len(candidate) > max_len:
+                if current.strip():
+                    chunks.append(current.rstrip())
+                current = part + "\n"
+            else:
+                current = candidate
     if current.strip():
         chunks.append(current.rstrip())
     return chunks
