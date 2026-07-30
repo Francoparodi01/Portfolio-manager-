@@ -10,6 +10,7 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Any
+import logging
 import math
 import re
 
@@ -19,6 +20,10 @@ from src.collector.cocos_history import candles_to_frame
 
 MIN_TECHNICAL_CANDLES = 60
 DEFAULT_CANDLE_LIMIT = 260
+PRICE_LEVEL_LABEL_COLLISION_PCT = 0.06
+PRICE_LEVEL_LABEL_MIN_AXIS_GAP = 0.085
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -144,6 +149,8 @@ async def build_ticker_technical_report_from_db(
             data_source = "yfinance"
             asset_type = None
             currency = "USD"
+
+    _log_volume_quality(clean_ticker, frame, data_source=data_source)
 
     position = await _load_position_context(db, clean_ticker, owner_chat_id=owner_chat_id)
     latest_decision = await _load_latest_decision_context(
@@ -283,11 +290,16 @@ def _render_price_volume_chart(report: TickerTechnicalReport, path: Path) -> Non
     sma50_color = "#ffb86b"
     sma200_color = "#b88cff"
 
-    close = frame["Close"]
+    sma_specs = [
+        (20, "SMA20", sma20_color, 1.05),
+        (50, "SMA50", sma50_color, 1.05),
+        (200, "SMA200", sma200_color, 1.8),
+    ]
     add_plots = [
-        mpf.make_addplot(close.rolling(20).mean(), color=sma20_color, width=1.2, label="SMA20"),
-        mpf.make_addplot(close.rolling(50).mean(), color=sma50_color, width=1.2, label="SMA50"),
-        mpf.make_addplot(close.rolling(200).mean(), color=sma200_color, width=2.0, label="SMA200"),
+        mpf.make_addplot(series, color=color, width=width, alpha=0.78, label=label)
+        for period, label, color, width in sma_specs
+        for series in [_moving_average_series(frame, period)]
+        if not series.dropna().empty
     ]
 
     fig, axes = mpf.plot(
@@ -307,11 +319,11 @@ def _render_price_volume_chart(report: TickerTechnicalReport, path: Path) -> Non
     )
     fig.set_dpi(155)
     fig.set_facecolor("#0b1117")
-    fig.subplots_adjust(left=0.08, right=0.965, top=0.82, bottom=0.095, hspace=0.08)
+    fig.subplots_adjust(left=0.08, right=0.955, top=0.775, bottom=0.095, hspace=0.08)
     fig.suptitle(
         f"{report.ticker} memo técnico",
         x=0.035,
-        y=0.985,
+        y=0.982,
         ha="left",
         color="#eef6fb",
         fontsize=20,
@@ -319,7 +331,7 @@ def _render_price_volume_chart(report: TickerTechnicalReport, path: Path) -> Non
     )
     fig.text(
         0.035,
-        0.94,
+        0.925,
         f"{_verdict(report, stats)[0]} | score {report.signal.score_raw:+.2f}",
         color=signal_color,
         fontsize=12,
@@ -327,7 +339,7 @@ def _render_price_volume_chart(report: TickerTechnicalReport, path: Path) -> Non
     )
     fig.text(
         0.035,
-        0.915,
+        0.895,
         f"{len(frame)} velas | {_fmt_dt(frame.index[0])} a {_fmt_dt(frame.index[-1])} | {report.data_source}",
         color="#9fb0bd",
         fontsize=9,
@@ -342,25 +354,40 @@ def _render_price_volume_chart(report: TickerTechnicalReport, path: Path) -> Non
     price_ax.set_ylabel("Precio", color="#9fb0bd")
     volume_ax.set_ylabel("Volumen", color="#9fb0bd")
     legend_handles = [
-        Line2D([0], [0], color=sma20_color, lw=1.5, label="SMA20"),
-        Line2D([0], [0], color=sma50_color, lw=1.5, label="SMA50"),
-        Line2D([0], [0], color=sma200_color, lw=2.2, label="SMA200"),
+        Line2D(
+            [0],
+            [0],
+            color=color,
+            lw=max(1.5, width),
+            alpha=0.78,
+            label=_sma_legend_label(frame, period, label),
+        )
+        for period, label, color, width in sma_specs
+        if not _moving_average_series(frame, period).dropna().empty
     ]
-    price_ax.legend(
-        handles=legend_handles,
-        loc="upper left",
-        bbox_to_anchor=(0.01, 0.98),
-        ncol=3,
-        facecolor="#101820",
-        edgecolor="#22313c",
-        labelcolor="#d9e6ee",
-        framealpha=0.9,
-        fontsize=8.5,
-    )
+    if legend_handles:
+        price_ax.legend(
+            handles=legend_handles,
+            loc="upper left",
+            bbox_to_anchor=(0.01, 0.98),
+            ncol=min(3, len(legend_handles)),
+            facecolor="#101820",
+            edgecolor="#22313c",
+            labelcolor="#d9e6ee",
+            framealpha=0.9,
+            fontsize=7.8,
+            borderpad=0.35,
+            handlelength=1.8,
+            columnspacing=1.0,
+        )
 
-    _annotate_price_level(price_ax, stats.get("support_low"), "soporte crítico", "#ff6b6b")
-    _annotate_price_level(price_ax, stats.get("resistance_low"), "recuperación", "#ffd166")
-    _annotate_latest_average(price_ax, frame, 200, "SMA200", sma200_color)
+    _annotate_price_levels(
+        price_ax,
+        [
+            (stats.get("support_low"), "soporte crítico", "#ff6b6b"),
+            (stats.get("resistance_low"), "recuperación", "#ffd166"),
+        ],
+    )
     _annotate_volume_gap(volume_ax, stats)
 
     fig.savefig(path, facecolor=fig.get_facecolor(), bbox_inches="tight", pad_inches=0.18)
@@ -411,6 +438,63 @@ def _style_mpl_axis(ax: Any) -> None:
         spine.set_color("#22313c")
 
 
+def _moving_average_series(frame: Any, period: int) -> Any:
+    close = frame["Close"].astype("float64")
+    series = close.rolling(period, min_periods=period).mean()
+    return series.where(close.notna())
+
+
+def _last_finite_value(series: Any) -> float | None:
+    try:
+        clean = series.dropna()
+    except Exception:
+        return None
+    if clean.empty:
+        return None
+    value = _num(clean.iloc[-1])
+    return value if value is not None else None
+
+
+def _sma_legend_label(frame: Any, period: int, label: str) -> str:
+    value = _last_finite_value(_moving_average_series(frame, period))
+    if value is None:
+        return label
+    return f"{label} {_fmt_axis_money(value)}"
+
+
+def _level_label_layout(
+    levels: list[tuple[float, str, str]],
+    ylim: tuple[float, float],
+) -> list[tuple[float, float, str, str]]:
+    if not levels:
+        return []
+    low, high = sorted((float(ylim[0]), float(ylim[1])))
+    span = max(high - low, 1.0)
+    min_axis_gap = span * PRICE_LEVEL_LABEL_MIN_AXIS_GAP
+    cleaned = sorted(levels, key=lambda item: item[0])
+    label_y = [float(level[0]) for level in cleaned]
+
+    for idx in range(1, len(label_y)):
+        previous_level = float(cleaned[idx - 1][0])
+        current_level = float(cleaned[idx][0])
+        relative_gap = abs(current_level - previous_level) / max(abs(current_level), 1.0)
+        required_gap = min_axis_gap if relative_gap < PRICE_LEVEL_LABEL_COLLISION_PCT else min_axis_gap * 0.7
+        if label_y[idx] - label_y[idx - 1] < required_gap:
+            label_y[idx] = label_y[idx - 1] + required_gap
+
+    overflow = label_y[-1] - (high - span * 0.02)
+    if overflow > 0:
+        label_y = [value - overflow for value in label_y]
+    underflow = (low + span * 0.02) - label_y[0]
+    if underflow > 0:
+        label_y = [value + underflow for value in label_y]
+
+    return [
+        (float(level[0]), float(adjusted), level[1], level[2])
+        for level, adjusted in zip(cleaned, label_y)
+    ]
+
+
 def _fmt_axis_money(value: Any) -> str:
     number = _num(value)
     if number is None:
@@ -456,38 +540,36 @@ def _annotate_price_level(ax: Any, value: Any, label: str, color: str) -> None:
     )
 
 
-def _annotate_latest_average(
+def _annotate_price_levels(
     ax: Any,
-    frame: Any,
-    period: int,
-    label: str,
-    color: str,
+    levels: list[tuple[Any, str, str]],
 ) -> None:
-    try:
-        series = frame["Close"].rolling(period).mean().dropna()
-    except Exception:
-        return
-    if series.empty:
-        return
-    value = float(series.iloc[-1])
-    if not math.isfinite(value):
-        return
-    ax.text(
-        0.012,
-        value,
-        f"{label} {_fmt_level(value)}",
-        transform=ax.get_yaxis_transform(),
-        color=color,
-        fontsize=8.3,
-        ha="left",
-        va="center",
-        bbox={
-            "facecolor": "#0b1117",
-            "edgecolor": color,
-            "alpha": 0.68,
-            "boxstyle": "round,pad=0.2",
-        },
-    )
+    cleaned: list[tuple[float, str, str]] = []
+    for value, label, color in levels:
+        number = _num(value)
+        if number is None:
+            continue
+        cleaned.append((number, label, color))
+        ax.axhline(number, color=color, linewidth=1.0, linestyle="--", alpha=0.75)
+
+    for number, label_y, label, color in _level_label_layout(cleaned, ax.get_ylim()):
+        va = "center" if abs(label_y - number) > 1e-9 else "bottom"
+        ax.text(
+            0.995,
+            label_y,
+            f" {label} {_fmt_level(number)}",
+            transform=ax.get_yaxis_transform(),
+            color=color,
+            fontsize=8.1,
+            ha="right",
+            va=va,
+            bbox={
+                "facecolor": "#0b1117",
+                "edgecolor": color,
+                "alpha": 0.74,
+                "boxstyle": "round,pad=0.24",
+            },
+        )
 
 
 def _annotate_volume_gap(ax: Any, stats: dict[str, float | None]) -> None:
@@ -715,6 +797,22 @@ def _trailing_missing_volume(volume: Any) -> float:
         return float(count)
     except Exception:
         return 0.0
+
+
+def _log_volume_quality(ticker: str, frame: Any, *, data_source: str) -> None:
+    stats = _frame_stats(frame)
+    missing = int(_num(stats.get("trailing_missing_volume")) or 0)
+    if missing < 3:
+        return
+    source_counts = getattr(frame, "attrs", {}).get("candle_source_counts", {}) or {}
+    logger.warning(
+        "%s: %d trailing candles without reported volume in %s; sources=%s. "
+        "No automatic volume fallback applied because external volume may not match local CEDEAR/ARS prices.",
+        ticker,
+        missing,
+        data_source,
+        source_counts,
+    )
 
 
 def _support_zone(low: Any, close: Any) -> tuple[float | None, float | None]:

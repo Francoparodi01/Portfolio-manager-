@@ -6,6 +6,10 @@ from src.analysis.ticker_technical_report import (
     TickerDecisionContext,
     TickerPositionContext,
     TickerTechnicalReport,
+    _level_label_layout,
+    _log_volume_quality,
+    _moving_average_series,
+    _sma_legend_label,
     build_ticker_technical_report,
     normalize_ticker,
     render_ticker_technical_chart,
@@ -170,6 +174,47 @@ def test_ticker_report_charts_write_price_and_momentum_pngs(tmp_path):
     for chart_path in chart_paths:
         assert chart_path.exists()
         assert chart_path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_chart_moving_average_requires_full_window_without_interpolation():
+    frame = _frame(rows=25)
+    series = _moving_average_series(frame, 20)
+
+    assert series.iloc[:19].isna().all()
+    assert pd.notna(series.iloc[19])
+    assert pd.notna(series.iloc[-1])
+
+
+def test_chart_level_label_layout_offsets_close_levels():
+    layout = _level_label_layout(
+        [
+            (100.0, "soporte", "#ff6b6b"),
+            (104.0, "recuperacion", "#ffd166"),
+        ],
+        (80.0, 120.0),
+    )
+
+    assert [item[0] for item in layout] == [100.0, 104.0]
+    assert layout[1][1] - layout[0][1] >= 40.0 * 0.085
+
+
+def test_chart_sma_legend_label_uses_latest_series_value():
+    frame = _frame(rows=220)
+
+    assert _sma_legend_label(frame, 20, "SMA20").startswith("SMA20 $")
+    assert _sma_legend_label(frame, 300, "SMA300") == "SMA300"
+
+
+def test_volume_quality_logs_trailing_missing_volume(caplog):
+    frame = _frame(rows=80)
+    frame.loc[frame.index[-4:], "Volume"] = 0.0
+    frame.attrs["candle_source_counts"] = {"COCOS": 76, "internal_snapshot": 4}
+
+    with caplog.at_level("WARNING", logger="src.analysis.ticker_technical_report"):
+        _log_volume_quality("MU", frame, data_source="market_candles")
+
+    assert "MU: 4 trailing candles without reported volume" in caplog.text
+    assert "internal_snapshot" in caplog.text
 
 
 def test_normalize_ticker_rejects_empty_input():
