@@ -11,6 +11,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 from uuid import uuid4
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,6 +28,11 @@ from src.analysis.thesis_shadow import (
     render_shadow_telegram_report,
 )
 from src.analysis.macro import fetch_macro, get_macro_regime, score_macro_for_ticker
+from src.analysis.corporate_actions import (
+    detect_price_anomaly,
+    normalize_candle_rows,
+    rebase_reference_price,
+)
 from src.analysis.signal_aggregator import load_sentiment_contexts
 from src.analysis.thesis_shadow_store import ShadowThesisStore
 from src.collector.db import PortfolioDatabase
@@ -203,9 +209,25 @@ async def _build_theses(
             asset_type=metadata.get("asset_type") or None,
             limit=HISTORY_LIMIT,
         )
+        effects = await db.get_corporate_action_effects(tickers=[ticker])
+        rows = normalize_candle_rows(rows, effects)
         if len(rows) < MIN_INPUT_SESSIONS:
             skipped.append(ticker)
             continue
+        if len(rows) >= 2:
+            latest_ts = rows[-1].get("ts")
+            if not isinstance(latest_ts, datetime):
+                latest_ts = datetime.fromisoformat(str(latest_ts).replace("Z", "+00:00"))
+            anomaly = detect_price_anomaly(
+                ticker=ticker,
+                reference_price=float(rows[-2]["close_price"]),
+                current_price=float(rows[-1]["close_price"]),
+                observed_at=latest_ts,
+            )
+            if anomaly is not None:
+                logger.warning("shadow omitido %s: %s", ticker, anomaly.reason)
+                skipped.append(ticker)
+                continue
         try:
             theses.append(
                 build_shadow_thesis(
@@ -237,10 +259,26 @@ async def _mature_pending_outcomes(
     filled = 0
     for ticker, forecasts in grouped.items():
         candles = await db.get_market_candles(ticker, limit=OUTCOME_HISTORY_LIMIT)
+        effects = await db.get_corporate_action_effects(tickers=[ticker])
+        candles = normalize_candle_rows(candles, effects)
+        latest_ts = candles[-1]["ts"] if candles else datetime.now(timezone.utc)
         for row in forecasts:
+            adjusted_reference, adjustment_factor = rebase_reference_price(
+                float(row["reference_price"]),
+                reference_at=row["as_of_ts"],
+                as_of=latest_ts,
+                effects=effects,
+            )
+            if adjustment_factor != 1.0:
+                logger.info(
+                    "shadow outcome %s forecast=%s corporate price factor=%.8f",
+                    ticker,
+                    row["id"],
+                    adjustment_factor,
+                )
             outcome = mature_forecast(
                 as_of_ts=row["as_of_ts"],
-                reference_price=float(row["reference_price"]),
+                reference_price=float(adjusted_reference or row["reference_price"]),
                 horizon_sessions=int(row["horizon_sessions"]),
                 expected_return=float(row["expected_return"]),
                 future_candles=candles,

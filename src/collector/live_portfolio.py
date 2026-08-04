@@ -6,6 +6,13 @@ from datetime import datetime, timezone
 from html import escape
 from typing import Optional
 
+from src.analysis.corporate_actions import (
+    CorporateActionEffect,
+    PriceQualityStatus,
+    assess_live_price,
+    effects_by_ticker,
+    rebase_position_view,
+)
 from src.collector.portfolio_quality import (
     PRICE_STATUS_FRESH,
     enrich_positions_with_market_metadata,
@@ -77,6 +84,8 @@ class PortfolioMoveAlert:
     change_pct_1d: float
     weight_live: float
     market_value: float
+    alert_type: str = "PRICE_MOVE"
+    reason: str = ""
 
 
 def build_live_portfolio(
@@ -84,8 +93,20 @@ def build_live_portfolio(
     latest_prices: list[dict],
     *,
     generated_at: Optional[datetime] = None,
+    corporate_action_effects: list[CorporateActionEffect] | None = None,
 ) -> dict:
     generated_at = generated_at or datetime.now(timezone.utc)
+    grouped_effects = effects_by_ticker(corporate_action_effects or [])
+    snapshot_at_raw = snapshot.get("scraped_at")
+    if isinstance(snapshot_at_raw, datetime):
+        snapshot_at = snapshot_at_raw
+    else:
+        try:
+            snapshot_at = datetime.fromisoformat(str(snapshot_at_raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            snapshot_at = generated_at
+    if snapshot_at.tzinfo is None:
+        snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
     price_map = {
         str(row.get("ticker", "")).upper(): row
         for row in latest_prices or []
@@ -98,11 +119,34 @@ def build_live_portfolio(
 
     positions: list[dict] = []
     covered_positions = 0
+    price_quality_flags: list[dict] = []
+    corporate_action_applications: list[dict] = []
 
-    for raw in enriched_snapshot_positions:
+    for source_raw in enriched_snapshot_positions:
+        raw = dict(source_raw)
         ticker = str(raw.get("ticker", "")).upper()
         if not ticker:
             continue
+
+        raw, position_applications = rebase_position_view(
+            raw,
+            snapshot_at=snapshot_at,
+            as_of=generated_at,
+            effects=grouped_effects.get(ticker, ()),
+        )
+        corporate_action_applications.extend(
+            {
+                "event_id": application.event_id,
+                "instrument_effect_id": application.instrument_effect_id,
+                "component": application.component,
+                "application_status": application.application_status,
+                "idempotency_key": application.idempotency_key,
+                "before_state": application.before_state,
+                "after_state": application.after_state,
+                "invariant_checks": application.invariant_checks,
+            }
+            for application in position_applications
+        )
 
         latest = price_map.get(ticker) or {}
         quantity = _safe_float(raw.get("quantity"))
@@ -120,6 +164,24 @@ def build_live_portfolio(
         )
         if previous_close_price > 0 and latest_price > 0 and price_is_fresh:
             change_pct_1d_f = (latest_price - previous_close_price) / previous_close_price
+        assessment = None
+        if previous_close_price > 0 and latest_price > 0 and price_is_fresh:
+            assessment = assess_live_price(
+                ticker=ticker,
+                reference_price=previous_close_price,
+                current_price=latest_price,
+                observed_at=generated_at,
+                effects=grouped_effects.get(ticker, ()),
+            )
+            if assessment.flag is not None:
+                price_quality_flags.append(assessment.flag.to_dict())
+            if assessment.status == PriceQualityStatus.RECONCILED.value:
+                change_pct_1d_f = assessment.normalized_change
+            elif assessment.status in {
+                PriceQualityStatus.PRICE_NOT_COMPARABLE.value,
+                PriceQualityStatus.DATA_QUALITY_BLOCK.value,
+            }:
+                change_pct_1d_f = None
         day_pnl_ars = None
         if change_pct_1d_f is not None and change_pct_1d_f > -0.99 and market_value:
             prev_value = market_value / (1.0 + change_pct_1d_f)
@@ -139,6 +201,15 @@ def build_live_portfolio(
             change_pct_1d=change_pct_1d_f,
             day_pnl_ars=day_pnl_ars,
             previous_close_price=previous_close_price if previous_close_price > 0 else None,
+            raw_change_pct_1d=(assessment.raw_change if assessment is not None else change_pct_1d_f),
+            price_quality_status=(
+                assessment.status if assessment is not None else PriceQualityStatus.COMPARABLE.value
+            ),
+            price_quality_reason=(
+                assessment.flag.reason
+                if assessment is not None and assessment.flag is not None
+                else ""
+            ),
             price_source="market_prices" if latest_price > 0 and price_is_fresh else "snapshot",
             market_price_ts=market_price_ts,
         )
@@ -176,6 +247,8 @@ def build_live_portfolio(
         "day_change_pct": day_change_pct,
         "positions_count": len(positions),
         "price_coverage_count": covered_positions,
+        "price_quality_flags": price_quality_flags,
+        "corporate_action_applications": corporate_action_applications,
         "positions": positions,
     }
 
@@ -190,6 +263,24 @@ def select_portfolio_move_alerts(
     alerts: list[PortfolioMoveAlert] = []
 
     for position in live_portfolio.get("positions") or []:
+        quality_status = str(position.get("price_quality_status") or "").upper()
+        if quality_status in {
+            PriceQualityStatus.PRICE_NOT_COMPARABLE.value,
+            PriceQualityStatus.DATA_QUALITY_BLOCK.value,
+        }:
+            alerts.append(
+                PortfolioMoveAlert(
+                    ticker=str(position.get("ticker", "")).upper(),
+                    level="DATA_QUALITY",
+                    direction="NONE",
+                    change_pct_1d=_safe_float(position.get("raw_change_pct_1d")),
+                    weight_live=_safe_float(position.get("weight_in_portfolio")),
+                    market_value=_safe_float(position.get("market_value")),
+                    alert_type="PRICE_NOT_COMPARABLE",
+                    reason=str(position.get("price_quality_reason") or ""),
+                )
+            )
+            continue
         change = position.get("change_pct_1d")
         if change is None:
             continue
@@ -239,6 +330,15 @@ def render_live_portfolio_alert(
     lines = tg_header("📣 Movimiento relevante en cartera", subtitle="Alerta intradía sobre valuación estimada")
 
     for alert in alerts:
+        if alert.alert_type == "PRICE_NOT_COMPARABLE":
+            lines.append(
+                f"<b>{escape(alert.ticker)}</b> precio no comparable "
+                f"(movimiento raw {alert.change_pct_1d:+.2%})."
+            )
+            if alert.reason:
+                lines.append(f"   {escape(alert.reason)}")
+            lines.append("   Senal intradia suspendida; requiere confirmacion o reconciliacion.")
+            continue
         icon = "🟢" if alert.direction == "UP" else "🔴"
         lines.append(
             f"{icon} <b>{escape(alert.ticker)}</b> "
@@ -282,6 +382,17 @@ def render_opening_portfolio_report(
         reverse=True,
     )
     state = _opening_state(day_change, covered, positions_count)
+    quality_positions = [
+        position
+        for position in positions
+        if str(position.get("price_quality_status") or "").upper()
+        in {
+            PriceQualityStatus.PRICE_NOT_COMPARABLE.value,
+            PriceQualityStatus.DATA_QUALITY_BLOCK.value,
+        }
+    ]
+    if quality_positions:
+        state = "REVISION: PRECIO NO COMPARABLE"
     coverage_ratio = (covered / positions_count) if positions_count else 0.0
     top_movers = sorted(
         [p for p in positions if p.get("change_pct_1d") is not None],
@@ -316,6 +427,18 @@ def render_opening_portfolio_report(
                 f"- <b>{ticker}</b>: {_fmt_pct(change)} "
                 f"({_fmt_ars(day_pnl_pos, signed=True)} ARS)"
             )
+
+    if quality_positions:
+        lines += ["", tg_section("Calidad de precio")]
+        for position in quality_positions:
+            ticker = escape(str(position.get("ticker") or "").upper())
+            raw_change = position.get("raw_change_pct_1d")
+            reason = escape(str(position.get("price_quality_reason") or ""))
+            lines.append(
+                f"- <b>{ticker}</b>: raw {_fmt_pct(raw_change)} | PRICE_NOT_COMPARABLE"
+            )
+            if reason:
+                lines.append(f"  {reason}")
 
     lines += [
         "",

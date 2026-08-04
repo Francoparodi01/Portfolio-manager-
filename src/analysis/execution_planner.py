@@ -203,6 +203,7 @@ class DecisionIntent:
     conviction: Optional[float] = None
     theoretical_ars: float = 0.0
     sell_cause: Optional[str] = None
+    block_code: Optional[str] = None
     funding_for: dict[str, float] = field(default_factory=dict)
     funded_by: dict[str, float] = field(default_factory=dict)
 
@@ -225,6 +226,8 @@ class OrderIntent:
     funded_by: list[str] = field(default_factory=list)
     partial: bool = False
     status: OrderStatus = OrderStatus.PLANNED
+    block_code: Optional[str] = None
+    decision_override: Optional[str] = None
 
     planned_qty: Optional[float] = None
     filled_qty: Optional[float] = None
@@ -913,6 +916,7 @@ def reconcile_funding(
     external_buys: Optional[list[dict]] = None,
     allow_new_entries: bool = True,
     blocked_buy_tickers: Optional[dict[str, str]] = None,
+    blocked_trade_tickers: Optional[dict[str, str]] = None,
 ) -> ExecutionPlan:
     """
     Convierte decisiones conceptuales en órdenes ejecutables con cash real.
@@ -935,6 +939,21 @@ def reconcile_funding(
         for ticker, reason in (blocked_buy_tickers or {}).items()
         if str(ticker or "").strip()
     }
+    blocked_trade_tickers = {
+        str(ticker or "").upper().strip(): str(reason or "").strip()
+        for ticker, reason in (blocked_trade_tickers or {}).items()
+        if str(ticker or "").strip()
+    }
+
+    for decision in decisions:
+        block_reason = blocked_trade_tickers.get(decision.ticker.upper())
+        if not block_reason:
+            continue
+        decision.action = DecisionType.BLOCKED
+        decision.block_code = "BLOCKED_CORPORATE_ACTION"
+        decision.reason_primary = "Operacion bloqueada por precio no comparable"
+        decision.reason_secondary = block_reason
+        warnings.append(f"{decision.ticker}: operacion bloqueada por corporate action/data quality")
 
     cost_rate = fee_pct + slippage_pct
 
@@ -1047,6 +1066,7 @@ def reconcile_funding(
         event_block_reason = blocked_buy_tickers.get(d.ticker)
         if event_block_reason:
             d.action = DecisionType.BLOCKED
+            d.block_code = "BLOCKED_MANUAL_EVENT"
             d.reason_primary = "Compra bloqueada por evento/catalyst manual"
             d.reason_secondary = event_block_reason
             warnings.append(f"{d.ticker}: compra bloqueada por evento manual activo")
@@ -1138,6 +1158,24 @@ def reconcile_funding(
             ref_price = float(ext.get("reference_price", 0.0) or 0.0)
 
             event_block_reason = blocked_buy_tickers.get(ticker)
+            corporate_block_reason = blocked_trade_tickers.get(ticker)
+            if corporate_block_reason:
+                warnings.append(f"{ticker} (radar): compra bloqueada por precio no comparable")
+                blocked_orders.append(OrderIntent(
+                    ticker=ticker,
+                    side=OrderSide.BUY,
+                    action=DecisionType.BLOCKED,
+                    amount_ars=0.0,
+                    theoretical_ars=round(wanted, 0),
+                    quantity_est=0.0,
+                    reference_price=ref_price,
+                    reason=corporate_block_reason,
+                    priority=3,
+                    funded_by=list(sell_tickers),
+                    block_code="BLOCKED_CORPORATE_ACTION",
+                    decision_override="HOLD",
+                ))
+                continue
             if event_block_reason:
                 warnings.append(f"{ticker} (radar): compra bloqueada por evento manual activo")
                 blocked_orders.append(OrderIntent(
@@ -1232,6 +1270,8 @@ def reconcile_funding(
                 reference_price=0.0,
                 reason=d.reason_secondary or d.reason_primary,
                 priority=9,
+                block_code=d.block_code,
+                decision_override=("HOLD" if d.block_code == "BLOCKED_CORPORATE_ACTION" else None),
             ))
 
     # ── PASO 6: Cash accounting ─────────────────────────────────────────────

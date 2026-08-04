@@ -67,7 +67,18 @@ from src.analysis.execution_planner import (
     build_signals_from_synthesis,
     build_positions_from_snapshot,
     ExecutionPlan,
+    OrderIntent,
+    OrderSide,
     MIN_TRADE_ARS,
+)
+from src.analysis.corporate_actions import (
+    CorporateActionEffect,
+    PriceQualityFlag,
+    corporate_action_layers,
+    effects_by_ticker,
+    guard_history_frames,
+    price_quality_flag_from_mapping,
+    rebase_position_view,
 )
 from src.analysis.manual_market_events import (
     ManualMarketEvent,
@@ -1082,6 +1093,8 @@ async def _save_execution_plan_events(
     run_id: str | None = None,
     run_intent: str = "formal_plan",
     manual_market_events: list[ManualMarketEvent] | None = None,
+    corporate_action_effects: list[CorporateActionEffect] | None = None,
+    corporate_action_flags: list[PriceQualityFlag] | None = None,
 ) -> list[int]:
     """
     Guarda eventos del ExecutionPlan en decision_log.
@@ -1117,6 +1130,10 @@ async def _save_execution_plan_events(
     position_price_by_ticker = _build_position_price_map(positions)
     portfolio_snapshot_id = _portfolio_snapshot_id_from_snapshot(portfolio_snapshot)
     manual_market_events = list(manual_market_events or [])
+    corporate_action_effects = list(corporate_action_effects or [])
+    corporate_action_flag_by_ticker = {
+        flag.ticker.upper(): flag for flag in (corporate_action_flags or [])
+    }
 
     def _safe_float(x, default: float = 0.0):
         try:
@@ -1135,6 +1152,9 @@ async def _save_execution_plan_events(
         return str(getattr(action, "value", action) or "")
 
     def _get_order_side(order, ticker: str) -> str:
+        override = str(getattr(order, "decision_override", "") or "").upper().strip()
+        if override in {"BUY", "SELL", "HOLD"}:
+            return override
         side = getattr(order, "side", None)
 
         if side is not None:
@@ -1207,6 +1227,7 @@ async def _save_execution_plan_events(
                 )
             ),
             "reason": str(getattr(order, "reason", "") or ""),
+            "block_code": str(getattr(order, "block_code", "") or ""),
             "gate": str(getattr(execution_plan, "gate", "") or ""),
             "current_weight": _safe_float(getattr(d, "current_weight", None), 0.0),
             "target_weight": _safe_float(getattr(d, "target_weight", None), 0.0),
@@ -1219,6 +1240,13 @@ async def _save_execution_plan_events(
             event_layers = manual_event_layers_for_ticker(ticker, manual_market_events)
             if event_layers:
                 extra["manual_event_risk"] = event_layers
+            corporate_layers = corporate_action_layers(
+                ticker,
+                effects=corporate_action_effects,
+                flag=corporate_action_flag_by_ticker.get(ticker),
+            )
+            if corporate_layers.get("active"):
+                extra["corporate_action"] = corporate_layers
             return _layers_payload_for_decision(
                 r,
                 extra=extra,
@@ -1230,6 +1258,13 @@ async def _save_execution_plan_events(
             event_layers = manual_event_layers_for_ticker(ticker, manual_market_events)
             if event_layers:
                 extra["manual_event_risk"] = event_layers
+            corporate_layers = corporate_action_layers(
+                ticker,
+                effects=corporate_action_effects,
+                flag=corporate_action_flag_by_ticker.get(ticker),
+            )
+            if corporate_layers.get("active"):
+                extra["corporate_action"] = corporate_layers
             if run_id:
                 feature_snapshot = build_feature_snapshot_from_layers(extra)
                 extra["feature_snapshot"] = feature_snapshot.to_dict()
@@ -1324,12 +1359,19 @@ async def _save_execution_plan_events(
               AND decision_date = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
               AND COALESCE(source, layers->>'source') = 'execution_plan'
               AND COALESCE(owner_chat_id, 0) = COALESCE($3::bigint, 0)
+              AND (
+                    ($4::text = 'blocked_corporate_action'
+                     AND COALESCE(decision_type, '') = 'blocked_corporate_action')
+                 OR ($4::text <> 'blocked_corporate_action'
+                     AND COALESCE(decision_type, '') <> 'blocked_corporate_action')
+              )
             ORDER BY decided_at DESC
             LIMIT 1
             """,
             ticker,
             decision,
             owner_chat_id,
+            decision_type,
         )
 
         size_pct = abs(delta_weight) if delta_weight else (
@@ -1559,11 +1601,16 @@ async def _save_execution_plan_events(
                 saved_ids.append(row_id)
 
         for order in (getattr(execution_plan, "blocked_orders", []) or []):
+            block_code = str(getattr(order, "block_code", "") or "").upper()
             row_id = await _insert_event(
                 conn,
                 order=order,
                 status="BLOCKED",
-                decision_type="blocked",
+                decision_type=(
+                    "blocked_corporate_action"
+                    if block_code == "BLOCKED_CORPORATE_ACTION"
+                    else "blocked"
+                ),
                 is_executable=False,
                 was_blocked=True,
             )
@@ -1929,7 +1976,7 @@ def _analysis_run_policy(
 ) -> tuple[bool, str, bool]:
     """Keep off-market recalculations exploratory while sentiment remains live."""
     current = now or datetime.now(ART_TZ)
-    off_market_context = not is_art_business_day(current)
+    off_market_context = not is_regular_market_session(current)
     if off_market_context:
         return True, "exploratory", True
     return bool(no_persist), str(run_intent or "formal_plan"), False
@@ -3138,6 +3185,104 @@ async def _load_active_manual_market_events(cfg) -> list[ManualMarketEvent]:
         await db.close()
 
 
+async def _load_corporate_action_context(
+    cfg,
+) -> tuple[list[CorporateActionEffect], list[PriceQualityFlag]]:
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        effects = await db.get_corporate_action_effects()
+        active_rows = await db.get_active_price_quality_flags()
+        return effects, [price_quality_flag_from_mapping(row) for row in active_rows]
+    finally:
+        await db.close()
+
+
+async def _persist_corporate_action_audit(
+    cfg,
+    *,
+    flags: list[PriceQualityFlag],
+    applications: list,
+) -> None:
+    if not flags and not applications:
+        return
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        if flags:
+            await db.save_price_quality_flags(flags)
+        if applications:
+            await db.record_corporate_action_applications(applications)
+    finally:
+        await db.close()
+
+
+def _ensure_corporate_action_blocks_in_plan(
+    execution_plan: ExecutionPlan | None,
+    *,
+    blocked_by_ticker: dict[str, str],
+    positions: list[dict],
+    cash_ars: float,
+) -> ExecutionPlan | None:
+    if not blocked_by_ticker:
+        return execution_plan
+    if execution_plan is None:
+        execution_plan = ExecutionPlan(
+            decisions=[],
+            sell_orders=[],
+            buy_orders=[],
+            blocked_orders=[],
+            cash_before=cash_ars,
+            gross_sell_ars=0.0,
+            fee_sell_ars=0.0,
+            net_sell_ars=0.0,
+            gross_buy_ars=0.0,
+            fee_buy_ars=0.0,
+            cash_after=cash_ars,
+            feasible=True,
+            gate="NORMAL",
+            summary="Sin ordenes; hay precios en cuarentena.",
+        )
+
+    position_tickers = {
+        str(position.get("ticker") or "").upper()
+        for position in positions or []
+        if str(position.get("ticker") or "").strip()
+    }
+    existing_blocked = {
+        str(order.ticker or "").upper()
+        for order in execution_plan.blocked_orders
+        if str(order.ticker or "").strip()
+    }
+    for ticker, reason in sorted(blocked_by_ticker.items()):
+        if ticker in existing_blocked:
+            continue
+        execution_plan.blocked_orders.append(
+            OrderIntent(
+                ticker=ticker,
+                side=OrderSide.SELL if ticker in position_tickers else OrderSide.BUY,
+                action=DecisionType.BLOCKED,
+                amount_ars=0.0,
+                theoretical_ars=0.0,
+                quantity_est=0.0,
+                reference_price=0.0,
+                reason=reason,
+                priority=0,
+                block_code="BLOCKED_CORPORATE_ACTION",
+                decision_override="HOLD",
+            )
+        )
+    execution_plan.warnings.extend(
+        f"{ticker}: precio no comparable; no se genera orden"
+        for ticker in sorted(blocked_by_ticker)
+    )
+    execution_plan.warnings = list(dict.fromkeys(execution_plan.warnings))
+    execution_plan.summary = (
+        f"{len(blocked_by_ticker)} activo(s) bloqueado(s) por corporate action/data quality"
+    )
+    return execution_plan
+
+
 async def _load_cocos_history_frames(cfg, positions: list[dict], limit: int = 260) -> dict:
     """Carga historia local de Cocos desde DB para los tickers disponibles."""
     frames = {}
@@ -3239,6 +3384,54 @@ async def main(
     except Exception as exc:
         logger.warning("No se pudieron cargar eventos manuales; sigo sin guard: %s", exc)
 
+    corporate_action_effects: list[CorporateActionEffect] = []
+    corporate_action_flags: list[PriceQualityFlag] = []
+    corporate_action_applications: list = []
+    corporate_action_blocklist: dict[str, str] = {}
+    try:
+        corporate_action_effects, persisted_quality_flags = (
+            await _load_corporate_action_context(cfg)
+        )
+        corporate_action_flags.extend(persisted_quality_flags)
+        for flag in persisted_quality_flags:
+            if flag.blocks_price_use:
+                corporate_action_blocklist[flag.ticker] = flag.reason
+        if corporate_action_effects or corporate_action_blocklist:
+            logger.warning(
+                "Corporate actions: effects=%s active_price_blocks=%s",
+                len(corporate_action_effects),
+                sorted(corporate_action_blocklist),
+            )
+    except Exception as exc:
+        logger.warning("No se pudo cargar corporate action context: %s", exc)
+
+    if portfolio_snapshot and corporate_action_effects:
+        snapshot_at = portfolio_snapshot.get("scraped_at")
+        if isinstance(snapshot_at, str):
+            try:
+                snapshot_at = datetime.fromisoformat(snapshot_at.replace("Z", "+00:00"))
+            except ValueError:
+                snapshot_at = None
+        if isinstance(snapshot_at, datetime):
+            grouped_effects = effects_by_ticker(corporate_action_effects)
+            reconciled_positions: list[dict] = []
+            for position in positions:
+                ticker = str(position.get("ticker") or "").upper()
+                reconciled, applications = rebase_position_view(
+                    position,
+                    snapshot_at=snapshot_at,
+                    as_of=datetime.now(timezone.utc),
+                    effects=grouped_effects.get(ticker, ()),
+                )
+                reconciled_positions.append(reconciled)
+                corporate_action_applications.extend(applications)
+            positions = reconciled_positions
+            total_ars = _portfolio_equity_total(
+                positions,
+                cash_ars,
+                float(portfolio_snapshot.get("total_value_ars", 0) or 0),
+            )
+
     # ── 2. Macro ───────────────────────────────────────────────────────────────
     logger.info("Descargando macro...")
     macro_snap   = fetch_macro()
@@ -3248,6 +3441,31 @@ async def main(
     # ── 3. Técnico ─────────────────────────────────────────────────────────────
     logger.info("Calculando técnico...")
     cocos_frames = await _load_cocos_history_frames(cfg, positions)
+    frame_guard = guard_history_frames(
+        cocos_frames,
+        effects=corporate_action_effects,
+        portfolio_history=history,
+        observed_at=datetime.now(timezone.utc),
+    )
+    cocos_frames = frame_guard.frames
+    corporate_action_flags.extend(frame_guard.flags)
+    corporate_action_applications.extend(frame_guard.applications)
+    corporate_action_blocklist.update(frame_guard.blocked_by_ticker)
+    effect_ticker_by_id = {
+        effect.effect_id: effect.ticker for effect in corporate_action_effects
+    }
+    for application in frame_guard.applications:
+        if application.application_status in {"APPLIED", "ALREADY_ADJUSTED"}:
+            reconciled_ticker = effect_ticker_by_id.get(application.instrument_effect_id)
+            if reconciled_ticker and reconciled_ticker not in frame_guard.blocked_by_ticker:
+                corporate_action_blocklist.pop(reconciled_ticker, None)
+    for blocked_ticker in corporate_action_blocklist:
+        cocos_frames.pop(blocked_ticker, None)
+    if frame_guard.blocked_by_ticker:
+        logger.warning(
+            "Tecnico suspendido por precio no comparable: %s",
+            sorted(frame_guard.blocked_by_ticker),
+        )
     if cocos_frames:
         logger.info(f"Historial Cocos disponible para {len(cocos_frames)}/{len(tickers)} tickers")
 
@@ -3427,6 +3645,18 @@ async def main(
                 _count_assets_by_type(universe_assets),
             )
             universe_frames = await _load_cocos_history_frames(cfg, universe_assets)
+            universe_frame_guard = guard_history_frames(
+                universe_frames,
+                effects=corporate_action_effects,
+                portfolio_history=history,
+                observed_at=datetime.now(timezone.utc),
+            )
+            universe_frames = universe_frame_guard.frames
+            corporate_action_flags.extend(universe_frame_guard.flags)
+            corporate_action_applications.extend(universe_frame_guard.applications)
+            corporate_action_blocklist.update(universe_frame_guard.blocked_by_ticker)
+            for blocked_ticker in corporate_action_blocklist:
+                universe_frames.pop(blocked_ticker, None)
             logger.info(
                 "Historial Cocos disponible para universo: %s/%s tickers",
                 len(universe_frames),
@@ -3560,6 +3790,16 @@ async def main(
         logger.warning(f"Análisis de universo falló (no crítico): {e}")
 
     # ── 8. Portfolio Optimizer ─────────────────────────────────────────────────
+    if not no_persist and (corporate_action_flags or corporate_action_applications):
+        try:
+            await _persist_corporate_action_audit(
+                cfg,
+                flags=corporate_action_flags,
+                applications=corporate_action_applications,
+            )
+        except Exception as exc:
+            logger.warning("No se pudo persistir corporate action audit: %s", exc)
+
     rebalance_report = None
     if not no_optimizer and results:
         logger.info("Ejecutando Portfolio Optimizer...")
@@ -3628,6 +3868,7 @@ async def main(
                     total_ars,
                 ),
                 blocked_buy_tickers = manual_event_blocklist,
+                blocked_trade_tickers = corporate_action_blocklist,
             )
             logger.info(
                 f"ExecutionPlan: sells={_money_ars(execution_plan.gross_sell_ars)} "
@@ -3665,6 +3906,13 @@ async def main(
             )
 
     # ── 9.5 Guardar eventos del ExecutionPlan en decision_log ─────────────────
+    execution_plan = _ensure_corporate_action_blocks_in_plan(
+        execution_plan,
+        blocked_by_ticker=corporate_action_blocklist,
+        positions=positions,
+        cash_ars=cash_ars,
+    )
+
     if no_persist:
         logger.info("Paso 9.5: omitido por --no-persist; no se guarda decision_log")
     elif execution_plan and total_ars > 0:
@@ -3686,6 +3934,8 @@ async def main(
                 run_id=analysis_run_id,
                 run_intent=run_intent,
                 manual_market_events=manual_market_events,
+                corporate_action_effects=corporate_action_effects,
+                corporate_action_flags=corporate_action_flags,
             )
             logger.info(f"Eventos ExecutionPlan guardados en DB: ids={saved}")
         except Exception as e:

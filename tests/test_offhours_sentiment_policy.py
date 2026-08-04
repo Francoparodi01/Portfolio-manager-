@@ -39,6 +39,16 @@ def test_business_day_analysis_preserves_requested_policy():
     )
 
 
+def test_business_day_preopen_analysis_is_exploratory_and_never_persists():
+    preopen = datetime(2026, 8, 4, 1, 8, tzinfo=ART_TZ)
+
+    assert _analysis_run_policy(False, "formal_plan", preopen) == (
+        True,
+        "exploratory",
+        True,
+    )
+
+
 def test_nuclear_attack_is_an_immediate_offhours_risk_event():
     event = {
         "headline": "Israel launches nuclear attack on Iran",

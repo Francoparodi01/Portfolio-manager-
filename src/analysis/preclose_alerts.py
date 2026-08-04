@@ -11,6 +11,12 @@ from datetime import datetime
 from html import escape
 from typing import Any
 
+from src.analysis.corporate_actions import (
+    CorporateActionEffect,
+    PriceQualityStatus,
+    assess_live_price,
+    effects_by_ticker,
+)
 from src.core.telegram_format import header as tg_header, note as tg_note, section as tg_section
 
 
@@ -150,6 +156,7 @@ def build_preclose_alerts(
     total_ars: float | None = None,
     sentiment_contexts: dict[str, Any] | None = None,
     manual_event_risk_by_ticker: dict[str, str] | None = None,
+    corporate_action_effects: list[CorporateActionEffect] | None = None,
     max_price_age_seconds: int = 20 * 60,
     now: datetime | None = None,
 ) -> list[PrecloseAlert]:
@@ -166,6 +173,7 @@ def build_preclose_alerts(
         for k, v in (manual_event_risk_by_ticker or {}).items()
         if str(k or "").strip()
     }
+    grouped_effects = effects_by_ticker(corporate_action_effects or [])
     latest_by_ticker = {
         str(row.get("ticker") or "").upper(): row
         for row in latest_prices or []
@@ -197,6 +205,42 @@ def build_preclose_alerts(
         current_price = _safe_float(latest.get("last_price"))
         reference_price, change_pct = _price_change(ticker, latest, previous_closes)
         if current_price is None or change_pct is None:
+            continue
+
+        assessment = assess_live_price(
+            ticker=ticker,
+            reference_price=reference_price,
+            current_price=current_price,
+            observed_at=now,
+            effects=grouped_effects.get(ticker, ()),
+        )
+        if assessment.status == PriceQualityStatus.RECONCILED.value:
+            reference_price = assessment.normalized_reference_price
+            change_pct = assessment.normalized_change
+        elif assessment.status in {
+            PriceQualityStatus.PRICE_NOT_COMPARABLE.value,
+            PriceQualityStatus.DATA_QUALITY_BLOCK.value,
+        }:
+            alerts.append(
+                PrecloseAlert(
+                    ticker=ticker,
+                    alert_type="PRICE_NOT_COMPARABLE",
+                    severity="HIGH",
+                    current_price=float(current_price),
+                    reference_price=reference_price,
+                    change_pct=float(assessment.raw_change or 0.0),
+                    current_weight=(market_value / denominator if denominator > 0 else None),
+                    reason=(assessment.flag.reason if assessment.flag else assessment.status),
+                    action="Suspender senal tecnica y resolver el evento antes de operar.",
+                    price_ts=price_ts,
+                    evidence={
+                        "price_quality_status": assessment.status,
+                        "price_quality_flag": (
+                            assessment.flag.to_dict() if assessment.flag else None
+                        ),
+                    },
+                )
+            )
             continue
 
         weight = market_value / denominator if denominator > 0 else None
@@ -314,6 +358,16 @@ def render_preclose_alerts(alerts: list[PrecloseAlert], *, slot: str) -> str:
         "",
     ]
     for alert in alerts[:5]:
+        if alert.alert_type == "PRICE_NOT_COMPARABLE":
+            lines += [
+                tg_section(alert.ticker),
+                "Tipo: <b>PRICE_NOT_COMPARABLE</b> | severidad <b>HIGH</b>",
+                f"Movimiento raw: <b>{alert.change_pct:+.2%}</b>",
+                f"Motivo: {escape(alert.reason)}",
+                f"Accion: <b>{escape(alert.action)}</b>",
+                "",
+            ]
+            continue
         weight = f" | peso {alert.current_weight:.1%}" if alert.current_weight is not None else ""
         price_time = alert.price_ts.strftime("%H:%M") if alert.price_ts else "N/A"
         lines += [

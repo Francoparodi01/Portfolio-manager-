@@ -6,7 +6,7 @@ import os
 import re
 import time as time_module
 from collections import defaultdict, deque
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -15,6 +15,13 @@ import pyotp
 from aiohttp import web
 
 from src.analysis.audit_scope import ensure_decision_audit_scope_columns
+from src.analysis.corporate_actions import (
+    CorporateActionEffect,
+    corporate_action_effect_from_row,
+    effects_by_ticker,
+    matching_effect_for_quantity_transition,
+    rebase_position_view,
+)
 from src.analysis.decision_ledger import fetch_decision_ledger
 from src.analysis.override_classification import (
     classify_override as _classify_override,
@@ -67,6 +74,78 @@ def _is_market_hours(now: datetime | None = None) -> bool:
 def _json(data: dict, status: int = 200) -> web.Response:
     data.setdefault("generated_at", _now_art().isoformat())
     return web.json_response(data, status=status)
+
+
+async def _corporate_action_schema_ready(conn: asyncpg.Connection) -> bool:
+    return bool(await conn.fetchval(
+        """
+        SELECT
+            to_regclass('public.corporate_events') IS NOT NULL
+            AND to_regclass('public.corporate_event_instrument_effects') IS NOT NULL
+            AND to_regclass('public.price_quality_flags') IS NOT NULL
+            AND to_regclass('public.corporate_event_applications') IS NOT NULL
+        """
+    ))
+
+
+async def _load_monitor_corporate_effects(
+    conn: asyncpg.Connection,
+    *,
+    since: datetime,
+    until: datetime,
+    tickers: list[str] | None = None,
+) -> list[CorporateActionEffect]:
+    if not await _corporate_action_schema_ready(conn):
+        return []
+    clean_tickers = sorted({
+        str(ticker or "").upper()
+        for ticker in (tickers or [])
+        if str(ticker or "").strip()
+    })
+    rows = await conn.fetch(
+        """
+        SELECT
+            e.id AS event_id,
+            effect.id AS effect_id,
+            e.event_key,
+            e.issuer_id,
+            e.event_type,
+            e.lifecycle_status,
+            e.effective_at,
+            e.expires_at,
+            e.source_name,
+            e.source_url,
+            e.ingestion_method,
+            e.evidence_level,
+            e.detector_score,
+            effect.instrument_id,
+            effect.ticker,
+            effect.venue,
+            effect.asset_type,
+            effect.currency,
+            effect.quantity_factor,
+            effect.price_factor,
+            effect.cost_basis_factor,
+            effect.depositary_ratio_before,
+            effect.depositary_ratio_after,
+            effect.metadata
+        FROM corporate_event_instrument_effects effect
+        JOIN corporate_events e ON e.id = effect.event_id
+        WHERE effect.is_active = TRUE
+          AND e.lifecycle_status IN ('CONFIRMED', 'EFFECTIVE')
+          AND e.effective_at >= $1
+          AND e.effective_at <= $2
+          AND (
+                cardinality($3::text[]) = 0
+             OR UPPER(effect.ticker) = ANY($3::text[])
+          )
+        ORDER BY e.effective_at, e.id, effect.id
+        """,
+        since,
+        until,
+        clean_tickers,
+    )
+    return [corporate_action_effect_from_row(dict(row)) for row in rows]
 
 
 def _client_key(request: web.Request) -> str:
@@ -580,6 +659,7 @@ async def decisions(request: web.Request) -> web.Response:
 async def portfolio_view(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
     pool: asyncpg.Pool = request.app["pool"]
+    corporate_applications = []
     async with pool.acquire() as conn:
         latest_snapshot = await conn.fetchrow("""
             SELECT snapshot_id, scraped_at, total_value_ars, cash_ars, confidence_score
@@ -616,6 +696,43 @@ async def portfolio_view(request: web.Request) -> web.Response:
                 ORDER BY market_value DESC
             """, latest_snapshot["snapshot_id"])
 
+            position_rows = [dict(row) for row in positions]
+            tickers = [str(row.get("ticker") or "").upper() for row in position_rows]
+            effects = await _load_monitor_corporate_effects(
+                conn,
+                since=latest_snapshot["scraped_at"],
+                until=datetime.now(timezone.utc),
+                tickers=tickers,
+            )
+            if effects:
+                grouped_effects = effects_by_ticker(effects)
+                reconciled_positions = []
+                for position in position_rows:
+                    ticker = str(position.get("ticker") or "").upper()
+                    reconciled, applications = rebase_position_view(
+                        position,
+                        snapshot_at=latest_snapshot["scraped_at"],
+                        as_of=datetime.now(timezone.utc),
+                        effects=grouped_effects.get(ticker, ()),
+                    )
+                    reconciled_positions.append(reconciled)
+                    corporate_applications.extend(applications)
+                positions = reconciled_positions
+                allocation_by_asset: dict[str, dict] = {}
+                for position in positions:
+                    asset_type = str(position.get("asset_type") or "UNKNOWN")
+                    bucket = allocation_by_asset.setdefault(
+                        asset_type,
+                        {"asset_type": asset_type, "market_value": 0.0, "positions": 0},
+                    )
+                    bucket["market_value"] += _float(position.get("market_value"))
+                    bucket["positions"] += 1
+                allocation = sorted(
+                    allocation_by_asset.values(),
+                    key=lambda item: item["market_value"],
+                    reverse=True,
+                )
+
         history = await conn.fetch("""
             SELECT DISTINCT ON ((scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date)
                 (scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date AS day,
@@ -628,13 +745,35 @@ async def portfolio_view(request: web.Request) -> web.Response:
             ORDER BY (scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date, scraped_at DESC
         """, days)
 
+    snapshot_payload = _row(latest_snapshot)
+    if latest_snapshot and corporate_applications:
+        snapshot_payload["reported_total_value_ars"] = snapshot_payload.get("total_value_ars")
+        snapshot_payload["total_value_ars"] = (
+            sum(_float(position.get("market_value")) for position in positions)
+            + _float(latest_snapshot["cash_ars"])
+        )
+
     return _json({
         "ok": True,
         "days": days,
-        "snapshot": _row(latest_snapshot),
+        "snapshot": snapshot_payload,
         "positions": [_row(r) for r in positions],
         "allocation": [_row(r) for r in allocation],
         "history": [_row(r) for r in history],
+        "price_basis": (
+            "corporate_action_reconciled" if corporate_applications else "reported"
+        ),
+        "corporate_action_applications": [
+            {
+                "event_id": application.event_id,
+                "instrument_effect_id": application.instrument_effect_id,
+                "component": application.component,
+                "application_status": application.application_status,
+                "idempotency_key": application.idempotency_key,
+                "invariant_checks": application.invariant_checks,
+            }
+            for application in corporate_applications
+        ],
     })
 
 
@@ -1577,6 +1716,8 @@ async def human_activity(request: web.Request) -> web.Response:
                 d.prev_scraped_at,
                 d.scraped_at,
                 d.ticker,
+                d.previous_quantity,
+                d.current_quantity,
                 CASE WHEN d.quantity_delta > 0 THEN 'BUY' ELSE 'SELL' END AS side,
                 ABS(d.quantity_delta) AS quantity,
                 d.reference_price,
@@ -1607,20 +1748,148 @@ async def human_activity(request: web.Request) -> web.Response:
             LIMIT 50
         """, days)
 
-    items = [_row(r) for r in rows]
-    confirmed = sum(1 for item in items if item.get("confirmed_at"))
-    pending = len(items) - confirmed
+        activity_effects = await _load_monitor_corporate_effects(
+            conn,
+            since=datetime.now(timezone.utc) - timedelta(days=days + 2),
+            until=datetime.now(timezone.utc),
+            tickers=[str(row["ticker"] or "").upper() for row in rows],
+        )
+
+    grouped_effects = effects_by_ticker(activity_effects)
+    items = []
+    for row in rows:
+        raw = dict(row)
+        effect = None
+        if not raw.get("confirmed_at"):
+            effect = matching_effect_for_quantity_transition(
+                ticker=str(raw.get("ticker") or ""),
+                previous_quantity=raw.get("previous_quantity"),
+                current_quantity=raw.get("current_quantity"),
+                previous_at=raw.get("prev_scraped_at"),
+                current_at=raw.get("scraped_at"),
+                effects=grouped_effects.get(str(raw.get("ticker") or "").upper(), ()),
+            )
+        item = _row(raw)
+        item["activity_type"] = "CORPORATE_ACTION" if effect else "HUMAN_TRADE_CANDIDATE"
+        if effect:
+            item["side"] = "CORPORATE_ACTION"
+            item["corporate_action"] = {
+                "event_key": effect.event_key,
+                "event_type": effect.event_type,
+                "effective_at": effect.effective_at.isoformat(),
+                "quantity_factor": effect.quantity_factor,
+                "price_factor": effect.price_factor,
+                "source_name": effect.source_name,
+                "source_url": effect.source_url,
+            }
+        items.append(item)
+
+    human_items = [item for item in items if item["activity_type"] != "CORPORATE_ACTION"]
+    corporate_items = [item for item in items if item["activity_type"] == "CORPORATE_ACTION"]
+    confirmed = sum(1 for item in human_items if item.get("confirmed_at"))
+    pending = len(human_items) - confirmed
     return _json({
         "ok": True,
         "days": days,
         "summary": {
-            "total": len(items),
+            "total": len(human_items),
             "confirmed": confirmed,
             "pending": pending,
+            "corporate_actions": len(corporate_items),
             "scope": "inferred_from_portfolio_snapshots",
-            "note": "Provisional: no entra al EV principal hasta que Cocos movements confirme el movimiento.",
+            "note": (
+                "Provisional: no entra al EV principal hasta que Cocos movements confirme "
+                "el movimiento. Corporate actions confirmadas se informan por separado."
+            ),
         },
         "recent": items,
+    })
+
+
+async def corporate_actions_view(request: web.Request) -> web.Response:
+    days = max(1, min(int(request.query.get("days", "30")), 3650))
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        if not await _corporate_action_schema_ready(conn):
+            return _json({
+                "ok": True,
+                "available": False,
+                "days": days,
+                "events": [],
+                "price_quality_flags": [],
+                "applications": [],
+            })
+        events = await conn.fetch(
+            """
+            SELECT
+                e.id AS event_id,
+                e.event_key,
+                e.issuer_id,
+                e.event_type,
+                e.lifecycle_status,
+                e.effective_at,
+                e.source_name,
+                e.source_url,
+                e.ingestion_method,
+                e.evidence_level,
+                e.detector_score,
+                effect.id AS instrument_effect_id,
+                effect.instrument_id,
+                effect.ticker,
+                effect.venue,
+                effect.asset_type,
+                effect.currency,
+                effect.quantity_factor,
+                effect.price_factor,
+                effect.cost_basis_factor
+            FROM corporate_events e
+            JOIN corporate_event_instrument_effects effect ON effect.event_id = e.id
+            WHERE e.effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+            ORDER BY e.effective_at DESC, e.id DESC, effect.id DESC
+            LIMIT 100
+            """,
+            days,
+        )
+        flags = await conn.fetch(
+            """
+            SELECT
+                ticker, observed_at, expires_at, flag_type, resolution_status,
+                observed_return, expected_price_factor, observed_quantity_factor,
+                quantity_factor, evidence_level, detector_score, detector_version,
+                action_taken, reason, event_id, instrument_effect_id
+            FROM price_quality_flags
+            WHERE observed_at >= NOW() - ($1::int * INTERVAL '1 day')
+            ORDER BY observed_at DESC, id DESC
+            LIMIT 100
+            """,
+            days,
+        )
+        applications = await conn.fetch(
+            """
+            SELECT
+                application.created_at, application.applied_at,
+                application.component, application.application_status,
+                application.adjustment_version, application.idempotency_key,
+                application.invariant_checks, application.error,
+                event.event_key, effect.ticker
+            FROM corporate_event_applications application
+            JOIN corporate_events event ON event.id = application.event_id
+            JOIN corporate_event_instrument_effects effect
+              ON effect.id = application.instrument_effect_id
+            WHERE application.created_at >= NOW() - ($1::int * INTERVAL '1 day')
+            ORDER BY application.created_at DESC, application.id DESC
+            LIMIT 100
+            """,
+            days,
+        )
+
+    return _json({
+        "ok": True,
+        "available": True,
+        "days": days,
+        "events": [_row(row) for row in events],
+        "price_quality_flags": [_row(row) for row in flags],
+        "applications": [_row(row) for row in applications],
     })
 
 
@@ -1878,6 +2147,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/radar-audit", radar_audit)
     app.router.add_get("/api/shadow", shadow_view)
     app.router.add_get("/api/human-activity", human_activity)
+    app.router.add_get("/api/corporate-actions", corporate_actions_view)
     app.router.add_get("/api/fills", fills)
     app.router.add_get("/api/logs/recent", logs_recent)
 

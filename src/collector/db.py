@@ -24,11 +24,21 @@ import json
 import logging
 from pathlib import Path
 import uuid
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 from src.analysis.audit_scope import (
     classify_decision_audit_scope,
     ensure_decision_audit_scope_columns,
+)
+from src.analysis.corporate_actions import (
+    CORPORATE_ACTIONS_SCHEMA_SQL,
+    CorporateActionApplication,
+    CorporateActionEffect,
+    MIN_ANOMALY_RETURN,
+    PriceQualityFlag,
+    corporate_action_effect_from_row,
+    normalize_candle_rows,
+    rebase_reference_price,
 )
 from src.analysis.decision_context import build_decision_run_context
 from src.analysis.decision_engine import directional_return
@@ -300,6 +310,7 @@ class PortfolioDatabase:
         self._execution_timestamp_meta_ready = False
         self._decision_audit_scope_ready = False
         self._manual_market_events_ready = False
+        self._corporate_actions_ready = False
         self._preclose_alerts_ready = False
         self._outcome_horizon_ready = False
 
@@ -351,6 +362,18 @@ class PortfolioDatabase:
             raise RuntimeError("Llamar connect() primero")
         async with self._pool.acquire() as conn:
             await self._ensure_manual_market_events_schema(conn)
+
+    async def _ensure_corporate_actions_schema(self, conn) -> None:
+        if self._corporate_actions_ready:
+            return
+        await conn.execute(CORPORATE_ACTIONS_SCHEMA_SQL)
+        self._corporate_actions_ready = True
+
+    async def ensure_corporate_actions_schema(self) -> None:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        async with self._pool.acquire() as conn:
+            await self._ensure_corporate_actions_schema(conn)
 
     async def _ensure_preclose_alerts_schema(self, conn) -> None:
         if self._preclose_alerts_ready:
@@ -607,6 +630,349 @@ class PortfolioDatabase:
             return int(result.split()[-1]) > 0
         except Exception:
             return False
+
+    async def upsert_corporate_action(
+        self,
+        *,
+        event_key: str,
+        issuer_id: str,
+        event_type: str,
+        lifecycle_status: str,
+        effective_at: datetime,
+        instrument_id: str,
+        ticker: str,
+        quantity_factor: float,
+        price_factor: float,
+        cost_basis_factor: float,
+        announced_at: datetime | None = None,
+        expires_at: datetime | None = None,
+        source_name: str = "",
+        source_url: str = "",
+        source_published_at: datetime | None = None,
+        source_hash: str = "",
+        ingestion_method: str = "MANUAL",
+        evidence_level: str = "PRIMARY_OFFICIAL",
+        detector_score: float | None = None,
+        detector_version: str | None = None,
+        raw_payload: Mapping[str, Any] | None = None,
+        venue: str = "BYMA",
+        asset_type: str = "UNKNOWN",
+        currency: str = "ARS",
+        depositary_ratio_before: str = "",
+        depositary_ratio_after: str = "",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> tuple[int, int]:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        async with self._pool.acquire() as conn:
+            await self._ensure_corporate_actions_schema(conn)
+            async with conn.transaction():
+                event_id = await conn.fetchval(
+                    """
+                    INSERT INTO corporate_events (
+                        event_key, issuer_id, event_type, lifecycle_status,
+                        announced_at, effective_at, expires_at,
+                        source_name, source_url, source_published_at, source_hash,
+                        ingestion_method, evidence_level, detector_score,
+                        detector_version, raw_payload, updated_at
+                    ) VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,NOW()
+                    )
+                    ON CONFLICT (event_key) DO UPDATE SET
+                        issuer_id = EXCLUDED.issuer_id,
+                        event_type = EXCLUDED.event_type,
+                        lifecycle_status = EXCLUDED.lifecycle_status,
+                        announced_at = EXCLUDED.announced_at,
+                        effective_at = EXCLUDED.effective_at,
+                        expires_at = EXCLUDED.expires_at,
+                        source_name = EXCLUDED.source_name,
+                        source_url = EXCLUDED.source_url,
+                        source_published_at = EXCLUDED.source_published_at,
+                        source_hash = EXCLUDED.source_hash,
+                        ingestion_method = EXCLUDED.ingestion_method,
+                        evidence_level = EXCLUDED.evidence_level,
+                        detector_score = EXCLUDED.detector_score,
+                        detector_version = EXCLUDED.detector_version,
+                        raw_payload = EXCLUDED.raw_payload,
+                        updated_at = NOW()
+                    RETURNING id
+                    """,
+                    str(event_key).strip(),
+                    str(issuer_id).strip(),
+                    str(event_type).upper().strip(),
+                    str(lifecycle_status).upper().strip(),
+                    announced_at,
+                    effective_at,
+                    expires_at,
+                    str(source_name or "").strip(),
+                    str(source_url or "").strip(),
+                    source_published_at,
+                    str(source_hash or "").strip(),
+                    str(ingestion_method).upper().strip(),
+                    str(evidence_level).upper().strip(),
+                    detector_score,
+                    detector_version,
+                    json.dumps(dict(raw_payload or {}), ensure_ascii=False),
+                )
+                effect_id = await conn.fetchval(
+                    """
+                    INSERT INTO corporate_event_instrument_effects (
+                        event_id, instrument_id, ticker, venue, asset_type, currency,
+                        quantity_factor, price_factor, cost_basis_factor,
+                        depositary_ratio_before, depositary_ratio_after,
+                        metadata, is_active, updated_at
+                    ) VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,TRUE,NOW()
+                    )
+                    ON CONFLICT (event_id, instrument_id) DO UPDATE SET
+                        ticker = EXCLUDED.ticker,
+                        venue = EXCLUDED.venue,
+                        asset_type = EXCLUDED.asset_type,
+                        currency = EXCLUDED.currency,
+                        quantity_factor = EXCLUDED.quantity_factor,
+                        price_factor = EXCLUDED.price_factor,
+                        cost_basis_factor = EXCLUDED.cost_basis_factor,
+                        depositary_ratio_before = EXCLUDED.depositary_ratio_before,
+                        depositary_ratio_after = EXCLUDED.depositary_ratio_after,
+                        metadata = EXCLUDED.metadata,
+                        is_active = TRUE,
+                        updated_at = NOW()
+                    RETURNING id
+                    """,
+                    int(event_id),
+                    str(instrument_id).upper().strip(),
+                    str(ticker).upper().strip(),
+                    str(venue or "").upper().strip(),
+                    str(asset_type or "").upper().strip(),
+                    str(currency or "").upper().strip(),
+                    float(quantity_factor),
+                    float(price_factor),
+                    float(cost_basis_factor),
+                    str(depositary_ratio_before or "").strip(),
+                    str(depositary_ratio_after or "").strip(),
+                    json.dumps(dict(metadata or {}), ensure_ascii=False),
+                )
+        return int(event_id), int(effect_id)
+
+    async def get_corporate_action_effects(
+        self,
+        *,
+        tickers: list[str] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[CorporateActionEffect]:
+        if not self._pool:
+            return []
+        clean_tickers = sorted({
+            str(ticker or "").upper().strip()
+            for ticker in (tickers or [])
+            if str(ticker or "").strip()
+        })
+        since = since or (datetime.now(timezone.utc) - timedelta(days=730))
+        until = until or (datetime.now(timezone.utc) + timedelta(days=7))
+        async with self._pool.acquire() as conn:
+            await self._ensure_corporate_actions_schema(conn)
+            rows = await conn.fetch(
+                """
+                SELECT
+                    e.id AS event_id,
+                    effect.id AS effect_id,
+                    e.event_key,
+                    e.issuer_id,
+                    e.event_type,
+                    e.lifecycle_status,
+                    e.effective_at,
+                    e.expires_at,
+                    e.source_name,
+                    e.source_url,
+                    e.ingestion_method,
+                    e.evidence_level,
+                    e.detector_score,
+                    effect.instrument_id,
+                    effect.ticker,
+                    effect.venue,
+                    effect.asset_type,
+                    effect.currency,
+                    effect.quantity_factor,
+                    effect.price_factor,
+                    effect.cost_basis_factor,
+                    effect.depositary_ratio_before,
+                    effect.depositary_ratio_after,
+                    effect.metadata
+                FROM corporate_event_instrument_effects effect
+                JOIN corporate_events e ON e.id = effect.event_id
+                WHERE effect.is_active = TRUE
+                  AND e.lifecycle_status IN ('ANNOUNCED', 'CONFIRMED', 'EFFECTIVE')
+                  AND e.effective_at >= $1
+                  AND e.effective_at <= $2
+                  AND (
+                        cardinality($3::text[]) = 0
+                     OR UPPER(effect.ticker) = ANY($3::text[])
+                  )
+                ORDER BY e.effective_at, e.id, effect.id
+                """,
+                since,
+                until,
+                clean_tickers,
+            )
+        return [corporate_action_effect_from_row(dict(row)) for row in rows]
+
+    async def save_price_quality_flags(
+        self,
+        flags: Sequence[PriceQualityFlag],
+    ) -> int:
+        if not self._pool or not flags:
+            return 0
+        saved = 0
+        async with self._pool.acquire() as conn:
+            await self._ensure_corporate_actions_schema(conn)
+            for flag in flags:
+                if flag.resolution_status == "CONFIRMED":
+                    await conn.execute(
+                        """
+                        UPDATE price_quality_flags
+                        SET resolution_status = 'CONFIRMED',
+                            action_taken = 'SUPERSEDED_BY_CONFIRMED_EVENT',
+                            updated_at = NOW()
+                        WHERE UPPER(ticker) = UPPER($1)
+                          AND resolution_status = 'OPEN'
+                          AND observed_at::date BETWEEN ($2::date - 1) AND ($2::date + 1)
+                        """,
+                        flag.ticker,
+                        flag.observed_at,
+                    )
+                status = await conn.execute(
+                    """
+                    INSERT INTO price_quality_flags (
+                        event_id, instrument_effect_id, ticker, observed_at, expires_at,
+                        flag_type, resolution_status, observed_reference_price,
+                        observed_current_price, observed_return, expected_price_factor,
+                        observed_quantity_factor, quantity_factor, evidence_level,
+                        detector_score, detector_version, action_taken, reason,
+                        evidence, idempotency_key, updated_at
+                    ) VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                        $17,$18,$19::jsonb,$20,NOW()
+                    )
+                    ON CONFLICT (idempotency_key) DO UPDATE SET
+                        expires_at = EXCLUDED.expires_at,
+                        resolution_status = EXCLUDED.resolution_status,
+                        detector_score = EXCLUDED.detector_score,
+                        action_taken = EXCLUDED.action_taken,
+                        reason = EXCLUDED.reason,
+                        evidence = EXCLUDED.evidence,
+                        updated_at = NOW()
+                    """,
+                    flag.event_id,
+                    flag.instrument_effect_id,
+                    flag.ticker,
+                    flag.observed_at,
+                    flag.expires_at,
+                    flag.flag_type,
+                    flag.resolution_status,
+                    flag.observed_reference_price,
+                    flag.observed_current_price,
+                    flag.observed_return,
+                    flag.expected_price_factor,
+                    flag.observed_quantity_factor,
+                    flag.quantity_factor,
+                    flag.evidence_level,
+                    flag.detector_score,
+                    flag.detector_version,
+                    flag.action_taken,
+                    flag.reason,
+                    json.dumps(flag.evidence or {}, ensure_ascii=False),
+                    flag.idempotency_key,
+                )
+                saved += status.startswith("INSERT")
+        return saved
+
+    async def get_active_price_quality_flags(
+        self,
+        *,
+        tickers: list[str] | None = None,
+        at: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self._pool:
+            return []
+        at = at or datetime.now(timezone.utc)
+        clean_tickers = sorted({
+            str(ticker or "").upper().strip()
+            for ticker in (tickers or [])
+            if str(ticker or "").strip()
+        })
+        async with self._pool.acquire() as conn:
+            await self._ensure_corporate_actions_schema(conn)
+            await conn.execute(
+                """
+                UPDATE price_quality_flags
+                SET resolution_status = 'EXPIRED',
+                    updated_at = NOW()
+                WHERE resolution_status = 'OPEN'
+                  AND expires_at IS NOT NULL
+                  AND expires_at < $1
+                """,
+                at,
+            )
+            rows = await conn.fetch(
+                """
+                SELECT *
+                FROM price_quality_flags
+                WHERE resolution_status = 'OPEN'
+                  AND (expires_at IS NULL OR expires_at >= $1)
+                  AND (
+                        cardinality($2::text[]) = 0
+                     OR UPPER(ticker) = ANY($2::text[])
+                  )
+                ORDER BY observed_at DESC, id DESC
+                """,
+                at,
+                clean_tickers,
+            )
+        return [dict(row) for row in rows]
+
+    async def record_corporate_action_applications(
+        self,
+        applications: Sequence[CorporateActionApplication],
+    ) -> int:
+        if not self._pool or not applications:
+            return 0
+        saved = 0
+        async with self._pool.acquire() as conn:
+            await self._ensure_corporate_actions_schema(conn)
+            for application in applications:
+                status = await conn.execute(
+                    """
+                    INSERT INTO corporate_event_applications (
+                        event_id, instrument_effect_id, owner_chat_id, component,
+                        application_status, adjustment_version, idempotency_key,
+                        before_state, after_state, invariant_checks, error, applied_at
+                    ) VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,
+                        CASE WHEN $5 IN ('APPLIED', 'ALREADY_ADJUSTED') THEN NOW() ELSE NULL END
+                    )
+                    ON CONFLICT (idempotency_key) DO UPDATE SET
+                        application_status = EXCLUDED.application_status,
+                        before_state = EXCLUDED.before_state,
+                        after_state = EXCLUDED.after_state,
+                        invariant_checks = EXCLUDED.invariant_checks,
+                        error = EXCLUDED.error,
+                        applied_at = EXCLUDED.applied_at
+                    """,
+                    application.event_id,
+                    application.instrument_effect_id,
+                    application.owner_chat_id,
+                    application.component,
+                    application.application_status,
+                    application.adjustment_version,
+                    application.idempotency_key,
+                    json.dumps(application.before_state or {}, ensure_ascii=False),
+                    json.dumps(application.after_state or {}, ensure_ascii=False),
+                    json.dumps(application.invariant_checks or {}, ensure_ascii=False),
+                    application.error,
+                )
+                saved += status.startswith("INSERT")
+        return saved
 
     async def upsert_bot_user_credentials(
         self,
@@ -2545,6 +2911,50 @@ class PortfolioDatabase:
 
         return LEGACY_EXTERNAL_OUTCOME_BASIS, ratio
 
+    async def _corporate_action_adjusted_outcome_inputs(
+        self,
+        *,
+        ticker: str,
+        entry_price: float,
+        decided_at: datetime,
+        candles: list[dict],
+        as_of: datetime,
+    ) -> tuple[float, list[dict], float]:
+        closes = []
+        for candle in candles:
+            try:
+                close = float(candle.get("close_price"))
+            except (TypeError, ValueError):
+                continue
+            if close > 0:
+                closes.append(close)
+        has_discontinuity = any(
+            abs((current / previous) - 1.0) >= MIN_ANOMALY_RETURN
+            for previous, current in zip(closes, closes[1:])
+            if previous > 0
+        )
+        if not has_discontinuity:
+            return entry_price, candles, 1.0
+
+        effects = await self.get_corporate_action_effects(
+            tickers=[ticker],
+            since=decided_at - timedelta(days=7),
+            until=as_of,
+        )
+        if not effects:
+            return entry_price, candles, 1.0
+        adjusted_entry, adjustment_factor = rebase_reference_price(
+            entry_price,
+            reference_at=decided_at,
+            as_of=as_of,
+            effects=effects,
+        )
+        return (
+            float(adjusted_entry or entry_price),
+            normalize_candle_rows(candles, effects),
+            float(adjustment_factor),
+        )
+
     async def update_outcomes(
         self,
         lookback_days: int = 30,
@@ -2676,6 +3086,23 @@ class PortfolioDatabase:
                         row["id"],
                     )
                     continue
+
+                entry_f, candles, corporate_adjustment_factor = (
+                    await self._corporate_action_adjusted_outcome_inputs(
+                        ticker=ticker,
+                        entry_price=entry_f,
+                        decided_at=decided_at,
+                        candles=candles,
+                        as_of=now,
+                    )
+                )
+                if corporate_adjustment_factor != 1.0:
+                    logger.info(
+                        "update_outcomes %s id=%s corporate price factor=%.8f",
+                        ticker,
+                        row["id"],
+                        corporate_adjustment_factor,
+                    )
 
                 outcome_basis, basis_ratio = self._assess_outcome_basis(
                     entry_price=entry_f,
@@ -2876,8 +3303,25 @@ class PortfolioDatabase:
                 )
                 continue
 
+            adjusted_entry, candles, corporate_adjustment_factor = (
+                await self._corporate_action_adjusted_outcome_inputs(
+                    ticker=ticker,
+                    entry_price=float(entry),
+                    decided_at=decided_at,
+                    candles=candles,
+                    as_of=now,
+                )
+            )
+            if corporate_adjustment_factor != 1.0:
+                logger.info(
+                    "recompute_outcomes %s id=%s corporate price factor=%.8f",
+                    ticker,
+                    row["id"],
+                    corporate_adjustment_factor,
+                )
+
             outcome_basis, basis_ratio = self._assess_outcome_basis(
-                entry_price=float(entry),
+                entry_price=adjusted_entry,
                 decided_at=decided_at,
                 candles=candles,
             )
@@ -2910,7 +3354,7 @@ class PortfolioDatabase:
                 continue
 
             outcomes = await self._compute_directional_outcomes(
-                entry_price=float(entry),
+                entry_price=adjusted_entry,
                 decided_at=decided_at,
                 direction=direction,
                 now=now,

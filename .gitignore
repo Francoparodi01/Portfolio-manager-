@@ -53,6 +53,7 @@ tests/*
 !tests/test_output_perf.py
 !tests/test_manual_broker_run_context.py
 !tests/test_thesis_shadow_store.py
+!tests/test_corporate_actions.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json

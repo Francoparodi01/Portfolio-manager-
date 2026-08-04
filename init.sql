@@ -531,6 +531,130 @@ CREATE TABLE IF NOT EXISTS sentiment_aggregated (
     UNIQUE (bucket_ts, ticker, asset_scope)
 );
 
+-- Corporate actions: canonical event, instrument-level transform and audit ledger.
+-- Raw candles, snapshots and decision prices remain immutable.
+CREATE TABLE IF NOT EXISTS corporate_events (
+    id                  BIGSERIAL PRIMARY KEY,
+    event_key           TEXT NOT NULL UNIQUE,
+    issuer_id           TEXT NOT NULL,
+    event_type          TEXT NOT NULL,
+    lifecycle_status    TEXT NOT NULL,
+    announced_at        TIMESTAMPTZ,
+    effective_at        TIMESTAMPTZ NOT NULL,
+    expires_at          TIMESTAMPTZ,
+    source_name         TEXT,
+    source_url          TEXT,
+    source_published_at TIMESTAMPTZ,
+    source_hash         TEXT,
+    ingestion_method    TEXT NOT NULL,
+    evidence_level      TEXT NOT NULL,
+    detector_score      FLOAT,
+    detector_version    TEXT,
+    raw_payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    supersedes_event_id BIGINT REFERENCES corporate_events(id) ON DELETE SET NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (event_type IN (
+        'SPLIT', 'REVERSE_SPLIT', 'DEPOSITARY_RATIO_CHANGE',
+        'DIVIDEND', 'SPIN_OFF', 'TICKER_CHANGE', 'OTHER'
+    )),
+    CHECK (lifecycle_status IN (
+        'SUSPECTED', 'ANNOUNCED', 'CONFIRMED', 'EFFECTIVE',
+        'CANCELLED', 'DISMISSED', 'SUPERSEDED'
+    )),
+    CHECK (ingestion_method IN ('MANUAL', 'AUTOMATED', 'DETECTOR')),
+    CHECK (evidence_level IN (
+        'PRIMARY_OFFICIAL', 'STRUCTURED_SECONDARY',
+        'CORROBORATED', 'HEURISTIC_ONLY'
+    )),
+    CHECK (detector_score IS NULL OR (detector_score >= 0 AND detector_score <= 1))
+);
+
+CREATE TABLE IF NOT EXISTS corporate_event_instrument_effects (
+    id                      BIGSERIAL PRIMARY KEY,
+    event_id                BIGINT NOT NULL REFERENCES corporate_events(id) ON DELETE CASCADE,
+    instrument_id           TEXT NOT NULL,
+    ticker                  TEXT NOT NULL,
+    venue                   TEXT,
+    asset_type              TEXT,
+    currency                TEXT,
+    quantity_factor         NUMERIC(24,12) NOT NULL,
+    price_factor            NUMERIC(24,12) NOT NULL,
+    cost_basis_factor       NUMERIC(24,12) NOT NULL,
+    depositary_ratio_before TEXT,
+    depositary_ratio_after  TEXT,
+    metadata                JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_active               BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (event_id, instrument_id),
+    CHECK (quantity_factor > 0),
+    CHECK (price_factor > 0),
+    CHECK (cost_basis_factor > 0)
+);
+
+CREATE TABLE IF NOT EXISTS price_quality_flags (
+    id                       BIGSERIAL PRIMARY KEY,
+    event_id                 BIGINT REFERENCES corporate_events(id) ON DELETE SET NULL,
+    instrument_effect_id     BIGINT REFERENCES corporate_event_instrument_effects(id) ON DELETE SET NULL,
+    ticker                   TEXT NOT NULL,
+    observed_at              TIMESTAMPTZ NOT NULL,
+    expires_at               TIMESTAMPTZ,
+    flag_type                TEXT NOT NULL,
+    resolution_status        TEXT NOT NULL DEFAULT 'OPEN',
+    observed_reference_price FLOAT,
+    observed_current_price   FLOAT,
+    observed_return          FLOAT,
+    expected_price_factor    FLOAT,
+    observed_quantity_factor FLOAT,
+    quantity_factor          FLOAT,
+    evidence_level           TEXT NOT NULL,
+    detector_score           FLOAT,
+    detector_version         TEXT NOT NULL,
+    action_taken             TEXT NOT NULL,
+    reason                   TEXT NOT NULL,
+    evidence                 JSONB NOT NULL DEFAULT '{}'::jsonb,
+    idempotency_key          TEXT NOT NULL UNIQUE,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (resolution_status IN ('OPEN', 'CONFIRMED', 'DISMISSED', 'EXPIRED')),
+    CHECK (flag_type IN ('PRICE_NOT_COMPARABLE', 'DATA_QUALITY_BLOCK')),
+    CHECK (detector_score IS NULL OR (detector_score >= 0 AND detector_score <= 1))
+);
+
+CREATE TABLE IF NOT EXISTS corporate_event_applications (
+    id                   BIGSERIAL PRIMARY KEY,
+    event_id             BIGINT NOT NULL REFERENCES corporate_events(id) ON DELETE CASCADE,
+    instrument_effect_id BIGINT NOT NULL REFERENCES corporate_event_instrument_effects(id) ON DELETE CASCADE,
+    owner_chat_id        BIGINT,
+    component            TEXT NOT NULL,
+    application_status   TEXT NOT NULL,
+    adjustment_version   TEXT NOT NULL,
+    idempotency_key      TEXT NOT NULL UNIQUE,
+    before_state         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    after_state          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    invariant_checks     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error                TEXT,
+    applied_at           TIMESTAMPTZ,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (application_status IN (
+        'PENDING', 'APPLYING', 'APPLIED', 'ALREADY_ADJUSTED',
+        'FAILED', 'ROLLED_BACK'
+    ))
+);
+
+CREATE INDEX IF NOT EXISTS idx_corporate_events_effective
+    ON corporate_events (effective_at DESC, lifecycle_status);
+
+CREATE INDEX IF NOT EXISTS idx_corporate_effects_ticker
+    ON corporate_event_instrument_effects (ticker, is_active);
+
+CREATE INDEX IF NOT EXISTS idx_price_quality_flags_active
+    ON price_quality_flags (ticker, resolution_status, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_corporate_applications_event
+    ON corporate_event_applications (event_id, instrument_effect_id, component);
+
 -- Eventos/catalysts manuales cargados por el operador.
 -- No scrapea fuentes externas: declara riesgos conocidos como earnings,
 -- guidance, Fed, CPI, OPEC, etc. para contextualizar y bloquear entradas.

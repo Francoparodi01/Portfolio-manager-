@@ -70,6 +70,12 @@ from src.collector.live_portfolio import (
 from src.collector.notifier import TelegramNotifier
 from src.core.telegram_format import header as tg_header, note as tg_note, section as tg_section
 from src.analysis.manual_market_events import active_event_risk_by_ticker
+from src.analysis.corporate_actions import (
+    corporate_action_application_from_mapping,
+    effects_by_ticker,
+    price_quality_flag_from_mapping,
+    rebase_reference_price,
+)
 from src.analysis.preclose_alerts import build_preclose_alerts, render_preclose_alerts
 from src.analysis.signal_aggregator import load_sentiment_contexts
 
@@ -701,7 +707,16 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
                 [p.get("ticker") for p in snapshot_payload.get("positions") or []],
                 now.date(),
             )
-            live_portfolio = build_live_portfolio(snapshot_payload, latest_prices)
+            opening_tickers = sorted(_active_position_tickers(snapshot_payload))
+            corporate_effects = await db.get_corporate_action_effects(
+                tickers=opening_tickers,
+            )
+            live_portfolio = build_live_portfolio(
+                snapshot_payload,
+                latest_prices,
+                corporate_action_effects=corporate_effects,
+            )
+            await _persist_live_corporate_action_audit(db, live_portfolio)
             live_portfolio = await _attach_manual_event_risk_to_live_portfolio(
                 db,
                 live_portfolio,
@@ -788,6 +803,24 @@ async def _safe_manual_event_risk_by_ticker(
         return {}
 
 
+async def _persist_live_corporate_action_audit(
+    db: PortfolioDatabase,
+    live_portfolio: dict,
+) -> None:
+    quality_flags = [
+        price_quality_flag_from_mapping(row)
+        for row in live_portfolio.get("price_quality_flags") or []
+    ]
+    applications = [
+        corporate_action_application_from_mapping(row)
+        for row in live_portfolio.get("corporate_action_applications") or []
+    ]
+    if quality_flags:
+        await db.save_price_quality_flags(quality_flags)
+    if applications:
+        await db.record_corporate_action_applications(applications)
+
+
 async def _attach_manual_event_risk_to_live_portfolio(
     db: PortfolioDatabase,
     live_portfolio: dict,
@@ -811,6 +844,14 @@ def _post_open_quality_warning(live_portfolio: dict, now: datetime) -> str | Non
     covered = int(live_portfolio.get("price_coverage_count") or 0)
     if positions_count <= 0:
         return "portfolio vacio o sin posiciones; no hay marca post-open confiable."
+    open_quality_flags = [
+        row
+        for row in live_portfolio.get("price_quality_flags") or []
+        if str(row.get("resolution_status") or "").upper() == "OPEN"
+    ]
+    if open_quality_flags:
+        tickers = ", ".join(sorted({str(row.get("ticker") or "").upper() for row in open_quality_flags}))
+        return f"precio no comparable en {tickers}; senales y PNL intradia suspendidos."
 
     coverage = covered / positions_count if positions_count else 0.0
     if coverage < 0.80:
@@ -890,7 +931,16 @@ async def run_post_open_portfolio_report(run_type: str = "10:45_POST_OPEN_PORTFO
             [p.get("ticker") for p in snapshot.get("positions") or []],
             now.date(),
         )
-        live_portfolio = build_live_portfolio(snapshot, latest_prices)
+        post_open_tickers = sorted(_active_position_tickers(snapshot))
+        corporate_effects = await db.get_corporate_action_effects(
+            tickers=post_open_tickers,
+        )
+        live_portfolio = build_live_portfolio(
+            snapshot,
+            latest_prices,
+            corporate_action_effects=corporate_effects,
+        )
+        await _persist_live_corporate_action_audit(db, live_portfolio)
         live_portfolio = await _attach_manual_event_risk_to_live_portfolio(
             db,
             live_portfolio,
@@ -1292,6 +1342,7 @@ async def run_preclose_alerts(slot: str = "16:45") -> dict:
             tickers=tickers,
         )
         manual_event_risk = active_event_risk_by_ticker(manual_events)
+        corporate_effects = await db.get_corporate_action_effects(tickers=tickers)
 
         invested = sum(float(position.get("market_value", 0) or 0) for position in positions)
         cash_ars = max(float(snapshot.get("cash_ars", 0) or 0), 0.0)
@@ -1303,8 +1354,16 @@ async def run_preclose_alerts(slot: str = "16:45") -> dict:
             total_ars=total_ars,
             sentiment_contexts=sentiment_contexts,
             manual_event_risk_by_ticker=manual_event_risk,
+            corporate_action_effects=corporate_effects,
             now=now,
         )
+        quality_flags = [
+            price_quality_flag_from_mapping(alert.evidence["price_quality_flag"])
+            for alert in alerts
+            if (alert.evidence or {}).get("price_quality_flag")
+        ]
+        if quality_flags:
+            await db.save_price_quality_flags(quality_flags)
         saved = await db.save_preclose_alerts(alerts, alert_ts=now, slot=slot)
         if alerts:
             notifier.send_raw(render_preclose_alerts(alerts, slot=slot))
@@ -1799,7 +1858,18 @@ class IntradayManager:
                     continue
 
                 bot_busy = await _is_bot_busy()
-                alerts = await self._compute_risk_alerts(pool)
+                corporate_effects = await db.get_corporate_action_effects()
+                active_quality_flags = await db.get_active_price_quality_flags()
+                blocked_price_tickers = {
+                    str(row.get("ticker") or "").upper()
+                    for row in active_quality_flags
+                    if str(row.get("ticker") or "").strip()
+                }
+                alerts = await self._compute_risk_alerts(
+                    pool,
+                    corporate_action_effects=corporate_effects,
+                    blocked_price_tickers=blocked_price_tickers,
+                )
 
                 digest_alerts: list[RiskAlert] = []
                 for alert in alerts:
@@ -1867,7 +1937,16 @@ class IntradayManager:
                     [p.get("ticker") for p in snapshot.get("positions") or []],
                     _now_art().date(),
                 )
-                live_portfolio = build_live_portfolio(snapshot, latest_prices)
+                active_tickers = sorted(_active_position_tickers(snapshot))
+                corporate_effects = await db.get_corporate_action_effects(
+                    tickers=active_tickers,
+                )
+                live_portfolio = build_live_portfolio(
+                    snapshot,
+                    latest_prices,
+                    corporate_action_effects=corporate_effects,
+                )
+                await _persist_live_corporate_action_audit(db, live_portfolio)
                 live_portfolio = await _attach_manual_event_risk_to_live_portfolio(
                     db,
                     live_portfolio,
@@ -1913,6 +1992,12 @@ class IntradayManager:
                             pool,
                             latest_prices,
                             _active_position_tickers(snapshot),
+                            corporate_action_effects=corporate_effects,
+                            blocked_price_tickers={
+                                flag.ticker
+                                for flag in quality_flags
+                                if flag.resolution_status == "OPEN"
+                            },
                         )
                         unseen_revalidations = [
                             alert for alert in revalidations
@@ -1958,6 +2043,9 @@ class IntradayManager:
         pool,
         latest_prices: list[dict],
         active_tickers: set[str],
+        *,
+        corporate_action_effects=None,
+        blocked_price_tickers: set[str] | None = None,
     ) -> list[IntradayRevalidationAlert]:
         active_tickers = {
             str(ticker or "").upper()
@@ -1966,6 +2054,11 @@ class IntradayManager:
         }
         if not latest_prices or not active_tickers:
             return []
+        blocked_price_tickers = {
+            str(ticker or "").upper()
+            for ticker in (blocked_price_tickers or set())
+        }
+        grouped_effects = effects_by_ticker(corporate_action_effects or [])
 
         latest_by_ticker = {
             str(row.get("ticker") or "").upper(): row
@@ -2011,6 +2104,8 @@ class IntradayManager:
         alerts: list[IntradayRevalidationAlert] = []
         for row in rows:
             ticker = str(row["ticker"] or "").upper()
+            if ticker in blocked_price_tickers:
+                continue
             latest = latest_by_ticker.get(ticker)
             if not latest:
                 continue
@@ -2018,6 +2113,15 @@ class IntradayManager:
             current_price = _safe_float(latest.get("last_price"))
             plan_price = _safe_float(row["plan_price"])
             if not current_price or not plan_price or plan_price <= 0:
+                continue
+
+            plan_price, _ = rebase_reference_price(
+                plan_price,
+                reference_at=row["decided_at"],
+                as_of=now,
+                effects=grouped_effects.get(ticker, ()),
+            )
+            if not plan_price or plan_price <= 0:
                 continue
 
             price_ts = self._parse_price_ts(latest.get("ts"))
@@ -2233,7 +2337,18 @@ class IntradayManager:
                 return pool
         return getattr(db, "_db_pool", None) or getattr(db, "_pool", None)
 
-    async def _compute_risk_alerts(self, pool) -> list[RiskAlert]:
+    async def _compute_risk_alerts(
+        self,
+        pool,
+        *,
+        corporate_action_effects=None,
+        blocked_price_tickers: set[str] | None = None,
+    ) -> list[RiskAlert]:
+        blocked_price_tickers = {
+            str(ticker or "").upper()
+            for ticker in (blocked_price_tickers or set())
+        }
+        grouped_effects = effects_by_ticker(corporate_action_effects or [])
         async with pool.acquire() as conn:
             active_rows = await conn.fetch(
                 """
@@ -2271,6 +2386,7 @@ class IntradayManager:
                 latest_buys AS (
                     SELECT DISTINCT ON (ticker)
                         ticker,
+                        decided_at,
                         price_at_decision,
                         stop_loss_pct,
                         stop_loss_price,
@@ -2287,6 +2403,7 @@ class IntradayManager:
                 )
                 SELECT
                     b.ticker,
+                    b.decided_at,
                     b.price_at_decision,
                     b.stop_loss_pct,
                     b.stop_loss_price,
@@ -2304,6 +2421,12 @@ class IntradayManager:
             ticker = str(row["ticker"]).upper()
             if ticker not in active_ticker_set:
                 continue
+            if ticker in blocked_price_tickers:
+                logger.warning(
+                    "Risk guard: %s omitido por PRICE_NOT_COMPARABLE activo",
+                    ticker,
+                )
+                continue
             entry = _safe_float(row["price_at_decision"])
             current = _safe_float(row["last_price"])
             stop_price = _safe_float(row["stop_loss_price"])
@@ -2312,6 +2435,20 @@ class IntradayManager:
 
             if entry is None or current is None or entry == 0:
                 continue
+
+            decided_at = row.get("decided_at") if hasattr(row, "get") else None
+            adjustment_factor = 1.0
+            if decided_at is not None:
+                entry, adjustment_factor = rebase_reference_price(
+                    entry,
+                    reference_at=decided_at,
+                    as_of=datetime.now(timezone.utc),
+                    effects=grouped_effects.get(ticker, ()),
+                )
+            if stop_price is not None:
+                stop_price *= adjustment_factor
+            if target_price is not None:
+                target_price *= adjustment_factor
 
             # Derivar stop_price desde stop_pct si no viene explícito
             if stop_price is None and stop_pct is not None:
