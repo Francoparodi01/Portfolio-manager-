@@ -10,6 +10,7 @@ from src.collector.issuer_event_sources import (
     parse_sec_company_directory,
     sec_submission_observations,
 )
+from src.collector.db import _json_payload
 
 
 def _sec_entry() -> IssuerRegistryEntry:
@@ -250,3 +251,9 @@ def test_confidence_scale_is_named_and_rejects_unknown_basis():
         assert "unsupported confidence basis" in str(exc)
     else:
         raise AssertionError("unknown confidence basis should fail")
+
+
+def test_jsonb_text_from_asyncpg_is_decoded_for_audit_reads():
+    assert _json_payload('{"registry_basis":"latest_portfolio_snapshot"}') == {
+        "registry_basis": "latest_portfolio_snapshot"
+    }

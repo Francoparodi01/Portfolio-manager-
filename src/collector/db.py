@@ -973,7 +973,7 @@ class PortfolioDatabase:
                 primary_symbol=str(row["primary_symbol"] or ""),
                 sec_cik=str(row["sec_cik"] or ""),
                 cnv_entity_name=str(row["cnv_entity_name"] or ""),
-                metadata=dict(row["metadata"] or {}),
+                metadata=_json_payload(row["metadata"]),
             ).normalized()
             for row in rows
         ]
@@ -1054,7 +1054,12 @@ class PortfolioDatabase:
                 str(ticker).strip() if ticker else None,
                 max(1, min(int(limit), 1000)),
             )
-        return [dict(row) for row in rows]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["raw_payload"] = _json_payload(item.get("raw_payload"))
+            result.append(item)
+        return result
 
     async def save_price_quality_flags(
         self,
