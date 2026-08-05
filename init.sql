@@ -713,7 +713,7 @@ CREATE TABLE IF NOT EXISTS issuer_event_observations (
     raw_payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CHECK (source IN ('SEC', 'FMP', 'FINNHUB', 'CNV')),
+    CHECK (source IN ('SEC', 'FMP', 'FINNHUB', 'CNV', 'YAHOO')),
     CHECK (event_type IN (
         'FILING', 'EARNINGS', 'SPLIT', 'REVERSE_SPLIT',
         'DEPOSITARY_RATIO_CHANGE', 'DIVIDEND', 'MERGER',
@@ -729,6 +729,23 @@ CREATE INDEX IF NOT EXISTS idx_issuer_event_observations_lookup
 
 CREATE INDEX IF NOT EXISTS idx_issuer_event_observations_ticker
     ON issuer_event_observations (ticker, created_at DESC);
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'issuer_event_observations'::regclass
+          AND conname = 'issuer_event_observations_source_check'
+          AND pg_get_constraintdef(oid) NOT LIKE '%YAHOO%'
+    ) THEN
+        ALTER TABLE issuer_event_observations
+            DROP CONSTRAINT issuer_event_observations_source_check;
+        ALTER TABLE issuer_event_observations
+            ADD CONSTRAINT issuer_event_observations_source_check
+            CHECK (source IN ('SEC', 'FMP', 'FINNHUB', 'CNV', 'YAHOO'));
+    END IF;
+END $$;
 
 -- Eventos/catalysts manuales cargados por el operador.
 -- No scrapea fuentes externas: declara riesgos conocidos como earnings,

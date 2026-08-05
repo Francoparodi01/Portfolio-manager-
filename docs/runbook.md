@@ -90,7 +90,7 @@ Definidos en `_scheduler_main()` de [src/scheduler/runner.py](../src/scheduler/r
 | `thesis_shadow` | 17:18 | Shadow forecasts si `THESIS_SHADOW_ENABLED`. |
 | `update_outcomes_daily` | 21:30 | Actualiza outcomes. |
 | `sentiment_pipeline` | intervalo | Sentiment si `SENTIMENT_PIPELINE_ENABLED`. |
-| `issuer_event_ingestion` | intervalo | Evidencia SEC/CNV/FMP/Finnhub si `ISSUER_EVENT_INGESTION_ENABLED`. |
+| `issuer_event_ingestion` | intervalo | Evidencia Yahoo/SEC/CNV/FMP/Finnhub si `ISSUER_EVENT_INGESTION_ENABLED`. |
 
 ## Comandos de diagnostico
 
@@ -103,7 +103,12 @@ docker compose exec -T scheduler python scripts/run_confidence_audit.py --days 1
 docker compose exec -T scheduler python scripts/run_performance.py --days 90 --no-telegram
 docker compose exec -T scheduler python scripts/run_decision_timeline.py --days 90
 docker compose exec -T scheduler python scripts/outcome_status.py
+docker compose exec -T scheduler python scripts/run_issuer_event_ingestion.py --dry-run --sources yahoo
 ```
+
+El calendario Yahoo se guarda como evidencia secundaria en
+`issuer_event_observations`: conserva simbolo de origen, fecha, ratio o EPS y
+siempre queda con `actionable=false`. No modifica scoring, planes ni ordenes.
 
 Monitor:
 

@@ -1,7 +1,7 @@
 """Collect issuer-event observations without changing trading decisions.
 
-SEC and CNV work without commercial API keys. FMP splits and Finnhub earnings
-are opt-in through FMP_API_KEY and FINNHUB_API_KEY respectively.
+Yahoo, SEC and CNV work without commercial API keys. FMP splits and Finnhub
+earnings are opt-in through FMP_API_KEY and FINNHUB_API_KEY respectively.
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from src.collector.issuer_event_sources import (
     fetch_fmp_splits,
     fetch_sec_company_directory,
     fetch_sec_filings,
+    fetch_yahoo_calendar_events,
     issuer_event_http_client,
 )
 from src.core.config import get_config
@@ -31,7 +32,7 @@ from src.core.logger import get_logger
 
 
 logger = get_logger(__name__)
-AVAILABLE_SOURCES = ("sec", "fmp", "finnhub", "cnv")
+AVAILABLE_SOURCES = ("yahoo", "sec", "fmp", "finnhub", "cnv")
 
 
 def _sources(value: str | Iterable[str]) -> tuple[str, ...]:
@@ -115,6 +116,27 @@ async def run(
 
             today = date.today()
             observations = []
+            if "yahoo" in requested:
+                try:
+                    fetched = await fetch_yahoo_calendar_events(
+                        registry_entries,
+                        from_date=today - timedelta(days=max(3, int(sec_lookback_days))),
+                        to_date=today + timedelta(days=max(1, int(calendar_days))),
+                    )
+                    observations.extend(fetched)
+                    summary["sources"]["YAHOO"] = {
+                        "status": "ok",
+                        "observations": len(fetched),
+                    }
+                except Exception as exc:
+                    error_type = type(exc).__name__
+                    logger.warning("Yahoo calendar ingestion failed: %s", error_type)
+                    summary["sources"]["YAHOO"] = {
+                        "status": "failed",
+                        "observations": 0,
+                        "error": error_type,
+                    }
+
             if "sec" in requested:
                 if not sec_user_agent:
                     summary["sources"]["SEC"] = {

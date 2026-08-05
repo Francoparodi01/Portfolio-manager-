@@ -9,6 +9,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import logging
+import math
 import re
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlencode, urljoin
@@ -18,6 +19,11 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 import httpx
 
+try:
+    import yfinance as yf
+except ImportError:  # pragma: no cover - dependency is required in runtime images
+    yf = None
+
 from src.analysis.issuer_events import (
     IssuerEventObservation,
     IssuerInstrument,
@@ -26,6 +32,7 @@ from src.analysis.issuer_events import (
     instrument_id_for,
     normalize_cik,
     normalize_symbol,
+    payload_hash,
 )
 
 
@@ -37,6 +44,10 @@ SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 FMP_SPLITS_CALENDAR_URL = "https://financialmodelingprep.com/stable/splits-calendar"
 FINNHUB_EARNINGS_CALENDAR_URL = "https://finnhub.io/api/v1/calendar/earnings"
 CNV_RELEVANT_FACTS_URL = "https://www.cnv.gov.ar/sitioWeb/HechosRelevantes"
+YAHOO_FINANCE_QUOTE_URL = "https://finance.yahoo.com/quote/{symbol}/"
+YAHOO_CALENDAR_PAGE_SIZE = 100
+YAHOO_SPLIT_MAX_PAGES = 5
+YAHOO_EARNINGS_MAX_PAGES = 10
 
 SEC_RELEVANT_FORMS = {"8-K", "6-K", "10-K", "10-Q", "20-F", "40-F"}
 CNV_SPANISH_MONTHS = {
@@ -98,16 +109,51 @@ def _date_from_value(value: Any) -> date | None:
 
 
 def _datetime_from_value(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif callable(getattr(value, "to_pydatetime", None)):
+        parsed = value.to_pydatetime()
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if str(value).strip() in {"<NA>", "NaT", "nan"}:
+        return None
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if callable(getattr(value, "to_pydatetime", None)):
+        return value.to_pydatetime().isoformat()
+    if callable(getattr(value, "item", None)):
+        try:
+            return _json_safe(value.item())
+        except (TypeError, ValueError):
+            pass
+    try:
+        if bool(value != value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (str, int, bool)):
+        return value
+    return str(value)
 
 
 def parse_sec_company_directory(payload: Mapping[str, Any]) -> dict[str, dict[str, str]]:
@@ -183,7 +229,11 @@ def build_registry_from_portfolio(
                 source_market="AR",
                 primary_symbol=ticker,
                 cnv_entity_name=native_issuer,
-                metadata={"registry_basis": "portfolio_or_corporate_hint"},
+                metadata={
+                    "registry_basis": "portfolio_or_corporate_hint",
+                    "issuer_symbol": native_issuer,
+                    "local_symbol": ticker,
+                },
             ).normalized()
         else:
             issuer_id = f"US:{ticker}"
@@ -381,6 +431,169 @@ def finnhub_earnings_observations(
             ).normalized()
         )
     return observations
+
+
+def _yahoo_registry_by_symbol(
+    registry_entries: Iterable[IssuerRegistryEntry],
+) -> dict[str, IssuerRegistryEntry]:
+    mapped: dict[str, IssuerRegistryEntry] = {}
+    for raw_entry in registry_entries:
+        entry = raw_entry.normalized()
+        local_symbol = entry.primary_symbol
+        issuer_symbol = normalize_symbol(entry.metadata.get("issuer_symbol"))
+        for symbol in {local_symbol, issuer_symbol} - {""}:
+            mapped[symbol] = entry
+        if local_symbol:
+            mapped[f"{local_symbol}.BA"] = entry
+    return mapped
+
+
+def _positive_number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def yahoo_split_calendar_observations(
+    rows: Iterable[Mapping[str, Any]],
+    registry_entries: Iterable[IssuerRegistryEntry],
+    *,
+    today: date | None = None,
+) -> list[IssuerEventObservation]:
+    today = today or date.today()
+    registry = _yahoo_registry_by_symbol(registry_entries)
+    observations: list[IssuerEventObservation] = []
+    for raw_row in rows:
+        row = _json_safe(dict(raw_row))
+        symbol = normalize_symbol(row.get("Symbol"))
+        entry = registry.get(symbol)
+        event_at = _datetime_from_value(row.get("Payable On"))
+        old_share_worth = _positive_number(row.get("Old Share Worth"))
+        share_worth = _positive_number(row.get("Share Worth"))
+        if not entry or not event_at or not old_share_worth or not share_worth:
+            continue
+        quantity_factor = share_worth / old_share_worth
+        event_type = "SPLIT" if quantity_factor >= 1 else "REVERSE_SPLIT"
+        event_date = event_at.date()
+        ratio = f"{share_worth:g}:{old_share_worth:g}"
+        scope = "local_instrument" if symbol.endswith(".BA") else "issuer"
+        observations.append(
+            IssuerEventObservation(
+                observation_key=(
+                    f"YAHOO:SPLIT:{symbol}:{event_date.isoformat()}:"
+                    f"{share_worth:g}:{old_share_worth:g}"
+                ),
+                issuer_id=entry.issuer_id,
+                ticker=entry.primary_symbol,
+                source="YAHOO",
+                event_type=event_type,
+                lifecycle_status="ANNOUNCED" if event_date >= today else "DISCOVERED",
+                event_date=event_date,
+                event_time_hint="unknown",
+                source_published_at=None,
+                source_url=YAHOO_FINANCE_QUOTE_URL.format(symbol=symbol),
+                confidence=confidence_for("structured_provider"),
+                title=f"{symbol} {event_type.lower()} {ratio}",
+                raw_payload={
+                    "provider_row": row,
+                    "yahoo_symbol": symbol,
+                    "event_scope": scope,
+                    "old_share_worth": old_share_worth,
+                    "share_worth": share_worth,
+                    "quantity_factor": quantity_factor,
+                    "confidence_basis": "structured_provider",
+                },
+            ).normalized()
+        )
+    return observations
+
+
+def yahoo_earnings_calendar_observations(
+    rows: Iterable[Mapping[str, Any]],
+    registry_entries: Iterable[IssuerRegistryEntry],
+) -> list[IssuerEventObservation]:
+    registry = _yahoo_registry_by_symbol(registry_entries)
+    by_key: dict[str, IssuerEventObservation] = {}
+    timing_map = {
+        "BMO": "before_open",
+        "AMC": "after_close",
+        "DMH": "during_market",
+    }
+    for raw_row in rows:
+        row = _json_safe(dict(raw_row))
+        symbol = normalize_symbol(row.get("Symbol"))
+        entry = registry.get(symbol)
+        event_at = _datetime_from_value(row.get("Event Start Date"))
+        if not entry or not event_at:
+            continue
+        event_date = event_at.date()
+        event_name = str(row.get("Event Name") or "Earnings Announcement").strip()
+        reported_eps = _optional_number(row.get("Reported EPS"))
+        surprise_pct = _optional_number(row.get("Surprise(%)"))
+        phase = (
+            "post_reported"
+            if reported_eps is not None or surprise_pct is not None
+            else "scheduled"
+        )
+        scope = "local_instrument" if symbol.endswith(".BA") else "issuer"
+        observation_key = f"YAHOO:EARNINGS:{entry.issuer_id}:{event_date.isoformat()}"
+        observation = IssuerEventObservation(
+            observation_key=observation_key,
+            issuer_id=entry.issuer_id,
+            ticker=entry.primary_symbol,
+            source="YAHOO",
+            event_type="EARNINGS",
+            lifecycle_status="ANNOUNCED",
+            event_date=event_date,
+            event_time_hint=timing_map.get(
+                str(row.get("Timing") or "").upper().strip(),
+                "unknown",
+            ),
+            source_published_at=None,
+            source_url=YAHOO_FINANCE_QUOTE_URL.format(symbol=symbol),
+            confidence=confidence_for("structured_provider"),
+            title=f"{symbol} {event_name}",
+            raw_payload={
+                "provider_row": row,
+                "yahoo_symbol": symbol,
+                "event_scope": scope,
+                "earnings_phase": phase,
+                "eps_estimate": _optional_number(row.get("EPS Estimate")),
+                "reported_eps": reported_eps,
+                "surprise_pct": surprise_pct,
+                "event_fingerprint": payload_hash(
+                    {
+                        "issuer_id": entry.issuer_id,
+                        "event_date": event_date.isoformat(),
+                        "event_name": event_name,
+                    }
+                )[:16],
+                "confidence_basis": "structured_provider",
+            },
+        ).normalized()
+        existing = by_key.get(observation_key)
+        if existing is None:
+            by_key[observation_key] = observation
+            continue
+        existing_scope = existing.raw_payload.get("event_scope")
+        if existing_scope == "local_instrument" and scope == "issuer":
+            by_key[observation_key] = observation
+        elif (
+            existing.raw_payload.get("earnings_phase") == "scheduled"
+            and phase == "post_reported"
+        ):
+            by_key[observation_key] = observation
+    return list(by_key.values())
 
 
 def _cnv_datetime(value: str) -> datetime | None:
@@ -613,6 +826,98 @@ async def fetch_finnhub_earnings(
             continue
         observations.extend(result)
     return observations
+
+
+def _calendar_frame_rows(frame: Any) -> list[dict[str, Any]]:
+    if frame is None or bool(getattr(frame, "empty", True)):
+        return []
+    reset = frame.reset_index()
+    return [
+        {str(key): _json_safe(value) for key, value in row.items()}
+        for row in reset.to_dict(orient="records")
+    ]
+
+
+def _paginate_yahoo_calendar(
+    getter,
+    *,
+    max_pages: int,
+    **kwargs,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for page in range(max(1, int(max_pages))):
+        frame = getter(
+            limit=YAHOO_CALENDAR_PAGE_SIZE,
+            offset=page * YAHOO_CALENDAR_PAGE_SIZE,
+            force=True,
+            **kwargs,
+        )
+        page_rows = _calendar_frame_rows(frame)
+        rows.extend(page_rows)
+        if len(page_rows) < YAHOO_CALENDAR_PAGE_SIZE:
+            break
+    return rows
+
+
+def _fetch_yahoo_calendar_events_sync(
+    registry_entries: list[IssuerRegistryEntry],
+    *,
+    from_date: date,
+    to_date: date,
+) -> list[IssuerEventObservation]:
+    if yf is None or not hasattr(yf, "Calendars"):
+        raise RuntimeError("yfinance Calendars requires yfinance>=1.0")
+    calendars = yf.Calendars(start=from_date, end=to_date)
+    observations: list[IssuerEventObservation] = []
+    failures: list[str] = []
+
+    try:
+        split_rows = _paginate_yahoo_calendar(
+            calendars.get_splits_calendar,
+            max_pages=YAHOO_SPLIT_MAX_PAGES,
+        )
+        observations.extend(
+            yahoo_split_calendar_observations(
+                split_rows,
+                registry_entries,
+                today=date.today(),
+            )
+        )
+    except Exception as exc:
+        failures.append("splits")
+        logger.warning("Yahoo split calendar unavailable: %s", type(exc).__name__)
+
+    try:
+        earnings_rows = _paginate_yahoo_calendar(
+            calendars.get_earnings_calendar,
+            max_pages=YAHOO_EARNINGS_MAX_PAGES,
+            filter_most_active=False,
+        )
+        observations.extend(
+            yahoo_earnings_calendar_observations(earnings_rows, registry_entries)
+        )
+    except Exception as exc:
+        failures.append("earnings")
+        logger.warning("Yahoo earnings calendar unavailable: %s", type(exc).__name__)
+
+    if len(failures) == 2:
+        raise RuntimeError("Yahoo split and earnings calendars are unavailable")
+    return observations
+
+
+async def fetch_yahoo_calendar_events(
+    registry_entries: Iterable[IssuerRegistryEntry],
+    *,
+    from_date: date,
+    to_date: date,
+) -> list[IssuerEventObservation]:
+    normalized_entries = [entry.normalized() for entry in registry_entries]
+    return await asyncio.to_thread(
+        _fetch_yahoo_calendar_events_sync,
+        normalized_entries,
+        from_date=from_date,
+        to_date=to_date,
+    )
 
 
 async def fetch_cnv_relevant_facts(

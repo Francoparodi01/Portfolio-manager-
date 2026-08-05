@@ -9,6 +9,8 @@ from src.collector.issuer_event_sources import (
     fmp_split_observations,
     parse_sec_company_directory,
     sec_submission_observations,
+    yahoo_earnings_calendar_observations,
+    yahoo_split_calendar_observations,
 )
 from src.collector.db import _json_payload
 
@@ -61,7 +63,123 @@ def test_registry_keeps_known_local_issuer_as_argentina_source():
 
     assert entries[0].issuer_id == "AR:YPF"
     assert entries[0].cnv_entity_name == "YPF"
+    assert entries[0].metadata["issuer_symbol"] == "YPF"
+    assert entries[0].metadata["local_symbol"] == "YPFD"
     assert instruments[0].instrument_id == "BYMA:ACCION:YPFD:ARS"
+
+
+def test_yahoo_local_split_maps_to_argentina_instrument():
+    entries, _ = build_registry_from_portfolio(
+        [PortfolioInstrumentSeed("YPFD", "ACCION", "ARS", issuer_hint="YPF")]
+    )
+
+    observations = yahoo_split_calendar_observations(
+        [
+            {
+                "Symbol": "YPFD.BA",
+                "Company": "YPF Sociedad Anonima",
+                "Payable On": "2026-08-03T04:00:00Z",
+                "Old Share Worth": 1,
+                "Share Worth": 10,
+            }
+        ],
+        entries,
+        today=date(2026, 8, 4),
+    )
+
+    assert len(observations) == 1
+    observed = observations[0]
+    assert observed.issuer_id == "AR:YPF"
+    assert observed.ticker == "YPFD"
+    assert observed.source == "YAHOO"
+    assert observed.event_type == "SPLIT"
+    assert observed.lifecycle_status == "DISCOVERED"
+    assert observed.event_date == date(2026, 8, 3)
+    assert observed.confidence == 0.75
+    assert observed.actionable is False
+    assert observed.raw_payload["event_scope"] == "local_instrument"
+    assert observed.raw_payload["quantity_factor"] == 10.0
+
+
+def test_yahoo_split_ratio_supports_reverse_splits():
+    observations = yahoo_split_calendar_observations(
+        [
+            {
+                "Symbol": "AXP",
+                "Payable On": "2026-08-20T04:00:00Z",
+                "Old Share Worth": 5,
+                "Share Worth": 1,
+            }
+        ],
+        [_sec_entry()],
+        today=date(2026, 8, 4),
+    )
+
+    assert len(observations) == 1
+    assert observations[0].event_type == "REVERSE_SPLIT"
+    assert observations[0].lifecycle_status == "ANNOUNCED"
+    assert observations[0].raw_payload["quantity_factor"] == 0.2
+
+
+def test_yahoo_earnings_maps_issuer_symbol_and_market_timing():
+    entries, _ = build_registry_from_portfolio(
+        [PortfolioInstrumentSeed("YPFD", "ACCION", "ARS", issuer_hint="YPF")]
+    )
+
+    observations = yahoo_earnings_calendar_observations(
+        [
+            {
+                "Symbol": "YPF",
+                "Event Name": "Q2 2026 Earnings Call",
+                "Event Start Date": "2026-08-10T20:00:00Z",
+                "Timing": "AMC",
+                "EPS Estimate": 2.0,
+                "Reported EPS": None,
+                "Surprise(%)": None,
+            }
+        ],
+        entries,
+    )
+
+    assert len(observations) == 1
+    observed = observations[0]
+    assert observed.issuer_id == "AR:YPF"
+    assert observed.ticker == "YPFD"
+    assert observed.event_time_hint == "after_close"
+    assert observed.raw_payload["event_scope"] == "issuer"
+    assert observed.raw_payload["earnings_phase"] == "scheduled"
+    assert observed.raw_payload["eps_estimate"] == 2.0
+
+
+def test_yahoo_earnings_deduplicates_local_row_and_keeps_reported_result():
+    observations = yahoo_earnings_calendar_observations(
+        [
+            {
+                "Symbol": "AXP.BA",
+                "Event Name": "Q3 Earnings",
+                "Event Start Date": "2026-10-15T12:00:00Z",
+                "Timing": "BMO",
+                "EPS Estimate": 3.1,
+            },
+            {
+                "Symbol": "AXP",
+                "Event Name": "Q3 Earnings",
+                "Event Start Date": "2026-10-15T12:00:00Z",
+                "Timing": "BMO",
+                "EPS Estimate": 3.1,
+                "Reported EPS": 3.4,
+                "Surprise(%)": 9.68,
+            },
+        ],
+        [_sec_entry()],
+    )
+
+    assert len(observations) == 1
+    observed = observations[0]
+    assert observed.raw_payload["event_scope"] == "issuer"
+    assert observed.raw_payload["earnings_phase"] == "post_reported"
+    assert observed.raw_payload["reported_eps"] == 3.4
+    assert observed.raw_payload["surprise_pct"] == 9.68
 
 
 def test_sec_submissions_keep_only_relevant_forms_after_lookback():
