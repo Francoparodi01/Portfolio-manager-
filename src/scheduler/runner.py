@@ -830,6 +830,15 @@ async def _persist_live_corporate_action_audit(
         await db.record_corporate_action_applications(applications)
 
 
+def _open_price_quality_tickers(live_portfolio: dict) -> set[str]:
+    return {
+        str(flag.get("ticker") or "").upper()
+        for flag in live_portfolio.get("price_quality_flags") or []
+        if str(flag.get("ticker") or "").strip()
+        and str(flag.get("resolution_status") or "").upper() == "OPEN"
+    }
+
+
 async def _attach_manual_event_risk_to_live_portfolio(
     db: PortfolioDatabase,
     live_portfolio: dict,
@@ -2042,11 +2051,9 @@ class IntradayManager:
                             latest_prices,
                             _active_position_tickers(snapshot),
                             corporate_action_effects=corporate_effects,
-                            blocked_price_tickers={
-                                flag.ticker
-                                for flag in quality_flags
-                                if flag.resolution_status == "OPEN"
-                            },
+                            blocked_price_tickers=_open_price_quality_tickers(
+                                live_portfolio
+                            ),
                         )
                         unseen_revalidations = [
                             alert for alert in revalidations

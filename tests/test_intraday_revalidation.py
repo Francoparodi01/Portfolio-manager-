@@ -103,3 +103,19 @@ def test_intraday_revalidation_skips_query_without_current_positions():
 
     assert alerts == []
     assert pool.conn.query == ""
+
+
+def test_open_price_quality_tickers_uses_only_open_flags():
+    assert runner._open_price_quality_tickers(
+        {
+            "price_quality_flags": [
+                {"ticker": "ypfd", "resolution_status": "OPEN"},
+                {"ticker": "NVDA", "resolution_status": "RESOLVED"},
+                {"ticker": "", "resolution_status": "OPEN"},
+            ]
+        }
+    ) == {"YPFD"}
+
+
+def test_open_price_quality_tickers_handles_missing_flags():
+    assert runner._open_price_quality_tickers({}) == set()
