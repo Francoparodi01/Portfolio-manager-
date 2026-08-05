@@ -104,11 +104,16 @@ docker compose exec -T scheduler python scripts/run_performance.py --days 90 --n
 docker compose exec -T scheduler python scripts/run_decision_timeline.py --days 90
 docker compose exec -T scheduler python scripts/outcome_status.py
 docker compose exec -T scheduler python scripts/run_issuer_event_ingestion.py --dry-run --sources yahoo
+docker compose exec -T scheduler python scripts/run_upcoming_events.py --no-telegram
 ```
 
 El calendario Yahoo se guarda como evidencia secundaria en
 `issuer_event_observations`: conserva simbolo de origen, fecha, ratio o EPS y
 siempre queda con `actionable=false`. No modifica scoring, planes ni ordenes.
+Los proximos balances de la cartera se consultan tambien desde Telegram con
+`/events`, `/earnings` o `/balances`. La ventana de dos ruedas queda registrada
+en `decision_log.layers.earnings_window_shadow`: informa si un gate futuro
+habria bloqueado una compra nueva, pero no cambia la decision actual.
 
 Monitor:
 

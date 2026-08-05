@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 
 from src.analysis.enums import DecisionType
@@ -16,6 +17,7 @@ from src.analysis.opportunity_screener import (
     OpportunityReport,
     TradeType,
 )
+from src.analysis.upcoming_earnings import UpcomingEarningsEvent
 from src.analysis.validators import validate_execution_plan
 from src.collector.db import PortfolioDatabase
 from scripts import run_analysis
@@ -248,6 +250,19 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
         gate="NORMAL",
     )
     cfg = SimpleNamespace(database=SimpleNamespace(url="postgresql://unused"))
+    today = datetime.now(run_analysis.ART_TZ).date()
+    upcoming_event = UpcomingEarningsEvent(
+        observation_key=f"YAHOO:EARNINGS:UPST:{today.isoformat()}",
+        issuer_id="SEC:UPST",
+        ticker="UPST",
+        event_date=today,
+        event_time_hint="after_close",
+        source="YAHOO",
+        confidence=0.75,
+        lifecycle_status="ANNOUNCED",
+        fiscal_year=today.year,
+        fiscal_quarter=2,
+    )
 
     saved = asyncio.run(
         run_analysis._save_execution_plan_events(
@@ -259,12 +274,18 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
             total_ars=1_694_700,
             positions=[],
             owner_chat_id=1,
+            upcoming_earnings_events=[upcoming_event],
         )
     )
 
     assert saved == [463]
     assert conn.insert_args is not None
     assert conn.insert_args[7] == 10_040
+    layers = json.loads(conn.insert_args[6])
+    shadow = layers["earnings_window_shadow"]
+    assert shadow["state"] == "EVENT_DAY"
+    assert shadow["would_block_new_buy"] is True
+    assert shadow["decision_changed"] is False
 
 
 def test_decision_price_warning_excludes_blocked_rows(monkeypatch):

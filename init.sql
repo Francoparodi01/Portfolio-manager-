@@ -703,6 +703,9 @@ CREATE TABLE IF NOT EXISTS issuer_event_observations (
     event_type          TEXT NOT NULL,
     lifecycle_status    TEXT NOT NULL,
     event_date          DATE,
+    fiscal_year         SMALLINT,
+    fiscal_quarter      SMALLINT,
+    fiscal_period_end   DATE,
     event_time_hint     TEXT NOT NULL DEFAULT 'unknown',
     source_published_at TIMESTAMPTZ,
     source_url          TEXT NOT NULL,
@@ -729,6 +732,33 @@ CREATE INDEX IF NOT EXISTS idx_issuer_event_observations_lookup
 
 CREATE INDEX IF NOT EXISTS idx_issuer_event_observations_ticker
     ON issuer_event_observations (ticker, created_at DESC);
+
+ALTER TABLE issuer_event_observations
+    ADD COLUMN IF NOT EXISTS fiscal_year SMALLINT,
+    ADD COLUMN IF NOT EXISTS fiscal_quarter SMALLINT,
+    ADD COLUMN IF NOT EXISTS fiscal_period_end DATE;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'issuer_event_observations'::regclass
+          AND conname = 'issuer_event_observations_fiscal_year_check'
+    ) THEN
+        ALTER TABLE issuer_event_observations
+            ADD CONSTRAINT issuer_event_observations_fiscal_year_check
+            CHECK (fiscal_year IS NULL OR fiscal_year BETWEEN 1900 AND 2200);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'issuer_event_observations'::regclass
+          AND conname = 'issuer_event_observations_fiscal_quarter_check'
+    ) THEN
+        ALTER TABLE issuer_event_observations
+            ADD CONSTRAINT issuer_event_observations_fiscal_quarter_check
+            CHECK (fiscal_quarter IS NULL OR fiscal_quarter BETWEEN 1 AND 4);
+    END IF;
+END $$;
 
 DO $$
 BEGIN

@@ -993,15 +993,20 @@ class PortfolioDatabase:
                     """
                     INSERT INTO issuer_event_observations (
                         observation_key, issuer_id, ticker, source, event_type,
-                        lifecycle_status, event_date, event_time_hint,
+                        lifecycle_status, event_date, fiscal_year,
+                        fiscal_quarter, fiscal_period_end, event_time_hint,
                         source_published_at, source_url, source_hash, confidence,
                         actionable, title, raw_payload, updated_at
                     ) VALUES (
-                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,NOW()
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+                        $16,$17,$18::jsonb,NOW()
                     )
                     ON CONFLICT (observation_key) DO UPDATE SET
                         lifecycle_status = EXCLUDED.lifecycle_status,
                         event_date = EXCLUDED.event_date,
+                        fiscal_year = EXCLUDED.fiscal_year,
+                        fiscal_quarter = EXCLUDED.fiscal_quarter,
+                        fiscal_period_end = EXCLUDED.fiscal_period_end,
                         event_time_hint = EXCLUDED.event_time_hint,
                         source_published_at = EXCLUDED.source_published_at,
                         source_url = EXCLUDED.source_url,
@@ -1018,6 +1023,9 @@ class PortfolioDatabase:
                     observation.event_type,
                     observation.lifecycle_status,
                     observation.event_date,
+                    observation.fiscal_year,
+                    observation.fiscal_quarter,
+                    observation.fiscal_period_end,
                     observation.event_time_hint,
                     observation.source_published_at,
                     observation.source_url,
@@ -1043,7 +1051,8 @@ class PortfolioDatabase:
             rows = await conn.fetch(
                 """
                 SELECT observation_key, issuer_id, ticker, source, event_type,
-                       lifecycle_status, event_date, event_time_hint,
+                       lifecycle_status, event_date, fiscal_year,
+                       fiscal_quarter, fiscal_period_end, event_time_hint,
                        source_published_at, source_url, confidence, actionable,
                        title, raw_payload, created_at, updated_at
                 FROM issuer_event_observations
@@ -1052,6 +1061,75 @@ class PortfolioDatabase:
                 LIMIT $2
                 """,
                 str(ticker).strip() if ticker else None,
+                max(1, min(int(limit), 1000)),
+            )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["raw_payload"] = _json_payload(item.get("raw_payload"))
+            result.append(item)
+        return result
+
+    async def get_upcoming_earnings_events(
+        self,
+        *,
+        from_date: date | None = None,
+        to_date: date | None = None,
+        tickers: Sequence[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not self._pool:
+            return []
+        start = from_date or date.today()
+        end = to_date or (start + timedelta(days=45))
+        clean_tickers = sorted({
+            str(ticker or "").upper().strip()
+            for ticker in (tickers or [])
+            if str(ticker or "").strip()
+        })
+        async with self._pool.acquire() as conn:
+            await self._ensure_issuer_events_schema(conn)
+            rows = await conn.fetch(
+                """
+                WITH ranked AS (
+                    SELECT observation_key, issuer_id, ticker, source,
+                           lifecycle_status, event_date, fiscal_year,
+                           fiscal_quarter, fiscal_period_end, event_time_hint,
+                           source_url, confidence, actionable, title, raw_payload,
+                           updated_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY issuer_id, event_date
+                               ORDER BY
+                                   CASE lifecycle_status
+                                       WHEN 'CONFIRMED' THEN 0
+                                       WHEN 'ANNOUNCED' THEN 1
+                                       ELSE 2
+                                   END,
+                                   confidence DESC,
+                                   updated_at DESC
+                           ) AS source_rank
+                    FROM issuer_event_observations
+                    WHERE event_type = 'EARNINGS'
+                      AND event_date BETWEEN $1 AND $2
+                      AND lifecycle_status NOT IN ('CANCELLED', 'DISMISSED')
+                      AND (
+                          $3::text[] IS NULL
+                          OR UPPER(ticker) = ANY($3::text[])
+                      )
+                )
+                SELECT observation_key, issuer_id, ticker, source,
+                       lifecycle_status, event_date, fiscal_year,
+                       fiscal_quarter, fiscal_period_end, event_time_hint,
+                       source_url, confidence, actionable, title, raw_payload,
+                       updated_at
+                FROM ranked
+                WHERE source_rank = 1
+                ORDER BY event_date, ticker
+                LIMIT $4
+                """,
+                start,
+                end,
+                clean_tickers or None,
                 max(1, min(int(limit), 1000)),
             )
         result: list[dict[str, Any]] = []

@@ -124,6 +124,7 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("analisis_full", "Vista completa sin guardar"),
     ("analisis_debug", "Diagnostico sin guardar"),
     ("mercado", "Contexto mercado/noticias"),
+    ("events", "Proximos balances"),
     ("ticker", "Analisis tecnico por accion"),
     ("radar", "Radar compacto"),
     ("shadow", "Tesis shadow 5/20/40"),
@@ -576,6 +577,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("Analisis ticker",      callback_data="ticker_analysis"),
+            InlineKeyboardButton("Proximos balances",    callback_data="upcoming_events"),
         ],
         [
             InlineKeyboardButton("📅 Resumen semanal",  callback_data="weekly_summary"),
@@ -641,6 +643,7 @@ def help_text() -> str:
         "<b>Uso rapido</b>\n"
         "<code>/portfolio</code>: cartera actual y concentracion.\n"
         "<code>/analisis</code>: plan operativo compacto.\n"
+        "<code>/events</code>: proximos balances de la cartera.\n"
         "<code>/ticker NVDA</code>: analisis tecnico y grafico por accion.\n"
         "<code>/radar</code>: oportunidades no ejecutadas.\n"
         "<code>/performance</code>: resultado real con fills/movimientos.\n"
@@ -992,6 +995,16 @@ async def action_market_context(context: ContextTypes.DEFAULT_TYPE, chat_id: int
         "12",
         *_owner_cli_args(chat_id),
         timeout=300,
+    )
+    await send_text(context, chat_id, report)
+
+
+async def action_upcoming_events(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    report = await run_python_script(
+        "scripts/run_upcoming_events.py",
+        "--no-telegram",
+        *_owner_cli_args(chat_id),
+        timeout=60,
     )
     await send_text(context, chat_id, report)
 
@@ -2085,6 +2098,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "analysis_test": "Probando analisis sin guardar...",
     "analysis_debug": "Generando diagnostico sin guardar...",
     "market_context": "Revisando mercado y noticias...",
+    "upcoming_events": "Leyendo proximos balances...",
     "ticker_analysis": "Preparando analisis por accion...",
     "portfolio":     "💼 Leyendo último portfolio...",
     "analysis":      "🧠 Generando plan de cartera...",
@@ -2113,6 +2127,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "analysis_full":  action_analysis_full,
         "analysis_debug": action_analysis_debug,
         "market_context": action_market_context,
+        "upcoming_events": action_upcoming_events,
         "ticker_analysis": action_ticker_prompt,
         "weekly_summary": action_weekly_summary,
         "performance":    action_performance,
@@ -2212,6 +2227,10 @@ async def analysis_debug_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def market_context_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "market_context")
+
+
+async def upcoming_events_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "upcoming_events")
 
 async def ticker_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     args = list(getattr(c, "args", None) or [])
@@ -2571,6 +2590,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("mercado",          market_context_handler))
     app.add_handler(CommandHandler("market_context",   market_context_handler))
     app.add_handler(CommandHandler("noticias",         market_context_handler))
+    app.add_handler(CommandHandler("events",           upcoming_events_handler))
+    app.add_handler(CommandHandler("earnings",         upcoming_events_handler))
+    app.add_handler(CommandHandler("balances",         upcoming_events_handler))
     app.add_handler(CommandHandler("ticker",           ticker_handler))
     app.add_handler(CommandHandler("tecnico",          ticker_handler))
     app.add_handler(CommandHandler("accion",           ticker_handler))

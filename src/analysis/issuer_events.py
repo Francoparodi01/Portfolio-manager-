@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS issuer_event_observations (
     event_type          TEXT NOT NULL,
     lifecycle_status    TEXT NOT NULL,
     event_date          DATE,
+    fiscal_year         SMALLINT,
+    fiscal_quarter      SMALLINT,
+    fiscal_period_end   DATE,
     event_time_hint     TEXT NOT NULL DEFAULT 'unknown',
     source_published_at TIMESTAMPTZ,
     source_url          TEXT NOT NULL,
@@ -126,6 +129,33 @@ CREATE INDEX IF NOT EXISTS idx_issuer_event_observations_lookup
 
 CREATE INDEX IF NOT EXISTS idx_issuer_event_observations_ticker
     ON issuer_event_observations (ticker, created_at DESC);
+
+ALTER TABLE issuer_event_observations
+    ADD COLUMN IF NOT EXISTS fiscal_year SMALLINT,
+    ADD COLUMN IF NOT EXISTS fiscal_quarter SMALLINT,
+    ADD COLUMN IF NOT EXISTS fiscal_period_end DATE;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'issuer_event_observations'::regclass
+          AND conname = 'issuer_event_observations_fiscal_year_check'
+    ) THEN
+        ALTER TABLE issuer_event_observations
+            ADD CONSTRAINT issuer_event_observations_fiscal_year_check
+            CHECK (fiscal_year IS NULL OR fiscal_year BETWEEN 1900 AND 2200);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'issuer_event_observations'::regclass
+          AND conname = 'issuer_event_observations_fiscal_quarter_check'
+    ) THEN
+        ALTER TABLE issuer_event_observations
+            ADD CONSTRAINT issuer_event_observations_fiscal_quarter_check
+            CHECK (fiscal_quarter IS NULL OR fiscal_quarter BETWEEN 1 AND 4);
+    END IF;
+END $$;
 
 DO $$
 BEGIN
@@ -180,6 +210,22 @@ def normalize_event_status(value: Any) -> str:
 def normalize_time_hint(value: Any) -> str:
     candidate = str(value or "unknown").lower().strip()
     return candidate if candidate in EVENT_TIME_HINTS else "unknown"
+
+
+def normalize_fiscal_year(value: Any) -> int | None:
+    try:
+        year = int(value)
+    except (TypeError, ValueError):
+        return None
+    return year if 1900 <= year <= 2200 else None
+
+
+def normalize_fiscal_quarter(value: Any) -> int | None:
+    try:
+        quarter = int(value)
+    except (TypeError, ValueError):
+        return None
+    return quarter if 1 <= quarter <= 4 else None
 
 
 def payload_hash(payload: Mapping[str, Any] | None) -> str:
@@ -292,6 +338,9 @@ class IssuerEventObservation:
     source_url: str
     confidence: float
     title: str
+    fiscal_year: int | None = None
+    fiscal_quarter: int | None = None
+    fiscal_period_end: date | None = None
     raw_payload: dict[str, Any] = field(default_factory=dict)
     actionable: bool = False
 
@@ -322,6 +371,9 @@ class IssuerEventObservation:
             source_url=url,
             confidence=max(0.0, min(1.0, float(self.confidence))),
             title=title[:1000],
+            fiscal_year=normalize_fiscal_year(self.fiscal_year),
+            fiscal_quarter=normalize_fiscal_quarter(self.fiscal_quarter),
+            fiscal_period_end=self.fiscal_period_end,
             raw_payload=dict(self.raw_payload or {}),
             actionable=bool(self.actionable),
         )

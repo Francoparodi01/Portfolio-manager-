@@ -133,6 +133,7 @@ def test_yahoo_earnings_maps_issuer_symbol_and_market_timing():
                 "Event Name": "Q2 2026 Earnings Call",
                 "Event Start Date": "2026-08-10T20:00:00Z",
                 "Timing": "AMC",
+                "Fiscal Period End": "2026-06-30",
                 "EPS Estimate": 2.0,
                 "Reported EPS": None,
                 "Surprise(%)": None,
@@ -146,9 +147,13 @@ def test_yahoo_earnings_maps_issuer_symbol_and_market_timing():
     assert observed.issuer_id == "AR:YPF"
     assert observed.ticker == "YPFD"
     assert observed.event_time_hint == "after_close"
+    assert observed.fiscal_year == 2026
+    assert observed.fiscal_quarter == 2
+    assert observed.fiscal_period_end == date(2026, 6, 30)
     assert observed.raw_payload["event_scope"] == "issuer"
     assert observed.raw_payload["earnings_phase"] == "scheduled"
     assert observed.raw_payload["eps_estimate"] == 2.0
+    assert observed.raw_payload["fiscal_period_end"] == "2026-06-30"
 
 
 def test_yahoo_earnings_deduplicates_local_row_and_keeps_reported_result():
@@ -241,6 +246,8 @@ def test_finnhub_earnings_preserves_market_time_hint():
     assert observations[0].event_type == "EARNINGS"
     assert observations[0].event_time_hint == "after_close"
     assert observations[0].lifecycle_status == "ANNOUNCED"
+    assert observations[0].fiscal_year == 2026
+    assert observations[0].fiscal_quarter == 3
 
 
 def test_cnv_parser_filters_issuer_and_classifies_split():

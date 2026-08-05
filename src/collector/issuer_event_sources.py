@@ -389,6 +389,33 @@ def fmp_split_observations(
     return observations
 
 
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fiscal_period_fields(
+    event_name: str,
+    row: Mapping[str, Any],
+) -> tuple[int | None, int | None, date | None]:
+    quarter = _optional_int(row.get("Fiscal Quarter") or row.get("quarter"))
+    year = _optional_int(row.get("Fiscal Year") or row.get("year"))
+    if quarter not in {1, 2, 3, 4}:
+        match = re.search(r"\bQ([1-4])\b", event_name, flags=re.IGNORECASE)
+        quarter = int(match.group(1)) if match else None
+    if year is None or not 1900 <= year <= 2200:
+        match = re.search(r"\b(20\d{2})\b", event_name)
+        year = int(match.group(1)) if match else None
+    period_end = _date_from_value(
+        row.get("Fiscal Period End")
+        or row.get("Period End")
+        or row.get("period")
+    )
+    return year, quarter, period_end
+
+
 def finnhub_earnings_observations(
     payload: Mapping[str, Any],
     registry_by_symbol: Mapping[str, IssuerRegistryEntry],
@@ -407,6 +434,10 @@ def finnhub_earnings_observations(
         time_hint = {"bmo": "before_open", "amc": "after_close", "dmh": "during_market"}.get(hour, "unknown")
         quarter = str(row.get("quarter") or "")
         year = str(row.get("year") or "")
+        fiscal_year, fiscal_quarter, fiscal_period_end = _fiscal_period_fields(
+            f"Q{quarter} {year}",
+            row,
+        )
         observations.append(
             IssuerEventObservation(
                 observation_key=f"FINNHUB:EARNINGS:{symbol}:{event_date.isoformat()}:{year}:{quarter}",
@@ -424,8 +455,16 @@ def finnhub_earnings_observations(
                 ),
                 confidence=confidence_for("structured_provider"),
                 title=f"{symbol} earnings {event_date.isoformat()} ({hour or 'time unknown'})",
+                fiscal_year=fiscal_year,
+                fiscal_quarter=fiscal_quarter,
+                fiscal_period_end=fiscal_period_end,
                 raw_payload={
                     "provider_row": dict(row),
+                    "fiscal_year": fiscal_year,
+                    "fiscal_quarter": fiscal_quarter,
+                    "fiscal_period_end": (
+                        fiscal_period_end.isoformat() if fiscal_period_end else None
+                    ),
                     "confidence_basis": "structured_provider",
                 },
             ).normalized()
@@ -538,6 +577,10 @@ def yahoo_earnings_calendar_observations(
             continue
         event_date = event_at.date()
         event_name = str(row.get("Event Name") or "Earnings Announcement").strip()
+        fiscal_year, fiscal_quarter, fiscal_period_end = _fiscal_period_fields(
+            event_name,
+            row,
+        )
         reported_eps = _optional_number(row.get("Reported EPS"))
         surprise_pct = _optional_number(row.get("Surprise(%)"))
         phase = (
@@ -563,11 +606,19 @@ def yahoo_earnings_calendar_observations(
             source_url=YAHOO_FINANCE_QUOTE_URL.format(symbol=symbol),
             confidence=confidence_for("structured_provider"),
             title=f"{symbol} {event_name}",
+            fiscal_year=fiscal_year,
+            fiscal_quarter=fiscal_quarter,
+            fiscal_period_end=fiscal_period_end,
             raw_payload={
                 "provider_row": row,
                 "yahoo_symbol": symbol,
                 "event_scope": scope,
                 "earnings_phase": phase,
+                "fiscal_year": fiscal_year,
+                "fiscal_quarter": fiscal_quarter,
+                "fiscal_period_end": (
+                    fiscal_period_end.isoformat() if fiscal_period_end else None
+                ),
                 "eps_estimate": _optional_number(row.get("EPS Estimate")),
                 "reported_eps": reported_eps,
                 "surprise_pct": surprise_pct,

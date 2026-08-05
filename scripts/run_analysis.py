@@ -86,6 +86,13 @@ from src.analysis.manual_market_events import (
     manual_event_layers_for_ticker,
     render_manual_market_events_html,
 )
+from src.analysis.upcoming_earnings import (
+    DEFAULT_UPCOMING_EARNINGS_DAYS,
+    UpcomingEarningsEvent,
+    earnings_shadow_layer_for_ticker,
+    render_upcoming_earnings_html,
+    upcoming_earnings_from_rows,
+)
 from src.analysis.opportunity_screener import (
     CandidateStatus,
     OpportunityReport,
@@ -1095,6 +1102,7 @@ async def _save_execution_plan_events(
     manual_market_events: list[ManualMarketEvent] | None = None,
     corporate_action_effects: list[CorporateActionEffect] | None = None,
     corporate_action_flags: list[PriceQualityFlag] | None = None,
+    upcoming_earnings_events: list[UpcomingEarningsEvent] | None = None,
 ) -> list[int]:
     """
     Guarda eventos del ExecutionPlan en decision_log.
@@ -1131,6 +1139,7 @@ async def _save_execution_plan_events(
     portfolio_snapshot_id = _portfolio_snapshot_id_from_snapshot(portfolio_snapshot)
     manual_market_events = list(manual_market_events or [])
     corporate_action_effects = list(corporate_action_effects or [])
+    upcoming_earnings_events = list(upcoming_earnings_events or [])
     corporate_action_flag_by_ticker = {
         flag.ticker.upper(): flag for flag in (corporate_action_flags or [])
     }
@@ -1235,6 +1244,13 @@ async def _save_execution_plan_events(
             "amount_ars": _get_amount(order),
             "theoretical_amount_ars": _get_theoretical_amount(order),
         }
+        earnings_layer = earnings_shadow_layer_for_ticker(
+            ticker,
+            upcoming_earnings_events,
+            today=decided_at.astimezone(ART_TZ).date(),
+        )
+        if earnings_layer:
+            extra["earnings_window_shadow"] = earnings_layer
 
         try:
             event_layers = manual_event_layers_for_ticker(ticker, manual_market_events)
@@ -2271,6 +2287,7 @@ def _render_compact_report(
     no_persist: bool = False,
     off_market_context: bool = False,
     manual_market_events: list[ManualMarketEvent] | None = None,
+    upcoming_earnings_events: list[UpcomingEarningsEvent] | None = None,
 ) -> str:
     plan = execution_plan
     timing_ctx = _execution_timing_context()
@@ -2304,6 +2321,13 @@ def _render_compact_report(
     )
     if exposure_lines:
         lines.extend(exposure_lines)
+    earnings_lines = render_upcoming_earnings_html(
+        upcoming_earnings_events or [],
+        today=datetime.now(ART_TZ).date(),
+        compact=True,
+    )
+    if earnings_lines:
+        lines.extend(earnings_lines)
     if timing_ctx["next_session"]:
         lines.append("⚠️ Fuera de rueda — validar apertura, no perseguir gaps.")
     if off_market_context:
@@ -2457,6 +2481,7 @@ def render_report(
     no_persist: bool = False,
     off_market_context: bool = False,
     manual_market_events: list[ManualMarketEvent] | None = None,
+    upcoming_earnings_events: list[UpcomingEarningsEvent] | None = None,
 ) -> str:
     plan = execution_plan
     gate = plan.gate if plan else "NORMAL"
@@ -2479,6 +2504,7 @@ def render_report(
             no_persist=no_persist,
             off_market_context=off_market_context,
             manual_market_events=manual_market_events,
+            upcoming_earnings_events=upcoming_earnings_events,
         )
 
     # ── Header ────────────────────────────────────────────────────────────────
@@ -2498,6 +2524,12 @@ def render_report(
     )
     if exposure_lines:
         h.extend(exposure_lines)
+    earnings_lines = render_upcoming_earnings_html(
+        upcoming_earnings_events or [],
+        today=datetime.now(ART_TZ).date(),
+    )
+    if earnings_lines:
+        h.extend(earnings_lines)
     if timing_ctx["next_session"]:
         h.append(f"🕒 <b>{timing_ctx['headline']}</b> — {timing_ctx['note']}")
     if off_market_context:
@@ -3185,6 +3217,27 @@ async def _load_active_manual_market_events(cfg) -> list[ManualMarketEvent]:
         await db.close()
 
 
+async def _load_upcoming_earnings_events(
+    cfg,
+    *,
+    tickers: list[str],
+    days: int = DEFAULT_UPCOMING_EARNINGS_DAYS,
+) -> list[UpcomingEarningsEvent]:
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        today = datetime.now(ART_TZ).date()
+        rows = await db.get_upcoming_earnings_events(
+            from_date=today,
+            to_date=today + timedelta(days=max(1, int(days))),
+            tickers=tickers,
+            limit=100,
+        )
+        return upcoming_earnings_from_rows(rows)
+    finally:
+        await db.close()
+
+
 async def _load_corporate_action_context(
     cfg,
 ) -> tuple[list[CorporateActionEffect], list[PriceQualityFlag]]:
@@ -3383,6 +3436,23 @@ async def main(
             )
     except Exception as exc:
         logger.warning("No se pudieron cargar eventos manuales; sigo sin guard: %s", exc)
+
+    upcoming_earnings_events: list[UpcomingEarningsEvent] = []
+    try:
+        upcoming_earnings_events = await _load_upcoming_earnings_events(
+            cfg,
+            tickers=tickers,
+        )
+        if upcoming_earnings_events:
+            logger.info(
+                "Proximos balances: %s",
+                [
+                    f"{event.ticker}:{event.event_date.isoformat()}"
+                    for event in upcoming_earnings_events
+                ],
+            )
+    except Exception as exc:
+        logger.warning("No se pudieron cargar proximos balances: %s", exc)
 
     corporate_action_effects: list[CorporateActionEffect] = []
     corporate_action_flags: list[PriceQualityFlag] = []
@@ -3936,6 +4006,7 @@ async def main(
                 manual_market_events=manual_market_events,
                 corporate_action_effects=corporate_action_effects,
                 corporate_action_flags=corporate_action_flags,
+                upcoming_earnings_events=upcoming_earnings_events,
             )
             logger.info(f"Eventos ExecutionPlan guardados en DB: ids={saved}")
         except Exception as e:
@@ -3978,6 +4049,7 @@ async def main(
         no_persist = no_persist,
         off_market_context = off_market_context,
         manual_market_events = manual_market_events,
+        upcoming_earnings_events = upcoming_earnings_events,
     )
 
     # Validación de consistencia del header vs plan (no bloquea el envío)

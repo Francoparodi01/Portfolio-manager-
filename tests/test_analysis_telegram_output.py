@@ -41,7 +41,7 @@ if "telegram" not in sys.modules:
     sys.modules["telegram.error"] = error
     sys.modules["telegram.ext"] = ext
 
-from scripts.telegram_bot import split_message
+from scripts.telegram_bot import BOT_COMMAND_SPECS, split_message
 
 
 def test_compact_reason_keeps_operational_reason_without_premature_ellipsis():
@@ -78,3 +78,7 @@ def test_split_message_splits_oversized_single_lines():
     assert len(chunks) > 1
     assert all(len(chunk) <= 80 for chunk in chunks)
     assert "".join(chunks) == "x" * 250
+
+
+def test_events_command_is_registered_in_telegram_menu():
+    assert ("events", "Proximos balances") in BOT_COMMAND_SPECS
