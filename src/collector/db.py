@@ -40,6 +40,12 @@ from src.analysis.corporate_actions import (
     normalize_candle_rows,
     rebase_reference_price,
 )
+from src.analysis.issuer_events import (
+    ISSUER_EVENTS_SCHEMA_SQL,
+    IssuerEventObservation,
+    IssuerInstrument,
+    IssuerRegistryEntry,
+)
 from src.analysis.decision_context import build_decision_run_context
 from src.analysis.decision_engine import directional_return
 from src.analysis.fill_reconciliation import ExecutionCandidate, choose_execution_candidate
@@ -311,6 +317,7 @@ class PortfolioDatabase:
         self._decision_audit_scope_ready = False
         self._manual_market_events_ready = False
         self._corporate_actions_ready = False
+        self._issuer_events_ready = False
         self._preclose_alerts_ready = False
         self._outcome_horizon_ready = False
 
@@ -374,6 +381,18 @@ class PortfolioDatabase:
             raise RuntimeError("Llamar connect() primero")
         async with self._pool.acquire() as conn:
             await self._ensure_corporate_actions_schema(conn)
+
+    async def _ensure_issuer_events_schema(self, conn) -> None:
+        if self._issuer_events_ready:
+            return
+        await conn.execute(ISSUER_EVENTS_SCHEMA_SQL)
+        self._issuer_events_ready = True
+
+    async def ensure_issuer_events_schema(self) -> None:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        async with self._pool.acquire() as conn:
+            await self._ensure_issuer_events_schema(conn)
 
     async def _ensure_preclose_alerts_schema(self, conn) -> None:
         if self._preclose_alerts_ready:
@@ -816,6 +835,226 @@ class PortfolioDatabase:
                 clean_tickers,
             )
         return [corporate_action_effect_from_row(dict(row)) for row in rows]
+
+    async def get_latest_portfolio_instrument_seeds(self) -> list[dict[str, str]]:
+        """Return local instruments from each owner's newest portfolio snapshot.
+
+        The result is discovery input only. It is not an instruction to create
+        an effect or trade, and may contain an issuer hint from a previously
+        confirmed corporate action such as YPFD -> YPF.
+        """
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        async with self._pool.acquire() as conn:
+            await self._ensure_corporate_actions_schema(conn)
+            rows = await conn.fetch(
+                """
+                WITH latest_snapshots AS (
+                    SELECT DISTINCT ON (COALESCE(owner_chat_id, 0))
+                        snapshot_id
+                    FROM portfolio_snapshots
+                    ORDER BY COALESCE(owner_chat_id, 0), scraped_at DESC
+                )
+                SELECT DISTINCT ON (UPPER(p.ticker), p.asset_type, p.currency)
+                    UPPER(p.ticker) AS ticker,
+                    COALESCE(p.asset_type, 'UNKNOWN') AS asset_type,
+                    COALESCE(p.currency, 'ARS') AS currency,
+                    COALESCE(corporate.issuer_id, '') AS issuer_hint
+                FROM positions p
+                JOIN latest_snapshots latest USING (snapshot_id)
+                LEFT JOIN LATERAL (
+                    SELECT event.issuer_id
+                    FROM corporate_event_instrument_effects effect
+                    JOIN corporate_events event ON event.id = effect.event_id
+                    WHERE UPPER(effect.ticker) = UPPER(p.ticker)
+                      AND event.lifecycle_status IN ('CONFIRMED', 'EFFECTIVE')
+                    ORDER BY event.effective_at DESC, event.id DESC
+                    LIMIT 1
+                ) corporate ON TRUE
+                WHERE COALESCE(p.ticker, '') <> ''
+                ORDER BY UPPER(p.ticker), p.asset_type, p.currency
+                """
+            )
+        return [dict(row) for row in rows]
+
+    async def upsert_issuer_registry(
+        self,
+        entries: Sequence[IssuerRegistryEntry],
+        instruments: Sequence[IssuerInstrument],
+    ) -> dict[str, int]:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        normalized_entries = [entry.normalized() for entry in entries]
+        normalized_instruments = [instrument.normalized() for instrument in instruments]
+        if not normalized_entries and not normalized_instruments:
+            return {"issuers": 0, "instruments": 0}
+
+        async with self._pool.acquire() as conn:
+            await self._ensure_issuer_events_schema(conn)
+            async with conn.transaction():
+                issuers_saved = 0
+                for entry in normalized_entries:
+                    status = await conn.execute(
+                        """
+                        INSERT INTO issuer_registry (
+                            issuer_id, issuer_name, source_market, primary_symbol,
+                            sec_cik, cnv_entity_name, metadata, is_active, updated_at
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,TRUE,NOW())
+                        ON CONFLICT (issuer_id) DO UPDATE SET
+                            issuer_name = EXCLUDED.issuer_name,
+                            source_market = EXCLUDED.source_market,
+                            primary_symbol = EXCLUDED.primary_symbol,
+                            sec_cik = NULLIF(EXCLUDED.sec_cik, ''),
+                            cnv_entity_name = NULLIF(EXCLUDED.cnv_entity_name, ''),
+                            metadata = EXCLUDED.metadata,
+                            is_active = TRUE,
+                            updated_at = NOW()
+                        """,
+                        entry.issuer_id,
+                        entry.issuer_name,
+                        entry.source_market,
+                        entry.primary_symbol,
+                        entry.sec_cik or None,
+                        entry.cnv_entity_name or None,
+                        json.dumps(entry.metadata, ensure_ascii=False),
+                    )
+                    issuers_saved += status.startswith(("INSERT", "UPDATE"))
+
+                instruments_saved = 0
+                for instrument in normalized_instruments:
+                    status = await conn.execute(
+                        """
+                        INSERT INTO issuer_instruments (
+                            issuer_id, ticker, instrument_id, venue, asset_type,
+                            currency, source_ticker, metadata, is_active, updated_at
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,TRUE,NOW())
+                        ON CONFLICT (instrument_id) DO UPDATE SET
+                            issuer_id = EXCLUDED.issuer_id,
+                            ticker = EXCLUDED.ticker,
+                            venue = EXCLUDED.venue,
+                            asset_type = EXCLUDED.asset_type,
+                            currency = EXCLUDED.currency,
+                            source_ticker = EXCLUDED.source_ticker,
+                            metadata = EXCLUDED.metadata,
+                            is_active = TRUE,
+                            updated_at = NOW()
+                        """,
+                        instrument.issuer_id,
+                        instrument.ticker,
+                        instrument.instrument_id,
+                        instrument.venue,
+                        instrument.asset_type,
+                        instrument.currency,
+                        instrument.source_ticker,
+                        json.dumps(instrument.metadata, ensure_ascii=False),
+                    )
+                    instruments_saved += status.startswith(("INSERT", "UPDATE"))
+        return {"issuers": issuers_saved, "instruments": instruments_saved}
+
+    async def get_active_issuer_registry(self) -> list[IssuerRegistryEntry]:
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            await self._ensure_issuer_events_schema(conn)
+            rows = await conn.fetch(
+                """
+                SELECT issuer_id, issuer_name, source_market, primary_symbol,
+                       sec_cik, cnv_entity_name, metadata
+                FROM issuer_registry
+                WHERE is_active = TRUE
+                ORDER BY source_market, primary_symbol, issuer_id
+                """
+            )
+        return [
+            IssuerRegistryEntry(
+                issuer_id=str(row["issuer_id"]),
+                issuer_name=str(row["issuer_name"]),
+                source_market=str(row["source_market"]),
+                primary_symbol=str(row["primary_symbol"] or ""),
+                sec_cik=str(row["sec_cik"] or ""),
+                cnv_entity_name=str(row["cnv_entity_name"] or ""),
+                metadata=dict(row["metadata"] or {}),
+            ).normalized()
+            for row in rows
+        ]
+
+    async def save_issuer_event_observations(
+        self,
+        observations: Sequence[IssuerEventObservation],
+    ) -> int:
+        if not self._pool or not observations:
+            return 0
+        normalized = [observation.normalized() for observation in observations]
+        saved = 0
+        async with self._pool.acquire() as conn:
+            await self._ensure_issuer_events_schema(conn)
+            for observation in normalized:
+                status = await conn.execute(
+                    """
+                    INSERT INTO issuer_event_observations (
+                        observation_key, issuer_id, ticker, source, event_type,
+                        lifecycle_status, event_date, event_time_hint,
+                        source_published_at, source_url, source_hash, confidence,
+                        actionable, title, raw_payload, updated_at
+                    ) VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,NOW()
+                    )
+                    ON CONFLICT (observation_key) DO UPDATE SET
+                        lifecycle_status = EXCLUDED.lifecycle_status,
+                        event_date = EXCLUDED.event_date,
+                        event_time_hint = EXCLUDED.event_time_hint,
+                        source_published_at = EXCLUDED.source_published_at,
+                        source_url = EXCLUDED.source_url,
+                        source_hash = EXCLUDED.source_hash,
+                        confidence = EXCLUDED.confidence,
+                        title = EXCLUDED.title,
+                        raw_payload = EXCLUDED.raw_payload,
+                        updated_at = NOW()
+                    """,
+                    observation.observation_key,
+                    observation.issuer_id,
+                    observation.ticker or None,
+                    observation.source,
+                    observation.event_type,
+                    observation.lifecycle_status,
+                    observation.event_date,
+                    observation.event_time_hint,
+                    observation.source_published_at,
+                    observation.source_url,
+                    observation.source_hash,
+                    observation.confidence,
+                    False,
+                    observation.title,
+                    json.dumps(observation.raw_payload, ensure_ascii=False),
+                )
+                saved += status.startswith(("INSERT", "UPDATE"))
+        return saved
+
+    async def get_issuer_event_observations(
+        self,
+        *,
+        limit: int = 100,
+        ticker: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            await self._ensure_issuer_events_schema(conn)
+            rows = await conn.fetch(
+                """
+                SELECT observation_key, issuer_id, ticker, source, event_type,
+                       lifecycle_status, event_date, event_time_hint,
+                       source_published_at, source_url, confidence, actionable,
+                       title, raw_payload, created_at, updated_at
+                FROM issuer_event_observations
+                WHERE ($1::text IS NULL OR UPPER(ticker) = UPPER($1))
+                ORDER BY COALESCE(source_published_at, updated_at) DESC, id DESC
+                LIMIT $2
+                """,
+                str(ticker).strip() if ticker else None,
+                max(1, min(int(limit), 1000)),
+            )
+        return [dict(row) for row in rows]
 
     async def save_price_quality_flags(
         self,

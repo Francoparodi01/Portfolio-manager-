@@ -63,6 +63,9 @@ Opcionales/relevantes:
 - `SENTIMENT_PIPELINE_ENABLED`, `SENTIMENT_PIPELINE_INTERVAL_SECONDS`,
   `SENTIMENT_OLLAMA_MODEL`, `OLLAMA_URL`.
 - `THESIS_SHADOW_ENABLED`.
+- `ISSUER_EVENT_INGESTION_ENABLED`, `ISSUER_EVENT_INGESTION_INTERVAL_SECONDS`,
+  `ISSUER_EVENT_INGESTION_SOURCES`, `SEC_USER_AGENT`.
+- `FMP_API_KEY`, `FINNHUB_API_KEY` para fuentes opcionales de eventos.
 - `SHADOW_CAUSAL_OLLAMA_MODEL`.
 - `MULTIUSER_ENABLED`, `APP_ENCRYPTION_KEY` en multiusuario.
 
@@ -87,6 +90,7 @@ Definidos en `_scheduler_main()` de [src/scheduler/runner.py](../src/scheduler/r
 | `thesis_shadow` | 17:18 | Shadow forecasts si `THESIS_SHADOW_ENABLED`. |
 | `update_outcomes_daily` | 21:30 | Actualiza outcomes. |
 | `sentiment_pipeline` | intervalo | Sentiment si `SENTIMENT_PIPELINE_ENABLED`. |
+| `issuer_event_ingestion` | intervalo | Evidencia SEC/CNV/FMP/Finnhub si `ISSUER_EVENT_INGESTION_ENABLED`. |
 
 ## Comandos de diagnostico
 

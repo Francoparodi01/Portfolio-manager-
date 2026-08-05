@@ -655,6 +655,81 @@ CREATE INDEX IF NOT EXISTS idx_price_quality_flags_active
 CREATE INDEX IF NOT EXISTS idx_corporate_applications_event
     ON corporate_event_applications (event_id, instrument_effect_id, component);
 
+-- Issuer-event discovery: shadow observations from SEC, FMP, Finnhub and CNV.
+-- These records are evidence only; they do not alter corporate effects or plans.
+CREATE TABLE IF NOT EXISTS issuer_registry (
+    issuer_id         TEXT PRIMARY KEY,
+    issuer_name       TEXT NOT NULL,
+    source_market     TEXT NOT NULL,
+    primary_symbol    TEXT,
+    sec_cik           TEXT,
+    cnv_entity_name   TEXT,
+    metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (source_market IN ('US', 'AR', 'OTHER'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issuer_registry_sec_cik
+    ON issuer_registry (sec_cik)
+    WHERE sec_cik IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS issuer_instruments (
+    id                BIGSERIAL PRIMARY KEY,
+    issuer_id         TEXT NOT NULL REFERENCES issuer_registry(issuer_id) ON DELETE CASCADE,
+    ticker            TEXT NOT NULL,
+    instrument_id     TEXT NOT NULL UNIQUE,
+    venue             TEXT,
+    asset_type        TEXT,
+    currency          TEXT,
+    source_ticker     TEXT,
+    metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (ticker, venue, currency)
+);
+
+CREATE INDEX IF NOT EXISTS idx_issuer_instruments_active
+    ON issuer_instruments (issuer_id, is_active, ticker);
+
+CREATE TABLE IF NOT EXISTS issuer_event_observations (
+    id                  BIGSERIAL PRIMARY KEY,
+    observation_key     TEXT NOT NULL UNIQUE,
+    issuer_id           TEXT NOT NULL REFERENCES issuer_registry(issuer_id) ON DELETE CASCADE,
+    ticker              TEXT,
+    source              TEXT NOT NULL,
+    event_type          TEXT NOT NULL,
+    lifecycle_status    TEXT NOT NULL,
+    event_date          DATE,
+    event_time_hint     TEXT NOT NULL DEFAULT 'unknown',
+    source_published_at TIMESTAMPTZ,
+    source_url          TEXT NOT NULL,
+    source_hash         TEXT NOT NULL,
+    confidence          FLOAT NOT NULL,
+    actionable          BOOLEAN NOT NULL DEFAULT FALSE,
+    title               TEXT NOT NULL,
+    raw_payload         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (source IN ('SEC', 'FMP', 'FINNHUB', 'CNV')),
+    CHECK (event_type IN (
+        'FILING', 'EARNINGS', 'SPLIT', 'REVERSE_SPLIT',
+        'DEPOSITARY_RATIO_CHANGE', 'DIVIDEND', 'MERGER',
+        'DELISTING', 'RELEVANT_FACT'
+    )),
+    CHECK (lifecycle_status IN ('DISCOVERED', 'ANNOUNCED', 'CONFIRMED', 'CANCELLED', 'DISMISSED')),
+    CHECK (event_time_hint IN ('before_open', 'during_market', 'after_close', 'unknown')),
+    CHECK (confidence >= 0 AND confidence <= 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_issuer_event_observations_lookup
+    ON issuer_event_observations (issuer_id, event_date DESC, source, event_type);
+
+CREATE INDEX IF NOT EXISTS idx_issuer_event_observations_ticker
+    ON issuer_event_observations (ticker, created_at DESC);
+
 -- Eventos/catalysts manuales cargados por el operador.
 -- No scrapea fuentes externas: declara riesgos conocidos como earnings,
 -- guidance, Fed, CPI, OPEC, etc. para contextualizar y bloquear entradas.

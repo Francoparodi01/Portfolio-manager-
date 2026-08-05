@@ -120,6 +120,15 @@ SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS = int(
     os.getenv("SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS", "604800")
 )
 THESIS_SHADOW_ENABLED = os.getenv("THESIS_SHADOW_ENABLED", "true").lower() == "true"
+ISSUER_EVENT_INGESTION_ENABLED = os.getenv(
+    "ISSUER_EVENT_INGESTION_ENABLED", "false"
+).lower() == "true"
+ISSUER_EVENT_INGESTION_INTERVAL_SECONDS = int(
+    os.getenv("ISSUER_EVENT_INGESTION_INTERVAL_SECONDS", "21600")
+)
+ISSUER_EVENT_INGESTION_SOURCES = os.getenv(
+    "ISSUER_EVENT_INGESTION_SOURCES", "sec,cnv,fmp,finnhub"
+)
 
 WARNING_PCT = -0.04
 CRITICAL_PCT = -0.06
@@ -1430,6 +1439,46 @@ async def run_sentiment_pipeline_job() -> None:
         logger.warning("sentiment_pipeline timeout")
     except Exception as exc:
         logger.warning("sentiment_pipeline fallo no critico: %s", exc, exc_info=True)
+
+
+async def run_issuer_event_ingestion_job() -> None:
+    """Collect issuer-source observations without changing decision layers."""
+    if not ISSUER_EVENT_INGESTION_ENABLED:
+        logger.debug("issuer_event_ingestion omitido: disabled")
+        return
+
+    cmd = [
+        sys.executable,
+        "scripts/run_issuer_event_ingestion.py",
+        "--sources",
+        ISSUER_EVENT_INGESTION_SOURCES,
+    ]
+    logger.info("issuer_event_ingestion iniciando: sources=%s", ISSUER_EVENT_INGESTION_SOURCES)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=240)
+        out = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            logger.warning(
+                "issuer_event_ingestion fallo rc=%s stderr=%s",
+                proc.returncode,
+                err[-1200:],
+            )
+            return
+        logger.info(
+            "issuer_event_ingestion OK stdout=%s stderr=%d chars",
+            out[-1200:],
+            len(err),
+        )
+    except asyncio.TimeoutError:
+        logger.warning("issuer_event_ingestion timeout")
+    except Exception as exc:
+        logger.warning("issuer_event_ingestion fallo no critico: %s", exc, exc_info=True)
 
 
 async def run_thesis_shadow_job() -> None:
@@ -2768,6 +2817,19 @@ async def _scheduler_main() -> None:
             max_instances=1,
             replace_existing=True,
         )
+    if ISSUER_EVENT_INGESTION_ENABLED:
+        scheduler.add_job(
+            run_issuer_event_ingestion_job,
+            IntervalTrigger(
+                seconds=max(3600, ISSUER_EVENT_INGESTION_INTERVAL_SECONDS),
+                timezone=TIMEZONE,
+            ),
+            id="issuer_event_ingestion",
+            name="Issuer event ingestion shadow",
+            misfire_grace_time=300,
+            max_instances=1,
+            replace_existing=True,
+        )
 
     heartbeat_task = asyncio.create_task(
         _scheduler_heartbeat_loop(),
@@ -2775,10 +2837,11 @@ async def _scheduler_main() -> None:
     )
     scheduler.start()
     logger.info(
-        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 16:15/16:45 preclose alerts; 16:59 intraday off; 17:02 full; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; sentiment context=%s; thesis shadow=%s"
+        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 16:15/16:45 preclose alerts; 16:59 intraday off; 17:02 full; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; sentiment context=%s; thesis shadow=%s; issuer events=%s"
         % (
             "on" if SENTIMENT_PIPELINE_ENABLED else "off",
             "on" if THESIS_SHADOW_ENABLED else "off",
+            "on" if ISSUER_EVENT_INGESTION_ENABLED else "off",
         )
     )
 
