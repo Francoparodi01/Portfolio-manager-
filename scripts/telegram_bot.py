@@ -2031,6 +2031,7 @@ CALLBACK_ALIASES: dict[str, str] = {
     "mercado":          "market_context",
     "noticias":         "market_context",
     "contexto":         "market_context",
+    "upcoming_events":  "upcoming_events",
     "ticker_analysis":  "ticker_analysis",
     "ticker":           "ticker_analysis",
     "tecnico":          "ticker_analysis",

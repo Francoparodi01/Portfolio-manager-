@@ -12,7 +12,8 @@ if "telegram" not in sys.modules:
 
     class _TelegramDummy:
         def __init__(self, *args, **kwargs):
-            pass
+            self.inline_keyboard = args[0] if args else kwargs.get("inline_keyboard")
+            self.callback_data = kwargs.get("callback_data")
 
     class _FilterDummy:
         def __and__(self, other):
@@ -41,7 +42,12 @@ if "telegram" not in sys.modules:
     sys.modules["telegram.error"] = error
     sys.modules["telegram.ext"] = ext
 
-from scripts.telegram_bot import BOT_COMMAND_SPECS, split_message
+from scripts.telegram_bot import (
+    BOT_COMMAND_SPECS,
+    CALLBACK_ALIASES,
+    main_keyboard,
+    split_message,
+)
 
 
 def test_compact_reason_keeps_operational_reason_without_premature_ellipsis():
@@ -82,3 +88,17 @@ def test_split_message_splits_oversized_single_lines():
 
 def test_events_command_is_registered_in_telegram_menu():
     assert ("events", "Proximos balances") in BOT_COMMAND_SPECS
+    assert CALLBACK_ALIASES["upcoming_events"] == "upcoming_events"
+
+
+def test_main_keyboard_callbacks_are_all_routable():
+    keyboard = main_keyboard()
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    }
+
+    assert callbacks
+    assert callbacks - CALLBACK_ALIASES.keys() == set()
