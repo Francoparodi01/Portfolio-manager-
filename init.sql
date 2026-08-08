@@ -526,6 +526,218 @@ CREATE INDEX IF NOT EXISTS idx_shadow_causal_forecast
     ON shadow_thesis_causal_analysis(forecast_id)
     WHERE forecast_id IS NOT NULL;
 
+-- Sentiment pipeline and later audit schemas remain outside causal shadow.
+-- Learning shadow v1: counterfactual audit of blocked decisions.
+-- Reads operational evidence but writes only to learning_shadow_*.
+CREATE TABLE IF NOT EXISTS learning_shadow_runs (
+    run_id                  UUID PRIMARY KEY,
+    owner_chat_id           BIGINT NOT NULL DEFAULT 0,
+    captured_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    lookback_days           INTEGER NOT NULL CHECK (lookback_days > 0),
+    material_return_bps     INTEGER NOT NULL CHECK (material_return_bps >= 0),
+    policy_version          TEXT NOT NULL,
+    schema_version          INTEGER NOT NULL,
+    decisions_seen          INTEGER NOT NULL DEFAULT 0,
+    cases_upserted          INTEGER NOT NULL DEFAULT 0,
+    status                  TEXT NOT NULL DEFAULT 'COMPLETE',
+    metadata                JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS learning_shadow_cases (
+    id                          BIGSERIAL PRIMARY KEY,
+    owner_chat_id               BIGINT NOT NULL DEFAULT 0,
+    decision_log_id             BIGINT NOT NULL REFERENCES decision_log(id) ON DELETE CASCADE,
+    ticker                      TEXT NOT NULL,
+    decision                    TEXT NOT NULL CHECK (decision IN ('BUY', 'SELL')),
+    decided_at                  TIMESTAMPTZ NOT NULL,
+    horizon_days                INTEGER NOT NULL CHECK (horizon_days IN (5, 10, 20, 40)),
+    shadow_horizon_sessions     INTEGER NOT NULL CHECK (shadow_horizon_sessions IN (5, 20, 40)),
+    block_reason                TEXT,
+    outcome_basis               TEXT,
+    outcome_source              TEXT,
+    directional_outcome         FLOAT,
+    material_return_bps         INTEGER NOT NULL,
+    classification              TEXT NOT NULL CHECK (classification IN (
+        'PENDING', 'MISSING_OUTCOME', 'EXCLUDED_BASIS', 'EXCLUDED_OUTLIER',
+        'POTENTIAL_FALSE_NEGATIVE', 'POSITIVE_BELOW_THRESHOLD',
+        'NON_POSITIVE_COUNTERFACTUAL'
+    )),
+    shadow_forecast_id          BIGINT REFERENCES shadow_thesis_forecasts(id) ON DELETE SET NULL,
+    shadow_as_of_ts             TIMESTAMPTZ,
+    shadow_expected_return      FLOAT,
+    shadow_probability_up       FLOAT,
+    shadow_action               TEXT,
+    shadow_direction_correct    BOOLEAN,
+    shadow_supports_direction   BOOLEAN,
+    policy_version              TEXT NOT NULL,
+    schema_version              INTEGER NOT NULL,
+    first_observed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_evaluated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_run_id                 UUID NOT NULL REFERENCES learning_shadow_runs(run_id) ON DELETE RESTRICT,
+    metadata                    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (owner_chat_id, decision_log_id, horizon_days)
+);
+
+CREATE TABLE IF NOT EXISTS learning_shadow_metric_snapshots (
+    id                              BIGSERIAL PRIMARY KEY,
+    run_id                          UUID NOT NULL REFERENCES learning_shadow_runs(run_id) ON DELETE CASCADE,
+    owner_chat_id                   BIGINT NOT NULL DEFAULT 0,
+    captured_at                     TIMESTAMPTZ NOT NULL,
+    snapshot_date                   DATE NOT NULL,
+    lookback_days                   INTEGER NOT NULL,
+    horizon_days                    INTEGER NOT NULL CHECK (horizon_days IN (5, 10, 20, 40)),
+    shadow_horizon_sessions         INTEGER NOT NULL CHECK (shadow_horizon_sessions IN (5, 20, 40)),
+    material_return_bps             INTEGER NOT NULL,
+    policy_version                  TEXT NOT NULL,
+    total_cases                     INTEGER NOT NULL,
+    matured_cases                   INTEGER NOT NULL,
+    potential_false_negatives       INTEGER NOT NULL,
+    positive_below_threshold        INTEGER NOT NULL,
+    non_positive_cases              INTEGER NOT NULL,
+    pending_cases                   INTEGER NOT NULL,
+    missing_outcome_cases           INTEGER NOT NULL,
+    excluded_cases                  INTEGER NOT NULL,
+    shadow_linked_cases             INTEGER NOT NULL,
+    shadow_aligned_cases            INTEGER NOT NULL,
+    shadow_coverage_rate            FLOAT,
+    shadow_alignment_rate           FLOAT,
+    potential_false_negative_rate   FLOAT,
+    mean_directional_outcome        FLOAT,
+    mean_false_negative_outcome     FLOAT,
+    UNIQUE (
+        owner_chat_id, snapshot_date, lookback_days, horizon_days,
+        material_return_bps, policy_version
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_shadow_cases_recent
+    ON learning_shadow_cases(owner_chat_id, decided_at DESC, horizon_days);
+
+CREATE INDEX IF NOT EXISTS idx_learning_shadow_cases_classification
+    ON learning_shadow_cases(owner_chat_id, classification, horizon_days, decided_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_learning_shadow_snapshots_trend
+    ON learning_shadow_metric_snapshots(owner_chat_id, horizon_days, captured_at DESC);
+
+-- Learning shadow v2: additive evidence fields and population-separated metrics.
+-- The v1 snapshot table remains intact as historical evidence.
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS case_population TEXT NOT NULL DEFAULT 'UNKNOWN';
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS block_code TEXT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS block_category TEXT NOT NULL DEFAULT 'OTHER';
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS audit_entry_price FLOAT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS audit_start_day DATE;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS path_sessions INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS path_max_gap FLOAT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS mae FLOAT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS mfe FLOAT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS path_risk TEXT NOT NULL DEFAULT 'PENDING';
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS benchmark_ticker TEXT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS benchmark_outcome FLOAT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS alpha_vs_benchmark FLOAT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS control_decision_log_id BIGINT REFERENCES decision_log(id) ON DELETE SET NULL;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS control_status TEXT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS control_outcome FLOAT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS control_match_type TEXT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS control_distance FLOAT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS delta_vs_control FLOAT;
+ALTER TABLE learning_shadow_cases ADD COLUMN IF NOT EXISTS review_label TEXT NOT NULL DEFAULT 'INSUFFICIENT_EVIDENCE';
+
+CREATE TABLE IF NOT EXISTS learning_shadow_metric_snapshots_v2 (
+    id                              BIGSERIAL PRIMARY KEY,
+    run_id                          UUID NOT NULL REFERENCES learning_shadow_runs(run_id) ON DELETE CASCADE,
+    owner_chat_id                   BIGINT NOT NULL DEFAULT 0,
+    captured_at                     TIMESTAMPTZ NOT NULL,
+    snapshot_date                   DATE NOT NULL,
+    lookback_days                   INTEGER NOT NULL,
+    horizon_days                    INTEGER NOT NULL CHECK (horizon_days IN (5, 10, 20, 40)),
+    shadow_horizon_sessions         INTEGER NOT NULL CHECK (shadow_horizon_sessions IN (5, 20, 40)),
+    material_return_bps             INTEGER NOT NULL,
+    policy_version                  TEXT NOT NULL,
+    case_population                 TEXT NOT NULL,
+    total_cases                     INTEGER NOT NULL,
+    matured_cases                   INTEGER NOT NULL,
+    potential_false_negatives       INTEGER NOT NULL,
+    potential_false_negative_rate   FLOAT,
+    clean_missed_opportunities      INTEGER NOT NULL,
+    clean_miss_rate                 FLOAT,
+    metrics                         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (
+        owner_chat_id, snapshot_date, lookback_days, horizon_days,
+        material_return_bps, policy_version, case_population
+    )
+);
+
+CREATE TABLE IF NOT EXISTS learning_shadow_cohort_metrics (
+    id                              BIGSERIAL PRIMARY KEY,
+    owner_chat_id                   BIGINT NOT NULL DEFAULT 0,
+    cohort_date                     DATE NOT NULL,
+    horizon_days                    INTEGER NOT NULL CHECK (horizon_days IN (5, 10, 20, 40)),
+    material_return_bps             INTEGER NOT NULL,
+    policy_version                  TEXT NOT NULL,
+    case_population                 TEXT NOT NULL,
+    total_cases                     INTEGER NOT NULL,
+    matured_cases                   INTEGER NOT NULL,
+    potential_false_negatives       INTEGER NOT NULL,
+    potential_false_negative_rate   FLOAT,
+    clean_missed_opportunities      INTEGER NOT NULL,
+    clean_miss_rate                 FLOAT,
+    metrics                         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    last_run_id                     UUID NOT NULL REFERENCES learning_shadow_runs(run_id) ON DELETE CASCADE,
+    last_evaluated_at               TIMESTAMPTZ NOT NULL,
+    UNIQUE (
+        owner_chat_id, cohort_date, horizon_days, material_return_bps,
+        policy_version, case_population
+    )
+);
+
+CREATE TABLE IF NOT EXISTS learning_shadow_policy_versions (
+    policy_version      TEXT PRIMARY KEY,
+    schema_version      INTEGER NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'SHADOW',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    config              JSONB NOT NULL DEFAULT '{}'::jsonb,
+    affects_analysis    BOOLEAN NOT NULL DEFAULT FALSE,
+    affects_execution   BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS learning_shadow_rule_candidates (
+    id                          BIGSERIAL PRIMARY KEY,
+    owner_chat_id               BIGINT NOT NULL DEFAULT 0,
+    policy_version              TEXT NOT NULL,
+    block_category              TEXT NOT NULL,
+    horizon_days                INTEGER NOT NULL,
+    candidate_type              TEXT NOT NULL,
+    proposed_rule               JSONB NOT NULL,
+    rationale                   TEXT NOT NULL,
+    sample_size                 INTEGER NOT NULL,
+    clean_miss_count            INTEGER NOT NULL,
+    clean_miss_rate             FLOAT NOT NULL,
+    risky_win_count             INTEGER NOT NULL,
+    market_driven_count         INTEGER NOT NULL,
+    mean_alpha_vs_benchmark     FLOAT,
+    evidence_start              TIMESTAMPTZ NOT NULL,
+    evidence_end                TIMESTAMPTZ NOT NULL,
+    status                      TEXT NOT NULL DEFAULT 'PROPOSED' CHECK (status IN (
+        'PROPOSED', 'APPROVED_FOR_SHADOW', 'REJECTED', 'ARCHIVED'
+    )),
+    reviewed_at                 TIMESTAMPTZ,
+    reviewed_by                 TEXT,
+    review_note                 TEXT,
+    created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_run_id                 UUID NOT NULL REFERENCES learning_shadow_runs(run_id) ON DELETE CASCADE,
+    UNIQUE (owner_chat_id, policy_version, block_category, horizon_days, candidate_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_shadow_cases_v2_recent
+    ON learning_shadow_cases(owner_chat_id, case_population, horizon_days, decided_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_shadow_cases_v2_review
+    ON learning_shadow_cases(owner_chat_id, review_label, block_category, horizon_days);
+CREATE INDEX IF NOT EXISTS idx_learning_shadow_snapshots_v2_trend
+    ON learning_shadow_metric_snapshots_v2(owner_chat_id, case_population, horizon_days, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_shadow_cohorts_v2_trend
+    ON learning_shadow_cohort_metrics(owner_chat_id, case_population, horizon_days, cohort_date);
+
 -- Sentiment pipeline: raw news/events, LLM scoring and ticker aggregates.
 -- Default use is contextual/auditable; it must not push buys by itself.
 CREATE TABLE IF NOT EXISTS sentiment_raw (

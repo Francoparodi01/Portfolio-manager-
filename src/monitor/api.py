@@ -8,6 +8,7 @@ import time as time_module
 from collections import defaultdict, deque
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -374,11 +375,35 @@ async def security_headers_middleware(request: web.Request, handler):
 @web.middleware
 async def cors_middleware(request: web.Request, handler):
     response = await handler(request)
-    origin = os.getenv("MONITOR_CORS_ORIGIN", "")
+    origin = request.headers.get("Origin", "")
+    configured = [
+        item.strip()
+        for item in os.getenv("MONITOR_CORS_ORIGIN", "").split(",")
+        if item.strip()
+    ]
+
+    allowed = False
     if origin:
+        if configured:
+            allowed = "*" in configured or origin in configured
+        else:
+            parsed_origin = urlparse(origin)
+            request_host = request.host.split(":", 1)[0]
+            origin_host = parsed_origin.hostname or ""
+            allowed = (
+                parsed_origin.scheme in {"http", "https"}
+                and bool(origin_host)
+                and (
+                    origin_host in {"localhost", "127.0.0.1", "::1"}
+                    or origin_host == request_host
+                )
+            )
+
+    if allowed:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Headers"] = "Authorization,X-API-Token,X-TOTP-Code,Content-Type"
         response.headers["Access-Control-Allow-Methods"] = "GET,OPTIONS"
+        response.headers["Vary"] = "Origin"
     return response
 
 
@@ -1895,6 +1920,7 @@ async def corporate_actions_view(request: web.Request) -> web.Response:
 
 async def fills(request: web.Request) -> web.Response:
     days = max(1, min(int(request.query.get("days", "90")), 365))
+    limit = max(1, min(int(request.query.get("limit", "80")), 300))
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         summary = await conn.fetchrow("""
@@ -1921,8 +1947,8 @@ async def fills(request: web.Request) -> web.Response:
             FROM broker_fills
             WHERE executed_at >= NOW() - ($1::int * INTERVAL '1 day')
             ORDER BY executed_at DESC
-            LIMIT 20
-        """, days)
+            LIMIT $2
+        """, days, limit)
         movements_summary = await conn.fetchrow("""
             SELECT
                 COUNT(*) AS total,
@@ -1947,18 +1973,507 @@ async def fills(request: web.Request) -> web.Response:
               AND quantity IS NOT NULL
               AND price IS NOT NULL
             ORDER BY executed_at DESC, id DESC
-            LIMIT 20
-        """, days)
+            LIMIT $2
+        """, days, limit)
 
     return _json({
         "ok": True,
         "days": days,
+        "limit": limit,
         "summary": _row(summary),
         "by_source": [_row(r) for r in by_source],
         "recent": [_row(r) for r in recent],
         "movements": {
             "summary": _row(movements_summary),
             "recent": [_row(r) for r in movements_recent],
+        },
+    })
+
+
+async def learning_shadow_view(request: web.Request) -> web.Response:
+    """Counterfactual metrics for blocked decisions; never feeds analysis."""
+    days = max(30, min(int(request.query.get("days", "365")), 730))
+    try:
+        owner_chat_id = int(request.query.get("owner_chat_id", "0"))
+    except (TypeError, ValueError):
+        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        schema_ready = await conn.fetchval(
+            """
+            SELECT
+                to_regclass('public.learning_shadow_runs') IS NOT NULL
+                AND to_regclass('public.learning_shadow_cases') IS NOT NULL
+                AND to_regclass('public.learning_shadow_metric_snapshots') IS NOT NULL
+            """
+        )
+        if not schema_ready:
+            return _json({
+                "ok": True,
+                "available": False,
+                "owner_chat_id": owner_chat_id,
+                "days": days,
+                "note": "Learning shadow todavia no fue inicializado.",
+                "run": None,
+                "metrics": [],
+                "trend": [],
+                "cohorts": [],
+                "by_block_reason": [],
+                "recent_cases": [],
+            })
+
+        latest_run = await conn.fetchrow(
+            """
+            SELECT *
+            FROM learning_shadow_runs
+            WHERE owner_chat_id = $1
+            ORDER BY captured_at DESC
+            LIMIT 1
+            """,
+            owner_chat_id,
+        )
+        if not latest_run:
+            return _json({
+                "ok": True,
+                "available": False,
+                "owner_chat_id": owner_chat_id,
+                "days": days,
+                "note": "Learning shadow no tiene corridas para este owner.",
+                "run": None,
+                "metrics": [],
+                "trend": [],
+                "cohorts": [],
+                "by_block_reason": [],
+                "recent_cases": [],
+            })
+
+        metrics = await conn.fetch(
+            """
+            SELECT *
+            FROM learning_shadow_metric_snapshots
+            WHERE run_id = $1
+            ORDER BY horizon_days
+            """,
+            latest_run["run_id"],
+        )
+        trend = await conn.fetch(
+            """
+            SELECT
+                captured_at, snapshot_date, horizon_days, total_cases,
+                matured_cases, potential_false_negatives,
+                potential_false_negative_rate, shadow_coverage_rate,
+                missing_outcome_cases, excluded_cases
+            FROM learning_shadow_metric_snapshots
+            WHERE owner_chat_id = $1
+              AND captured_at >= NOW() - ($2::int * INTERVAL '1 day')
+            ORDER BY captured_at, horizon_days
+            """,
+            owner_chat_id,
+            days,
+        )
+        cohorts = await conn.fetch(
+            """
+            SELECT
+                date_trunc('week', decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                    AS cohort_date,
+                horizon_days,
+                COUNT(*)::integer AS total_cases,
+                COUNT(*) FILTER (WHERE classification IN (
+                    'POTENTIAL_FALSE_NEGATIVE', 'POSITIVE_BELOW_THRESHOLD',
+                    'NON_POSITIVE_COUNTERFACTUAL'
+                ))::integer AS matured_cases,
+                COUNT(*) FILTER (
+                    WHERE classification = 'POTENTIAL_FALSE_NEGATIVE'
+                )::integer AS potential_false_negatives,
+                AVG(CASE
+                    WHEN classification = 'POTENTIAL_FALSE_NEGATIVE' THEN 1.0
+                    WHEN classification IN (
+                        'POSITIVE_BELOW_THRESHOLD', 'NON_POSITIVE_COUNTERFACTUAL'
+                    ) THEN 0.0
+                END) AS potential_false_negative_rate,
+                AVG(directional_outcome) FILTER (WHERE classification IN (
+                    'POTENTIAL_FALSE_NEGATIVE', 'POSITIVE_BELOW_THRESHOLD',
+                    'NON_POSITIVE_COUNTERFACTUAL'
+                )) AS mean_directional_outcome,
+                AVG(CASE WHEN shadow_forecast_id IS NOT NULL THEN 1.0 ELSE 0.0 END)
+                    AS shadow_coverage_rate
+            FROM learning_shadow_cases
+            WHERE owner_chat_id = $1
+              AND decided_at >= NOW() - ($2::int * INTERVAL '1 day')
+            GROUP BY cohort_date, horizon_days
+            ORDER BY cohort_date, horizon_days
+            """,
+            owner_chat_id,
+            days,
+        )
+        by_block_reason = await conn.fetch(
+            """
+            SELECT
+                COALESCE(NULLIF(block_reason, ''), 'sin motivo estructurado') AS block_reason,
+                COUNT(*)::integer AS matured_cases,
+                COUNT(*) FILTER (
+                    WHERE classification = 'POTENTIAL_FALSE_NEGATIVE'
+                )::integer AS potential_false_negatives,
+                AVG(CASE
+                    WHEN classification = 'POTENTIAL_FALSE_NEGATIVE' THEN 1.0
+                    ELSE 0.0
+                END) AS potential_false_negative_rate,
+                AVG(directional_outcome) AS mean_directional_outcome
+            FROM learning_shadow_cases
+            WHERE owner_chat_id = $1
+              AND horizon_days = 5
+              AND decided_at >= NOW() - ($2::int * INTERVAL '1 day')
+              AND classification IN (
+                  'POTENTIAL_FALSE_NEGATIVE', 'POSITIVE_BELOW_THRESHOLD',
+                  'NON_POSITIVE_COUNTERFACTUAL'
+              )
+            GROUP BY COALESCE(NULLIF(block_reason, ''), 'sin motivo estructurado')
+            ORDER BY potential_false_negatives DESC, matured_cases DESC
+            LIMIT 12
+            """,
+            owner_chat_id,
+            days,
+        )
+        recent_cases = await conn.fetch(
+            """
+            SELECT
+                decision_log_id, ticker, decision, decided_at, horizon_days,
+                block_reason, outcome_source, directional_outcome,
+                classification, shadow_forecast_id, shadow_as_of_ts,
+                shadow_expected_return, shadow_action,
+                shadow_supports_direction, last_evaluated_at
+            FROM learning_shadow_cases
+            WHERE owner_chat_id = $1
+              AND decided_at >= NOW() - ($2::int * INTERVAL '1 day')
+              AND horizon_days = 5
+              AND classification = 'POTENTIAL_FALSE_NEGATIVE'
+            ORDER BY decided_at DESC, horizon_days
+            LIMIT 30
+            """,
+            owner_chat_id,
+            days,
+        )
+
+    return _json({
+        "ok": True,
+        "available": True,
+        "owner_chat_id": owner_chat_id,
+        "days": days,
+        "run": _row(latest_run),
+        "metrics": [_row(row) for row in metrics],
+        "trend": [_row(row) for row in trend],
+        "cohorts": [_row(row) for row in cohorts],
+        "by_block_reason": [_row(row) for row in by_block_reason],
+        "recent_cases": [_row(row) for row in recent_cases],
+        "note": (
+            "Experimental y solo auditoria. Un falso negativo potencial indica "
+            "retorno direccional posterior >= umbral; no prueba que el bloqueo haya sido incorrecto."
+        ),
+        "boundary": {
+            "reads": ["decision_log", "shadow_thesis_forecasts", "shadow_thesis_outcomes"],
+            "writes": [
+                "learning_shadow_runs",
+                "learning_shadow_cases",
+                "learning_shadow_metric_snapshots",
+            ],
+            "affects_analysis": False,
+            "affects_execution": False,
+        },
+    })
+
+
+async def learning_shadow_v2_view(request: web.Request) -> web.Response:
+    """Population-separated counterfactual evidence; never feeds analysis."""
+    days = max(30, min(int(request.query.get("days", "365")), 730))
+    try:
+        owner_chat_id = int(request.query.get("owner_chat_id", "0"))
+    except (TypeError, ValueError):
+        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+
+    empty = {
+        "ok": True,
+        "available": False,
+        "owner_chat_id": owner_chat_id,
+        "days": days,
+        "run": None,
+        "metrics": [],
+        "population_summary": [],
+        "trend": [],
+        "cohorts": [],
+        "by_block_category": [],
+        "review_summary": [],
+        "rule_candidates": [],
+        "data_quality": {},
+        "recent_cases": [],
+    }
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        schema_ready = await conn.fetchval(
+            """
+            SELECT
+                to_regclass('public.learning_shadow_runs') IS NOT NULL
+                AND to_regclass('public.learning_shadow_cases') IS NOT NULL
+                AND to_regclass('public.learning_shadow_metric_snapshots_v2') IS NOT NULL
+                AND to_regclass('public.learning_shadow_cohort_metrics') IS NOT NULL
+                AND to_regclass('public.learning_shadow_rule_candidates') IS NOT NULL
+            """
+        )
+        if not schema_ready:
+            return _json({**empty, "note": "Learning shadow v2 todavia no fue inicializado."})
+
+        latest_run = await conn.fetchrow(
+            """
+            SELECT * FROM learning_shadow_runs
+            WHERE owner_chat_id = $1 AND policy_version = 'learning-shadow-v2'
+            ORDER BY captured_at DESC LIMIT 1
+            """,
+            owner_chat_id,
+        )
+        if not latest_run:
+            return _json({**empty, "note": "Learning shadow v2 no tiene corridas."})
+
+        metrics = await conn.fetch(
+            """
+            SELECT
+                captured_at, snapshot_date, horizon_days,
+                shadow_horizon_sessions, material_return_bps, policy_version,
+                case_population, total_cases, matured_cases,
+                potential_false_negatives, potential_false_negative_rate,
+                clean_missed_opportunities, clean_miss_rate,
+                (metrics->>'positive_below_threshold')::int AS positive_below_threshold,
+                (metrics->>'non_positive_cases')::int AS non_positive_cases,
+                (metrics->>'pending_cases')::int AS pending_cases,
+                (metrics->>'missing_outcome_cases')::int AS missing_outcome_cases,
+                (metrics->>'shadow_linked_cases')::int AS shadow_linked_cases,
+                (metrics->>'benchmark_linked_cases')::int AS benchmark_linked_cases,
+                (metrics->>'control_linked_cases')::int AS control_linked_cases,
+                (metrics->>'unique_control_cases')::int AS unique_control_cases,
+                (metrics->>'control_reuse_ratio')::float AS control_reuse_ratio,
+                (metrics->>'risky_counterfactual_wins')::int AS risky_counterfactual_wins,
+                (metrics->>'market_driven_wins')::int AS market_driven_wins,
+                (metrics->>'uncontrolled_counterfactual_wins')::int
+                    AS uncontrolled_counterfactual_wins,
+                (metrics->>'insufficient_potential_wins')::int
+                    AS insufficient_potential_wins,
+                (metrics->>'shadow_coverage_rate')::float AS shadow_coverage_rate,
+                (metrics->>'benchmark_coverage_rate')::float AS benchmark_coverage_rate,
+                (metrics->>'mean_directional_outcome')::float AS mean_directional_outcome,
+                (metrics->>'mean_mae')::float AS mean_mae,
+                (metrics->>'mean_mfe')::float AS mean_mfe,
+                (metrics->>'mean_alpha_vs_benchmark')::float AS mean_alpha_vs_benchmark,
+                (metrics->>'mean_delta_vs_control')::float AS mean_delta_vs_control
+            FROM learning_shadow_metric_snapshots_v2
+            WHERE run_id = $1 AND case_population = 'PLANNER_BLOCKED'
+            ORDER BY horizon_days
+            """,
+            latest_run["run_id"],
+        )
+        population_summary = await conn.fetch(
+            """
+            SELECT
+                case_population, total_cases, matured_cases,
+                potential_false_negatives, potential_false_negative_rate,
+                clean_missed_opportunities, clean_miss_rate,
+                (metrics->>'mean_directional_outcome')::float AS mean_directional_outcome,
+                (metrics->>'benchmark_coverage_rate')::float AS benchmark_coverage_rate
+            FROM learning_shadow_metric_snapshots_v2
+            WHERE run_id = $1 AND horizon_days = 5 AND total_cases > 0
+            ORDER BY CASE case_population
+                WHEN 'PLANNER_BLOCKED' THEN 0
+                WHEN 'RADAR_BLOCKED' THEN 1
+                WHEN 'RADAR_DEBUG' THEN 2
+                ELSE 3 END
+            """,
+            latest_run["run_id"],
+        )
+        trend = await conn.fetch(
+            """
+            SELECT captured_at, snapshot_date, horizon_days, total_cases,
+                   matured_cases, potential_false_negatives,
+                   potential_false_negative_rate, clean_missed_opportunities,
+                   clean_miss_rate,
+                   (metrics->>'benchmark_coverage_rate')::float AS benchmark_coverage_rate
+            FROM learning_shadow_metric_snapshots_v2
+            WHERE owner_chat_id = $1
+              AND captured_at >= NOW() - ($2::int * INTERVAL '1 day')
+              AND case_population = 'PLANNER_BLOCKED'
+            ORDER BY captured_at, horizon_days
+            """,
+            owner_chat_id,
+            days,
+        )
+        cohorts = await conn.fetch(
+            """
+            SELECT cohort_date, horizon_days, total_cases, matured_cases,
+                   potential_false_negatives, potential_false_negative_rate,
+                   clean_missed_opportunities, clean_miss_rate,
+                   (metrics->>'mean_directional_outcome')::float AS mean_directional_outcome,
+                   (metrics->>'benchmark_coverage_rate')::float AS benchmark_coverage_rate
+            FROM learning_shadow_cohort_metrics
+            WHERE owner_chat_id = $1
+              AND cohort_date >= CURRENT_DATE - $2::int
+              AND policy_version = 'learning-shadow-v2'
+              AND case_population = 'PLANNER_BLOCKED'
+            ORDER BY cohort_date, horizon_days
+            """,
+            owner_chat_id,
+            days,
+        )
+        by_block_category = await conn.fetch(
+            """
+            SELECT block_category, COUNT(*)::integer AS matured_cases,
+                   COUNT(*) FILTER (WHERE classification = 'POTENTIAL_FALSE_NEGATIVE')::integer
+                       AS potential_false_negatives,
+                   COUNT(*) FILTER (WHERE review_label = 'CLEAN_MISSED_OPPORTUNITY')::integer
+                       AS clean_missed_opportunities,
+                   COUNT(*) FILTER (WHERE review_label = 'RISKY_COUNTERFACTUAL_WIN')::integer
+                       AS risky_counterfactual_wins,
+                   AVG((classification = 'POTENTIAL_FALSE_NEGATIVE')::int::float)
+                       AS potential_false_negative_rate,
+                   AVG((review_label = 'CLEAN_MISSED_OPPORTUNITY')::int::float)
+                       AS clean_miss_rate,
+                   AVG(directional_outcome) AS mean_directional_outcome,
+                   AVG(alpha_vs_benchmark) AS mean_alpha_vs_benchmark,
+                   AVG(mae) AS mean_mae
+            FROM learning_shadow_cases
+            WHERE owner_chat_id = $1 AND horizon_days = 5
+              AND decided_at >= NOW() - ($2::int * INTERVAL '1 day')
+              AND policy_version = 'learning-shadow-v2'
+              AND case_population = 'PLANNER_BLOCKED'
+              AND classification IN (
+                  'POTENTIAL_FALSE_NEGATIVE', 'POSITIVE_BELOW_THRESHOLD',
+                  'NON_POSITIVE_COUNTERFACTUAL'
+              )
+            GROUP BY block_category
+            ORDER BY matured_cases DESC, block_category
+            """,
+            owner_chat_id,
+            days,
+        )
+        review_summary = await conn.fetch(
+            """
+            SELECT review_label, COUNT(*)::integer AS cases,
+                   AVG(directional_outcome) AS mean_directional_outcome,
+                   AVG(mae) AS mean_mae,
+                   AVG(alpha_vs_benchmark) AS mean_alpha_vs_benchmark
+            FROM learning_shadow_cases
+            WHERE owner_chat_id = $1 AND horizon_days = 5
+              AND decided_at >= NOW() - ($2::int * INTERVAL '1 day')
+              AND policy_version = 'learning-shadow-v2'
+              AND case_population = 'PLANNER_BLOCKED'
+            GROUP BY review_label
+            ORDER BY cases DESC, review_label
+            """,
+            owner_chat_id,
+            days,
+        )
+        data_quality = await conn.fetchrow(
+            """
+            SELECT COUNT(*)::integer AS total_cases,
+                   COUNT(*) FILTER (WHERE classification IN (
+                       'POTENTIAL_FALSE_NEGATIVE', 'POSITIVE_BELOW_THRESHOLD',
+                       'NON_POSITIVE_COUNTERFACTUAL'
+                   ))::integer AS matured_cases,
+                   COUNT(*) FILTER (WHERE path_risk NOT IN ('PENDING', 'OUTLIER'))::integer
+                       AS usable_path_cases,
+                   COUNT(*) FILTER (WHERE path_risk = 'OUTLIER')::integer AS path_outliers,
+                   COUNT(*) FILTER (WHERE benchmark_outcome IS NOT NULL)::integer
+                       AS benchmark_linked_cases,
+                   COUNT(*) FILTER (WHERE control_decision_log_id IS NOT NULL)::integer
+                       AS control_linked_cases,
+                   COUNT(DISTINCT control_decision_log_id)::integer AS unique_control_cases,
+                   COUNT(*) FILTER (WHERE classification = 'MISSING_OUTCOME')::integer
+                       AS missing_outcome_cases,
+                   COUNT(*) FILTER (WHERE shadow_forecast_id IS NOT NULL)::integer
+                       AS shadow_linked_cases
+            FROM learning_shadow_cases
+            WHERE owner_chat_id = $1 AND horizon_days = 5
+              AND decided_at >= NOW() - ($2::int * INTERVAL '1 day')
+              AND policy_version = 'learning-shadow-v2'
+              AND case_population = 'PLANNER_BLOCKED'
+            """,
+            owner_chat_id,
+            days,
+        )
+        rule_candidates = await conn.fetch(
+            """
+            SELECT id, policy_version, block_category, horizon_days,
+                   candidate_type, proposed_rule, rationale, sample_size,
+                   clean_miss_count, clean_miss_rate, risky_win_count,
+                   market_driven_count, mean_alpha_vs_benchmark,
+                   evidence_start, evidence_end, status,
+                   reviewed_at, reviewed_by, review_note, updated_at
+            FROM learning_shadow_rule_candidates
+            WHERE owner_chat_id = $1 AND policy_version = 'learning-shadow-v2'
+            ORDER BY CASE status WHEN 'PROPOSED' THEN 0 ELSE 1 END,
+                     clean_miss_rate DESC, block_category
+            """,
+            owner_chat_id,
+        )
+        recent_cases = await conn.fetch(
+            """
+            SELECT decision_log_id, ticker, decision, decided_at, horizon_days,
+                   block_category, block_reason, outcome_source, directional_outcome,
+                   classification, review_label, path_sessions, mae, mfe, path_risk,
+                   benchmark_outcome, alpha_vs_benchmark,
+                   control_decision_log_id, control_status, control_outcome,
+                   control_match_type, delta_vs_control,
+                   shadow_forecast_id, shadow_as_of_ts,
+                   shadow_expected_return, shadow_action,
+                   shadow_supports_direction, last_evaluated_at
+            FROM learning_shadow_cases
+            WHERE owner_chat_id = $1
+              AND decided_at >= NOW() - ($2::int * INTERVAL '1 day')
+              AND horizon_days = 5
+              AND classification = 'POTENTIAL_FALSE_NEGATIVE'
+              AND policy_version = 'learning-shadow-v2'
+              AND case_population = 'PLANNER_BLOCKED'
+            ORDER BY CASE review_label
+                         WHEN 'CLEAN_MISSED_OPPORTUNITY' THEN 0
+                         WHEN 'RISKY_COUNTERFACTUAL_WIN' THEN 1
+                         WHEN 'MARKET_DRIVEN_WIN' THEN 2
+                         ELSE 3 END,
+                     decided_at DESC
+            LIMIT 10
+            """,
+            owner_chat_id,
+            days,
+        )
+
+    return _json({
+        "ok": True,
+        "available": True,
+        "owner_chat_id": owner_chat_id,
+        "days": days,
+        "run": _row(latest_run),
+        "metrics": [_row(row) for row in metrics],
+        "population_summary": [_row(row) for row in population_summary],
+        "trend": [_row(row) for row in trend],
+        "cohorts": [_row(row) for row in cohorts],
+        "by_block_category": [_row(row) for row in by_block_category],
+        "review_summary": [_row(row) for row in review_summary],
+        "data_quality": _row(data_quality),
+        "rule_candidates": [_row(row) for row in rule_candidates],
+        "recent_cases": [_row(row) for row in recent_cases],
+        "note": (
+            "Experimental y solo auditoria. La tasa potencial mide retornos posteriores "
+            ">= umbral. La tasa limpia agrega recorrido continuo y alpha positivo contra SPY; "
+            "sigue sin probar causalidad."
+        ),
+        "boundary": {
+            "reads": [
+                "decision_log", "market_candles",
+                "shadow_thesis_forecasts", "shadow_thesis_outcomes",
+            ],
+            "writes": [
+                "learning_shadow_runs", "learning_shadow_cases",
+                "learning_shadow_metric_snapshots_v2",
+                "learning_shadow_cohort_metrics",
+                "learning_shadow_rule_candidates",
+            ],
+            "affects_analysis": False,
+            "affects_execution": False,
         },
     })
 
@@ -2146,6 +2661,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/decision-ledger", decision_ledger)
     app.router.add_get("/api/radar-audit", radar_audit)
     app.router.add_get("/api/shadow", shadow_view)
+    app.router.add_get("/api/learning-shadow", learning_shadow_v2_view)
     app.router.add_get("/api/human-activity", human_activity)
     app.router.add_get("/api/corporate-actions", corporate_actions_view)
     app.router.add_get("/api/fills", fills)

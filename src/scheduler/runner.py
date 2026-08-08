@@ -126,6 +126,11 @@ SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS = int(
     os.getenv("SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS", "604800")
 )
 THESIS_SHADOW_ENABLED = os.getenv("THESIS_SHADOW_ENABLED", "true").lower() == "true"
+LEARNING_SHADOW_ENABLED = os.getenv("LEARNING_SHADOW_ENABLED", "true").lower() == "true"
+LEARNING_SHADOW_LOOKBACK_DAYS = int(os.getenv("LEARNING_SHADOW_LOOKBACK_DAYS", "365"))
+LEARNING_SHADOW_MATERIAL_RETURN_BPS = int(
+    os.getenv("LEARNING_SHADOW_MATERIAL_RETURN_BPS", "75")
+)
 ISSUER_EVENT_INGESTION_ENABLED = os.getenv(
     "ISSUER_EVENT_INGESTION_ENABLED", "false"
 ).lower() == "true"
@@ -1526,6 +1531,41 @@ async def run_thesis_shadow_job() -> None:
         logger.warning("thesis_shadow fallo no critico: %s", exc, exc_info=True)
 
 
+async def run_learning_shadow_job() -> None:
+    """Refresh counterfactual audit metrics without touching operational layers."""
+    if not LEARNING_SHADOW_ENABLED:
+        logger.debug("learning_shadow omitido: disabled")
+        return
+
+    cmd = [
+        sys.executable,
+        "scripts/run_learning_shadow.py",
+        "--days",
+        str(max(1, LEARNING_SHADOW_LOOKBACK_DAYS)),
+        "--material-return-bps",
+        str(max(0, LEARNING_SHADOW_MATERIAL_RETURN_BPS)),
+        "--json",
+    ]
+    logger.info("learning_shadow iniciando despues de outcomes")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        out = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            logger.warning("learning_shadow fallo rc=%s stderr=%s", proc.returncode, err[-1600:])
+            return
+        logger.info("learning_shadow OK stdout=%s stderr=%d chars", out[-1200:], len(err))
+    except asyncio.TimeoutError:
+        logger.warning("learning_shadow timeout")
+    except Exception as exc:
+        logger.warning("learning_shadow fallo no critico: %s", exc, exc_info=True)
+
+
 def _is_severe_offhours_sentiment_event(event: dict) -> bool:
     impact = str(event.get("impact") or "").lower()
     confidence = float(event.get("confidence") or 0.0)
@@ -2842,6 +2882,16 @@ async def _scheduler_main() -> None:
         misfire_grace_time=600,
         replace_existing=True,
     )
+    if LEARNING_SHADOW_ENABLED:
+        scheduler.add_job(
+            run_learning_shadow_job,
+            _business_day_cron(hour=21, minute=40),
+            id="learning_shadow_daily",
+            name="Learning shadow audit 21:40 ART",
+            misfire_grace_time=900,
+            max_instances=1,
+            replace_existing=True,
+        )
     if SENTIMENT_PIPELINE_ENABLED:
         scheduler.add_job(
             run_sentiment_pipeline_job,
@@ -2875,10 +2925,11 @@ async def _scheduler_main() -> None:
     )
     scheduler.start()
     logger.info(
-        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 16:15/16:45 preclose alerts; 16:59 intraday off; 17:02 full; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; sentiment context=%s; thesis shadow=%s; issuer events=%s"
+        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 16:15/16:45 preclose alerts; 16:59 intraday off; 17:02 full; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
         % (
             "on" if SENTIMENT_PIPELINE_ENABLED else "off",
             "on" if THESIS_SHADOW_ENABLED else "off",
+            "on" if LEARNING_SHADOW_ENABLED else "off",
             "on" if ISSUER_EVENT_INGESTION_ENABLED else "off",
         )
     )
