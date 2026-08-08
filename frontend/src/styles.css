@@ -1158,9 +1158,37 @@ a {
   flex-wrap: nowrap;
 }
 
+.timeline-chain-filter {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  gap: var(--space-2);
+  margin-left: auto;
+  padding-left: var(--space-3);
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand) 45%, var(--border-subtle));
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.timeline-chain-filter button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  place-items: center;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid color-mix(in srgb, var(--brand) 35%, var(--border-subtle));
+}
+
 .timeline-counts {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   margin: 0;
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -1308,6 +1336,10 @@ a {
   border-left: 2px solid var(--border-strong);
 }
 
+.timeline-facts div.wide {
+  grid-column: 1 / -1;
+}
+
 .timeline-facts dt {
   color: var(--text-muted);
   font-family: var(--font-mono);
@@ -1346,6 +1378,24 @@ a {
 }
 
 .timeline-linked {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  color: var(--brand);
+  background: transparent;
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.timeline-linked:hover {
+  text-decoration: underline;
+}
+
+.timeline-linked-label {
   margin: var(--space-3) 0 0;
   color: var(--brand);
   font-family: var(--font-mono);
@@ -1674,12 +1724,23 @@ input::placeholder {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .timeline-counts div:nth-child(2) {
+  .timeline-counts div:nth-child(2),
+  .timeline-counts div:nth-child(4),
+  .timeline-counts div:last-child {
     border-right: 0;
   }
 
-  .timeline-counts div:nth-child(-n + 2) {
+  .timeline-counts div:nth-child(-n + 4) {
     border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .timeline-counts div:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .timeline-chain-filter {
+    margin-left: 0;
+    justify-content: space-between;
   }
 
   .timeline-stage-control {

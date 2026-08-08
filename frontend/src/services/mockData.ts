@@ -195,19 +195,31 @@ export const demoCandles: CandlesPayload = {
 
 export const demoLogs: LogsPayload = { items: [{ file: "scheduler.log", line: "WARNING demo: una señal quedó pendiente por falta de precio de cierre." }], log_dir: "demo", note: null, ok: true };
 export const demoLedger: RowRecord = { ok: true, timeline: [{ at: hoursAgo(2), label: "Plan formal", stage: "planner_audit", ticker: "AMZN" }] };
+const demoTimelineDecisionAt = daysAgo(4);
 export const demoTimeline: AuditTimelinePayload = {
   days: 90,
   events: [
     {
       decision_log_id: 41,
-      event_id: "plan:41",
-      event_type: "plan_created",
-      gaps: ["missing_order_id"],
-      payload: { decision: "BUY", executed_amount_ars: 185000, status: "EXECUTED", theoretical_amount_ars: 203000 },
+      event_id: "decision:41",
+      event_type: "decision_logged",
+      gaps: [],
+      payload: { confidence: 0.82, decision: "BUY", final_score: 0.074, price_at_decision: 13910, reason: "Rebalanceo moderado con soporte de tendencia.", status: "EXECUTED" },
       run_id: "demo-run-41",
       source: "execution_plan",
       ticker: "V",
-      ts: daysAgo(4),
+      ts: demoTimelineDecisionAt,
+    },
+    {
+      decision_log_id: 41,
+      event_id: "plan:41",
+      event_type: "plan_created",
+      gaps: ["missing_order_id"],
+      payload: { decision: "BUY", executed_amount_ars: 185000, reason: "Rebalanceo moderado con soporte de tendencia.", status: "EXECUTED", theoretical_amount_ars: 203000 },
+      run_id: "demo-run-41",
+      source: "execution_plan",
+      ticker: "V",
+      ts: demoTimelineDecisionAt,
     },
     {
       decision_log_id: null,
@@ -218,7 +230,7 @@ export const demoTimeline: AuditTimelinePayload = {
       run_id: null,
       source: "cocos_movements",
       ticker: "V",
-      ts: daysAgo(4),
+      ts: demoTimelineDecisionAt,
     },
     {
       decision_log_id: 41,
@@ -229,14 +241,14 @@ export const demoTimeline: AuditTimelinePayload = {
       run_id: "demo-run-41",
       source: "broker_fill",
       ticker: "V",
-      ts: daysAgo(4),
+      ts: demoTimelineDecisionAt,
     },
     {
       decision_log_id: 41,
       event_id: "outcome:41",
       event_type: "outcome_updated",
       gaps: [],
-      payload: { is_primary_metric: true, outcome_5d: 0.018, outcome_basis: "canonical_cocos" },
+      payload: { decided_at: demoTimelineDecisionAt, decision: "BUY", executed_amount_ars: 185000, is_primary_metric: true, outcome_5d: 0.018, outcome_basis: "canonical_cocos", reason: "Rebalanceo moderado con soporte de tendencia.", status: "EXECUTED" },
       run_id: "demo-run-41",
       source: "decision_log",
       ticker: "V",
@@ -245,7 +257,7 @@ export const demoTimeline: AuditTimelinePayload = {
   ],
   limit: 400,
   ok: true,
-  summary: { event_count: 4, gaps: ["missing_decision_link", "missing_order_id"], tickers: ["V"] },
+  summary: { event_count: 5, gaps: ["missing_decision_link", "missing_order_id"], tickers: ["V"] },
 };
 
 export function demoPayloadFor(key: string): unknown {

@@ -3,9 +3,11 @@ import {
   ArrowLeftRight,
   ChartNoAxesCombined,
   ClipboardCheck,
+  Link2,
   ListChecks,
   ReceiptText,
   Search,
+  X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -17,7 +19,7 @@ import { EmptyState, ErrorState, LoadingState } from "../feedback/States";
 import { Panel } from "../ui/Panel";
 import { StatusBadge } from "../ui/StatusBadge";
 
-type TimelineStage = "all" | "plan" | "movement" | "fill" | "outcome";
+type TimelineStage = "all" | "decision" | "plan" | "movement" | "fill" | "outcome";
 
 type EventPresentation = {
   Icon: LucideIcon;
@@ -28,10 +30,12 @@ type EventPresentation = {
 type TimelineFact = {
   label: string;
   value: string;
+  wide?: boolean;
 };
 
 const stageOptions: Array<{ key: TimelineStage; label: string }> = [
   { key: "all", label: "Todo" },
+  { key: "decision", label: "Decisiones" },
   { key: "plan", label: "Planes" },
   { key: "movement", label: "Movimientos" },
   { key: "fill", label: "Fills" },
@@ -47,7 +51,7 @@ const presentations: Record<string, EventPresentation> = {
 };
 
 const gapLabels: Record<string, string> = {
-  missing_decision_link: "Sin vinculo directo a decision_log",
+  missing_decision_link: "Operacion real sin relacion comprobada con un plan del bot",
   missing_feature_snapshot_id: "Sin feature snapshot",
   missing_order_id: "Sin order ID persistido",
   missing_portfolio_snapshot_id: "Sin portfolio snapshot",
@@ -68,21 +72,28 @@ export function AuditTimeline({
 }) {
   const [ticker, setTicker] = useState("");
   const [stage, setStage] = useState<TimelineStage>("all");
+  const [selectedDecisionId, setSelectedDecisionId] = useState<number | null>(null);
   const events = useMemo(() => {
     const normalizedTicker = ticker.trim().toUpperCase();
     return [...(data?.events ?? [])]
       .sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts))
       .filter((event) => !normalizedTicker || String(event.ticker || "").toUpperCase().includes(normalizedTicker))
+      .filter((event) => selectedDecisionId === null || event.decision_log_id === selectedDecisionId)
       .filter((event) => stage === "all" || eventPresentation(event).stage === stage)
       .slice(0, 120);
-  }, [data?.events, stage, ticker]);
+  }, [data?.events, selectedDecisionId, stage, ticker]);
   const counts = countEvents(data?.events ?? []);
+
+  const selectDecision = (decisionId: number) => {
+    setSelectedDecisionId(decisionId);
+    setStage("all");
+  };
 
   return (
     <Panel
       action={<StatusBadge tone="real">{events.length} visibles</StatusBadge>}
       className="audit-timeline-panel"
-      kicker="Plan -> movimiento -> fill -> outcome"
+      kicker="Decision -> plan -> movimiento -> fill -> outcome"
       title="Timeline auditable"
     >
       <div className="timeline-toolbar">
@@ -112,9 +123,24 @@ export function AuditTimeline({
             ))}
           </div>
         </div>
+        {selectedDecisionId !== null ? (
+          <div className="timeline-chain-filter">
+            <Link2 size={14} aria-hidden="true" />
+            <span>Cadena decision #{selectedDecisionId}</span>
+            <button
+              aria-label="Cerrar filtro de cadena"
+              onClick={() => setSelectedDecisionId(null)}
+              title="Cerrar filtro de cadena"
+              type="button"
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <dl className="timeline-counts" aria-label="Eventos por etapa">
+        <TimelineCount label="Decisiones" value={counts.decision} />
         <TimelineCount label="Planes" value={counts.plan} />
         <TimelineCount label="Movimientos" value={counts.movement} />
         <TimelineCount label="Fills" value={counts.fill} />
@@ -129,7 +155,9 @@ export function AuditTimeline({
 
       {events.length ? (
         <ol className="audit-timeline-list" aria-live="polite">
-          {events.map((event) => <TimelineEvent event={event} key={event.event_id} />)}
+          {events.map((event) => (
+            <TimelineEvent event={event} key={event.event_id} onSelectDecision={selectDecision} />
+          ))}
         </ol>
       ) : null}
       {(data?.events?.length ?? 0) > 120 ? (
@@ -148,7 +176,13 @@ function TimelineCount({ label, value }: { label: string; value: number }) {
   );
 }
 
-function TimelineEvent({ event }: { event: AuditTimelineEvent }) {
+function TimelineEvent({
+  event,
+  onSelectDecision,
+}: {
+  event: AuditTimelineEvent;
+  onSelectDecision: (decisionId: number) => void;
+}) {
   const presentation = eventPresentation(event);
   const tone = eventTone(event);
   const facts = eventFacts(event);
@@ -162,11 +196,12 @@ function TimelineEvent({ event }: { event: AuditTimelineEvent }) {
         <header className="timeline-event-header">
           <div>
             <div className="timeline-event-meta">
+              <span>{event.event_type === "outcome_updated" ? "Actualizado" : "Evento"}</span>
               <time dateTime={event.ts}>{formatDateTime(event.ts)}</time>
               {event.ticker ? <strong>{event.ticker}</strong> : null}
               {event.decision_log_id ? <span>decision #{event.decision_log_id}</span> : null}
             </div>
-            <h3>{presentation.label}</h3>
+            <h3>{eventTitle(event, presentation)}</h3>
             <p>{timelineSourceLabel(event.source)}</p>
           </div>
           <StatusBadge tone={tone}>{stageLabel(presentation.stage)}</StatusBadge>
@@ -175,7 +210,7 @@ function TimelineEvent({ event }: { event: AuditTimelineEvent }) {
         {facts.length ? (
           <dl className="timeline-facts">
             {facts.map((fact) => (
-              <div key={`${event.event_id}-${fact.label}`}>
+              <div className={fact.wide ? "wide" : undefined} key={`${event.event_id}-${fact.label}`}>
                 <dt>{fact.label}</dt>
                 <dd>{fact.value}</dd>
               </div>
@@ -188,9 +223,12 @@ function TimelineEvent({ event }: { event: AuditTimelineEvent }) {
             <summary><AlertTriangle size={14} aria-hidden="true" /> {gaps.length} hueco{gaps.length === 1 ? "" : "s"} de trazabilidad</summary>
             <ul>{gaps.map((gap) => <li key={gap}>{gapLabels[gap] || gap}</li>)}</ul>
           </details>
-        ) : (
-          <p className="timeline-linked">Vinculo auditable disponible</p>
-        )}
+        ) : null}
+        {event.decision_log_id ? (
+          <button className="timeline-linked" onClick={() => onSelectDecision(event.decision_log_id!)} type="button">
+            <Link2 size={13} aria-hidden="true" /> Ver cadena decision #{event.decision_log_id}
+          </button>
+        ) : !gaps.length ? <p className="timeline-linked-label">Registro auditable</p> : null}
       </article>
     </li>
   );
@@ -221,18 +259,20 @@ function eventFacts(event: AuditTimelineEvent): TimelineFact[] {
   const payload = event.payload ?? {};
   const facts: TimelineFact[] = [];
   const action = getString(payload, "decision") || getString(payload, "side");
-  if (action) facts.push({ label: "Accion", value: decisionLabel(action) });
+  if (action) facts.push({ label: actionLabel(event), value: decisionLabel(action) });
 
   if (event.event_type === "decision_logged") {
     pushFact(facts, "Estado", statusLabel(getString(payload, "status")));
     pushFact(facts, "Score", formatScore(getNumber(payload, "final_score")));
     pushFact(facts, "Confianza", formatPercent(getNumber(payload, "confidence")));
     pushFact(facts, "Precio base", formatMoney(getNumber(payload, "price_at_decision")));
+    pushFact(facts, "Motivo", getString(payload, "reason"), true);
   }
   if (event.event_type === "plan_created") {
     pushFact(facts, "Estado", statusLabel(getString(payload, "status")));
     pushFact(facts, "Monto plan", formatMoney(getNumber(payload, "theoretical_amount_ars")));
     pushFact(facts, "Monto ejecutado", formatMoney(getNumber(payload, "executed_amount_ars")));
+    pushFact(facts, "Motivo", getString(payload, "reason"), true);
   }
   if (event.event_type === "movement_detected") {
     pushFact(facts, "Cantidad", formatQuantity(getNumber(payload, "quantity")));
@@ -246,6 +286,10 @@ function eventFacts(event: AuditTimelineEvent): TimelineFact[] {
     pushFact(facts, "Comisiones", formatMoney(getNumber(payload, "fees_ars")));
   }
   if (event.event_type === "outcome_updated") {
+    pushFact(facts, "Estado original", statusLabel(getString(payload, "status")));
+    const decidedAt = getString(payload, "decided_at");
+    pushFact(facts, "Decision original", decidedAt ? formatDateTime(decidedAt) : "");
+    pushFact(facts, "Monto ejecutado", formatMoney(getNumber(payload, "executed_amount_ars")));
     for (const [key, label] of [["outcome_5d", "5D"], ["outcome_10d", "10D"], ["outcome_20d", "20D"], ["outcome_40d", "40D"]] as const) {
       const value = getNumber(payload, key);
       if (value !== null) facts.push({ label, value: formatPercent(value, 1, true) });
@@ -253,20 +297,36 @@ function eventFacts(event: AuditTimelineEvent): TimelineFact[] {
     pushFact(facts, "Base", getString(payload, "outcome_basis"));
     const primary = getBoolean(payload, "is_primary_metric");
     if (primary !== null) facts.push({ label: "Metrica", value: primary ? "Principal" : "Auditoria" });
+    pushFact(facts, "Motivo original", getString(payload, "reason"), true);
   }
   return facts.filter((fact) => fact.value && fact.value !== "-");
 }
 
-function pushFact(facts: TimelineFact[], label: string, value: string) {
-  if (value && value !== "-") facts.push({ label, value });
+function pushFact(facts: TimelineFact[], label: string, value: string, wide = false) {
+  if (value && value !== "-") facts.push({ label, value, wide });
 }
 
 function countEvents(events: AuditTimelineEvent[]) {
   return events.reduce((counts, event) => {
     const stage = eventPresentation(event).stage;
-    if (stage === "plan" || stage === "movement" || stage === "fill" || stage === "outcome") counts[stage] += 1;
+    if (stage === "decision" || stage === "plan" || stage === "movement" || stage === "fill" || stage === "outcome") counts[stage] += 1;
     return counts;
-  }, { fill: 0, movement: 0, outcome: 0, plan: 0 });
+  }, { decision: 0, fill: 0, movement: 0, outcome: 0, plan: 0 });
+}
+
+function actionLabel(event: AuditTimelineEvent): string {
+  if (event.event_type === "movement_detected" || event.event_type === "fill_detected") return "Accion real";
+  return "Accion propuesta";
+}
+
+function eventTitle(event: AuditTimelineEvent, presentation: EventPresentation): string {
+  if (event.event_type !== "outcome_updated") return presentation.label;
+  const status = getString(event.payload ?? {}, "status").toUpperCase();
+  if (status === "BLOCKED") return "Resultado hipotetico de propuesta bloqueada";
+  if (status === "EXECUTED_MANUAL") return "Resultado de operacion manual";
+  if (status === "EXECUTED") return "Resultado de operacion ejecutada";
+  if (status === "APPROVED") return "Resultado posterior de propuesta aprobada";
+  return "Resultado posterior de la decision";
 }
 
 function formatQuantity(value: number | null): string {

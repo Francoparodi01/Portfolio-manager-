@@ -92,8 +92,11 @@ async def fetch_decision_timeline(
             source,
             status,
             decision_type,
+            block_reason,
             theoretical_amount_ars,
             executed_amount_ars,
+            is_executable,
+            was_blocked,
             run_id::text AS run_id,
             run_intent,
             decision_stage,
@@ -216,14 +219,18 @@ def _events_from_decision(row: dict[str, Any]) -> list[DecisionTimelineEvent]:
     ts = _as_datetime(row.get("decided_at"))
     layers = _layers(row.get("layers"))
     gaps = _decision_gaps(row, layers)
+    reason = _decision_reason(row, layers)
 
     base_payload = {
         "decision": _text(row.get("decision")),
         "status": _text(row.get("status")),
         "decision_type": _text(row.get("decision_type")),
+        "reason": reason,
         "final_score": _json_ready(row.get("final_score")),
         "confidence": _json_ready(row.get("confidence")),
         "price_at_decision": _json_ready(row.get("price_at_decision")),
+        "is_executable": bool(row.get("is_executable")),
+        "was_blocked": bool(row.get("was_blocked")),
         "run_intent": _text(row.get("run_intent")),
         "decision_stage": _text(row.get("decision_stage")),
         "metric_scope": _text(row.get("metric_scope")),
@@ -256,8 +263,11 @@ def _events_from_decision(row: dict[str, Any]) -> list[DecisionTimelineEvent]:
                 payload={
                     "decision": base_payload["decision"],
                     "status": base_payload["status"],
+                    "reason": reason,
                     "theoretical_amount_ars": _json_ready(row.get("theoretical_amount_ars")),
                     "executed_amount_ars": _json_ready(row.get("executed_amount_ars")),
+                    "is_executable": base_payload["is_executable"],
+                    "was_blocked": base_payload["was_blocked"],
                 },
                 gaps=sorted(set(gaps + ["missing_order_id"])),
             )
@@ -269,6 +279,14 @@ def _events_from_decision(row: dict[str, Any]) -> list[DecisionTimelineEvent]:
         if row.get(key) is not None
     }
     if outcomes:
+        outcomes["decision"] = base_payload["decision"]
+        outcomes["status"] = base_payload["status"]
+        outcomes["reason"] = reason
+        outcomes["decided_at"] = ts.isoformat()
+        outcomes["executed_amount_ars"] = _json_ready(row.get("executed_amount_ars"))
+        outcomes["is_executable"] = base_payload["is_executable"]
+        outcomes["was_blocked"] = base_payload["was_blocked"]
+        outcomes["metric_scope"] = base_payload["metric_scope"]
         outcomes["outcome_basis"] = _text(row.get("outcome_basis"))
         outcomes["is_primary_metric"] = bool(row.get("is_primary_metric"))
         events.append(
@@ -349,6 +367,14 @@ def _decision_gaps(row: Mapping[str, Any], layers: Mapping[str, Any]) -> list[st
     if not run_context.get("portfolio_snapshot_id"):
         gaps.append("missing_portfolio_snapshot_id")
     return gaps
+
+
+def _decision_reason(row: Mapping[str, Any], layers: Mapping[str, Any]) -> str | None:
+    return (
+        _text(row.get("block_reason"))
+        or _text(layers.get("reason"))
+        or _text(layers.get("forced_reason"))
+    )
 
 
 def _layers(value: Any) -> dict[str, Any]:

@@ -136,8 +136,11 @@ def test_decision_timeline_unifies_plan_fill_and_executable_outcome():
                 "decision": "BUY",
                 "source": "execution_plan",
                 "status": "EXECUTED",
+                "block_reason": None,
                 "theoretical_amount_ars": Decimal("250000"),
                 "executed_amount_ars": Decimal("245000"),
+                "is_executable": True,
+                "was_blocked": False,
                 "outcome_5d": Decimal("0.025"),
                 "outcome_basis": "canonical_cocos",
                 "is_primary_metric": True,
@@ -180,6 +183,44 @@ def test_decision_timeline_unifies_plan_fill_and_executable_outcome():
     assert fill["gaps"] == []
     assert outcome["payload"]["outcome_basis"] == "canonical_cocos"
     assert outcome["payload"]["is_primary_metric"] is True
+    assert outcome["payload"]["decision"] == "BUY"
+    assert outcome["payload"]["status"] == "EXECUTED"
+    assert outcome["payload"]["executed_amount_ars"] == 245000.0
+    assert outcome["payload"]["decided_at"] == "2026-08-01T14:00:00+00:00"
+
+
+def test_blocked_outcome_keeps_original_reason_and_audit_context():
+    data = build_decision_timeline(
+        [
+            {
+                "id": 22,
+                "decided_at": "2026-08-01T14:00:00+00:00",
+                "outcome_filled_at": "2026-08-07T00:30:00+00:00",
+                "ticker": "MU",
+                "decision": "BUY",
+                "source": "execution_plan",
+                "status": "BLOCKED",
+                "block_reason": "Funding insuficiente",
+                "theoretical_amount_ars": Decimal("100000"),
+                "executed_amount_ars": Decimal("0"),
+                "is_executable": False,
+                "was_blocked": True,
+                "outcome_5d": Decimal("-0.101"),
+                "outcome_basis": "canonical_cocos",
+                "is_primary_metric": False,
+                "metric_scope": "blocked_audit",
+                "layers": {},
+            }
+        ]
+    )
+
+    outcome = next(event for event in data["events"] if event["event_type"] == "outcome_updated")
+
+    assert outcome["ts"] == "2026-08-07T00:30:00+00:00"
+    assert outcome["payload"]["status"] == "BLOCKED"
+    assert outcome["payload"]["reason"] == "Funding insuficiente"
+    assert outcome["payload"]["was_blocked"] is True
+    assert outcome["payload"]["is_primary_metric"] is False
 
 
 def test_monitor_registers_read_only_audit_timeline_route():
