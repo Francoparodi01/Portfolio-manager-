@@ -35,6 +35,7 @@ construir una memoria operacional confiable: datos, decisiones, fills y outcomes
 | [audit-traceability.md](audit-traceability.md) | decisiones, evidencia, metricas y capas audit-only |
 | [roadmap.md](roadmap.md) | mejoras, deuda, riesgos y cambios no recomendados todavia |
 | [validation-2026-07-28.md](validation-2026-07-28.md) | snapshot de validacion local, Docker y auditorias vivas |
+| [quantia-dossier.md](quantia-dossier.md) | dossier tecnico con corte historico al 2026-07-30 |
 
 ## Principios del Sistema
 

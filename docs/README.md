@@ -18,6 +18,7 @@ La normalizacion final de marca queda pendiente.
 - [Arquitectura frontend](08-frontend-arquitectura.md)
 - [Auditoria de datos frontend](09-frontend-data-audit.md)
 - [Learning shadow v2](10-learning-shadow.md)
+- [Dossier tecnico, corte 2026-07-30](quantia-dossier.md)
 
 ## Que problema resuelve
 
