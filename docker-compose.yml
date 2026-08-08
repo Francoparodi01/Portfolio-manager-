@@ -71,11 +71,26 @@ services:
     command: ["python", "-m", "src.monitor.api"]
     environment:
       TZ: America/Argentina/Buenos_Aires
+      MONITOR_CORS_ORIGIN: ${MONITOR_CORS_ORIGIN:-}
     deploy:
       resources:
         limits:
           cpus: "0.5"
           memory: 512M
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_MONITOR_API_BASE_URL: ${VITE_MONITOR_API_BASE_URL:-auto}
+    container_name: quantia_frontend
+    restart: unless-stopped
+    depends_on:
+      - monitor_api
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    environment:
+      TZ: America/Argentina/Buenos_Aires
 
 volumes:
   postgres_data:

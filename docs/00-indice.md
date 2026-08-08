@@ -17,6 +17,9 @@ construir una memoria operacional confiable: datos, decisiones, fills y outcomes
 | [05-mantenimiento.md](05-mantenimiento.md) | backfills, calidad, troubleshooting, limpieza futura |
 | [06-seguridad-y-publicacion.md](06-seguridad-y-publicacion.md) | seguridad, exposicion remota y publicacion del monitor |
 | [07-analisis-radar-shadow.md](07-analisis-radar-shadow.md) | como analizan cartera, oportunidades y pronosticos 5/20/40 |
+| [08-frontend-arquitectura.md](08-frontend-arquitectura.md) | arquitectura del frontend React, rutas, contrato API y despliegue |
+| [09-frontend-data-audit.md](09-frontend-data-audit.md) | auditoria de datos capturados, API, frontend y cruces priorizables |
+| [10-learning-shadow.md](10-learning-shadow.md) | aprendizaje audit-only sobre bloqueos, metricas y revision humana |
 
 ## Documentacion de Evaluacion
 

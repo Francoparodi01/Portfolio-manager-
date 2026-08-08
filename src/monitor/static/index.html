@@ -1709,19 +1709,35 @@
 
           <div class="kpi-row">
             <div class="kpi">
-              <span class="kpi-label">Outcomes 5D</span>
+              <span
+                class="kpi-label"
+                title="Decisiones ejecutadas reales con outcome 5D cerrado. Incluye movimientos manuales de Cocos y planes del bot ejecutados."
+                >Real cerradas 5D</span
+              >
               <span class="kpi-value" id="perfClosed">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Win Rate</span>
+              <span
+                class="kpi-label"
+                title="Acierto sobre la muestra real primaria cerrada."
+                >Real win 5D</span
+              >
               <span class="kpi-value blue" id="perfWinRate">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">EV 5D</span>
+              <span
+                class="kpi-label"
+                title="Retorno esperado 5D de la muestra real primaria."
+                >Real EV 5D</span
+              >
               <span class="kpi-value money" id="perfEv">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Mejor / Peor</span>
+              <span
+                class="kpi-label"
+                title="Mejor y peor outcome 5D dentro de la muestra real primaria."
+                >Real mejor / peor</span
+              >
               <span class="kpi-value" id="perfBestWorst" style="font-size: 14px"
                 >-</span
               >
@@ -1732,24 +1748,40 @@
             id="decisionIntelNote"
             style="margin: 10px 0 12px"
           >
-            Metrica principal: solo decisiones primarias con outcome 5D cerrado.
+            Real primario: fills/movimientos ejecutados con outcome 5D cerrado.
           </div>
 
           <div class="kpi-row">
             <div class="kpi">
-              <span class="kpi-label">Bot planes</span>
+              <span
+                class="kpi-label"
+                title="Planes execution_plan del bot. No significa que se hayan seguido."
+                >Bot planes aud.</span
+              >
               <span class="kpi-value" id="botPredTotal">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Bot cerradas 5D</span>
+              <span
+                class="kpi-label"
+                title="Planes del bot con outcome 5D ya disponible."
+                >Bot 5D cerrados</span
+              >
               <span class="kpi-value blue" id="botPredClosed">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Bot acierto</span>
+              <span
+                class="kpi-label"
+                title="Acierto direccional del bot: BUY acierta si sube; SELL acierta si baja."
+                >Bot acierto dir.</span
+              >
               <span class="kpi-value" id="botPredWin">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Bot edge dir.</span>
+              <span
+                class="kpi-label"
+                title="Promedio direccional 5D de los planes del bot. Es auditoria, no EV real."
+                >Bot edge dir. 5D</span
+              >
               <span class="kpi-value money" id="botPredEdge">-</span>
             </div>
           </div>
@@ -1758,25 +1790,41 @@
             id="botPredictionNote"
             style="margin: 10px 0 12px"
           >
-            Audita lo que dijo el bot aunque no lo hayas seguido. No entra al EV
-            real del portfolio.
+            Auditoria de planes del bot, seguidos o ignorados. No entra al EV
+            real.
           </div>
 
           <div class="kpi-row" style="margin-bottom: 16px">
             <div class="kpi">
-              <span class="kpi-label">SELL fuerte cerradas</span>
+              <span
+                class="kpi-label"
+                title="SELL del bot con final_score menor a -0.08 y outcome 5D cerrado."
+                >SELL fuerte 5D</span
+              >
               <span class="kpi-value" id="strongSellClosed">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">SELL fuerte acierto</span>
+              <span
+                class="kpi-label"
+                title="Porcentaje de SELL fuertes que evitaron baja posterior."
+                >SELL fuerte win</span
+              >
               <span class="kpi-value blue" id="strongSellHit">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Pérdida evitable</span>
+              <span
+                class="kpi-label"
+                title="Suma de bajas 5D que el SELL fuerte habria evitado."
+                >Perdida evitada</span
+              >
               <span class="kpi-value money" id="strongSellAvoided">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Falsa alarma avg</span>
+              <span
+                class="kpi-label"
+                title="Promedio de SELL fuertes que habrian vendido antes de una suba."
+                >Falsa alarma avg</span
+              >
               <span class="kpi-value" id="strongSellFalseAlarm">-</span>
             </div>
           </div>
@@ -1820,13 +1868,13 @@
 
           <div class="panel-split" style="margin-bottom: 16px">
             <div class="card">
-              <h2>EV por fuente</h2>
+              <h2>Real vs auditoria</h2>
               <div class="table-wrap">
                 <table>
                   <thead>
                     <tr>
-                      <th>Fuente</th>
-                      <th>Scope</th>
+                      <th>Origen</th>
+                      <th>Tipo</th>
                       <th>Cerr.</th>
                       <th>Win</th>
                       <th>EV 5D</th>
@@ -1997,19 +2045,35 @@
 
           <div class="kpi-row">
             <div class="kpi">
-              <span class="kpi-label">Planes / intenciones</span>
+              <span
+                class="kpi-label"
+                title="Planes APPROVED del bot / tickers-direcciones unicas."
+                >Planes / intenciones</span
+              >
               <span class="kpi-value" id="overridePlans">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Seguidas / sobre-ej.</span>
+              <span
+                class="kpi-label"
+                title="Mismo lado que el bot: seguido >=75%; sobre-ejecutado >=135%."
+                >Seguidas / sobre-ej.</span
+              >
               <span class="kpi-value blue" id="overrideFollowed">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Ignoradas / opuestas</span>
+              <span
+                class="kpi-label"
+                title="Ignorada: sin movimiento suficiente; opuesta: movimiento contrario >=15%."
+                >Ignoradas / opuestas</span
+              >
               <span class="kpi-value amber" id="overrideIgnored">-</span>
             </div>
             <div class="kpi">
-              <span class="kpi-label">Cerradas 5D</span>
+              <span
+                class="kpi-label"
+                title="Planes del bot con outcome 5D cerrado / intenciones cerradas."
+                >Cerradas 5D</span
+              >
               <span class="kpi-value" id="overrideClosed">-</span>
             </div>
           </div>
@@ -3088,6 +3152,54 @@
         return key || "-";
       }
 
+      function sourceLabel(value) {
+        const key = String(value || "").toLowerCase();
+        if (key === "broker_movement") return "Manual Cocos";
+        if (key === "broker_fill") return "Fill broker";
+        if (key === "execution_plan") return "Bot";
+        if (key === "radar") return "Radar";
+        if (key === "optimizer") return "Optimizer";
+        if (key === "sin_source") return "Sin source";
+        return value || "-";
+      }
+
+      function metricScopeLabel(value) {
+        const key = String(value || "").toLowerCase();
+        if (key === "primary") return "Real primario";
+        if (key === "planner_audit") return "Plan bot audit";
+        if (key === "blocked_audit") return "Bloqueado audit";
+        if (key === "radar_audit") return "Radar audit";
+        if (key === "debug") return "Debug";
+        return value || "-";
+      }
+
+      function closedSourceParts(rows, scope) {
+        return (rows || [])
+          .filter((row) => String(row.metric_scope || "").toLowerCase() === scope)
+          .filter((row) => Number(row.closed_5d || 0) > 0)
+          .map(
+            (row) =>
+              `${sourceLabel(row.source)} ${fmtNumber(row.closed_5d || 0)}`,
+          )
+          .join(" + ");
+      }
+
+      function closedBotParts(rows) {
+        return (rows || [])
+          .filter((row) => String(row.source || "").toLowerCase() === "execution_plan")
+          .filter((row) =>
+            ["primary", "planner_audit"].includes(
+              String(row.metric_scope || "").toLowerCase(),
+            ),
+          )
+          .filter((row) => Number(row.closed_5d || 0) > 0)
+          .map(
+            (row) =>
+              `${metricScopeLabel(row.metric_scope)} ${fmtNumber(row.closed_5d || 0)}`,
+          )
+          .join(" + ");
+      }
+
       function renderDecisionBreakdownRows(rows) {
         return (
           (rows || [])
@@ -3128,8 +3240,8 @@
             .map((row) => {
               const closed = Number(row.closed_5d || 0);
               return `<tr>
-                <td>${escapeHtml(row.source || "-")}</td>
-                <td>${escapeHtml(row.metric_scope || "-")}</td>
+                <td title="${escapeHtml(row.source || "-")}">${escapeHtml(sourceLabel(row.source))}</td>
+                <td title="${escapeHtml(row.metric_scope || "-")}">${escapeHtml(metricScopeLabel(row.metric_scope))}</td>
                 <td>${fmtNumber(closed)} <span class="subtle">/ ${fmtNumber(row.total || 0)}</span></td>
                 <td>${closed ? fmtPct(row.win_rate_5d) : "-"}</td>
                 <td class="${pctClass(row.avg_5d)}">${closed ? fmtPct(row.avg_5d) : "-"}</td>
@@ -3192,8 +3304,9 @@
           ? `${fmtPct(s.best_5d)} / ${fmtPct(s.worst_5d)}`
           : "- / -";
         if (closed) {
+          const realParts = closedSourceParts(data.source_breakdown, "primary");
           $("decisionIntelNote").textContent =
-            `Métrica principal: ${fmtNumber(closed)} outcomes 5D primarios cerrados. Excluye radar, bloqueos y planes sin fill.`;
+            `Real primario: ${fmtNumber(closed)} outcomes 5D cerrados${realParts ? " (" + realParts + ")" : ""}. Excluye radar, bloqueos y planes del bot no ejecutados.`;
         } else {
           const periodLabel =
             state.performanceDays === 365 ? "All" : `${state.performanceDays}d`;
@@ -3216,9 +3329,10 @@
         $("botPredEdge").textContent = botClosed
           ? fmtPct(bot.avg_directional_5d)
           : "-";
+        const botAuditParts = closedBotParts(data.source_breakdown);
         $("botPredictionNote").textContent = botClosed
-          ? "Bot Prediction Audit: mide planes APPROVED/EXECUTED del bot, seguidos o ignorados. Edge direccional: BUY suma si sube, SELL suma si baja. No entra al EV real."
-          : `Bot Prediction Audit: ${fmtNumber(bot.total || 0)} planes del bot en ventana; ${fmtNumber(botPending)} pendientes de outcome 5D. No entra al EV real.`;
+          ? `Bot audit: mide planes APPROVED/EXECUTED, seguidos o ignorados${botAuditParts ? " (" + botAuditParts + ")" : ""}. Edge dir.: BUY suma si sube, SELL si baja.`
+          : `Bot audit: ${fmtNumber(bot.total || 0)} planes en ventana; ${fmtNumber(botPending)} pendientes 5D. No entra al EV real.`;
         const evitable = data.evitable_loss || {};
         const strongSellClosed = Number(evitable.closed_5d || 0);
         $("strongSellClosed").textContent = strongSellClosed
@@ -3301,11 +3415,11 @@
         $("overrideUpdated").textContent =
           `act. hace ${ageFromIso(data.generated_at)} · ${fmtNumber(s.repeated_plans || 0)} planes repetidos`;
         $("overrideSummary").innerHTML = `
-        <span title="Seguido">Seguido: <b>${fmtNumber(byStatus.FOLLOWED || 0)}</b></span>
-        <span title="Sobre-ejecutado">Sobre: <b>${fmtNumber(byStatus.OVERFOLLOWED || 0)}</b></span>
-        <span title="Parcial">Parcial: <b>${fmtNumber(byStatus.PARTIAL || 0)}</b></span>
-        <span title="Ignorado">Ignorado: <b>${fmtNumber(byStatus.IGNORED || 0)}</b></span>
-        <span title="Opuesto">Opuesto: <b>${fmtNumber(byStatus.OPPOSITE || 0)}</b></span>
+        <span title="Mismo lado que el bot >=75% del monto planeado">Seguido: <b>${fmtNumber(byStatus.FOLLOWED || 0)}</b></span>
+        <span title="Mismo lado que el bot >=135% del monto planeado">Sobre: <b>${fmtNumber(byStatus.OVERFOLLOWED || 0)}</b></span>
+        <span title="Mismo lado entre 15% y 75% del monto planeado">Parcial: <b>${fmtNumber(byStatus.PARTIAL || 0)}</b></span>
+        <span title="Sin movimiento real suficiente contra ese plan">Ignorado: <b>${fmtNumber(byStatus.IGNORED || 0)}</b></span>
+        <span title="Movimiento real contrario >=15% del monto planeado">Opuesto: <b>${fmtNumber(byStatus.OPPOSITE || 0)}</b></span>
       `;
         $("overridePlans").textContent =
           `${fmtNumber(s.plans)} / ${fmtNumber(s.unique_intents)}`;

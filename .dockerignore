@@ -33,6 +33,13 @@ logs
 screenshots
 outputs
 models
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend/.playwright-cli
+frontend/output
+docs/export
 playwright-report
 test-results
 trace.zip

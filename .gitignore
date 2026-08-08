@@ -7,6 +7,13 @@
 venv/
 __pycache__/
 *.pyc
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.playwright-cli/
+frontend/output/
+.vite/
+*.tsbuildinfo
 
 # Secretos
 secret_key/
@@ -29,6 +36,7 @@ logs/
 screenshots/
 models/
 outputs/
+docs/export/
 *.log
 tests/*
 !tests/test_trend_regime.py
@@ -56,6 +64,8 @@ tests/*
 !tests/test_corporate_actions.py
 !tests/test_issuer_event_sources.py
 !tests/test_operational_tools.py
+!tests/test_cocos_access_block.py
+!tests/test_learning_shadow.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json

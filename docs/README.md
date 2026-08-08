@@ -15,6 +15,9 @@ La normalizacion final de marca queda pendiente.
 - [Testing y calidad](testing-quality.md)
 - [Auditoria y trazabilidad](audit-traceability.md)
 - [Roadmap](roadmap.md)
+- [Arquitectura frontend](08-frontend-arquitectura.md)
+- [Auditoria de datos frontend](09-frontend-data-audit.md)
+- [Learning shadow v2](10-learning-shadow.md)
 
 ## Que problema resuelve
 
