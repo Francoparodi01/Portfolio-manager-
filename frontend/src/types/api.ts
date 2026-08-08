@@ -19,6 +19,7 @@ export type EndpointKey =
   | "performance"
   | "override"
   | "ledger"
+  | "timeline"
   | "radar"
   | "shadow"
   | "learning"
@@ -101,6 +102,31 @@ export type OverrideAuditPayload = {
   summary?: RowRecord;
   matches?: RowRecord[];
   recent?: RowRecord[];
+};
+
+export type AuditTimelineEvent = {
+  event_id: string;
+  event_type: string;
+  ts: string;
+  ticker?: string | null;
+  run_id?: string | null;
+  decision_log_id?: number | null;
+  source: string;
+  payload?: RowRecord;
+  gaps?: string[];
+};
+
+export type AuditTimelinePayload = {
+  ok: boolean;
+  days: number;
+  limit?: number;
+  filters?: RowRecord;
+  summary?: {
+    event_count?: number;
+    tickers?: string[];
+    gaps?: string[];
+  };
+  events?: AuditTimelineEvent[];
 };
 
 export type RadarPayload = {

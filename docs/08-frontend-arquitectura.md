@@ -112,6 +112,7 @@ sequenceDiagram
 | `performance` | `/api/performance?days=<n>` |
 | `override` | `/api/override-audit?days=<n>` |
 | `ledger` | `/api/decision-ledger?days=<n>` |
+| `timeline` | `/api/audit-timeline?days=<n>&limit=<n>` |
 | `radar` | `/api/radar-audit?days=<n>` |
 | `shadow` | `/api/shadow` |
 | `human` | `/api/human-activity?days=<n>` |

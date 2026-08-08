@@ -98,10 +98,12 @@ async def fetch_decision_timeline(
             run_intent,
             decision_stage,
             metric_scope,
-            outcome_5d,
-            outcome_10d,
-            outcome_20d,
-            outcome_40d,
+            COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
+            COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
+            COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
+            COALESCE(executable_outcome_40d, outcome_40d) AS outcome_40d,
+            outcome_basis,
+            is_primary_metric,
             outcome_filled_at
         FROM decision_log
         WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
@@ -267,6 +269,8 @@ def _events_from_decision(row: dict[str, Any]) -> list[DecisionTimelineEvent]:
         if row.get(key) is not None
     }
     if outcomes:
+        outcomes["outcome_basis"] = _text(row.get("outcome_basis"))
+        outcomes["is_primary_metric"] = bool(row.get("is_primary_metric"))
         events.append(
             DecisionTimelineEvent(
                 event_id=f"outcome:{decision_id}",

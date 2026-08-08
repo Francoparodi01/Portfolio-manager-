@@ -1,4 +1,5 @@
 import { useSearchParams } from "react-router-dom";
+import { AuditTimeline } from "../components/audit/AuditTimeline";
 import { PageHeader } from "../components/layout/PageHeader";
 import { LoadingState } from "../components/feedback/States";
 import { Metric, MetricGroup } from "../components/ui/Metric";
@@ -6,7 +7,7 @@ import { Panel } from "../components/ui/Panel";
 import { ResponsiveTable, type TableColumn } from "../components/ui/ResponsiveTable";
 import { StatusBadge } from "../components/ui/StatusBadge";
 import { PERIODS } from "../services/monitorApi";
-import { useDecisionsQuery, useFillsQuery, useOverrideQuery, usePeriodParam } from "../hooks/useMonitorData";
+import { useAuditTimelineQuery, useDecisionsQuery, useFillsQuery, useOverrideQuery, usePeriodParam } from "../hooks/useMonitorData";
 import type { RowRecord, Tone } from "../types/api";
 import { asRows, getNumber, getRecord, getString } from "../utils/data";
 import { formatDateTime, formatMoney, formatNumber, formatPercent, formatScore, toneForNumber } from "../utils/format";
@@ -71,6 +72,7 @@ export default function DecisionsPage() {
   const decisions = useDecisionsQuery(period);
   const override = useOverrideQuery(period);
   const fills = useFillsQuery(period, movementLimit);
+  const timeline = useAuditTimelineQuery(period, 400);
   const summary = getRecord(decisions.data, "summary");
   const fillSummary = getRecord(fills.data, "summary");
   const movementPayload = getRecord(fills.data, "movements");
@@ -117,8 +119,8 @@ export default function DecisionsPage() {
       <section className="ledger-rail" aria-label="Etapas de decision">
         <div>
           <span>01</span>
-          <strong>Senal</strong>
-          <small>Score o radar</small>
+          <strong>Decision</strong>
+          <small>Senal registrada</small>
         </div>
         <div>
           <span>02</span>
@@ -127,15 +129,27 @@ export default function DecisionsPage() {
         </div>
         <div>
           <span>03</span>
-          <strong>Usuario</strong>
+          <strong>Movimiento</strong>
           <small>Movimiento real Cocos</small>
         </div>
         <div>
           <span>04</span>
+          <strong>Fill</strong>
+          <small>Ejecucion reconciliada</small>
+        </div>
+        <div>
+          <span>05</span>
           <strong>Outcome</strong>
-          <small>5/10/20 ruedas</small>
+          <small>5/10/20/40 ruedas</small>
         </div>
       </section>
+
+      <AuditTimeline
+        data={timeline.data}
+        error={timeline.error instanceof Error ? timeline.error.message : ""}
+        isLoading={timeline.isLoading}
+        onRetry={() => void timeline.refetch()}
+      />
 
       <Panel kicker="Lectura rapida" title="Que significa cada grupo">
         <ResponsiveTable

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 from src.analysis.decision_timeline import (
     build_decision_timeline,
@@ -123,3 +124,66 @@ def test_fetch_decision_timeline_omits_unscoped_movements_for_run_filter():
     asyncio.run(fetch_decision_timeline(conn, run_id="run-1"))
 
     assert not any("FROM broker_movements" in query for query in conn.queries)
+
+
+def test_decision_timeline_unifies_plan_fill_and_executable_outcome():
+    data = build_decision_timeline(
+        [
+            {
+                "id": 21,
+                "decided_at": "2026-08-01T14:00:00+00:00",
+                "ticker": "YPFD",
+                "decision": "BUY",
+                "source": "execution_plan",
+                "status": "EXECUTED",
+                "theoretical_amount_ars": Decimal("250000"),
+                "executed_amount_ars": Decimal("245000"),
+                "outcome_5d": Decimal("0.025"),
+                "outcome_basis": "canonical_cocos",
+                "is_primary_metric": True,
+                "run_id": "run-21",
+                "layers": {
+                    "run_context": {
+                        "run_id": "run-21",
+                        "portfolio_snapshot_id": "p21",
+                        "feature_snapshot_id": "f21",
+                    }
+                },
+            }
+        ],
+        fill_rows=[
+            {
+                "id": 31,
+                "executed_at": "2026-08-01T15:00:00+00:00",
+                "ticker": "YPFD",
+                "side": "BUY",
+                "quantity": Decimal("10"),
+                "avg_fill_price": Decimal("24500"),
+                "gross_amount_ars": Decimal("245000"),
+                "source": "broker_fill",
+                "decision_log_id": 21,
+                "run_id": "run-21",
+            }
+        ],
+    )
+
+    event_types = [event["event_type"] for event in data["events"]]
+    assert event_types == [
+        "decision_logged",
+        "outcome_updated",
+        "plan_created",
+        "fill_detected",
+    ]
+    fill = next(event for event in data["events"] if event["event_type"] == "fill_detected")
+    outcome = next(event for event in data["events"] if event["event_type"] == "outcome_updated")
+    assert fill["decision_log_id"] == 21
+    assert fill["gaps"] == []
+    assert outcome["payload"]["outcome_basis"] == "canonical_cocos"
+    assert outcome["payload"]["is_primary_metric"] is True
+
+
+def test_monitor_registers_read_only_audit_timeline_route():
+    root = Path(__file__).resolve().parents[1]
+    monitor_api = (root / "src" / "monitor" / "api.py").read_text(encoding="utf-8")
+
+    assert 'app.router.add_get("/api/audit-timeline", audit_timeline)' in monitor_api

@@ -7,6 +7,10 @@ El objetivo es inventariar que datos ya captura el backend, que parte llega hoy
 a la API del monitor, que parte se ve en el frontend React y que cruces conviene
 priorizar con Franco.
 
+Actualizacion 2026-08-08: la timeline auditable fue implementada como endpoint
+read-only y vista integrada en `DecisionsPage`. Los demas cruces conservan el
+estado indicado en este documento.
+
 No implementa cambios de UX, API, schema, scoring, thresholds, optimizer,
 planner ni logica de decision. Cualquier cruce nuevo debe ser read-only y debe
 mantener separados:
@@ -36,7 +40,7 @@ formacion, pero no como edge confirmado.
 | Pesos Black-Litterman vs pesos previos / fallback `FALLBACK_MAX_SHARPE`. Optimizer en `src/analysis/optimizer.py`; docs mencionan BL y fallback. | No se encontro endpoint dedicado de corridas de optimizer/pesos historicos. Parte puede quedar embebida en planes o logs, pero no como contrato estable de API. | No se encontro vista dedicada de pesos propuestos vs cartera actual. | `PortfolioPage` o panel "Optimizer". | Si, salvo que se acepte un MVP limitado desde `decision_log.layers` si contiene datos suficientes en produccion. |
 | Alertas intraday pre-close disparadas. Tabla `intraday_preclose_alerts`; generacion en `src/analysis/preclose_alerts.py` y scheduler. | No se encontro endpoint dedicado en monitor API. | No se encontro vista dedicada. | Timeline operativo, `DataPage` o panel de alertas. | Si. |
 | Overrides humanos con justificacion. Auditoria cruza planes aprobados con movimientos reales y clasifica `FOLLOWED`, `PARTIAL`, `OPPOSITE`, `IGNORED`; `override_audit` lee `layers->>'reason'` del plan. | Si, por `/api/override-audit`; incluye estado de seguimiento y razon del plan. No confirma una justificacion humana explicita persistida para cada override. | Parcial. `HumanBenchmarkPage` y `DecisionsPage` muestran bot vs humano, pero falta separar mejor "razon del bot", "accion real del usuario" y "justificacion humana". | `HumanBenchmarkPage` / `DecisionsPage`. | No para auditoria basica; si si queremos guardar y mostrar justificacion humana explicita. |
-| Fills reales vs plan del bot. Tablas `broker_fills`, `broker_movements`; endpoints `/api/fills`, `/api/override-audit`, `/api/decision-ledger`. | Si, con fills/movements recientes y auditoria de seguimiento. | Si, parcial. `DecisionsPage` muestra historial de movimientos y `HumanBenchmarkPage` resume seguimiento, pero falta una timeline unificada plan -> ejecucion -> outcome. | `DecisionsPage` / timeline de auditoria. | No para MVP basico; si para una timeline unificada con eventos, alertas y outcomes en una sola respuesta. |
+| Fills reales vs plan del bot. Tablas `broker_fills`, `broker_movements`; endpoints `/api/fills`, `/api/override-audit`, `/api/decision-ledger` y `/api/audit-timeline`. | Si, con un flujo read-only de decision, plan, movimiento, fill y outcome. | Si. `DecisionsPage` muestra la timeline unificada, permite filtrar por ticker/etapa y explicita los eventos sin vinculo directo. | `DecisionsPage` / timeline de auditoria. | No para el flujo actual. |
 | Snapshots de portfolio y allocation historica. Tabla `portfolio_snapshots`; endpoint `/api/portfolio`. | Si. | Si. `PortfolioPage` y resumen general. | `PortfolioPage`. | No. |
 | Cobertura/frescura de velas de mercado. Tabla `market_candles`; endpoint `/api/candles` y `/api/ingestion`. | Si. | Si. `DataPage` y componentes de estado. | `DataPage`. | No. |
 
@@ -46,9 +50,9 @@ formacion, pero no como edge confirmado.
    eventos manuales, pre-close alerts y optimizer no tienen una superficie clara.
 2. La UI ya distingue algunas poblaciones, pero todavia necesita una regla
    visual uniforme para `n`, especialmente en EV/performance.
-3. "Hecho por Franco" y "decision del bot" no deben mezclarse en una sola fila:
-   una pantalla auditable deberia separar plan, accion real, fuente, estado de
-   seguimiento y outcome.
+3. La timeline ya separa plan, accion real, fill, fuente y outcome. Los movimientos
+   sin relacion verificable con `decision_log` quedan marcados como huecos de
+   trazabilidad y no se atribuyen automaticamente al bot.
 4. La justificacion humana no esta confirmada como dato persistido estructurado.
    Hoy puede inferirse accion real por broker movements, pero no conviene
    inventar una razon si la DB no la trae.
@@ -63,7 +67,7 @@ que Franco confirme que cruces construir primero.
 | Prioridad propuesta | Cruce | Valor | Costo estimado | Estado recomendado |
 |---|---|---|---|---|
 | 1 | EV/performance por poblacion con `n`, scope y badge `n<30`. Separar bot-only, manual-only, aggregate, radar/debug y primary. | Alto: evita conclusiones falsas sobre edge y hace legible la metrica principal. | Bajo/medio: parte ya sale por `/api/performance`, pero hay que endurecer contrato UI. | Recomendar como primer cambio. |
-| 2 | Timeline auditable plan -> movimiento real -> outcome. Cada fila debe decir: fuente, estado, accion, monto, fecha, si fue seguido/ignorado y resultado. | Alto: responde directamente "que hice yo" vs "que decidio el bot". | Medio: puede empezar con `/api/fills`, `/api/override-audit` y `/api/decision-ledger`; para timeline completa conviene endpoint agregado read-only. | Recomendar como primer MVP de producto. |
+| 2 | Timeline auditable plan -> movimiento real -> fill -> outcome. Cada evento declara fuente, accion, monto, fecha y vinculos disponibles. | Alto: responde directamente "que hice yo" vs "que decidio el bot". | Implementado con `/api/audit-timeline` y una vista unificada en `DecisionsPage`. | Completado como MVP read-only. |
 | 3 | Override humano con costo/beneficio real. Mostrar planes aprobados que Franco siguio, ignoro o hizo al reves, con outcome posterior y razon del plan. | Alto: mide si el criterio humano mejora o empeora el plan. | Medio: datos basicos existen; falta capturar justificacion humana si se quiere mostrarla honestamente. | Recomendar despues del timeline basico. |
 | 4 | Shadow forecast vs realidad por ticker/horizonte. Ver 5/20/40 como evidencia experimental con muestras y error. | Medio/alto: ayuda a auditar tesis sin tocar planner. | Medio: `/api/shadow` ya existe; falta UX y tal vez historico/filtros. | Aprobable como panel de analisis, no como decision. |
 | 5 | Eventos manuales + alertas pre-close sobre decisiones y precio. Marcar cuando una compra/venta ocurrio cerca de catalyst o alerta. | Medio/alto: explica contexto que hoy queda escondido. | Medio/alto: requiere endpoints para `manual_market_events` e `intraday_preclose_alerts`. | Priorizar si Franco usa esos eventos operativamente. |
@@ -73,24 +77,23 @@ que Franco confirme que cruces construir primero.
 
 ## Decision pendiente para Franco
 
-Para avanzar sin construir ocho cosas a la vez, la decision recomendada es elegir
-un paquete inicial de 2 o 3 cruces. Mi recomendacion tecnica es:
+La timeline auditable ya fue aprobada e implementada. Los siguientes cruces para
+priorizar son:
 
 1. EV/performance por poblacion con `n` visible y bloqueo visual de `n<30`.
-2. Timeline auditable plan -> ejecucion real -> outcome.
-3. Override humano con costo/beneficio real.
+2. Override humano con costo/beneficio real y justificacion persistida.
+3. Shadow forecast vs realidad por ticker y horizonte.
 
-Queda pendiente de aprobacion por Franco. Hasta esa aprobacion, este documento
-solo funciona como insumo de priorizacion.
+Los puntos restantes siguen pendientes de aprobacion por Franco.
 
-## Contratos API sugeridos, sin implementar
+## Contratos API actuales y sugeridos
 
-Si se aprueba avanzar, conviene agregar endpoints read-only y no cambiar la
-logica de decision:
+La timeline ya esta implementada. Los demas endpoints siguen sugeridos y deben
+mantenerse read-only:
 
 | Endpoint sugerido | Fuente primaria | Uso |
 |---|---|---|
-| `/api/audit-timeline?days=...&ticker=...` | `decision_log`, `broker_fills`, `broker_movements`, outcomes | Unificar plan, ejecucion real y resultado. |
+| `/api/audit-timeline?days=...&ticker=...&limit=...` | `decision_log`, `broker_fills`, `broker_movements`, outcomes | Implementado: unifica decision, plan, ejecucion real y resultado. |
 | `/api/sentiment-audit?days=...&ticker=...` | `sentiment_raw`, `sentiment_scored`, `sentiment_aggregated` | Mostrar sentimiento como evidencia contextual. |
 | `/api/manual-events?days=...&ticker=...` | `manual_market_events` | Mostrar catalysts declarados manualmente. |
 | `/api/preclose-alerts?days=...&ticker=...` | `intraday_preclose_alerts` | Mostrar alertas disparadas y evidencia. |

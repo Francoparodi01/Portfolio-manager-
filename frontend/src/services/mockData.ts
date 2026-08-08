@@ -1,4 +1,5 @@
 import type {
+  AuditTimelinePayload,
   CandlesPayload,
   DecisionsPayload,
   FillsPayload,
@@ -194,6 +195,58 @@ export const demoCandles: CandlesPayload = {
 
 export const demoLogs: LogsPayload = { items: [{ file: "scheduler.log", line: "WARNING demo: una señal quedó pendiente por falta de precio de cierre." }], log_dir: "demo", note: null, ok: true };
 export const demoLedger: RowRecord = { ok: true, timeline: [{ at: hoursAgo(2), label: "Plan formal", stage: "planner_audit", ticker: "AMZN" }] };
+export const demoTimeline: AuditTimelinePayload = {
+  days: 90,
+  events: [
+    {
+      decision_log_id: 41,
+      event_id: "plan:41",
+      event_type: "plan_created",
+      gaps: ["missing_order_id"],
+      payload: { decision: "BUY", executed_amount_ars: 185000, status: "EXECUTED", theoretical_amount_ars: 203000 },
+      run_id: "demo-run-41",
+      source: "execution_plan",
+      ticker: "V",
+      ts: daysAgo(4),
+    },
+    {
+      decision_log_id: null,
+      event_id: "movement:71",
+      event_type: "movement_detected",
+      gaps: ["missing_decision_link"],
+      payload: { amount_ars: 185000, price: 13910, quantity: 13.3, side: "BUY" },
+      run_id: null,
+      source: "cocos_movements",
+      ticker: "V",
+      ts: daysAgo(4),
+    },
+    {
+      decision_log_id: 41,
+      event_id: "fill:81",
+      event_type: "fill_detected",
+      gaps: [],
+      payload: { avg_fill_price: 13910, gross_amount_ars: 185000, quantity: 13.3, side: "BUY" },
+      run_id: "demo-run-41",
+      source: "broker_fill",
+      ticker: "V",
+      ts: daysAgo(4),
+    },
+    {
+      decision_log_id: 41,
+      event_id: "outcome:41",
+      event_type: "outcome_updated",
+      gaps: [],
+      payload: { is_primary_metric: true, outcome_5d: 0.018, outcome_basis: "canonical_cocos" },
+      run_id: "demo-run-41",
+      source: "decision_log",
+      ticker: "V",
+      ts: daysAgo(1),
+    },
+  ],
+  limit: 400,
+  ok: true,
+  summary: { event_count: 4, gaps: ["missing_decision_link", "missing_order_id"], tickers: ["V"] },
+};
 
 export function demoPayloadFor(key: string): unknown {
   return {
@@ -211,5 +264,6 @@ export function demoPayloadFor(key: string): unknown {
     portfolio: demoPortfolio,
     radar: demoRadar,
     shadow: demoShadow,
+    timeline: demoTimeline,
   }[key];
 }

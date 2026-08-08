@@ -24,6 +24,7 @@ from src.analysis.corporate_actions import (
     rebase_position_view,
 )
 from src.analysis.decision_ledger import fetch_decision_ledger
+from src.analysis.decision_timeline import fetch_decision_timeline
 from src.analysis.override_classification import (
     classify_override as _classify_override,
     dominant_override_status,
@@ -1522,6 +1523,41 @@ async def decision_ledger(request: web.Request) -> web.Response:
     return _json({"ok": True, **data})
 
 
+async def audit_timeline(request: web.Request) -> web.Response:
+    try:
+        days = max(1, min(int(request.query.get("days", "90")), 365))
+        limit = max(1, min(int(request.query.get("limit", "400")), 1000))
+        owner_raw = request.query.get("owner_chat_id")
+        owner_chat_id = int(owner_raw) if owner_raw else None
+    except (TypeError, ValueError):
+        return _json({"ok": False, "error": "Parametros numericos invalidos"}, status=400)
+
+    ticker = str(request.query.get("ticker") or "").strip().upper() or None
+    run_id = str(request.query.get("run_id") or "").strip() or None
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        data = await fetch_decision_timeline(
+            conn,
+            days=days,
+            run_id=run_id,
+            ticker=ticker,
+            owner_chat_id=owner_chat_id,
+            limit=limit,
+        )
+
+    return _json({
+        "ok": True,
+        "days": days,
+        "limit": limit,
+        "filters": {
+            "ticker": ticker,
+            "run_id": run_id,
+            "owner_chat_id": owner_chat_id,
+        },
+        **data,
+    })
+
+
 async def radar_audit(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
     pool: asyncpg.Pool = request.app["pool"]
@@ -2659,6 +2695,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/performance", performance_view)
     app.router.add_get("/api/override-audit", override_audit)
     app.router.add_get("/api/decision-ledger", decision_ledger)
+    app.router.add_get("/api/audit-timeline", audit_timeline)
     app.router.add_get("/api/radar-audit", radar_audit)
     app.router.add_get("/api/shadow", shadow_view)
     app.router.add_get("/api/learning-shadow", learning_shadow_v2_view)
