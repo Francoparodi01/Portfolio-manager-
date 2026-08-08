@@ -55,6 +55,7 @@ tests/*
 !tests/test_thesis_shadow_store.py
 !tests/test_corporate_actions.py
 !tests/test_issuer_event_sources.py
+!tests/test_operational_tools.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json

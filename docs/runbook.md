@@ -169,6 +169,49 @@ docker compose exec -T scheduler python scripts/run_override_audit.py --days 90 
 
 ## Recuperacion
 
+### Backup y restore de Postgres local
+
+El procedimiento cubre la base `db` del perfil `localdb`. Genera un dump binario
+en el host, lo valida con `pg_restore --list` y no imprime credenciales.
+
+Crear y verificar un backup:
+
+```powershell
+python scripts/postgres_maintenance.py backup
+```
+
+Verificar nuevamente un archivo existente:
+
+```powershell
+python scripts/postgres_maintenance.py verify outputs/backups/portfolio-AAAAMMDDTHHMMSSZ.dump
+```
+
+Antes de restaurar, detener los servicios que escriben en la base:
+
+```powershell
+docker compose stop scheduler telegram_bot monitor_api
+python scripts/postgres_maintenance.py restore outputs/backups/portfolio-AAAAMMDDTHHMMSSZ.dump --confirm-database portfolio
+docker compose up -d scheduler telegram_bot monitor_api
+```
+
+`restore` usa una transaccion, `--clean --if-exists` y exige que
+`--confirm-database` coincida exactamente con `--database`. No ejecutar este
+comando sobre una base externa: usar el mecanismo de snapshots/restores del
+proveedor correspondiente.
+
+### Smoke Docker
+
+Validar servicios activos y el monitor sin disparar scraping ni analisis:
+
+```powershell
+python scripts/docker_smoke.py
+python scripts/docker_smoke.py --with-local-db --with-frontend
+```
+
+Si `MONITOR_API_TOKEN` esta disponible en el entorno, el smoke consulta
+`/api/health` y exige `database.ok=true`. Sin token valida el endpoint publico
+`/api/auth/status` y deja una advertencia explicita.
+
 - Reiniciar servicios:
 
 ```powershell
@@ -200,8 +243,9 @@ docker compose exec -T scheduler python scripts/run_once.py --fills --no-telegra
 docker compose exec -T scheduler python scripts/run_confidence_audit.py --days 180 --no-telegram
 ```
 
-Pendiente de validar: procedimiento formal de backup/restore de Postgres,
-rotacion de secretos y RTO/RPO.
+Pendiente de definir: rotacion formal de secretos y objetivos RTO/RPO. El
+backup/restore local debe probarse periodicamente en una base descartable; la
+existencia de un dump no reemplaza una prueba de recuperacion.
 
 ## Logs relevantes
 
