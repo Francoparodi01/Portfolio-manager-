@@ -60,8 +60,8 @@ Falla observada y corregida en esta validacion:
 - No confirmado en el repo: simulacion completa multiusuario.
 - Pendiente de validar: cobertura total de `scripts/telegram_bot.py`, UI estatica
   del monitor y paths de Docker Compose, aunque hay tests parciales.
-- Pendiente de validar: smoke real de scheduler con DB/Redis/Cocos activos en
-  este relevamiento.
+- Existe `scripts/docker_smoke.py` para config, servicios, DB y endpoints. Sigue
+  pendiente un E2E controlado contra Cocos real; el smoke no dispara scraping.
 
 ## Como correr tests
 
@@ -89,6 +89,13 @@ Foco broker/fills:
 python -m pytest tests/test_broker_movement_dedupe.py tests/test_superseded_broker_fills.py
 ```
 
+Foco operativo y persistencia de plan:
+
+```powershell
+python -m pytest tests/test_operational_tools.py tests/test_execution_nominals_and_rotation.py
+python scripts/docker_smoke.py --with-local-db --with-frontend
+```
+
 ## Validaciones manuales necesarias
 
 - Levantar Docker y confirmar `docker compose ps`.
@@ -106,9 +113,9 @@ python -m pytest tests/test_broker_movement_dedupe.py tests/test_superseded_brok
 
 - Dependencia de scraping ante cambios del broker.
 - Contratos JSONB en `layers` aun parcialmente informales.
-- `decision_log` sobrecargado.
-- Falta de IDs normalizados para plan, orden, optimizer, risk y snapshot de
-  mercado.
+- `decision_log` sigue sobrecargado, aunque plan/orden ya se persisten en tablas
+  aditivas enlazadas al ledger.
+- Faltan IDs normalizados para optimizer, risk y snapshot de mercado.
 - Riesgo de que tests unitarios no detecten fallas de runtime Docker/Cocos.
 - Riesgo de encoding en documentacion historica; nuevos docs usan ASCII.
 

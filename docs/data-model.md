@@ -14,6 +14,8 @@ repo muestra 20 tablas `CREATE TABLE IF NOT EXISTS`.
 | `market_candles` | OHLCV canonico para analisis/outcomes. | `ts`, `ticker`, `long_ticker`, `interval`, `open_price`, `high_price`, `low_price`, `close_price`, `volume`, `source`. |
 | `bot_users` | Usuarios Telegram y credenciales cifradas. | `chat_id`, `telegram_username`, `cocos_user_ciphertext`, `cocos_pass_ciphertext`, `mfa_timeout`, `is_active`. |
 | `decision_log` | Ledger central de decisiones, planes, bloqueos, ejecuciones y outcomes. | `id`, `decided_at`, `ticker`, `decision`, `final_score`, `confidence`, `layers`, `price_at_decision`, `status`, `source`, `run_id`, `metric_scope`, `is_primary_metric`. |
+| `execution_plans` | Cabecera persistida del plan operativo multiorden. | `id`, `run_id`, `gate`, `feasible`, cash y totales de compra/venta, `summary`, `warnings`. |
+| `order_intents` | Ordenes propuestas, bloqueadas o pendientes del plan; no implica envio al broker. | `execution_plan_id`, `decision_log_id`, `sequence_no`, `ticker`, `side`, montos, estado y precio de referencia. |
 | `broker_fills` | Fills reales o importados desde broker. | `source`, `external_fill_id`, `executed_at`, `ticker`, `side`, `quantity`, `avg_fill_price`, `fees_ars`, `decision_log_id`. |
 | `broker_movements` | Movimientos de Cocos de instrumentos/caja. | `external_movement_id`, `executed_at`, `movement_type`, `amount`, `quantity`, `price`, `ticker`, `raw_payload`. |
 | `sentiment_raw` | Noticias crudas deduplicadas por URL. | `source`, `url_hash`, `headline`, `published_at`, `score_status`, `raw_payload`. |
@@ -33,6 +35,8 @@ repo muestra 20 tablas `CREATE TABLE IF NOT EXISTS`.
 - `positions.snapshot_id` y `raw_snapshots.snapshot_id` referencian
   `portfolio_snapshots.snapshot_id`.
 - `broker_fills.decision_log_id` referencia `decision_log.id`.
+- `order_intents.execution_plan_id` referencia `execution_plans.id` y
+  `order_intents.decision_log_id` mantiene compatibilidad con `decision_log.id`.
 - `decision_log.superseded_by_id` referencia otra fila de `decision_log`.
 - `bot_users.chat_id` se vincula con `owner_chat_id` en `decision_log`,
   `portfolio_snapshots`, `broker_fills` y shadow.
@@ -46,7 +50,7 @@ repo muestra 20 tablas `CREATE TABLE IF NOT EXISTS`.
 |---|---|
 | Estado observado de cartera | Ultimo `portfolio_snapshots` + `positions`. |
 | Precio/velas para analisis y outcomes | `market_candles` cuando hay cobertura canonica; `market_prices` para snapshot/frescura. |
-| Plan operativo formal | Filas `decision_log` con `source='execution_plan'`, `run_intent='formal_plan'` y scope correspondiente. |
+| Plan operativo formal | `execution_plans` + `order_intents`, con espejo compatible en `decision_log` usando `source='execution_plan'` y `run_intent='formal_plan'`. |
 | Ejecucion real | `broker_fills` y `broker_movements`; al reconciliar actualizan `decision_log` a primary/executed. |
 | Outcome operativo | Columnas `outcome_*` y `executable_outcome_*` en `decision_log`, con `outcome_basis`. |
 | Radar | `decision_log` con `source='radar'` y `metric_scope='radar_audit'`, no primary. |
@@ -78,8 +82,8 @@ Fortalezas:
 
 Debilidades:
 
-- `decision_log` esta sobrecargada.
-- No hay entidad persistida `execution_plan`/`order_intent`.
+- `decision_log` sigue sobrecargada para historico, outcomes y compatibilidad;
+  plan/orden ya tienen persistencia aditiva propia.
 - `market_snapshot_id`, `optimizer_run_id`, `planner_run_id` y
   `risk_assessment_id` no estan normalizados.
 - Algunas migraciones aparecen duplicadas en `init.sql`; son idempotentes por

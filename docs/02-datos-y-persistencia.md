@@ -37,6 +37,8 @@ cuando exista dato oficial de Cocos.
 | `market_prices` | snapshots de mercado por ticker |
 | `market_candles` | OHLCV canonico |
 | `decision_log` | decisiones, bloqueos, ejecuciones, outcomes |
+| `execution_plans` | cabecera de cada plan operativo multiorden |
+| `order_intents` | ordenes propuestas/bloqueadas enlazadas al ledger |
 | `broker_fills` | fills reales reconciliables |
 | `broker_movements` | actividad Cocos de instrumentos/caja |
 | `bot_users` | usuarios y credenciales cifradas |
@@ -55,6 +57,14 @@ tiene ticker, lado, cantidad, precio y fecha, puede convertirse en fill.
 - nada queda pendiente si se pudo asociar a una operacion real.
 
 Esta separacion evita atribuir al bot decisiones que fueron manuales.
+
+## Planes y ordenes propuestas
+
+`scripts/run_analysis.py` persiste cada plan formal en `execution_plans` y sus
+ordenes en `order_intents`. Cada orden conserva el `decision_log_id` generado por
+el flujo compatible. Una fila en `order_intents` describe intencion y estado del
+planner; no prueba envio ni ejecucion. Solo `broker_fills`/`broker_movements`
+representan actividad real observada en Cocos.
 
 ## Outcomes
 
@@ -103,4 +113,3 @@ EN COCOS / SIN HISTORICO OPERABLE
 
 Significa que el ticker existe en Cocos, pero aun no tiene suficientes velas para
 analisis operativo. No depende de fills; los fills solo aparecen si hubo operaciones reales.
-

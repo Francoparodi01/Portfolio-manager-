@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.analysis.enums import DecisionType
@@ -205,6 +206,7 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
     class _Connection:
         def __init__(self):
             self.insert_args = None
+            self.executions = []
 
         async def fetchval(self, _statement, *_args):
             return None
@@ -213,6 +215,10 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
             assert "INSERT INTO decision_log" in statement
             self.insert_args = args
             return {"id": 463}
+
+        async def execute(self, statement, *args):
+            self.executions.append((statement, args))
+            return "OK"
 
         async def close(self):
             return None
@@ -225,10 +231,14 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
     async def _ensure_scope(_conn):
         return None
 
+    async def _ensure_plan_tables(_conn):
+        return None
+
     import asyncpg
 
     monkeypatch.setattr(asyncpg, "connect", _connect)
     monkeypatch.setattr(run_analysis, "ensure_decision_audit_scope_columns", _ensure_scope)
+    monkeypatch.setattr(run_analysis, "ensure_execution_plan_persistence", _ensure_plan_tables)
 
     order = OrderIntent(
         ticker="UPST",
@@ -282,10 +292,29 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
     assert conn.insert_args is not None
     assert conn.insert_args[7] == 10_040
     layers = json.loads(conn.insert_args[6])
+    assert layers["execution_plan_id"]
     shadow = layers["earnings_window_shadow"]
     assert shadow["state"] == "EVENT_DAY"
     assert shadow["would_block_new_buy"] is True
     assert shadow["decision_changed"] is False
+    plan_write = next(
+        args for statement, args in conn.executions if "INSERT INTO execution_plans" in statement
+    )
+    order_write = next(
+        args for statement, args in conn.executions if "INSERT INTO order_intents" in statement
+    )
+    assert plan_write[0] == layers["execution_plan_id"]
+    assert order_write[0] == layers["execution_plan_id"]
+    assert order_write[1] == 463
+
+
+def test_execution_plan_schema_is_additive_and_linked():
+    schema = (Path(__file__).parents[1] / "init.sql").read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS execution_plans" in schema
+    assert "CREATE TABLE IF NOT EXISTS order_intents" in schema
+    assert "REFERENCES execution_plans(id) ON DELETE CASCADE" in schema
+    assert "REFERENCES decision_log(id) ON DELETE SET NULL" in schema
 
 
 def test_decision_price_warning_excludes_blocked_rows(monkeypatch):

@@ -3,6 +3,10 @@
 Este roadmap prioriza mejoras compatibles con el sistema actual. No propone
 reescribir el proyecto ni cambiar thresholds productivos sin evidencia.
 
+Estado al 2026-08-08: se agregaron backup/verify/restore para Postgres local,
+smoke Docker no destructivo y persistencia aditiva de `execution_plans` y
+`order_intents`. Ninguno de estos cambios envia ordenes ni modifica scoring.
+
 ## Proximas mejoras recomendadas
 
 1. Normalizar lifecycle read-only.
@@ -12,10 +16,11 @@ reescribir el proyecto ni cambiar thresholds productivos sin evidencia.
      `features_built`, `plan_created`, `fill_detected` y `outcome_updated`.
    - No requiere migracion destructiva.
 
-2. Persistir entidad de plan/orden.
-   - Crear `execution_plans` y `order_intents` cuando el contrato este probado.
+2. Persistir entidad de plan/orden. Implementado en v1 aditiva.
+   - `execution_plans` y `order_intents` conservan el contrato operativo.
    - Mantener compatibilidad con `decision_log.id`.
-   - Prioridad alta porque hoy `OrderIntent` vive en memoria.
+   - Pendiente: incorporar el vinculo a reconciliacion de fills solo despues de
+     probarlo con evidencia real.
 
 3. Versionar estrategia/planner/optimizer/risk.
    - Usar `DecisionRunContext` ya existente.
@@ -27,9 +32,9 @@ reescribir el proyecto ni cambiar thresholds productivos sin evidencia.
      `input_fingerprint`) en sentiment y explicaciones live.
    - Mantener LLM audit-only.
 
-5. Endurecer runbook operativo.
-   - Agregar backup/restore Postgres.
-   - Agregar smoke Docker documentado.
+5. Endurecer runbook operativo. Base local implementada.
+   - Probar periodicamente backup/restore en una base descartable.
+   - Mantener smoke Docker documentado y versionado.
    - Agregar checklist de despliegue local/remoto.
 
 6. Mejorar QA de integracion.

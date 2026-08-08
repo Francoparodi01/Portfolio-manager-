@@ -50,10 +50,10 @@ flowchart TD
 | `feature_snapshot_id` | Parcial | `decision_log.layers`, `ml_decision_features`, shadow `feature_snapshot` | No hay hash reproducible de inputs live | Generar hash estructurado por decision/run |
 | `portfolio_snapshot_id` | Implementado | `portfolio_snapshots.snapshot_id` | Falta vinculo consistente desde decision/strategy run | Referenciarlo desde `decision_runs` |
 | `optimizer_run_id` | Ausente | `OptimizationResult` queda en memoria/reportes | No se puede auditar engine/fallback/input hash | Agregar entidad o metadata versionada |
-| `planner_run_id` | Ausente | `ExecutionPlan` no se persiste como entidad | El plan queda fragmentado en filas `decision_log` | Crear `execution_plans` o metadata por run |
+| `planner_run_id` | Parcial | `execution_plans.run_id` enlaza la corrida, pero no identifica/versiona por separado al planner | Falta version del planner por corrida | Mantener el plan persistido y sumar versionado del planner |
 | `risk_assessment_id` | Ausente | Guardas en optimizer/planner/risk | Politicas de risk no se versionan | Persistir assessment estructurado |
-| `execution_plan_id` | Parcial | `decision_log.source='execution_plan'` | No identifica plan multiorden | Crear ID de plan y vincular ordenes |
-| `order_id` | Ausente | `OrderIntent` en memoria | No hay orden teorica persistida | Persistir ordenes planeadas antes de fill |
+| `execution_plan_id` | Implementado | `execution_plans.id` y `order_intents.execution_plan_id` | Falta adopcion en todas las vistas read-only | Incorporarlo gradualmente sin romper `decision_log` |
+| `order_id` | Implementado para intencion | `order_intents.id` y vinculo opcional a `decision_log.id` | Todavia no enlaza fills reales | Probar reconciliacion orden-fill antes de promover el vinculo |
 | `fill_id` | Implementado | `broker_fills.id` | Falta vinculo formal con orden planeada | Asociar con `order_id` o candidato reconciliado |
 | `outcome_id` | Ausente/parcial | Outcomes en columnas de `decision_log`; shadow outcomes por forecast | Outcome no es entidad consultable | Crear outcome normalizado posterior |
 | `attribution_id` | Ausente | No hay tabla dedicada | Resultado no se descompone por causa financiera | Crear `financial_attribution` despues de IDs |
@@ -130,7 +130,7 @@ class DecisionTimelineEvent:
 | `signal_synthesized` | `synthesis.py`, `decision_log` | score, confidence, action |
 | `weights_optimized` | `optimizer.py`, execution report | target/current/delta weights |
 | `risk_checked` | planner/risk layers | guard, block reason |
-| `plan_created` | `decision_log.source='execution_plan'` | theoretical amount, executable amount |
+| `plan_created` | `execution_plans`, `order_intents` y espejo en `decision_log` | plan ID, orden, theoretical amount, executable amount |
 | `movement_detected` | `broker_movements` | side, amount, date |
 | `fill_detected` | `broker_fills` | price, quantity, fees |
 | `outcome_updated` | `decision_log` outcome columns | 5/10/20/40 horizon values |
