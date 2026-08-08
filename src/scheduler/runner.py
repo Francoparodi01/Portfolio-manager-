@@ -56,7 +56,11 @@ from src.core.portfolio_cache import (
     get_cached_portfolio_snapshot,
 )
 from src.core.redis_client import client as redis_client
-from src.collector.cocos_scraper import CocosCapitalScraper
+from src.collector.cocos_scraper import (
+    CocosAccessBlockedError,
+    CocosAuthenticationError,
+    CocosCapitalScraper,
+)
 from src.collector.cocos_history import candles_to_frame
 from src.collector.db import PortfolioDatabase
 from src.collector.broker_movements import BrokerMovement, broker_fills_from_movements
@@ -97,6 +101,8 @@ PORTFOLIO_REFRESH_SECONDS = int(os.getenv("PORTFOLIO_REFRESH_SECONDS", "300"))
 PORTFOLIO_OFFHOURS_REFRESH_SECONDS = 3600
 COCOS_SYNC_FILLS = os.getenv("COCOS_SYNC_FILLS", "true").lower() == "true"
 FILL_REFRESH_SECONDS = int(os.getenv("FILL_REFRESH_SECONDS", "300"))
+COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS = int(os.getenv("COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS", "1800"))
+COCOS_AUTH_FAILURE_COOLDOWN_SECONDS = int(os.getenv("COCOS_AUTH_FAILURE_COOLDOWN_SECONDS", "1800"))
 PORTFOLIO_CACHE_TTL_SECONDS = int(os.getenv("PORTFOLIO_CACHE_TTL_SECONDS", "600"))
 PORTFOLIO_LIVE_POLL_SECONDS = int(os.getenv("PORTFOLIO_LIVE_POLL_SECONDS", "60"))
 PORTFOLIO_ALERT_MAJOR_PCT = float(os.getenv("PORTFOLIO_ALERT_MAJOR_PCT", "0.06"))
@@ -1772,9 +1778,20 @@ class IntradayManager:
         """
         last_portfolio_ts: float = 0.0
         last_fills_ts: float = 0.0
+        access_block_until: float = 0.0
 
         while self._running:
             now = _now_art()
+            now_ts = time.monotonic()
+            if access_block_until > now_ts:
+                remaining = int(access_block_until - now_ts)
+                logger.warning(
+                    "Scraper loop pausado por bloqueo de Cocos; reintento en %ss",
+                    remaining,
+                )
+                await asyncio.sleep(min(300, max(30, remaining)))
+                continue
+
             do_market = _should_scrape_market(now)
             do_portfolio = _should_scrape_portfolio(now)
 
@@ -1787,8 +1804,6 @@ class IntradayManager:
                 logger.info("Scraper loop: lock ocupado por job scheduled, esperando 20s...")
                 await asyncio.sleep(20)
                 continue
-
-            now_ts = time.monotonic()
 
             portfolio_interval = (
                 PORTFOLIO_REFRESH_SECONDS if do_market
@@ -1879,6 +1894,22 @@ class IntradayManager:
 
             except asyncio.CancelledError:
                 raise
+            except CocosAccessBlockedError as e:
+                access_block_until = time.monotonic() + COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS
+                logger.warning(
+                    "Scraper loop detecto bloqueo de Cocos; pausando scraper por %ss: %s",
+                    COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS,
+                    e,
+                    exc_info=True,
+                )
+            except CocosAuthenticationError as e:
+                access_block_until = time.monotonic() + COCOS_AUTH_FAILURE_COOLDOWN_SECONDS
+                logger.warning(
+                    "Scraper loop detecto fallo de autenticacion Cocos; pausando scraper por %ss: %s",
+                    COCOS_AUTH_FAILURE_COOLDOWN_SECONDS,
+                    e,
+                    exc_info=True,
+                )
             except Exception as e:
                 logger.warning(
                     "Scraper loop error (reintentará luego): %s",

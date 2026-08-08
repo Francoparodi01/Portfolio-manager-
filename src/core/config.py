@@ -29,9 +29,9 @@ class ScraperConfig:
     password: str = ""
 
     # URLs
-    portfolio_url: str = "https://app.cocos.capital/capital-portfolio"
-    market_acciones_url: str = "https://app.cocos.capital/market/ACCIONES"
-    market_cedears_url: str = "https://app.cocos.capital/market/CEDEARS"
+    portfolio_url: str = "https://app.cocos.capital/portfolio"
+    market_acciones_url: str = "https://app.cocos.capital/market-home"
+    market_cedears_url: str = "https://app.cocos.capital/market-home"
 
     def validate(self) -> list[str]:
         errors = []

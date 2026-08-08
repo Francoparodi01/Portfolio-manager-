@@ -51,3 +51,52 @@ def test_cash_only_portfolio_snapshot_is_valid():
     )
 
     assert snapshot.validate() == []
+
+
+def test_portfolio_api_extracts_positions_from_settlements():
+    payload = {
+        "holdings": [
+            {
+                "ticker": "NVDA",
+                "name": "Cedear Nvidia Corp.",
+                "type": "CEDEARS",
+                "currencyId": "ARS",
+                "price": 14390,
+                "priceFactor": 1,
+                "allocation": 0.13294208996984289,
+                "settlements": [
+                    {"period": "CI", "amount": 302190, "quantity": 21},
+                    {"period": "24hs", "amount": 302190, "quantity": 21},
+                    {"period": "INF", "amount": 302190, "quantity": 21},
+                ],
+            }
+        ]
+    }
+
+    positions, confidence = CocosCapitalScraper._extract_positions_from_portfolio_api(
+        payload
+    )
+
+    assert confidence.is_acceptable(0.8) is True
+    assert len(positions) == 1
+    assert positions[0].ticker == "NVDA"
+    assert float(positions[0].quantity) == 21.0
+    assert float(positions[0].current_price) == 14390.0
+    assert float(positions[0].market_value) == 302190.0
+
+
+def test_portfolio_api_extracts_totals_from_balance_payload():
+    portfolio_payload = {"cash": 15}
+    balance_payload = {
+        "totalBalance": 303205,
+        "holdingsBalance": 302190,
+        "cashBalance": 1015,
+    }
+
+    total, cash = CocosCapitalScraper._extract_totals_from_portfolio_api(
+        portfolio_payload,
+        balance_payload,
+    )
+
+    assert float(total) == 302190.0
+    assert float(cash) == 1015.0

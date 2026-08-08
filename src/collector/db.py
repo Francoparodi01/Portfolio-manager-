@@ -1605,24 +1605,57 @@ class PortfolioDatabase:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                WITH ranked AS (
-                    SELECT
+                WITH latest_prev AS (
+                    SELECT DISTINCT ON (ticker, asset_type, currency)
                         ticker,
                         asset_type,
                         currency,
-                        last_price,
-                        COALESCE(volume, 0) AS volume,
+                        close_price AS prev_close
+                    FROM market_candles
+                    WHERE interval = '1d'
+                      AND close_price IS NOT NULL
+                      AND close_price > 0
+                      AND (ts AT TIME ZONE 'UTC')::date < $1
+                    ORDER BY
+                        ticker,
+                        asset_type,
+                        currency,
+                        ts DESC,
+                        CASE source
+                            WHEN 'COCOS' THEN 0
+                            WHEN 'TRADINGVIEW_BYMA' THEN 1
+                            WHEN 'internal_snapshot' THEN 2
+                            ELSE 3
+                        END
+                ),
+                ranked AS (
+                    SELECT
+                        mp.ticker,
+                        mp.asset_type,
+                        mp.currency,
+                        mp.last_price,
+                        COALESCE(mp.volume, 0) AS volume,
                         ROW_NUMBER() OVER (
-                            PARTITION BY ticker, asset_type, currency
-                            ORDER BY ts ASC
+                            PARTITION BY mp.ticker, mp.asset_type, mp.currency
+                            ORDER BY mp.ts ASC
                         ) AS first_rank,
                         ROW_NUMBER() OVER (
-                            PARTITION BY ticker, asset_type, currency
-                            ORDER BY ts DESC
+                            PARTITION BY mp.ticker, mp.asset_type, mp.currency
+                            ORDER BY mp.ts DESC
                         ) AS last_rank
-                    FROM market_prices
-                    WHERE (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = $1
-                      AND last_price IS NOT NULL
+                    FROM market_prices mp
+                    LEFT JOIN latest_prev lp
+                      ON lp.ticker = mp.ticker
+                     AND lp.asset_type = mp.asset_type
+                     AND lp.currency = mp.currency
+                    WHERE (mp.ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = $1
+                      AND mp.last_price IS NOT NULL
+                      AND mp.last_price > 0
+                      AND NOT (
+                          lp.prev_close > 100
+                          AND mp.last_price < 10
+                          AND ABS((mp.last_price::float / lp.prev_close::float) - 1.0) > 0.90
+                      )
                 )
                 SELECT
                     ticker,

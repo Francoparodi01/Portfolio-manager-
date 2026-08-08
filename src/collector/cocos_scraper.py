@@ -15,6 +15,7 @@ from email.mime import message
 import os
 import re
 import time
+from urllib.parse import urlparse
 try:
     import pyotp
     HAS_PYOTP = True
@@ -142,6 +143,14 @@ SELECTORS = {
 
 
 # ── Telegram MFA Helper ───────────────────────────────────
+
+class CocosAccessBlockedError(RuntimeError):
+    """Raised when Cocos/Cloudflare blocks scraper access before login."""
+
+
+class CocosAuthenticationError(RuntimeError):
+    """Raised when Cocos rejects login credentials or MFA."""
+
 
 class TelegramMFA:
     """
@@ -375,6 +384,398 @@ class CocosCapitalScraper:
         self._known_dom_hashes[page_key] = current_hash
         return current_hash, raw_hash
 
+    async def _access_block_reason(
+        self,
+        *,
+        response_status: int | None = None,
+    ) -> str | None:
+        if not self._page:
+            return None
+
+        probes: list[str] = [str(self._page.url or "")]
+        if response_status is not None:
+            probes.append(f"status={response_status}")
+
+        try:
+            probes.append(await self._page.title())
+        except Exception:
+            pass
+
+        try:
+            body_text = await self._page.locator("body").inner_text(timeout=2_000)
+            probes.append(body_text[:2_000])
+        except Exception:
+            pass
+
+        page_text = "\n".join(probes).lower()
+        if "error 1015" in page_text or "being rate limited" in page_text:
+            return "Cloudflare 1015 rate limit"
+        if "cloudflare" in page_text and (
+            "rate limited" in page_text
+            or "temporarily" in page_text
+            or "access denied" in page_text
+        ):
+            return "Cloudflare access block"
+        return None
+
+    async def _raise_if_access_blocked(
+        self,
+        stage: str,
+        *,
+        response_status: int | None = None,
+    ) -> None:
+        reason = await self._access_block_reason(response_status=response_status)
+        if reason:
+            raise CocosAccessBlockedError(f"{reason} during {stage}")
+
+    async def _visible_input_elements(self, selector: str = "input") -> list[Any]:
+        if not self._page:
+            return []
+
+        inputs = await self._page.query_selector_all(selector)
+        visible_inputs = []
+        for inp in inputs:
+            try:
+                if not await inp.is_visible():
+                    continue
+                box = await inp.bounding_box()
+                if not box or box.get("width", 0) <= 0 or box.get("height", 0) <= 0:
+                    continue
+                visible_inputs.append(inp)
+            except Exception:
+                continue
+        return visible_inputs
+
+    @staticmethod
+    def _is_login_url(url: str) -> bool:
+        path = urlparse(url or "").path.rstrip("/")
+        return path in ("/login", "/sign-in")
+
+    @staticmethod
+    def _is_portfolio_url(url: str) -> bool:
+        path = urlparse(url or "").path.rstrip("/")
+        return path in ("/portfolio", "/capital-portfolio") or "capital-portfolio" in (
+            urlparse(url or "").query
+        )
+
+    @staticmethod
+    def _extract_market_price_from_text(text: str) -> Decimal | None:
+        money_match = re.search(
+            r"\$\s*(\d{1,3}(?:\.\d{3})*),\s*(\d{1,2})",
+            text or "",
+            re.S,
+        )
+        if money_match:
+            return parse_decimal(f"{money_match.group(1)},{money_match.group(2)}")
+
+        for line in (text or "").splitlines():
+            if "%" in line:
+                continue
+            price_match = re.search(r"\b(\d{1,3}(?:\.\d{3})+,\d{1,2})\b", line)
+            if price_match:
+                return parse_decimal(price_match.group(1))
+        return None
+
+    @staticmethod
+    def _extract_market_change_from_text(text: str) -> Decimal:
+        change_match = re.search(r"([+\-]?\d+,\d+)\s*%", text or "")
+        if change_match:
+            return parse_decimal(change_match.group(1)) or Decimal("0")
+        return Decimal("0")
+
+    @staticmethod
+    def _decimal_from_any(value: Any) -> Decimal | None:
+        if value is None:
+            return None
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return Decimal(str(value))
+        if isinstance(value, str):
+            parsed = parse_decimal(value)
+            if parsed is not None:
+                return parsed
+            compact = (
+                value.strip()
+                .replace("\xa0", "")
+                .replace(" ", "")
+                .replace("$", "")
+                .replace("AR$", "")
+            )
+            if re.fullmatch(r"-?\d{1,3}(?:\.\d{3})+", compact):
+                return Decimal(compact.replace(".", ""))
+        return None
+
+    @staticmethod
+    def _asset_type_from_cocos_portfolio(value: Any) -> AssetType:
+        text = str(value or "").strip().upper()
+        if "CEDEAR" in text:
+            return AssetType.CEDEAR
+        if "ACCION" in text or "ACCIONES" in text:
+            return AssetType.ACCION
+        if "BONO" in text:
+            return AssetType.BONO
+        if "FCI" in text:
+            return AssetType.FCI
+        return AssetType.UNKNOWN
+
+    @staticmethod
+    def _currency_from_cocos(value: Any) -> Currency:
+        text = str(value or "").strip().upper()
+        if text == "USD":
+            return Currency.USD
+        if text == "MEP":
+            return Currency.MEP
+        return Currency.ARS
+
+    @staticmethod
+    def _portfolio_api_endpoint_kind(url: str) -> str | None:
+        parsed = urlparse(url or "")
+        path = parsed.path.rstrip("/").lower()
+        if not path.endswith("/api/portfolio") and not path.endswith("/api/portfolio/balance"):
+            return None
+        if path.endswith("/api/portfolio/balance"):
+            return "balance"
+        return "portfolio"
+
+    @classmethod
+    def _select_portfolio_settlement(cls, holding: dict[str, Any]) -> dict[str, Any] | None:
+        settlements = holding.get("settlements")
+        if not isinstance(settlements, list):
+            return None
+
+        typed_settlements = [s for s in settlements if isinstance(s, dict)]
+        for preferred in ("24", "CI"):
+            for settlement in typed_settlements:
+                period = str(settlement.get("period") or "").upper()
+                if preferred in period:
+                    return settlement
+
+        for settlement in typed_settlements:
+            amount = cls._decimal_from_any(settlement.get("amount"))
+            quantity = cls._decimal_from_any(settlement.get("quantity"))
+            if amount and amount > 0 and quantity and quantity > 0:
+                return settlement
+        return typed_settlements[0] if typed_settlements else None
+
+    @classmethod
+    def _extract_positions_from_portfolio_api(
+        cls,
+        payload: Any,
+    ) -> tuple[list[Position], ConfidenceResult]:
+        holdings = payload.get("holdings") if isinstance(payload, dict) else None
+        if not isinstance(holdings, list):
+            checks = [
+                ("api_payload", False, 2.0),
+                ("parse_success", False, 3.0),
+                ("prices_positive", False, 3.0),
+                ("market_values_positive", False, 2.0),
+            ]
+            return [], ConfidenceResult.compute(
+                checks,
+                expected_positions=None,
+                positions_parsed=0,
+            )
+
+        positions: list[Position] = []
+        parse_errors = 0
+        expected_positions = 0
+
+        for holding in holdings:
+            if not isinstance(holding, dict):
+                continue
+
+            settlement = cls._select_portfolio_settlement(holding) or {}
+            quantity = cls._decimal_from_any(settlement.get("quantity"))
+            if quantity is None:
+                quantity = cls._decimal_from_any(holding.get("quantity"))
+            amount = cls._decimal_from_any(settlement.get("amount"))
+
+            if quantity and quantity > 0:
+                expected_positions += 1
+            else:
+                continue
+
+            ticker_source = (
+                holding.get("ticker")
+                or holding.get("code")
+                or str(holding.get("longTicker") or "").split("-", 1)[0]
+            )
+            ticker = normalize_ticker(str(ticker_source or ""))
+            if not ticker:
+                parse_errors += 1
+                continue
+
+            price = None
+            if amount and amount > 0 and quantity > 0:
+                price = amount / quantity
+            else:
+                api_price = cls._decimal_from_any(holding.get("price"))
+                price_factor = cls._decimal_from_any(holding.get("priceFactor")) or Decimal("1")
+                if api_price and api_price > 0 and price_factor > 0:
+                    price = api_price / price_factor
+
+            market_value = amount
+            if (not market_value or market_value <= 0) and price and price > 0:
+                market_value = quantity * price
+
+            if not price or price <= 0 or not market_value or market_value <= 0:
+                parse_errors += 1
+                continue
+
+            allocation = cls._decimal_from_any(holding.get("allocation"))
+            positions.append(Position(
+                ticker=ticker,
+                asset_type=cls._asset_type_from_cocos_portfolio(holding.get("type")),
+                currency=cls._currency_from_cocos(holding.get("currencyId")),
+                quantity=quantity,
+                avg_cost=Decimal("0"),
+                current_price=price,
+                market_value=market_value,
+                unrealized_pnl=Decimal("0"),
+                unrealized_pnl_pct=Decimal("0"),
+                weight_in_portfolio=allocation,
+                sector=None,
+            ))
+
+        checks = [
+            ("api_payload", True, 2.0),
+            ("parse_success", parse_errors == 0, 3.0),
+            ("prices_positive", all(p.current_price > 0 for p in positions), 3.0),
+            ("market_values_positive", all(p.market_value > 0 for p in positions), 2.0),
+        ]
+        return positions, ConfidenceResult.compute(
+            checks,
+            expected_positions=expected_positions,
+            positions_parsed=len(positions),
+        )
+
+    @classmethod
+    def _extract_totals_from_portfolio_api(
+        cls,
+        portfolio_payload: Any | None,
+        balance_payload: Any | None,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        total = None
+        cash = None
+
+        if isinstance(balance_payload, dict):
+            total = (
+                cls._decimal_from_any(balance_payload.get("holdingsBalance"))
+                or cls._decimal_from_any(balance_payload.get("holdings_balance"))
+            )
+            cash = (
+                cls._decimal_from_any(balance_payload.get("cashBalance"))
+                or cls._decimal_from_any(balance_payload.get("cash_balance"))
+            )
+
+        if isinstance(portfolio_payload, dict):
+            total = (
+                total
+                or cls._decimal_from_any(portfolio_payload.get("holdingsBalance"))
+                or cls._decimal_from_any(portfolio_payload.get("holdings_balance"))
+            )
+            cash_value = portfolio_payload.get("cash")
+            if isinstance(cash_value, dict):
+                cash = (
+                    cash
+                    or cls._decimal_from_any(cash_value.get("amount"))
+                    or cls._decimal_from_any(cash_value.get("balance"))
+                    or cls._decimal_from_any(cash_value.get("value"))
+                )
+            else:
+                cash = cash or cls._decimal_from_any(cash_value)
+
+        return total, cash
+
+    async def _resolve_trusted_device_step(self) -> bool:
+        if not self._page:
+            return False
+
+        try:
+            url = self._page.url or ""
+            body_text = await self._page.locator("body").inner_text(timeout=2_000)
+        except Exception:
+            url = self._page.url or ""
+            body_text = ""
+
+        normalized_text = body_text.lower()
+        is_trusted_device = (
+            "trusted-device" in url
+            or (
+                "dispositivo" in normalized_text
+                and (
+                    "confi" in normalized_text
+                    or "record" in normalized_text
+                    or "segur" in normalized_text
+                )
+            )
+        )
+        if not is_trusted_device:
+            return False
+
+        logger.info("Pantalla trusted-device detectada; intentando continuar")
+        await self._screenshot("trusted_device_prompt")
+
+        selectors = [
+            "button:has-text('guardar como dispositivo seguro'), a:has-text('guardar como dispositivo seguro'), [role='button']:has-text('guardar como dispositivo seguro')",
+            "text=guardar como dispositivo seguro",
+            "button:has-text('En otro momento'), a:has-text('En otro momento'), [role='button']:has-text('En otro momento')",
+            "text=En otro momento",
+            "button:has-text('No confiar'), a:has-text('No confiar'), [role='button']:has-text('No confiar')",
+            "button:has-text('No por ahora'), a:has-text('No por ahora'), [role='button']:has-text('No por ahora')",
+            "button:has-text('Ahora no'), a:has-text('Ahora no'), [role='button']:has-text('Ahora no')",
+            "button:has-text('Omitir'), a:has-text('Omitir'), [role='button']:has-text('Omitir')",
+            "button:has-text('Saltar'), a:has-text('Saltar'), [role='button']:has-text('Saltar')",
+            "button:has-text('Continuar'), a:has-text('Continuar'), [role='button']:has-text('Continuar')",
+            "button:has-text('Aceptar'), a:has-text('Aceptar'), [role='button']:has-text('Aceptar')",
+            "button:has-text('Confirmar'), a:has-text('Confirmar'), [role='button']:has-text('Confirmar')",
+            "button:has-text('Confiar'), a:has-text('Confiar'), [role='button']:has-text('Confiar')",
+            "button[type='submit']",
+        ]
+
+        for selector in selectors:
+            candidate = self._page.locator(selector).first
+            try:
+                if await candidate.count() == 0:
+                    continue
+                if not await candidate.is_visible(timeout=1_000):
+                    continue
+                try:
+                    label = (await candidate.inner_text(timeout=1_000)).strip()
+                except Exception:
+                    label = selector
+                await candidate.click(timeout=5_000)
+                logger.info("Trusted-device: click en '%s'", label[:80] or selector)
+                try:
+                    await self._page.wait_for_function(
+                        "() => !location.href.includes('trusted-device')",
+                        timeout=10_000,
+                    )
+                except Exception:
+                    pass
+                await self._page.wait_for_load_state("domcontentloaded", timeout=30_000)
+                await self._page.wait_for_timeout(1_000)
+                if "trusted-device" not in (self._page.url or ""):
+                    return True
+            except Exception as exc:
+                logger.debug("Trusted-device selector omitido %s: %s", selector, exc)
+
+        try:
+            await self._page.keyboard.press("Enter")
+            await self._page.wait_for_function(
+                "() => !location.href.includes('trusted-device')",
+                timeout=10_000,
+            )
+            await self._page.wait_for_load_state("domcontentloaded", timeout=30_000)
+            await self._page.wait_for_timeout(1_000)
+        except Exception:
+            pass
+
+        return "trusted-device" not in (self._page.url or "")
+
     # ── Login con Telegram MFA ────────────────────
 
     @timed("scraper.login")
@@ -389,21 +790,29 @@ class CocosCapitalScraper:
 
         try:
             logger.info("Navegando a Cocos Capital...")
-            await self._page.goto(
-                "https://app.cocos.capital/login",
+            response = await self._page.goto(
+                "https://app.cocos.capital/sign-in",
                 wait_until="domcontentloaded",
                 timeout=60_000,
             )
+            await self._raise_if_access_blocked(
+                "login",
+                response_status=response.status if response else None,
+            )
+
+            username_selector = SELECTORS["login"]["username"]
+            password_selector = SELECTORS["login"]["password"]
+            submit_selector = SELECTORS["login"]["submit"]
 
             await self._page.wait_for_selector(
-                "input[type='email']",
+                username_selector,
                 state="attached",
                 timeout=60_000,
             )
             await asyncio.sleep(0.3)
 
-            email_input = await self._page.query_selector("input[type='email']")
-            password_input = await self._page.query_selector("input[type='password']")
+            email_input = await self._page.query_selector(username_selector)
+            password_input = await self._page.query_selector(password_selector)
 
             if not email_input or not password_input:
                 raise RuntimeError("No se encontraron los campos email/password")
@@ -417,9 +826,7 @@ class CocosCapitalScraper:
 
             await asyncio.sleep(0.2)
 
-            submit_btn = await self._page.query_selector("button:has-text('Iniciar sesión')")
-            if not submit_btn:
-                submit_btn = await self._page.query_selector("button[type='submit']")
+            submit_btn = await self._page.query_selector(submit_selector)
             if not submit_btn:
                 raise RuntimeError("No se encontró el botón de login")
 
@@ -449,8 +856,16 @@ class CocosCapitalScraper:
             totp_secret = getattr(self._cfg, "totp_secret", None) or os.environ.get("COCOS_TOTP_SECRET", "")
             if totp_secret and HAS_PYOTP:
                 try:
-                    mfa_code = pyotp.TOTP(totp_secret).now()
-                    logger.info("TOTP generado automáticamente")
+                    totp = pyotp.TOTP(totp_secret)
+                    remaining_seconds = int(totp.interval - (time.time() % totp.interval))
+                    if remaining_seconds < 8:
+                        await asyncio.sleep(remaining_seconds + 1)
+                    mfa_code = totp.now()
+                    remaining_seconds = int(totp.interval - (time.time() % totp.interval))
+                    logger.info(
+                        "TOTP generado automáticamente (ventana restante: %ss)",
+                        remaining_seconds,
+                    )
                 except Exception as e:
                     logger.warning(f"TOTP falló ({e}), fallback a Telegram manual")
                     mfa_code = None
@@ -480,7 +895,12 @@ class CocosCapitalScraper:
             await asyncio.sleep(0.3)
 
             all_inputs = await self._page.query_selector_all("input")
-            logger.info(f"Inputs en pantalla MFA: {len(all_inputs)}")
+            visible_inputs = await self._visible_input_elements("input")
+            logger.info(
+                "Inputs en pantalla MFA: %d totales, %d visibles",
+                len(all_inputs),
+                len(visible_inputs),
+            )
 
             JS_FILL = """(el, v) => {
                 const setter = Object.getOwnPropertyDescriptor(
@@ -490,42 +910,110 @@ class CocosCapitalScraper:
                 el.dispatchEvent(new Event('change', { bubbles: true }));
             }"""
 
-            if len(all_inputs) >= 6:
-                for i, digit in enumerate(mfa_code[:6]):
-                    inp = all_inputs[i]
-                    await inp.click()
-                    await inp.evaluate(JS_FILL, digit)
-                    await asyncio.sleep(0.12)
-                logger.info("Código MFA ingresado dígito a dígito (React)")
+            if len(visible_inputs) >= 6:
+                try:
+                    await visible_inputs[0].click()
+                    await self._page.keyboard.type(mfa_code[:6], delay=80)
+                    logger.info("Código MFA ingresado con teclado")
+                except Exception as keyboard_exc:
+                    logger.warning(
+                        "Ingreso MFA por teclado falló (%s); intento dígito a dígito",
+                        keyboard_exc,
+                    )
+                    for i, digit in enumerate(mfa_code[:6]):
+                        inp = visible_inputs[i]
+                        await inp.click()
+                        try:
+                            await inp.fill("")
+                            await inp.type(digit, delay=30)
+                        except Exception:
+                            await inp.evaluate(JS_FILL, digit)
+                        await asyncio.sleep(0.12)
+                    logger.info("Código MFA ingresado dígito a dígito (React)")
 
-            elif len(all_inputs) > 0:
-                await all_inputs[0].click()
-                await all_inputs[0].evaluate(JS_FILL, mfa_code)
+            elif len(visible_inputs) > 0:
+                await visible_inputs[0].click()
+                try:
+                    await visible_inputs[0].fill(mfa_code)
+                except Exception:
+                    await visible_inputs[0].evaluate(JS_FILL, mfa_code)
                 logger.info("Código MFA ingresado en input único")
 
             else:
                 await self._screenshot("mfa_no_inputs")
                 raise RuntimeError("No se encontraron inputs MFA en el DOM")
 
-            await asyncio.sleep(0.3)
-            await self._page.keyboard.press("Enter")
-            await asyncio.sleep(2)
-            await self._page.keyboard.press("Enter")
+            await asyncio.sleep(1.0)
+            try:
+                await self._page.wait_for_function(
+                    """
+                    () => (
+                        !location.href.includes('enroll-validate-2fa') &&
+                        !document.body.innerText.includes('Código de 6 dígitos')
+                    )
+                    """,
+                    timeout=15_000,
+                )
+            except Exception:
+                await self._page.keyboard.press("Enter")
+                try:
+                    await self._page.wait_for_function(
+                        """
+                        () => (
+                            !location.href.includes('enroll-validate-2fa') &&
+                            !document.body.innerText.includes('Código de 6 dígitos')
+                        )
+                        """,
+                        timeout=10_000,
+                    )
+                except Exception:
+                    pass
 
-            logger.info("Navegando directo al portfolio...")
-            await self._page.goto(
-                "https://app.cocos.capital/capital-portfolio",
-                wait_until="domcontentloaded",
-                timeout=self._cfg.timeout_ms,
-            )
             await self._page.wait_for_load_state("domcontentloaded", timeout=60_000)
+            await self._page.wait_for_timeout(3_000)
 
             final_url = self._page.url
-            logger.info(f"URL final post-MFA: {final_url}")
+            logger.info(f"URL post-MFA: {final_url}")
 
-            if "login" in final_url:
+            if await self._resolve_trusted_device_step():
+                final_url = self._page.url
+                logger.info(f"URL post trusted-device: {final_url}")
+
+            try:
+                body_after_mfa = await self._page.locator("body").inner_text(timeout=2_000)
+            except Exception:
+                body_after_mfa = ""
+
+            mfa_screen_visible = (
+                "enroll-validate-2fa" in final_url
+                or "Código de 6 dígitos" in body_after_mfa
+            )
+            login_screen_visible = (
+                self._is_login_url(final_url)
+                or (
+                    "Iniciar sesión" in body_after_mfa
+                    and "Contraseña" in body_after_mfa
+                )
+            )
+
+            if mfa_screen_visible or login_screen_visible:
                 await self._screenshot("login_mfa_failed")
-                raise RuntimeError(f"Login fallido post-MFA. URL: {final_url}")
+                raise CocosAuthenticationError(f"Login fallido post-MFA. URL: {final_url}")
+
+            if not self._is_portfolio_url(final_url):
+                logger.info("Navegando al portfolio con sesión MFA confirmada...")
+                await self._page.goto(
+                    self._cfg.portfolio_url,
+                    wait_until="domcontentloaded",
+                    timeout=self._cfg.timeout_ms,
+                )
+                await self._page.wait_for_load_state("domcontentloaded", timeout=60_000)
+                await self._page.wait_for_timeout(3_000)
+                final_url = self._page.url
+                logger.info(f"URL final post-MFA: {final_url}")
+                if self._is_login_url(final_url):
+                    await self._screenshot("login_mfa_failed")
+                    raise CocosAuthenticationError(f"Login fallido post-MFA. URL: {final_url}")
 
             self._is_logged_in = True
             logger.info("Login con MFA confirmado")
@@ -552,6 +1040,36 @@ class CocosCapitalScraper:
         await self.login()
 
         for attempt in range(self._cfg.retry_attempts):
+            portfolio_api_payloads: list[Any] = []
+            portfolio_balance_payloads: list[Any] = []
+            seen_api_urls: set[str] = set()
+            response_tasks: list[asyncio.Task] = []
+
+            async def handle_response(response) -> None:
+                url = response.url
+                kind = self._portfolio_api_endpoint_kind(url)
+                if not kind or url in seen_api_urls:
+                    return
+                seen_api_urls.add(url)
+                try:
+                    if response.status >= 400:
+                        return
+                    content_type = response.headers.get("content-type", "")
+                    if "json" not in content_type.lower():
+                        return
+                    payload = await response.json()
+                    if kind == "balance":
+                        portfolio_balance_payloads.append(payload)
+                    else:
+                        portfolio_api_payloads.append(payload)
+                    logger.info("Cocos portfolio JSON: %s", url)
+                except Exception as exc:
+                    logger.debug("No se pudo leer portfolio JSON %s: %s", url, exc)
+
+            def on_response(response) -> None:
+                response_tasks.append(asyncio.create_task(handle_response(response)))
+
+            self._page.on("response", on_response)
             try:
                 await self._page.goto(
                     self._cfg.portfolio_url, timeout=self._cfg.timeout_ms
@@ -559,10 +1077,55 @@ class CocosCapitalScraper:
                 await self._page.wait_for_load_state("domcontentloaded", timeout=60_000)
                 # Esperar al menos un assetWrapper (posición) — verificado Mar 2026
                 await self._wait_for_portfolio_loaded(timeout=self._cfg.timeout_ms)
+                await self._page.wait_for_timeout(1_000)
+
+                if response_tasks:
+                    await asyncio.gather(*response_tasks, return_exceptions=True)
+                    response_tasks.clear()
 
                 dom_hash, raw_hash = await self._check_dom_fingerprint("portfolio")
-                positions, confidence = await self._extract_positions()
-                total_value, cash = await self._extract_totals()
+                portfolio_payload = portfolio_api_payloads[-1] if portfolio_api_payloads else None
+                balance_payload = (
+                    portfolio_balance_payloads[-1] if portfolio_balance_payloads else None
+                )
+
+                if portfolio_payload is None:
+                    portfolio_payload = await self._fetch_json_in_page(
+                        "https://api.cocos.capital/api/portfolio?currency=ARS&from=BROKER"
+                    )
+                if balance_payload is None:
+                    balance_payload = await self._fetch_json_in_page(
+                        "https://api.cocos.capital/api/portfolio/balance?currency=ARS&period=MAX"
+                    )
+
+                if portfolio_payload is not None:
+                    positions, confidence = self._extract_positions_from_portfolio_api(
+                        portfolio_payload
+                    )
+                    logger.info(
+                        "Portfolio API parseado: %d posiciones, confidence %.2f",
+                        len(positions),
+                        confidence.score,
+                    )
+                    if not positions:
+                        logger.warning("Portfolio API sin posiciones; fallback DOM")
+                        positions, confidence = await self._extract_positions()
+                else:
+                    positions, confidence = await self._extract_positions()
+
+                api_total, api_cash = self._extract_totals_from_portfolio_api(
+                    portfolio_payload,
+                    balance_payload,
+                )
+                if api_total is not None or api_cash is not None:
+                    total_value = api_total if api_total is not None else sum(
+                        (p.market_value for p in positions),
+                        Decimal("0"),
+                    )
+                    cash = api_cash if api_cash is not None else Decimal("0")
+                    logger.info(f"Total portfolio API: ${total_value}, Cash: ${cash}")
+                else:
+                    total_value, cash = await self._extract_totals()
 
                 snapshot = PortfolioSnapshot(
                     scraped_at=utcnow(),
@@ -603,6 +1166,13 @@ class CocosCapitalScraper:
                     await self._screenshot("portfolio_timeout")
                     raise
                 await asyncio.sleep(self._cfg.retry_backoff_s * (attempt + 1))
+            finally:
+                try:
+                    self._page.remove_listener("response", on_response)
+                except Exception:
+                    pass
+                if response_tasks:
+                    await asyncio.gather(*response_tasks, return_exceptions=True)
 
     async def _wait_for_portfolio_loaded(self, *, timeout: int) -> None:
         """
@@ -622,11 +1192,15 @@ class CocosCapitalScraper:
                     text.includes("Instrumentos");
                 const hasPositionRows =
                     document.querySelectorAll("[class*='assetWrapper']").length > 0;
+                const hasPortfolioTable =
+                    text.includes("Cantidad") &&
+                    text.includes("Importe") &&
+                    text.includes("% Portfolio");
                 const hasCashOnlyEmptyState =
                     text.includes("Ir al mercado") &&
                     text.includes("Dinero") &&
                     text.includes("Total dinero");
-                return hasPortfolioChrome && (hasPositionRows || hasCashOnlyEmptyState);
+                return hasPortfolioChrome && (hasPositionRows || hasPortfolioTable || hasCashOnlyEmptyState);
             }
             """,
             timeout=timeout,
@@ -776,6 +1350,8 @@ class CocosCapitalScraper:
             ("min_positions",   len(positions) >= 1,                  2.0),
             ("prices_positive", all(p.current_price > 0 for p in positions), 3.0),
         ]
+        if (expected_positions is None or expected_positions <= 0) and positions:
+            expected_positions = len(positions)
         return positions, ConfidenceResult.compute(
             checks,
             expected_positions=expected_positions,
@@ -854,8 +1430,8 @@ class CocosCapitalScraper:
     ) -> list[MarketAsset]:
         """
         Scraping del mercado de Cocos Capital.
-        La URL /market/ACCIONES y /market/CEDEARS carga la tabla directamente.
-        No requiere interacción con dropdown.
+        La app actual carga Acciones y CEDEARs desde /market-home y cambia
+        el universo con tabs internas.
         """
         assert market_type in ("ACCIONES", "CEDEARS")
         if cedear_segment and market_type != "CEDEARS":
@@ -875,6 +1451,8 @@ class CocosCapitalScraper:
             logger.info(f"Navegando a mercado {market_type}{segment_note}: {url}")
             await self._page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             await asyncio.sleep(2.0)
+
+            await self._select_market_tab("Acciones" if market_type == "ACCIONES" else "Cedears")
 
             if market_type == "CEDEARS" and cedear_segment:
                 await self._select_cedear_segment(cedear_segment)
@@ -926,6 +1504,27 @@ class CocosCapitalScraper:
             await self._screenshot(f"market_{market_type}_error")
             logger.error(f"scrape_market({market_type}) falló: {e}")
             return []
+
+    async def _select_market_tab(self, label: str) -> None:
+        if not self._page:
+            raise RuntimeError("page no inicializada")
+
+        for selector in (
+            f"text=/^{re.escape(label)}$/i",
+            f"button:has-text('{label}')",
+            f"[role='button']:has-text('{label}')",
+        ):
+            try:
+                locator = self._page.locator(selector).first
+                if await locator.count():
+                    await locator.click(timeout=8_000)
+                    await self._page.wait_for_timeout(2_000)
+                    logger.info("Tab mercado seleccionada: %s", label)
+                    return
+            except Exception:
+                continue
+
+        logger.warning("No se pudo seleccionar tab mercado %s; parseo estado actual", label)
 
     async def _select_cedear_segment(self, segment: str) -> None:
         if not self._page:
@@ -1020,21 +1619,14 @@ class CocosCapitalScraper:
                         continue
 
                     ticker = None
-                    price = None
-                    change = Decimal("0")
+                    price = self._extract_market_price_from_text(text)
+                    change = self._extract_market_change_from_text(text)
 
                     for line in lines:
                         if ticker is None:
                             word = line.split()[0] if line.split() else ""
                             if _re.fullmatch(r"[A-Z][A-Z0-9\.]{1,5}", word):
                                 ticker = normalize_ticker(word)
-                        if price is None:
-                            m = _re.search(MARKET_PRICE_RE, line)
-                            if m:
-                                price = parse_decimal(m.group(1))
-                        m_chg = _re.search(r"([+\-]?\d+,\d+)\s*%", line)
-                        if m_chg:
-                            change = parse_decimal(m_chg.group(1)) or Decimal("0")
 
                     if not ticker or ticker in seen:
                         continue
@@ -1075,15 +1667,9 @@ class CocosCapitalScraper:
                 if _re.fullmatch(r"[A-Z][A-Z0-9\.]{1,5}", line):
                     ticker = normalize_ticker(line)
                     if ticker not in seen:
-                        price = None
-                        change = Decimal("0")
-                        for j in range(i + 1, min(i + 8, len(lines))):
-                            m = _re.search(MARKET_PRICE_RE, lines[j])
-                            if m and price is None:
-                                price = parse_decimal(m.group(1))
-                            m_chg = _re.search(r"([+\-]?\d+,\d+)\s*%", lines[j])
-                            if m_chg:
-                                change = parse_decimal(m_chg.group(1)) or Decimal("0")
+                        chunk = "\n".join(lines[i : min(i + 12, len(lines))])
+                        price = self._extract_market_price_from_text(chunk)
+                        change = self._extract_market_change_from_text(chunk)
                         if price and price > 0:
                             seen.add(ticker)
                             assets.append(MarketAsset(

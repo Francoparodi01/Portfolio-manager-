@@ -680,60 +680,39 @@ async def send_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
 # Portfolio — renderizado de tabla
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _render_portfolio_table(positions: list[dict], total_invested: float) -> str:
+def _format_quantity(value: float) -> str:
+    try:
+        qty = float(value)
+        if qty.is_integer():
+            return str(int(qty))
+        return f"{qty:.4f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "0"
+
+
+def _render_portfolio_positions(positions: list[dict], total_invested: float) -> str:
     """
-    Genera tabla monoespaciada para el bloque <code>.
+    Genera una lista compacta pensada para Telegram mobile.
 
     Para MVP:
-    - No muestra flags raros tipo ● / ·.
+    - No usa tabla monoespaciada: Telegram mobile corta columnas largas.
     - No muestra P&L.
     - El peso se calcula sobre total_invested, no sobre cash ni total cuenta.
     """
-    COL_TICKER = 10
-    COL_CANT   = 5
-    COL_PRECIO = 9
-    COL_VALOR  = 10
-    COL_PESO   = 6
-    SEP        = "  "
-
-    def _ars(v: float) -> str:
-        return f"${abs(v):,.0f}".replace(",", ".")
-
-    header = (
-        f"{'TICKER':<{COL_TICKER}}{SEP}"
-        f"{'CANT':>{COL_CANT}}{SEP}"
-        f"{'PRECIO':>{COL_PRECIO}}{SEP}"
-        f"{'VALOR':>{COL_VALOR}}{SEP}"
-        f"{'PESO':>{COL_PESO}}"
-    )
-
-    sep_line = "─" * len(header)
-    rows = [header, sep_line]
+    rows: list[str] = []
 
     for p in positions:
-        ticker = str(p.get("ticker", "?")).upper()
+        ticker = html_text(str(p.get("ticker", "?")).upper())
         qty    = _to_float(p.get("quantity", 0))
         price  = _to_float(p.get("current_price", 0))
         mv     = _to_float(p.get("market_value", 0))
-
         weight = mv / total_invested if total_invested > 0 else 0.0
 
-        rows.append(
-            f"{ticker:<{COL_TICKER}}{SEP}"
-            f"{qty:>{COL_CANT}g}{SEP}"
-            f"{_ars(price):>{COL_PRECIO}}{SEP}"
-            f"{_ars(mv):>{COL_VALOR}}{SEP}"
-            f"{weight:>{COL_PESO}.1%}"
-        )
+        rows.append(f"<b>{ticker}</b> · {_format_quantity(qty)} u · {_money(price)}")
+        rows.append(f"{_money(mv)} · {_pct(weight)}")
 
-    rows.append(sep_line)
-    rows.append(
-        f"{'TOTAL':<{COL_TICKER}}{SEP}"
-        f"{'':>{COL_CANT}}{SEP}"
-        f"{'':>{COL_PRECIO}}{SEP}"
-        f"{_ars(total_invested):>{COL_VALOR}}{SEP}"
-        f"{'100.0%':>{COL_PESO}}"
-    )
+    rows.append("")
+    rows.append(f"<b>TOTAL</b> · {_money(total_invested)} · 100.0%")
 
     return "\n".join(rows)
 
@@ -896,7 +875,7 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "<b>POSICIONES</b>  <i>(peso sobre invertido)</i>",
         "",
-        f"<code>{_render_portfolio_table(positions, total_invested)}</code>",
+        _render_portfolio_positions(positions, total_invested),
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "<i>Portfolio — Cocos Copilot</i>",
