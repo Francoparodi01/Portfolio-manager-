@@ -73,6 +73,7 @@ tests/fixtures/*
 playwright-report/
 test-results/
 trace.zip
+reports/yahoo_byma_probe/
 
 # Python
 .pytest_cache/
