@@ -426,6 +426,38 @@ def test_daily_analysis_scheduler_matches_operational_analysis_scope(monkeypatch
     assert verified == [True]
 
 
+def test_radar_audit_capture_persists_without_sending_telegram(monkeypatch):
+    from src.scheduler import runner
+
+    commands = []
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"radar output", b""
+
+    async def _create_subprocess_exec(*cmd, stdout=None, stderr=None):
+        commands.append(cmd)
+        return _Proc()
+
+    cfg = SimpleNamespace(
+        scraper=SimpleNamespace(telegram_chat_id="77"),
+    )
+    monkeypatch.setattr(runner, "_is_business_day", lambda: True)
+    monkeypatch.setattr(runner, "get_config", lambda: cfg)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", _create_subprocess_exec)
+
+    asyncio.run(runner.run_radar_audit_capture())
+
+    assert len(commands) == 1
+    command = commands[0]
+    assert "scripts/run_opportunity.py" in command
+    assert "--no-telegram" in command
+    assert "--no-persist" not in command
+    assert command[-2:] == ("--owner-chat-id", "77")
+
+
 def test_fill_reconciliation_backfills_missing_decision_price():
     class _Connection:
         def __init__(self):

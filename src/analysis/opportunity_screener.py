@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from types import SimpleNamespace
 from typing import Optional
@@ -214,6 +214,8 @@ class OpportunityCandidate:
     sentiment_score:     float = 0.0
     sentiment_context:   object | None = None
     momentum_score:      float = 0.0
+    reversion_score:     float = 0.0
+    reversion_components: dict[str, float] = field(default_factory=dict)
     shadow_expected_return_20: float | None = None
     shadow_probability_up_20:  float | None = None
     shadow_action:             str = ""
@@ -251,6 +253,8 @@ class OpportunityCandidate:
     entry_zone_high:     float = 0.0
     # Alertas
     alerts:              list[str] = field(default_factory=list)
+    prior_radar_decided_at: date | datetime | None = None
+    prior_radar_outcomes: dict[int, float | None] = field(default_factory=dict)
     generated_at:        datetime  = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -1235,6 +1239,8 @@ def run_opportunity_analysis(
             sentiment_score      = round(float(sent_score), 4),
             sentiment_context    = sentiment_contexts.get(ticker),
             momentum_score       = round(float(momentum_s), 4),
+            reversion_score      = round(float(getattr(tech, "reversion_score", 0.0) or 0.0), 4),
+            reversion_components = dict(getattr(tech, "reversion_components", {}) or {}),
             shadow_expected_return_20 = shadow_er20,
             shadow_probability_up_20  = shadow_p20,
             shadow_action             = shadow_action,
@@ -1414,6 +1420,40 @@ def render_opportunity_report(
         )
         return f"{mode} ({detail})"
 
+    def _reversion_line(c: OpportunityCandidate) -> str:
+        score = float(c.reversion_score or 0.0)
+        if score >= 0.25:
+            label = "posible rebote alcista"
+        elif score <= -0.25:
+            label = "posible corrección bajista"
+        else:
+            label = "sin extremo claro"
+        component_labels = {
+            "rsi": "RSI",
+            "stochastic": "estocástico",
+            "williams_r": "Williams %R",
+            "bollinger": "Bollinger",
+        }
+        components = ", ".join(
+            component_labels.get(name, name)
+            for name, value in c.reversion_components.items()
+            if abs(float(value or 0.0)) > 0
+        )
+        detail = f" | {components}" if components else ""
+        return f"↩️ Reversión: <b>{label}</b> (<code>{score:+.3f}</code>){detail}"
+
+    def _prior_radar_outcome_line(c: OpportunityCandidate) -> str:
+        if not c.prior_radar_decided_at or not c.prior_radar_outcomes:
+            return ""
+        values = []
+        for horizon in (5, 10, 20, 40):
+            value = c.prior_radar_outcomes.get(horizon)
+            values.append(f"{horizon}D {value:+.1%}" if value is not None else f"{horizon}D pendiente")
+        decided_at = c.prior_radar_decided_at
+        if isinstance(decided_at, datetime) and decided_at.tzinfo is not None:
+            decided_at = decided_at.astimezone()
+        return f"📊 Última idea radar {decided_at:%d/%m/%Y}: " + " | ".join(values)
+
     def _tv_chart_url(ticker: str) -> str:
         raw = str(ticker or "").upper().strip()
         symbol = {"BA.C": "BAC", "BRKB": "BRKB"}.get(raw, raw.replace(".", ""))
@@ -1508,6 +1548,10 @@ def render_opportunity_report(
             f"momentum {c.momentum_score:+.3f} | sent {c.sentiment_score:+.3f}</code>"
         )
         h.append(f"Fuente técnica: <b>{escape(_technical_source_label(c))}</b>")
+        h.append(_reversion_line(c))
+        prior_outcome = _prior_radar_outcome_line(c)
+        if prior_outcome:
+            h.append(prior_outcome)
         if c.shadow_alignment != "SIN SHADOW":
             h.append(f"🔬 Shadow: <b>{escape(c.shadow_alignment)}</b> — {escape(_shadow_reader_note(c))}")
         h.append(f"Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
@@ -1590,6 +1634,10 @@ def render_opportunity_report(
             f"{rr_str} | ${c.price_usd:.2f}{edge_str}{near_tag}"
         )
         h.append(f"   Fuente técnica: <b>{escape(_technical_source_label(c))}</b>")
+        h.append(f"   {_reversion_line(c)}")
+        prior_outcome = _prior_radar_outcome_line(c)
+        if prior_outcome:
+            h.append(f"   {prior_outcome}")
         if c.shadow_alignment != "SIN SHADOW":
             h.append(f"   🔬 Shadow: <b>{escape(c.shadow_alignment)}</b> — {escape(_shadow_reader_note(c))}")
         h.append(f"   Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
@@ -1714,6 +1762,10 @@ def render_opportunity_report(
                 f"  <b>{c.ticker}</b>: score <code>{c.final_score:+.3f}</code> | "
                 f"{rr_str} | ${c.price_usd:.2f}"
             )
+            h.append(f"   {_reversion_line(c)}")
+            prior_outcome = _prior_radar_outcome_line(c)
+            if prior_outcome:
+                h.append(f"   {prior_outcome}")
             if c.shadow_alignment != "SIN SHADOW":
                 h.append(f"   🔬 Shadow: <b>{escape(c.shadow_alignment)}</b> — {escape(_shadow_reader_note(c))}")
             if c.asymmetry and c.asymmetry.rr_alert:

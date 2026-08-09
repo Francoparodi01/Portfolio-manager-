@@ -1430,6 +1430,8 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
         edge = re.search(r"Edge:\s*[🟢🟡🟠🔴]?\s*([+-]?\d+\.\d+)", block)
         sizing_ars = re.search(r"≈\s*\$([0-9.]+)\s*ARS", block)
         shadow = re.search(r"🔬 Shadow:\s*([A-ZÁÉÍÓÚÑ ]+)\s*—\s*(.+)", block)
+        reversion = re.search(r"↩️ Reversión:\s*(.+)", block)
+        prior_radar = re.search(r"📊 Última idea radar\s*(.+)", block)
         action = re.search(
             r"🎯 (?:Acción sugerida|Revalidación requerida):\s*(.+)",
             block,
@@ -1457,6 +1459,8 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
             "action": action_text,
             "shadow_label": shadow.group(1).strip() if shadow else "",
             "shadow_note": shadow.group(2).strip() if shadow else "",
+            "reversion": reversion.group(1).strip() if reversion else "",
+            "prior_radar": prior_radar.group(1).strip() if prior_radar else "",
         })
 
     if not items:
@@ -1509,6 +1513,11 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
         if item["shadow_label"]:
             lines.append(f"   🔬 Shadow: <b>{item['shadow_label']}</b> — {item['shadow_note']}")
 
+        if item["reversion"]:
+            lines.append(f"   ↩️ Reversión: {item['reversion']}")
+        if item["prior_radar"]:
+            lines.append(f"   📊 Última idea radar {item['prior_radar']}")
+
         action_prefix = "Revalidar" if market_closed else "🎯"
         lines.append(f"   {action_prefix}: {item['action']}")
 
@@ -1521,6 +1530,10 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
     return "\n".join(lines)
 
 
+def _radar_cache_supports_reversion(report: str) -> bool:
+    return "↩️ Reversión:" in str(report or "")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Acción: Radar
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1528,6 +1541,9 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
 async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     started = time.perf_counter()
     cached = await _load_cached_report("radar", chat_id)
+    if cached and not _radar_cache_supports_reversion(str(cached.get("report_text") or "")):
+        logger.info("[BOT][RADAR] cache_schema_miss=reversion")
+        cached = None
     if cached:
         report = compact_radar_report(str(cached["report_text"]), max_items=6)
         logger.info(

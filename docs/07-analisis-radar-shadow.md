@@ -190,6 +190,14 @@ Los activos que no pasan este filtro no consumen el resto del análisis.
    - sin efectivo ejecutable, baja la idea a vigilancia;
    - informa “requiere funding o swap” en vez de presentar una compra imposible.
 
+7. **Etiqueta posibles reversiones**
+   - `reversion_score >= +0.25`: posible rebote alcista desde sobreventa;
+   - `reversion_score <= -0.25`: posible corrección bajista desde sobrecompra;
+   - entre ambos límites: sin extremo claro;
+   - RSI, estocástico, Williams %R y Bollinger explican la etiqueta;
+   - la etiqueta es informativa y no agrega una segunda recomendación ni cambia
+     por sí sola el ranking.
+
 ### Estados principales
 
 | Estado | Lectura correcta |
@@ -210,12 +218,17 @@ Los activos que no pasan este filtro no consumen el resto del análisis.
 - zona de entrada e invalidación;
 - comparación contra holdings;
 - necesidad de efectivo o swap.
+- posible reversión y sus componentes;
+- devolución 5/10/20/40D de la última idea radar madura del mismo ticker,
+  cuando existe. Esa devolución es histórica, no una proyección de la idea actual.
 
 ### Qué no significa
 
 - estar primero en el ranking no equivale a una orden de compra;
 - “requiere funding” significa que no existe efectivo suficiente en ese momento;
 - el radar de Telegram es exploratorio y corre con `--no-persist`;
+- el scheduler guarda una cohorte teórica diaria a las 16:50 ART con
+  `source='radar'` y `metric_scope='radar_audit'`; no crea órdenes ni fills;
 - una idea del radar sólo pasa a la capa operativa si el planner puede financiarla
   y convertirla en nominales reales.
 

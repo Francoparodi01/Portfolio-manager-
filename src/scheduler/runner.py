@@ -127,6 +127,7 @@ SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS = int(
 )
 THESIS_SHADOW_ENABLED = os.getenv("THESIS_SHADOW_ENABLED", "true").lower() == "true"
 LEARNING_SHADOW_ENABLED = os.getenv("LEARNING_SHADOW_ENABLED", "true").lower() == "true"
+RADAR_AUDIT_CAPTURE_ENABLED = os.getenv("RADAR_AUDIT_CAPTURE_ENABLED", "true").lower() == "true"
 LEARNING_SHADOW_LOOKBACK_DAYS = int(os.getenv("LEARNING_SHADOW_LOOKBACK_DAYS", "365"))
 LEARNING_SHADOW_MATERIAL_RETURN_BPS = int(
     os.getenv("LEARNING_SHADOW_MATERIAL_RETURN_BPS", "75")
@@ -1401,6 +1402,54 @@ async def run_daily_analysis() -> None:
         notifier.notify_critical_error("daily_analysis", str(e))
 
     await run_verify_decision_prices()
+
+
+async def run_radar_audit_capture() -> None:
+    """Persiste una cohorte teórica diaria del radar para medir outcomes futuros."""
+    if not _is_business_day():
+        logger.info("radar_audit_capture omitido: %s", market_closed_reason() or "mercado cerrado")
+        return
+
+    cfg = get_config()
+    cmd = [
+        sys.executable,
+        "scripts/run_opportunity.py",
+        "--no-telegram",
+        "--period",
+        "1y",
+        "--top",
+        "6",
+        "--min-score",
+        "0.10",
+    ]
+    owner_chat_id = str(cfg.scraper.telegram_chat_id or "").strip()
+    if owner_chat_id.isdigit():
+        cmd.extend(["--owner-chat-id", owner_chat_id])
+
+    logger.info("radar_audit_capture iniciando: %s", " ".join(cmd))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        if proc.returncode != 0:
+            logger.error(
+                "radar_audit_capture fallo rc=%s stderr=%s",
+                proc.returncode,
+                stderr.decode("utf-8", errors="replace")[-1600:],
+            )
+            return
+        logger.info(
+            "radar_audit_capture OK stdout=%d chars stderr=%d chars",
+            len(stdout),
+            len(stderr),
+        )
+    except asyncio.TimeoutError:
+        logger.error("radar_audit_capture timeout")
+    except Exception as exc:
+        logger.error("radar_audit_capture fallo: %s", exc, exc_info=True)
 
 
 def _snapshot_age_seconds(snapshot: dict, now: datetime | None = None) -> float | None:
@@ -2963,6 +3012,16 @@ async def _scheduler_main() -> None:
         max_instances=1,
         replace_existing=True,
     )
+    if RADAR_AUDIT_CAPTURE_ENABLED:
+        scheduler.add_job(
+            run_radar_audit_capture,
+            _business_day_cron(hour=16, minute=50),
+            id="radar_audit_capture",
+            name="Radar audit capture 16:50 ART",
+            misfire_grace_time=300,
+            max_instances=1,
+            replace_existing=True,
+        )
     scheduler.add_job(
         run_preclose_alerts,
         _business_day_cron(hour=16, minute=45),
@@ -3066,8 +3125,9 @@ async def _scheduler_main() -> None:
     )
     scheduler.start()
     logger.info(
-        "Scheduler activo: 10:31 apertura portfolio + intraday on; mercado 10:40/12:00/16:40/17:02; 10:45 post-open; 16:15/16:45 preclose alerts; 16:59 intraday off; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
+        "Scheduler activo: 10:31 apertura portfolio + intraday on; mercado 10:40/12:00/16:40/17:02; 10:45 post-open; 16:15/16:45 preclose alerts; radar audit 16:50=%s; 16:59 intraday off; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
         % (
+            "on" if RADAR_AUDIT_CAPTURE_ENABLED else "off",
             "on" if SENTIMENT_PIPELINE_ENABLED else "off",
             "on" if THESIS_SHADOW_ENABLED else "off",
             "on" if LEARNING_SHADOW_ENABLED else "off",

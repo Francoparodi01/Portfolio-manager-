@@ -27,11 +27,13 @@ import os
 import sys
 from datetime import datetime, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.core.config import get_config
 from src.core.logger import get_logger
+from src.core.market_calendar import is_trading_day
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
 from src.collector.cocos_history import candles_to_frame
@@ -60,6 +62,7 @@ from src.analysis.audit_scope import (
 )
 
 logger = get_logger(__name__)
+ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
 
 def _portfolio_equity_total(
@@ -154,6 +157,88 @@ async def _load_portfolio_scores(
     return scores
 
 
+async def _load_latest_radar_outcomes(
+    cfg,
+    tickers: list[str],
+    owner_chat_id: int | None = None,
+) -> dict[str, dict]:
+    """Carga la última idea radar madura por ticker, sin recalcular outcomes."""
+    normalized = sorted({str(t or "").upper().strip() for t in tickers if str(t or "").strip()})
+    if not normalized:
+        return {}
+    db = PortfolioDatabase(cfg.database.url)
+    try:
+        await db.connect()
+        pool = await db.get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (ticker)
+                    ticker,
+                    (decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date AS decision_day,
+                    COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
+                    COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
+                    COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
+                    COALESCE(executable_outcome_40d, outcome_40d) AS outcome_40d
+                FROM decision_log
+                WHERE ticker = ANY($1::text[])
+                  AND COALESCE(source, layers->>'source') = 'radar'
+                  AND COALESCE(metric_scope, 'radar_audit') = 'radar_audit'
+                  AND (
+                      COALESCE(executable_outcome_5d, outcome_5d) IS NOT NULL
+                      OR COALESCE(executable_outcome_10d, outcome_10d) IS NOT NULL
+                      OR COALESCE(executable_outcome_20d, outcome_20d) IS NOT NULL
+                      OR COALESCE(executable_outcome_40d, outcome_40d) IS NOT NULL
+                  )
+                  AND (
+                      ($2::bigint IS NULL AND owner_chat_id IS NULL)
+                      OR owner_chat_id = $2
+                      OR owner_chat_id IS NULL
+                  )
+                ORDER BY
+                    ticker,
+                    (owner_chat_id = $2::bigint) DESC NULLS LAST,
+                    decided_at DESC
+                """,
+                normalized,
+                owner_chat_id,
+            )
+        return {
+            str(row["ticker"]): {
+                "decided_at": row["decision_day"],
+                "outcomes": {
+                    horizon: (
+                        float(row[f"outcome_{horizon}d"])
+                        if row[f"outcome_{horizon}d"] is not None
+                        else None
+                    )
+                    for horizon in (5, 10, 20, 40)
+                },
+            }
+            for row in rows
+        }
+    except Exception as exc:
+        logger.warning("No se pudieron cargar devoluciones históricas del radar: %s", exc)
+        return {}
+    finally:
+        try:
+            await db.close()
+        except Exception:
+            pass
+
+
+def _attach_latest_radar_outcomes(report, contexts: dict[str, dict]) -> int:
+    attached = 0
+    for candidate in list(getattr(report, "candidates", []) or []):
+        context = contexts.get(str(candidate.ticker or "").upper().strip())
+        if not context:
+            continue
+        candidate.prior_radar_decided_at = context.get("decided_at")
+        candidate.prior_radar_outcomes = dict(context.get("outcomes") or {})
+        attached += 1
+    return attached
+
+
 async def _load_cocos_universe_assets(cfg) -> list[dict]:
     db = PortfolioDatabase(cfg.database.url)
     await db.connect()
@@ -185,9 +270,73 @@ async def _load_cocos_history_frames(cfg, assets: list[dict], limit: int = 260) 
             if item is not None:
                 ticker, frame = item
                 frames[ticker] = frame
+        if frames and hasattr(db, "get_market_price_samples"):
+            samples = await db.get_market_price_samples(list(frames))
+            frames = _append_intraday_price_samples(frames, samples)
     finally:
         await db.close()
     return frames
+
+
+def _append_intraday_price_samples(frames: dict, samples: list[dict]) -> dict:
+    """Agrega una vela provisional en memoria para la rueda todavía no cerrada."""
+    by_ticker: dict[str, list[dict]] = {}
+    for sample in samples or []:
+        ticker = str(sample.get("ticker") or "").upper().strip()
+        price = float(sample.get("last_price") or 0.0)
+        ts = sample.get("ts")
+        if not ticker or price <= 0 or not isinstance(ts, datetime):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        normalized = dict(sample)
+        normalized["ts"] = ts
+        normalized["last_price"] = price
+        by_ticker.setdefault(ticker, []).append(normalized)
+
+    result = dict(frames or {})
+    for ticker, ticker_samples in by_ticker.items():
+        frame = result.get(ticker)
+        if frame is None or frame.empty:
+            continue
+        ticker_samples.sort(key=lambda row: row["ts"])
+        sample_day = ticker_samples[-1]["ts"].astimezone(ART_TZ).date()
+        if not is_trading_day(sample_day):
+            continue
+        last_index = frame.index[-1]
+        if getattr(last_index, "tzinfo", None) is None:
+            last_day = last_index.to_pydatetime().replace(tzinfo=timezone.utc).astimezone(ART_TZ).date()
+        else:
+            last_day = last_index.to_pydatetime().astimezone(ART_TZ).date()
+        if sample_day <= last_day:
+            continue
+
+        import pandas as pd
+
+        prices = [row["last_price"] for row in ticker_samples]
+        volumes = [float(row.get("volume") or 0.0) for row in ticker_samples]
+        last_ts = ticker_samples[-1]["ts"]
+        provisional = pd.DataFrame(
+            [{
+                "Open": prices[0],
+                "High": max(prices),
+                "Low": min(prices),
+                "Close": prices[-1],
+                "Volume": max(volumes) if volumes else 0.0,
+                "Source": "market_prices_intraday",
+            }],
+            index=pd.DatetimeIndex([last_ts], name=frame.index.name),
+        )
+        attrs = dict(frame.attrs)
+        combined = pd.concat([frame, provisional]).sort_index()
+        source_counts = dict(attrs.get("candle_source_counts") or {})
+        source_counts["market_prices_intraday"] = 1
+        attrs["candle_source_counts"] = source_counts
+        attrs["candle_sources"] = tuple(sorted(source_counts))
+        attrs["has_reconstructed_candles"] = bool(attrs.get("has_reconstructed_candles", False))
+        combined.attrs = attrs
+        result[ticker] = combined
+    return result
 
 
 async def _load_active_manual_market_events(cfg) -> list[ManualMarketEvent]:
@@ -302,6 +451,11 @@ def _radar_candidate_layers(candidate) -> dict:
         "macro": {"raw": candidate.macro_score},
         "sentiment": {"raw": candidate.sentiment_score},
         "momentum": {"raw": candidate.momentum_score},
+        "reversion_shadow": {
+            "score": float(getattr(candidate, "reversion_score", 0.0) or 0.0),
+            "components": dict(getattr(candidate, "reversion_components", {}) or {}),
+            "informational_only": True,
+        },
         "final_score": candidate.final_score,
         "conviction": candidate.conviction,
         "edge": edge.raw if edge else None,
@@ -643,6 +797,13 @@ async def main(
         sentiment_contexts   = sentiment_contexts,
         shadow_contexts      = shadow_contexts,
     )
+    radar_outcome_contexts = await _load_latest_radar_outcomes(
+        cfg,
+        [candidate.ticker for candidate in report.candidates],
+        owner_chat_id=owner_chat_id,
+    )
+    attached_outcomes = _attach_latest_radar_outcomes(report, radar_outcome_contexts)
+    logger.info("Radar: devoluciones históricas adjuntadas=%s", attached_outcomes)
 
     manual_market_events: list[ManualMarketEvent] = []
     try:

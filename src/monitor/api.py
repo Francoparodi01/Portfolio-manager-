@@ -1689,6 +1689,8 @@ async def radar_audit(request: web.Request) -> web.Response:
                 r.layers->>'edge_label' AS edge_label,
                 (r.layers->>'edge')::float AS edge,
                 r.layers->>'technical_data_source_mode' AS technical_source,
+                (r.layers->'reversion_shadow'->>'score')::float AS reversion_score,
+                r.layers->'reversion_shadow'->'components' AS reversion_components,
                 path.price_2d,
                 path.close_5d,
                 path.close_10d,
