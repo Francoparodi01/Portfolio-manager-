@@ -29,6 +29,7 @@ Coordinación de scraper:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import signal
@@ -1703,10 +1704,90 @@ async def run_thesis_shadow_job() -> None:
             logger.warning("thesis_shadow fallo rc=%s stderr=%s", proc.returncode, err[-1600:])
             return
         logger.info("thesis_shadow OK stdout=%s stderr=%d chars", out[-1200:], len(err))
+        await run_shadow_calibration_job()
     except asyncio.TimeoutError:
         logger.warning("thesis_shadow timeout")
     except Exception as exc:
         logger.warning("thesis_shadow fallo no critico: %s", exc, exc_info=True)
+
+
+async def run_shadow_calibration_job() -> None:
+    """Calibrate the latest shadow run without changing its raw forecasts."""
+    cmd = [sys.executable, "scripts/run_shadow_calibration.py", "--json"]
+    logger.info("shadow_calibration_v3 iniciando despues de thesis_shadow")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        out = stdout.decode("utf-8", errors="replace").strip()
+        err = stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0:
+            logger.warning(
+                "shadow_calibration_v3 fallo rc=%s stderr=%s",
+                proc.returncode,
+                err[-1600:],
+            )
+            return
+        logger.info(
+            "shadow_calibration_v3 OK stdout=%s stderr=%d chars",
+            out[-1600:],
+            len(err),
+        )
+        try:
+            payload = json.loads(out.splitlines()[-1]) if out else {}
+        except (json.JSONDecodeError, IndexError):
+            logger.warning("shadow_calibration_v3 devolvio JSON invalido; omito alerta")
+            return
+        gate_changes = payload.get("gate_changes") or []
+        if gate_changes:
+            cfg = get_config()
+            notifier = TelegramNotifier(
+                cfg.scraper.telegram_bot_token,
+                cfg.scraper.telegram_chat_id,
+            )
+            message = _render_shadow_calibration_gate_alert(gate_changes)
+            sent = notifier.send_raw(message)
+            logger.info(
+                "shadow_calibration_v3 gate alert cambios=%d sent=%s",
+                len(gate_changes),
+                sent,
+            )
+    except asyncio.TimeoutError:
+        logger.warning("shadow_calibration_v3 timeout")
+    except Exception as exc:
+        logger.warning("shadow_calibration_v3 fallo no critico: %s", exc, exc_info=True)
+
+
+def _render_shadow_calibration_gate_alert(changes: list[dict]) -> str:
+    lines = [
+        "<b>Shadow v3 | cambio de compuerta</b>",
+        "",
+    ]
+    for change in sorted(changes, key=lambda item: int(item.get("horizon_sessions") or 0)):
+        horizon = int(change.get("horizon_sessions") or 0)
+        previous = _shadow_calibration_gate_label(change.get("previous_gate"))
+        current = _shadow_calibration_gate_label(change.get("new_gate"))
+        lines.append(
+            f"- <b>{horizon}r</b>: <code>{escape(previous)}</code> -&gt; "
+            f"<code>{escape(current)}</code>"
+        )
+    lines.extend([
+        "",
+        "<i>Auditoria experimental. No cambia Analisis, Radar, planes ni ordenes.</i>",
+    ])
+    return "\n".join(lines)
+
+
+def _shadow_calibration_gate_label(value) -> str:
+    return {
+        "FAILED_WALK_FORWARD": "Rechazado",
+        "PENDING_PROSPECTIVE_EVIDENCE": "Esperando evidencia",
+        "PENDING_MORE_COHORTS": "Muestra insuficiente",
+        "CANDIDATE_AFTER_FORWARD_TEST": "Candidato a revision",
+    }.get(str(value or "").upper(), str(value or "Sin estado"))
 
 
 async def run_learning_shadow_job() -> None:

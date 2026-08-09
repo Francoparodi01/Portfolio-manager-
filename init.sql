@@ -512,6 +512,91 @@ CREATE INDEX IF NOT EXISTS idx_shadow_thesis_forecasts_pending
 CREATE INDEX IF NOT EXISTS idx_shadow_thesis_outcomes_matured
     ON shadow_thesis_outcomes(matured_at DESC);
 
+-- Shadow v3: post-hoc calibration of v2 forecasts. These tables only read
+-- shadow evidence and remain disconnected from decision_log and execution.
+CREATE TABLE IF NOT EXISTS shadow_calibration_runs (
+    calibration_run_id UUID PRIMARY KEY,
+    owner_chat_id BIGINT NOT NULL DEFAULT 0,
+    source_run_id UUID NOT NULL REFERENCES shadow_thesis_runs(run_id) ON DELETE CASCADE,
+    source_model_version TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    trained_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    train_cutoff TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL DEFAULT 'COMPLETE_SHADOW',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (owner_chat_id, source_run_id, model_version)
+);
+
+CREATE TABLE IF NOT EXISTS shadow_calibration_models (
+    calibration_run_id UUID NOT NULL REFERENCES shadow_calibration_runs(calibration_run_id) ON DELETE CASCADE,
+    horizon_sessions INTEGER NOT NULL CHECK (horizon_sessions IN (5, 20)),
+    sample_count INTEGER NOT NULL,
+    cohort_count INTEGER NOT NULL,
+    train_start_ts TIMESTAMPTZ NOT NULL,
+    train_end_ts TIMESTAMPTZ NOT NULL,
+    parameters JSONB NOT NULL,
+    fit_metrics JSONB NOT NULL,
+    walk_forward_metrics JSONB NOT NULL,
+    diagnostics JSONB NOT NULL,
+    PRIMARY KEY (calibration_run_id, horizon_sessions)
+);
+
+CREATE TABLE IF NOT EXISTS shadow_calibrated_forecasts (
+    id BIGSERIAL PRIMARY KEY,
+    calibration_run_id UUID NOT NULL REFERENCES shadow_calibration_runs(calibration_run_id) ON DELETE CASCADE,
+    source_forecast_id BIGINT NOT NULL REFERENCES shadow_thesis_forecasts(id) ON DELETE CASCADE,
+    owner_chat_id BIGINT NOT NULL DEFAULT 0,
+    ticker TEXT NOT NULL,
+    as_of_ts TIMESTAMPTZ NOT NULL,
+    horizon_sessions INTEGER NOT NULL CHECK (horizon_sessions IN (5, 20)),
+    model_version TEXT NOT NULL,
+    raw_expected_return FLOAT NOT NULL,
+    raw_probability_up FLOAT NOT NULL CHECK (raw_probability_up >= 0 AND raw_probability_up <= 1),
+    calibrated_expected_return FLOAT NOT NULL,
+    calibrated_probability_up FLOAT NOT NULL CHECK (
+        calibrated_probability_up >= 0 AND calibrated_probability_up <= 1
+    ),
+    calibrated_lower_return FLOAT NOT NULL,
+    calibrated_upper_return FLOAT NOT NULL,
+    calibration_status TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_forecast_id, model_version)
+);
+
+CREATE TABLE IF NOT EXISTS shadow_calibration_gate_state (
+    owner_chat_id BIGINT NOT NULL DEFAULT 0,
+    horizon_sessions INTEGER NOT NULL CHECK (horizon_sessions IN (5, 20)),
+    current_gate TEXT NOT NULL,
+    calibration_run_id UUID REFERENCES shadow_calibration_runs(calibration_run_id) ON DELETE SET NULL,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (owner_chat_id, horizon_sessions)
+);
+
+CREATE TABLE IF NOT EXISTS shadow_calibration_gate_events (
+    id BIGSERIAL PRIMARY KEY,
+    owner_chat_id BIGINT NOT NULL DEFAULT 0,
+    horizon_sessions INTEGER NOT NULL CHECK (horizon_sessions IN (5, 20)),
+    previous_gate TEXT NOT NULL,
+    new_gate TEXT NOT NULL,
+    calibration_run_id UUID REFERENCES shadow_calibration_runs(calibration_run_id) ON DELETE SET NULL,
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (calibration_run_id, horizon_sessions, previous_gate, new_gate)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_calibration_runs_latest
+    ON shadow_calibration_runs(owner_chat_id, trained_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_calibrated_forecasts_latest
+    ON shadow_calibrated_forecasts(owner_chat_id, ticker, as_of_ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_calibration_gate_events_latest
+    ON shadow_calibration_gate_events(owner_chat_id, changed_at DESC);
+
 -- Parallel causal audit for shadow forecasts. This table is intentionally
 -- independent from decision_log and does not alter forecasts or outcomes.
 CREATE TABLE IF NOT EXISTS shadow_thesis_causal_analysis (

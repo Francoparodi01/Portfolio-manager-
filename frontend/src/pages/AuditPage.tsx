@@ -6,7 +6,7 @@ import { Metric, MetricGroup } from "../components/ui/Metric";
 import { Panel } from "../components/ui/Panel";
 import { ResponsiveTable, type TableColumn } from "../components/ui/ResponsiveTable";
 import { StatusBadge } from "../components/ui/StatusBadge";
-import { useDecisionsQuery, useLearningShadowQuery, useLogsQuery, usePerformanceQuery } from "../hooks/useMonitorData";
+import { useDecisionsQuery, useLearningShadowQuery, useLogsQuery, usePerformanceQuery, useShadowCalibrationQuery } from "../hooks/useMonitorData";
 import type { RowRecord } from "../types/api";
 import { asRows, getNumber, getRecord, getString } from "../utils/data";
 import { formatDateTime, formatNumber, formatPercent, toneForNumber } from "../utils/format";
@@ -20,6 +20,7 @@ export default function AuditPage() {
   const decisions = useDecisionsQuery(90);
   const performance = usePerformanceQuery(180);
   const learning = useLearningShadowQuery(365);
+  const calibration = useShadowCalibrationQuery();
   const logs = useLogsQuery();
   const summary = getRecord(decisions.data, "summary");
   const groups = asRows(decisions.data?.groups).filter((row) => scope === "todos" || getString(row, "metric_scope") === scope);
@@ -31,6 +32,10 @@ export default function AuditPage() {
   const learningQuality = getRecord(learning.data, "data_quality");
   const learningReviews = asRows(learning.data?.review_summary);
   const learningCandidates = asRows(learning.data?.rule_candidates);
+  const calibrationHorizons = asRows(calibration.data?.horizons);
+  const calibrationEvents = asRows(calibration.data?.gate_events);
+  const calibrationRun = getRecord(calibration.data, "run");
+  const failedCalibrationGates = calibrationHorizons.filter((row) => getString(row, "gate").startsWith("FAILED")).length;
 
   const setScope = (nextScope: string) => {
     const next = new URLSearchParams(params);
@@ -54,6 +59,40 @@ export default function AuditPage() {
         <Metric label="Radar audit" tone="theoretical" value={formatNumber(getNumber(summary, "radar_audit"))} />
         <Metric label="Debug" tone="pending" value={formatNumber(getNumber(summary, "debug_events"))} />
       </MetricGroup>
+
+      <Panel
+        action={
+          <StatusBadge tone={!calibration.data?.available ? "pending" : failedCalibrationGates ? "blocked" : "theoretical"}>
+            {!calibration.data?.available ? "Sin corrida" : failedCalibrationGates ? "Promocion bloqueada" : "En evaluacion"}
+          </StatusBadge>
+        }
+        kicker="Shadow calibrado v3"
+        title="Compuertas por horizonte"
+      >
+        <div className="calibration-summary">
+          <span>Modelo <code>{getString(calibrationRun, "model_version", "price_trend_calibrated_shadow_v3")}</code></span>
+          <span>Corte <strong>{formatDateTime(calibrationRun.train_cutoff)}</strong></span>
+          <span>Entrenado <strong>{formatDateTime(calibrationRun.trained_at)}</strong></span>
+        </div>
+        <ResponsiveTable
+          columns={calibrationColumns}
+          emptyLabel="Sin horizontes calibrados"
+          rowKey={(row) => `calibration-${getNumber(row, "horizon_sessions")}`}
+          rows={calibrationHorizons}
+        />
+        {calibrationEvents.length > 0 ? (
+          <div className="calibration-events">
+            <strong>Transiciones recientes</strong>
+            <ResponsiveTable
+              columns={calibrationEventColumns}
+              emptyLabel="Sin cambios de compuerta"
+              rowKey={(row, index) => `${getNumber(row, "id")}-${index}`}
+              rows={calibrationEvents}
+            />
+          </div>
+        ) : null}
+        <p className="table-note">{calibration.data?.note || "La capa v3 todavia no tiene evidencia disponible."}</p>
+      </Panel>
 
       <Panel kicker="Learning shadow v2" title="Qué pasó con los bloqueos del planner">
         <div className="analysis-layout">
@@ -237,6 +276,45 @@ const learningCandidateColumns: TableColumn<RowRecord>[] = [
   { align: "right", header: "Tasa limpia", id: "rate", render: (row) => formatPercent(getNumber(row, "clean_miss_rate"), 1) },
   { header: "Estado", id: "status", render: (row) => <StatusBadge tone="pending">{getString(row, "status", "PROPOSED")}</StatusBadge> },
 ];
+
+const calibrationColumns: TableColumn<RowRecord>[] = [
+  { header: "Horizonte", id: "horizon", render: (row) => <strong className="ticker">{formatNumber(getNumber(row, "horizon_sessions"))}r</strong> },
+  { header: "Compuerta", id: "gate", render: (row) => <StatusBadge tone={calibrationGateTone(getString(row, "gate"))}>{calibrationGateLabel(getString(row, "gate"))}</StatusBadge> },
+  { header: "Entrenamiento", id: "training", render: (row) => `${formatNumber(getNumber(row, "sample_count"))} casos / ${formatNumber(getNumber(row, "cohort_count"))} cohortes` },
+  { header: "Walk-forward", id: "walk", render: (row) => `${formatNumber(getNumber(row, "walk_samples"))} casos / ${formatNumber(getNumber(row, "walk_cohorts"))} cohortes` },
+  { align: "right", header: "Brier v2 -> v3", id: "brier", render: (row) => metricTransition(getNumber(row, "walk_raw_brier"), getNumber(row, "walk_calibrated_brier"), "score") },
+  { align: "right", header: "MAE v2 -> v3", id: "mae", render: (row) => metricTransition(getNumber(row, "walk_raw_mae"), getNumber(row, "walk_calibrated_mae"), "percent") },
+  { align: "right", header: "Cobertura", id: "coverage", render: (row) => formatPercent(getNumber(row, "walk_interval_coverage"), 1) },
+  { align: "right", header: "Prospectivos", id: "prospective", render: (row) => `${formatNumber(getNumber(row, "current_matured"))} / ${formatNumber(getNumber(row, "current_forecasts"))}` },
+];
+
+const calibrationEventColumns: TableColumn<RowRecord>[] = [
+  { header: "Fecha", id: "date", render: (row) => formatDateTime(row.changed_at) },
+  { header: "Horizonte", id: "horizon", render: (row) => `${formatNumber(getNumber(row, "horizon_sessions"))}r` },
+  { header: "Anterior", id: "previous", render: (row) => calibrationGateLabel(getString(row, "previous_gate")) },
+  { header: "Nuevo", id: "new", render: (row) => <StatusBadge tone={calibrationGateTone(getString(row, "new_gate"))}>{calibrationGateLabel(getString(row, "new_gate"))}</StatusBadge> },
+];
+
+function calibrationGateLabel(value: string): string {
+  return {
+    FAILED_WALK_FORWARD: "Rechazado",
+    PENDING_PROSPECTIVE_EVIDENCE: "Esperando outcomes",
+    PENDING_MORE_COHORTS: "Muestra insuficiente",
+    CANDIDATE_AFTER_FORWARD_TEST: "Candidato a revision",
+  }[value] || value || "Sin estado";
+}
+
+function calibrationGateTone(value: string) {
+  if (value === "FAILED_WALK_FORWARD") return "blocked" as const;
+  if (value === "CANDIDATE_AFTER_FORWARD_TEST") return "positive" as const;
+  return "pending" as const;
+}
+
+function metricTransition(before: number | null, after: number | null, mode: "score" | "percent"): string {
+  if (before === null || after === null) return "-";
+  if (mode === "percent") return `${formatPercent(before, 2)} -> ${formatPercent(after, 2)}`;
+  return `${before.toFixed(4)} -> ${after.toFixed(4)}`;
+}
 
 function learningReviewLabel(value: string): string {
   return {

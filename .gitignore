@@ -61,6 +61,7 @@ tests/*
 !tests/test_output_perf.py
 !tests/test_manual_broker_run_context.py
 !tests/test_thesis_shadow_store.py
+!tests/test_shadow_calibration.py
 !tests/test_corporate_actions.py
 !tests/test_issuer_event_sources.py
 !tests/test_operational_tools.py

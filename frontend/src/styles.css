@@ -894,6 +894,42 @@ a {
   font-family: var(--font-display);
 }
 
+.calibration-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin-block-end: var(--space-3);
+  padding-block: var(--space-2);
+  color: var(--text-muted);
+  border-block: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.calibration-summary span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.calibration-summary strong,
+.calibration-summary code {
+  color: var(--text-primary);
+}
+
+.calibration-events {
+  display: grid;
+  gap: var(--space-2);
+  margin-block-start: var(--space-4);
+}
+
+.calibration-events > strong {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
 .radar-dot {
   fill: currentColor;
   stroke-width: 2.5;

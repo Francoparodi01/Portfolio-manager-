@@ -2739,6 +2739,193 @@ async def shadow_view(request: web.Request) -> web.Response:
     })
 
 
+async def shadow_calibration_view(request: web.Request) -> web.Response:
+    """Read-only v3 calibration gates and out-of-sample evidence."""
+    try:
+        owner_chat_id = int(request.query.get("owner_chat_id", "0"))
+    except (TypeError, ValueError):
+        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+
+    empty = {
+        "ok": True,
+        "available": False,
+        "owner_chat_id": owner_chat_id,
+        "run": None,
+        "horizons": [],
+        "prospective_metrics": [],
+        "gate_events": [],
+    }
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        schema_ready = await conn.fetchval(
+            """
+            SELECT
+                to_regclass('public.shadow_calibration_runs') IS NOT NULL
+                AND to_regclass('public.shadow_calibration_models') IS NOT NULL
+                AND to_regclass('public.shadow_calibrated_forecasts') IS NOT NULL
+                AND to_regclass('public.shadow_calibration_gate_state') IS NOT NULL
+                AND to_regclass('public.shadow_calibration_gate_events') IS NOT NULL
+            """
+        )
+        if not schema_ready:
+            return _json({
+                **empty,
+                "note": "La calibracion shadow v3 todavia no fue inicializada.",
+            })
+
+        latest_run = await conn.fetchrow(
+            """
+            SELECT calibration_run_id, owner_chat_id, source_run_id,
+                   source_model_version, model_version, schema_version,
+                   trained_at, train_cutoff, status, metadata
+            FROM shadow_calibration_runs
+            WHERE owner_chat_id = $1
+            ORDER BY train_cutoff DESC, trained_at DESC
+            LIMIT 1
+            """,
+            owner_chat_id,
+        )
+        if not latest_run:
+            return _json({
+                **empty,
+                "note": "La calibracion shadow v3 no tiene corridas para este owner.",
+            })
+
+        horizons = await conn.fetch(
+            """
+            WITH forecast_counts AS (
+                SELECT
+                    cf.calibration_run_id,
+                    cf.horizon_sessions,
+                    COUNT(*)::integer AS current_forecasts,
+                    COUNT(o.forecast_id)::integer AS current_matured
+                FROM shadow_calibrated_forecasts cf
+                LEFT JOIN shadow_thesis_outcomes o
+                  ON o.forecast_id = cf.source_forecast_id
+                WHERE cf.calibration_run_id = $1
+                GROUP BY cf.calibration_run_id, cf.horizon_sessions
+            )
+            SELECT
+                m.horizon_sessions,
+                m.sample_count,
+                m.cohort_count,
+                m.train_start_ts,
+                m.train_end_ts,
+                (m.parameters ->> 'probability_slope')::double precision AS probability_slope,
+                (m.parameters ->> 'return_slope')::double precision AS return_slope,
+                (m.fit_metrics ->> 'raw_brier')::double precision AS fit_raw_brier,
+                (m.fit_metrics ->> 'calibrated_brier')::double precision AS fit_calibrated_brier,
+                (m.fit_metrics ->> 'raw_mae')::double precision AS fit_raw_mae,
+                (m.fit_metrics ->> 'calibrated_mae')::double precision AS fit_calibrated_mae,
+                (m.fit_metrics ->> 'calibrated_interval_coverage')::double precision
+                    AS fit_interval_coverage,
+                m.walk_forward_metrics ->> 'status' AS walk_status,
+                COALESCE((m.walk_forward_metrics ->> 'samples')::integer, 0)
+                    AS walk_samples,
+                COALESCE((m.walk_forward_metrics ->> 'cohorts')::integer, 0)
+                    AS walk_cohorts,
+                (m.walk_forward_metrics ->> 'raw_brier')::double precision AS walk_raw_brier,
+                (m.walk_forward_metrics ->> 'calibrated_brier')::double precision
+                    AS walk_calibrated_brier,
+                (m.walk_forward_metrics ->> 'raw_mae')::double precision AS walk_raw_mae,
+                (m.walk_forward_metrics ->> 'calibrated_mae')::double precision
+                    AS walk_calibrated_mae,
+                (m.walk_forward_metrics ->> 'calibrated_interval_coverage')::double precision
+                    AS walk_interval_coverage,
+                COALESCE(s.current_gate, m.diagnostics ->> 'promotion_gate') AS gate,
+                COALESCE((m.diagnostics ->> 'direction_inverted')::boolean, FALSE)
+                    AS direction_inverted,
+                COALESCE(fc.current_forecasts, 0) AS current_forecasts,
+                COALESCE(fc.current_matured, 0) AS current_matured
+            FROM shadow_calibration_models m
+            LEFT JOIN shadow_calibration_gate_state s
+              ON s.owner_chat_id = $2
+             AND s.horizon_sessions = m.horizon_sessions
+            LEFT JOIN forecast_counts fc
+              ON fc.calibration_run_id = m.calibration_run_id
+             AND fc.horizon_sessions = m.horizon_sessions
+            WHERE m.calibration_run_id = $1
+            ORDER BY m.horizon_sessions
+            """,
+            latest_run["calibration_run_id"],
+            owner_chat_id,
+        )
+        prospective_metrics = await conn.fetch(
+            """
+            WITH scored AS (
+                SELECT cf.horizon_sessions, cf.as_of_ts,
+                       cf.raw_expected_return, cf.raw_probability_up,
+                       cf.calibrated_expected_return,
+                       cf.calibrated_probability_up,
+                       cf.calibrated_lower_return,
+                       cf.calibrated_upper_return,
+                       o.realized_return
+                FROM shadow_calibrated_forecasts cf
+                JOIN shadow_thesis_outcomes o
+                  ON o.forecast_id = cf.source_forecast_id
+                WHERE cf.owner_chat_id = $1
+                  AND ABS(o.realized_return) <= 1.0
+            )
+            SELECT horizon_sessions,
+                   COUNT(*)::integer AS samples,
+                   COUNT(DISTINCT as_of_ts::date)::integer AS cohorts,
+                   AVG(POWER(raw_probability_up -
+                       CASE WHEN realized_return > 0 THEN 1.0 ELSE 0.0 END, 2))
+                       AS raw_brier,
+                   AVG(POWER(calibrated_probability_up -
+                       CASE WHEN realized_return > 0 THEN 1.0 ELSE 0.0 END, 2))
+                       AS calibrated_brier,
+                   AVG(ABS(raw_expected_return - realized_return)) AS raw_mae,
+                   AVG(ABS(calibrated_expected_return - realized_return)) AS calibrated_mae,
+                   AVG(CASE WHEN realized_return BETWEEN calibrated_lower_return
+                                                 AND calibrated_upper_return
+                            THEN 1.0 ELSE 0.0 END) AS interval_coverage
+            FROM scored
+            GROUP BY horizon_sessions
+            ORDER BY horizon_sessions
+            """,
+            owner_chat_id,
+        )
+        gate_events = await conn.fetch(
+            """
+            SELECT id, horizon_sessions, previous_gate, new_gate,
+                   calibration_run_id, changed_at
+            FROM shadow_calibration_gate_events
+            WHERE owner_chat_id = $1
+            ORDER BY changed_at DESC, id DESC
+            LIMIT 12
+            """,
+            owner_chat_id,
+        )
+
+    return _json({
+        "ok": True,
+        "available": True,
+        "owner_chat_id": owner_chat_id,
+        "run": _row(latest_run),
+        "horizons": [_row(row) for row in horizons],
+        "prospective_metrics": [_row(row) for row in prospective_metrics],
+        "gate_events": [_row(row) for row in gate_events],
+        "note": (
+            "V3 es una calibracion audit-only. FAILED bloquea promocion; "
+            "PENDING espera outcomes prospectivos; CANDIDATE requiere revision humana."
+        ),
+        "boundary": {
+            "reads": [
+                "shadow_calibration_runs",
+                "shadow_calibration_models",
+                "shadow_calibrated_forecasts",
+                "shadow_calibration_gate_state",
+                "shadow_calibration_gate_events",
+                "shadow_thesis_outcomes",
+            ],
+            "writes": [],
+            "affects_analysis": False,
+            "affects_execution": False,
+        },
+    })
+
+
 SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"bot\d+:[A-Za-z0-9_-]+", re.I), "bot***"),
     (re.compile(r"(password=)[^\s&]+", re.I), r"\1***"),
@@ -2811,6 +2998,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/audit-timeline", audit_timeline)
     app.router.add_get("/api/radar-audit", radar_audit)
     app.router.add_get("/api/shadow", shadow_view)
+    app.router.add_get("/api/shadow-calibration", shadow_calibration_view)
     app.router.add_get("/api/learning-shadow", learning_shadow_v2_view)
     app.router.add_get("/api/human-activity", human_activity)
     app.router.add_get("/api/corporate-actions", corporate_actions_view)

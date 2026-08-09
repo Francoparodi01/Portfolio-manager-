@@ -22,6 +22,7 @@ export type EndpointKey =
   | "timeline"
   | "radar"
   | "shadow"
+  | "calibration"
   | "learning"
   | "human"
   | "fills"
@@ -146,6 +147,18 @@ export type ShadowPayload = {
   forecasts?: RowRecord[];
   metrics?: RowRecord[];
   axis?: RowRecord;
+};
+
+export type ShadowCalibrationPayload = {
+  ok: boolean;
+  available: boolean;
+  owner_chat_id?: number;
+  note?: string;
+  run?: RowRecord | null;
+  horizons?: RowRecord[];
+  prospective_metrics?: RowRecord[];
+  gate_events?: RowRecord[];
+  boundary?: RowRecord;
 };
 
 export type LearningShadowPayload = {

@@ -17,6 +17,7 @@ import type {
   RadarPayload,
   RowRecord,
   ShadowPayload,
+  ShadowCalibrationPayload,
 } from "../types/api";
 import { fetchJson, fetchPublicJson } from "./apiClient";
 
@@ -36,6 +37,7 @@ export function endpointDefinitions(period: number): EndpointDefinition[] {
     { key: "timeline", label: "Timeline", path: `/api/audit-timeline?days=${period}&limit=120`, timeoutMs: 35_000 },
     { key: "radar", label: "Radar", path: "/api/radar-audit?days=90", timeoutMs: 25_000 },
     { key: "shadow", label: "Shadow", path: "/api/shadow", timeoutMs: 22_000 },
+    { key: "calibration", label: "Calibracion v3", path: "/api/shadow-calibration", timeoutMs: 22_000 },
     { key: "learning", label: "Learning shadow", path: `/api/learning-shadow?days=${period}`, timeoutMs: 22_000 },
     { key: "human", label: "Humano", path: "/api/human-activity?days=7" },
     { key: "fills", label: "Fills", path: "/api/fills?days=90&limit=80" },
@@ -56,6 +58,7 @@ export const monitorApi = {
   timeline: (session: ApiSession, days = 90, limit = 120) => fetchJson<AuditTimelinePayload>(session, `/api/audit-timeline?days=${days}&limit=${limit}`, 35_000),
   radar: (session: ApiSession, days = 90) => fetchJson<RadarPayload>(session, `/api/radar-audit?days=${days}`, 25_000),
   shadow: (session: ApiSession) => fetchJson<ShadowPayload>(session, "/api/shadow", 22_000),
+  calibration: (session: ApiSession) => fetchJson<ShadowCalibrationPayload>(session, "/api/shadow-calibration", 22_000),
   learning: (session: ApiSession, days = 365) => fetchJson<LearningShadowPayload>(session, `/api/learning-shadow?days=${days}`, 22_000),
   human: (session: ApiSession, days = 7) => fetchJson<HumanActivityPayload>(session, `/api/human-activity?days=${days}`),
   fills: (session: ApiSession, days = 90, limit = 80) => fetchJson<FillsPayload>(session, `/api/fills?days=${days}&limit=${limit}`),

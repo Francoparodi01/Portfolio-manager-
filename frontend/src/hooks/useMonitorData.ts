@@ -21,6 +21,7 @@ import type {
   RadarPayload,
   RowRecord,
   ShadowPayload,
+  ShadowCalibrationPayload,
 } from "../types/api";
 
 function cloneDemo<T>(value: unknown): T {
@@ -49,6 +50,7 @@ export const useHealthQuery = () => useMonitorQuery<HealthPayload>("health", mon
 export const useIngestionQuery = () => useMonitorQuery<IngestionPayload>("ingestion", monitorApi.ingestion);
 export const useCandlesQuery = () => useMonitorQuery<CandlesPayload>("candles", monitorApi.candles);
 export const useShadowQuery = () => useMonitorQuery<ShadowPayload>("shadow", monitorApi.shadow);
+export const useShadowCalibrationQuery = () => useMonitorQuery<ShadowCalibrationPayload>("calibration", monitorApi.calibration);
 export const useLearningShadowQuery = (days = 365) => useMonitorQuery<LearningShadowPayload>("learning", (session) => monitorApi.learning(session, days), [days]);
 export const useLogsQuery = () => useMonitorQuery<LogsPayload>("logs", monitorApi.logs);
 

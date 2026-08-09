@@ -14,6 +14,7 @@ import type {
   RadarPayload,
   RowRecord,
   ShadowPayload,
+  ShadowCalibrationPayload,
 } from "../types/api";
 
 const now = () => new Date().toISOString();
@@ -132,6 +133,51 @@ export const demoShadow: ShadowPayload = {
   note: "Shadow es experimental y no modifica decision_log ni genera órdenes.",
   ok: true,
   run: { as_of_ts: hoursAgo(2), captured_at: hoursAgo(2), model_version: "demo-shadow", run_id: "demo-shadow-run", status: "demo", universe_count: 38 },
+};
+
+export const demoShadowCalibration: ShadowCalibrationPayload = {
+  available: true,
+  gate_events: [],
+  horizons: [
+    {
+      cohort_count: 12,
+      current_forecasts: 170,
+      current_matured: 0,
+      direction_inverted: true,
+      gate: "FAILED_WALK_FORWARD",
+      horizon_sessions: 5,
+      sample_count: 2628,
+      walk_calibrated_brier: 0.3467,
+      walk_calibrated_mae: 0.061,
+      walk_cohorts: 4,
+      walk_interval_coverage: 0.691,
+      walk_raw_brier: 0.2595,
+      walk_raw_mae: 0.0492,
+      walk_samples: 819,
+      walk_status: "AVAILABLE_LIMITED",
+    },
+    {
+      cohort_count: 10,
+      current_forecasts: 170,
+      current_matured: 0,
+      direction_inverted: true,
+      gate: "PENDING_PROSPECTIVE_EVIDENCE",
+      horizon_sessions: 20,
+      sample_count: 1835,
+      walk_cohorts: 0,
+      walk_samples: 0,
+      walk_status: "PENDING_PROSPECTIVE_EVIDENCE",
+    },
+  ],
+  note: "V3 es experimental y no afecta analisis ni ejecucion.",
+  ok: true,
+  prospective_metrics: [],
+  run: {
+    model_version: "price_trend_calibrated_shadow_v3",
+    status: "COMPLETE_SHADOW",
+    train_cutoff: hoursAgo(2),
+    trained_at: hoursAgo(1),
+  },
 };
 
 export const demoLearningShadow: LearningShadowPayload = {
@@ -263,6 +309,7 @@ export const demoTimeline: AuditTimelinePayload = {
 export function demoPayloadFor(key: string): unknown {
   return {
     candles: demoCandles,
+    calibration: demoShadowCalibration,
     decisions: demoDecisions,
     fills: demoFills,
     health: demoHealth,
