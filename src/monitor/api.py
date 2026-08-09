@@ -32,6 +32,7 @@ from src.analysis.override_classification import (
     override_opposite_ratio as _override_opposite_ratio,
     override_same_ratio as _override_same_ratio,
 )
+from src.analysis.thesis_shadow_store import MAX_ABS_REALIZED_RETURN_FOR_METRICS
 from src.core.config import get_config
 from src.core.logger import get_logger, redact_secrets
 from src.core.market_calendar import (
@@ -2662,6 +2663,7 @@ async def shadow_view(request: web.Request) -> web.Response:
                 f.thesis_confidence,
                 f.signal_strength,
                 f.input_sessions,
+                f.feature_snapshot,
                 o.target_session_ts,
                 o.outcome_price,
                 o.realized_return,
@@ -2680,22 +2682,42 @@ async def shadow_view(request: web.Request) -> web.Response:
         )
         metrics = await conn.fetch(
             """
+            WITH scored AS (
+                SELECT
+                    f.horizon_sessions,
+                    f.ticker,
+                    f.expected_return,
+                    o.realized_return,
+                    o.direction_correct,
+                    o.absolute_error,
+                    COALESCE(
+                        ABS(o.realized_return) <= $2::double precision,
+                        FALSE
+                    ) AS is_sane
+                FROM shadow_thesis_forecasts f
+                JOIN shadow_thesis_outcomes o ON o.forecast_id = f.id
+                WHERE f.owner_chat_id = $1
+            )
             SELECT
-                f.horizon_sessions,
-                COUNT(o.forecast_id)::integer AS samples,
-                AVG(CASE WHEN o.direction_correct THEN 1.0 ELSE 0.0 END)
+                horizon_sessions,
+                COUNT(*) FILTER (WHERE is_sane)::integer AS samples,
+                COUNT(*) FILTER (WHERE NOT is_sane)::integer AS excluded_samples,
+                COALESCE(
+                    ARRAY_AGG(DISTINCT ticker ORDER BY ticker)
+                        FILTER (WHERE NOT is_sane),
+                    ARRAY[]::text[]
+                ) AS excluded_tickers,
+                AVG(CASE WHEN is_sane AND direction_correct THEN 1.0 WHEN is_sane THEN 0.0 END)
                     AS directional_accuracy,
-                AVG(o.absolute_error) AS mean_absolute_error,
-                AVG(f.expected_return) FILTER (WHERE o.forecast_id IS NOT NULL)
-                    AS mean_expected_return,
-                AVG(o.realized_return) AS mean_realized_return
-            FROM shadow_thesis_forecasts f
-            LEFT JOIN shadow_thesis_outcomes o ON o.forecast_id = f.id
-            WHERE f.owner_chat_id = $1
-            GROUP BY f.horizon_sessions
-            ORDER BY f.horizon_sessions
+                AVG(CASE WHEN is_sane THEN absolute_error END) AS mean_absolute_error,
+                AVG(CASE WHEN is_sane THEN expected_return END) AS mean_expected_return,
+                AVG(CASE WHEN is_sane THEN realized_return END) AS mean_realized_return
+            FROM scored
+            GROUP BY horizon_sessions
+            ORDER BY horizon_sessions
             """,
             owner_chat_id,
+            MAX_ABS_REALIZED_RETURN_FOR_METRICS,
         )
 
     return _json({

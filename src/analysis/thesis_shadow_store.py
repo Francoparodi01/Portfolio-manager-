@@ -10,7 +10,9 @@ from uuid import UUID
 from src.analysis.thesis_shadow import HorizonForecast, MaturedOutcome, ShadowThesis
 
 
-MAX_ABS_REALIZED_RETURN_FOR_METRICS = 5.0
+# Returns beyond +/-100% over these short horizons are treated as a price-basis
+# break or unadjusted corporate action. Rows remain persisted for audit.
+MAX_ABS_REALIZED_RETURN_FOR_METRICS = 1.0
 
 
 class ShadowThesisStore:
@@ -46,6 +48,8 @@ class ShadowThesisStore:
                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,'COMPLETE',$8::jsonb)
                     ON CONFLICT (owner_chat_id, as_of_ts, model_version)
                     DO UPDATE SET
+                        captured_at = EXCLUDED.captured_at,
+                        schema_version = EXCLUDED.schema_version,
                         universe_count = EXCLUDED.universe_count,
                         status = EXCLUDED.status,
                         metadata = EXCLUDED.metadata
@@ -108,6 +112,36 @@ class ShadowThesisStore:
                             json.dumps(feature_payload),
                         )
                         inserted += row_id is not None
+                persisted = await conn.fetchrow(
+                    """
+                    SELECT
+                        COUNT(DISTINCT ticker)::integer AS universe_count,
+                        COUNT(DISTINCT ticker) FILTER (
+                            WHERE universe_role = 'POSITION'
+                        )::integer AS positions,
+                        COUNT(DISTINCT ticker) FILTER (
+                            WHERE universe_role = 'CANDIDATE'
+                        )::integer AS candidates
+                    FROM shadow_thesis_forecasts
+                    WHERE run_id = $1
+                    """,
+                    stored_run_id,
+                )
+                if persisted is not None:
+                    await conn.execute(
+                        """
+                        UPDATE shadow_thesis_runs
+                        SET universe_count = $2,
+                            metadata = $3::jsonb
+                        WHERE run_id = $1
+                        """,
+                        stored_run_id,
+                        int(persisted["universe_count"] or 0),
+                        json.dumps({
+                            "positions": int(persisted["positions"] or 0),
+                            "candidates": int(persisted["candidates"] or 0),
+                        }),
+                    )
         return stored_run_id, inserted
 
     async def pending_outcomes(

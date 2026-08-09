@@ -269,6 +269,25 @@ separación permite saber si el precio por sí solo aporta capacidad predictiva.
 6. Convierte retorno esperado e incertidumbre en una probabilidad de terminar
    positivo.
 
+### Rango intradiario observado
+
+Desde `schema_version=2`, cada tesis conserva en `feature_snapshot` una capa
+`intraday_range_shadow` construida con las capturas de `10:40`, `12:00`,
+`16:40` y `17:02` ART. Registra:
+
+- primer precio y cierre observado;
+- máximo y mínimo observados, con sus horarios;
+- rango contra el cierre anterior;
+- ubicación del cierre dentro del rango;
+- gap, excursión alcista y excursión bajista;
+- cantidad de muestras, slots cubiertos y estado de calidad.
+
+Estos valores no representan necesariamente el máximo y mínimo reales de toda
+la rueda. Sólo son evaluables cuando los cuatro slots están presentes, existe
+un cierre anterior comparable y no se detecta un quiebre de base de precio.
+La capa se persiste para contrastarla con outcomes futuros, pero no modifica el
+forecast, el scoring, el optimizer, el planner ni las órdenes.
+
 ### Cómo clasifica
 
 El horizonte principal para la tesis es 20 ruedas, confirmado por 40 ruedas.
@@ -324,8 +343,10 @@ La evaluación informa, entre otras métricas:
 
 Las cifras de retorno son extrapolaciones de tendencia, no objetivos de precio.
 Valores altos —por ejemplo, +40% o +80%— deben considerarse hipótesis agresivas
-hasta comprobar su calibración. El módulo todavía necesita acumular outcomes de
-5, 20 y 40 ruedas antes de decidir si aporta señal real.
+hasta comprobar su calibración. Hay outcomes maduros de 5 y 20 ruedas; el
+horizonte de 40 ruedas todavía no tiene muestra madura suficiente. Ninguna capa
+shadow debe promoverse por volumen de filas sin demostrar calibración, calidad
+de precio y mejora contra baselines.
 
 ---
 

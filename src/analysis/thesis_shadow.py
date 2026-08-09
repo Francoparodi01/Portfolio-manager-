@@ -18,7 +18,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 MODEL_VERSION = "price_trend_context_overlay_v2"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 FORECAST_HORIZONS = (5, 20, 40)
 MIN_INPUT_SESSIONS = 80
 PRIMARY_HORIZON = 20
@@ -410,6 +410,7 @@ def render_shadow_ticker_telegram_report(
     icon, action_label = labels.get(thesis.thesis_action, ("⚪", thesis.thesis_action))
     context = thesis.feature_snapshot.get("context_overlay") or {}
     trend_windows = thesis.feature_snapshot.get("trend_windows") or {}
+    intraday = thesis.feature_snapshot.get("intraday_range_shadow") or {}
     flags = list(context.get("context_flags") or [])
     data_date = thesis.as_of_ts.strftime("%d/%m/%Y")
     input_start = str(thesis.feature_snapshot.get("input_start_ts") or "")[:10]
@@ -454,6 +455,29 @@ def render_shadow_ticker_telegram_report(
             f"P+ <b>{forecast.probability_up:.0%}</b> · "
             f"rango <code>{forecast.lower_return:+.1%}/{forecast.upper_return:+.1%}</code> · "
             f"conf {forecast.confidence:.0%}"
+        )
+
+    if intraday:
+        close_location = intraday.get("close_location")
+        range_pct = intraday.get("range_pct_vs_previous_close")
+        lines.extend(
+            [
+                "",
+                "<b>Rueda observada · shadow</b>",
+                (
+                    f"• Estado: <b>{escape(str(intraday.get('state') or 'N/D'))}</b> · "
+                    f"calidad <code>{escape(str(intraday.get('quality_status') or 'N/D'))}</code>"
+                ),
+                (
+                    f"• Rango observado: <code>{_pct(range_pct)}</code> · "
+                    "cierre dentro del rango "
+                    f"<b>{_prob(close_location)}</b>"
+                ),
+                (
+                    f"• Muestras: <b>{int(intraday.get('sample_count') or 0)}</b> · "
+                    f"slots {len(intraday.get('observed_slots') or [])}/4"
+                ),
+            ]
         )
 
     lines.extend(["", "<b>Lectura del modelo</b>"])
@@ -569,6 +593,18 @@ def _render_telegram_thesis(
     flags = list(context.get("context_flags") or [])
     if flags:
         lines.append(f"   Contexto: {escape('; '.join(flags[:2]))}")
+    intraday = thesis.feature_snapshot.get("intraday_range_shadow") or {}
+    if intraday and intraday.get("eligible_for_evaluation"):
+        close_location = intraday.get("close_location")
+        close_text = (
+            f"{float(close_location):.0%} del rango"
+            if close_location is not None
+            else "rango plano"
+        )
+        lines.append(
+            "   Rueda obs.: "
+            f"{escape(str(intraday.get('state') or 'N/D'))} · {escape(close_text)}"
+        )
     return lines
 
 

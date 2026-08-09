@@ -65,6 +65,7 @@ def test_evaluation_metrics_applies_realized_return_quality_gate():
     assert metrics[0]["samples"] == 42
     assert metrics[0]["excluded_samples"] == 3
     assert metrics[0]["excluded_tickers"] == ["BAYN", "C.I."]
+    assert MAX_ABS_REALIZED_RETURN_FOR_METRICS == 1.0
 
 
 def test_shadow_reports_log_quality_gate_exclusions_next_to_metrics():

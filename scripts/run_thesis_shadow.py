@@ -11,6 +11,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -28,6 +29,7 @@ from src.analysis.thesis_shadow import (
     render_shadow_telegram_report,
 )
 from src.analysis.macro import fetch_macro, get_macro_regime, score_macro_for_ticker
+from src.analysis.intraday_range_shadow import ART_TZ, build_intraday_range_shadow
 from src.analysis.corporate_actions import (
     detect_price_anomaly,
     normalize_candle_rows,
@@ -129,6 +131,21 @@ async def _build_theses(
     if max_assets > 0:
         selected = selected[:max_assets]
 
+    intraday_samples = await db.get_market_price_samples(selected)
+    samples_by_ticker: dict[str, list[dict]] = defaultdict(list)
+    for sample in intraday_samples:
+        samples_by_ticker[str(sample.get("ticker") or "").upper()].append(sample)
+    sample_days = {
+        sample["ts"].astimezone(ART_TZ).date()
+        for sample in intraday_samples
+        if isinstance(sample.get("ts"), datetime)
+    }
+    sample_day = max(sample_days) if sample_days else None
+    previous_closes = await db.get_previous_candle_closes(
+        selected,
+        before_day=sample_day,
+    ) if sample_day else {}
+
     invested_ars = sum(float(position.get("market_value", 0) or 0) for position in positions.values())
     total_ars = invested_ars + max(float(cash_ars or 0.0), 0.0)
     cash_pct = (max(float(cash_ars or 0.0), 0.0) / total_ars) if total_ars > 0 else None
@@ -229,14 +246,31 @@ async def _build_theses(
                 skipped.append(ticker)
                 continue
         try:
-            theses.append(
-                build_shadow_thesis(
-                    ticker,
-                    rows,
-                    universe_role=role,
-                    context=context,
-                )
+            thesis = build_shadow_thesis(
+                ticker,
+                rows,
+                universe_role=role,
+                context=context,
             )
+            intraday = build_intraday_range_shadow(
+                samples_by_ticker.get(ticker, ()),
+                previous_close=previous_closes.get(ticker),
+            )
+            if intraday is not None:
+                intraday_payload = intraday.to_dict()
+                feature_snapshot = dict(thesis.feature_snapshot)
+                feature_snapshot["intraday_range_shadow"] = intraday_payload
+                rationale = thesis.rationale + (
+                    "Intraday observed range: "
+                    f"{intraday.state}, quality={intraday.quality_status}; "
+                    "audit-only and does not alter the price forecast.",
+                )
+                thesis = replace(
+                    thesis,
+                    feature_snapshot=feature_snapshot,
+                    rationale=rationale,
+                )
+            theses.append(thesis)
         except ValueError as exc:
             logger.debug("shadow thesis omitida para %s: %s", ticker, exc)
             skipped.append(ticker)

@@ -1994,6 +1994,48 @@ class PortfolioDatabase:
             )
         return {str(r["ticker"]).upper(): float(r["close_price"]) for r in rows}
 
+    async def get_market_price_samples(
+        self,
+        tickers: list[str],
+        *,
+        business_day: Optional[date] = None,
+    ) -> list[dict]:
+        """Return one market day of raw samples for shadow range features."""
+        if not self._pool or not tickers:
+            return []
+        clean = sorted({str(t).upper() for t in tickers if str(t or "").strip()})
+        if not clean:
+            return []
+        async with self._pool.acquire() as conn:
+            selected_day = business_day
+            if selected_day is None:
+                selected_day = await conn.fetchval(
+                    """
+                    SELECT MAX((ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date)
+                    FROM market_prices
+                    WHERE ticker = ANY($1::text[])
+                      AND last_price IS NOT NULL
+                      AND last_price > 0
+                    """,
+                    clean,
+                )
+            if selected_day is None:
+                return []
+            rows = await conn.fetch(
+                """
+                SELECT ts, ticker, asset_type, currency, last_price, change_pct_1d, volume
+                FROM market_prices
+                WHERE ticker = ANY($1::text[])
+                  AND (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = $2::date
+                  AND last_price IS NOT NULL
+                  AND last_price > 0
+                ORDER BY ticker, ts
+                """,
+                clean,
+                selected_day,
+            )
+        return [dict(row) for row in rows]
+
     async def get_cocos_universe(self) -> list[str]:
         prices = await self.get_cocos_universe_assets()
         tickers = sorted({
