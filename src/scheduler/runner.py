@@ -96,12 +96,11 @@ BUSINESS_DAY_CRON = "mon-fri"
 MARKET_OPEN_H, MARKET_OPEN_M = 10, 30
 MARKET_CLOSE_H, MARKET_CLOSE_M = 17, 0
 
-MARKET_POLL_SECONDS = 90       # frecuencia del loop de mercado
 RISK_POLL_SECONDS = 60         # frecuencia del risk guard
-PORTFOLIO_REFRESH_SECONDS = int(os.getenv("PORTFOLIO_REFRESH_SECONDS", "300"))
+PORTFOLIO_REFRESH_SECONDS = int(os.getenv("PORTFOLIO_REFRESH_SECONDS", "600"))
 PORTFOLIO_OFFHOURS_REFRESH_SECONDS = 3600
 COCOS_SYNC_FILLS = os.getenv("COCOS_SYNC_FILLS", "true").lower() == "true"
-FILL_REFRESH_SECONDS = int(os.getenv("FILL_REFRESH_SECONDS", "300"))
+FILL_REFRESH_SECONDS = int(os.getenv("FILL_REFRESH_SECONDS", "600"))
 COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS = int(os.getenv("COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS", "1800"))
 COCOS_AUTH_FAILURE_COOLDOWN_SECONDS = int(os.getenv("COCOS_AUTH_FAILURE_COOLDOWN_SECONDS", "1800"))
 PORTFOLIO_CACHE_TTL_SECONDS = int(os.getenv("PORTFOLIO_CACHE_TTL_SECONDS", "600"))
@@ -206,11 +205,6 @@ def _is_market_window(now: datetime | None = None) -> bool:
 
 def _sentiment_interval_seconds(now: datetime | None = None) -> int:
     return SENTIMENT_PIPELINE_INTERVAL_SECONDS if _is_market_window(now) else 3600
-
-
-def _should_scrape_market(now: datetime | None = None) -> bool:
-    now = now or _now_art()
-    return _is_market_window(now)
 
 
 def _should_scrape_portfolio(now: datetime | None = None) -> bool:
@@ -477,6 +471,69 @@ async def run_scrape(run_type: str = "SCHEDULED") -> dict:
     return result
 
 
+async def run_market_refresh(run_type: str = "SCHEDULED_MARKET") -> dict:
+    """Refresh the full market universe without touching portfolio or analysis."""
+    now = _now_art()
+    result: dict = {"success": False, "run_type": run_type}
+    if not _is_business_day(now):
+        reason = market_closed_reason(now) or "mercado cerrado"
+        logger.info("run_market_refresh [%s] omitido: %s", run_type, reason)
+        result.update(skipped="market_closed", reason=reason)
+        return result
+
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    lock = _get_scraper_lock()
+    wait_deadline = time.monotonic() + 180
+    while lock.locked() and time.monotonic() < wait_deadline:
+        logger.info("run_market_refresh [%s]: esperando scraper de cuenta", run_type)
+        await asyncio.sleep(5)
+    if lock.locked():
+        logger.warning("run_market_refresh [%s]: scraper ocupado tras 180s; abortando", run_type)
+        result["aborted"] = "scraper_busy_timeout"
+        return result
+
+    logger.info("=== run_market_refresh [%s] iniciando ===", run_type)
+    async with lock:
+        await _redis_set(SCRAPER_LOCK_KEY, f"market_refresh:{run_type}", ex=300)
+        try:
+            await db.connect()
+            async with CocosCapitalScraper(cfg.scraper) as scraper:
+                await scraper.login()
+                acciones = await scraper.scrape_market("ACCIONES")
+                cedears = await scraper.scrape_cedears_segments()
+
+            total_prices = len(acciones) + len(cedears)
+            if total_prices <= 0:
+                result["error"] = "market_without_rows"
+                logger.warning("run_market_refresh [%s]: mercado sin filas", run_type)
+                return result
+
+            await db.save_market_prices(acciones + cedears)
+            await _heartbeat(MARKET_HEARTBEAT_KEY)
+            result.update(
+                success=True,
+                acciones=len(acciones),
+                cedears=len(cedears),
+                prices=total_prices,
+            )
+            logger.info(
+                "run_market_refresh [%s] ok: %d precios (%dA + %dC)",
+                run_type,
+                total_prices,
+                len(acciones),
+                len(cedears),
+            )
+        except Exception as exc:
+            result["error"] = str(exc)
+            logger.error("run_market_refresh [%s] fallo: %s", run_type, exc, exc_info=True)
+        finally:
+            await _redis_delete(SCRAPER_LOCK_KEY)
+            await db.close()
+
+    return result
+
+
 async def _scrape_portfolio_with_retries(
     scraper: CocosCapitalScraper,
     run_type: str,
@@ -677,7 +734,7 @@ async def run_full(run_type: str = "FULL") -> dict:
 
 async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO") -> dict:
     """
-    Primera foto operativa de la rueda: mercado + portfolio + valuacion live.
+    Primera foto operativa de la rueda: portfolio + valuacion con precios en DB.
 
     El objetivo es enviar una devolucion clara de apertura usando el mismo
     estandar de datos que el resto del sistema: precios desde market_prices y
@@ -717,12 +774,6 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
             async with CocosCapitalScraper(cfg.scraper) as scraper:
                 await scraper.login()
 
-                acciones = await scraper.scrape_market("ACCIONES")
-                cedears = await scraper.scrape_cedears_segments()
-                if acciones or cedears:
-                    await db.save_market_prices(acciones + cedears)
-                    await _heartbeat(MARKET_HEARTBEAT_KEY)
-
                 snapshot = await scraper.scrape_portfolio()
                 await db.save_snapshot(snapshot)
                 snapshot_payload = snapshot.to_dict()
@@ -761,17 +812,13 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
             result.update(
                 success=True,
                 positions=len(snapshot.positions),
-                acciones=len(acciones),
-                cedears=len(cedears),
                 price_coverage=live_portfolio.get("price_coverage_count", 0),
             )
             logger.info(
-                "opening portfolio ok: %d posiciones · cobertura %s/%s · %dA + %dC",
+                "opening portfolio ok: %d posiciones · cobertura %s/%s",
                 len(snapshot.positions),
                 live_portfolio.get("price_coverage_count", 0),
                 live_portfolio.get("positions_count", 0),
-                len(acciones),
-                len(cedears),
             )
         except Exception as e:
             logger.error("run_opening_portfolio_report [%s] falló: %s", run_type, e, exc_info=True)
@@ -1807,10 +1854,8 @@ class IntradayManager:
     Dos loops independientes durante horario de mercado:
 
     1. _scraper_loop:
-       Un único loop de scraping — un login por iteración, sin competencia.
-       - Mercado (ACCIONES + CEDEARS) cada MARKET_POLL_SECONDS (90s).
-       - Portfolio cada PORTFOLIO_REFRESH_SECONDS (~10min), dentro del mismo login.
-       Esto resuelve el problema de dos scrapers peleándose y logins dobles.
+       Un unico loop para portfolio y fills, sin scraping del universo.
+       Las cotizaciones completas se actualizan en jobs horarios separados.
 
     2. _risk_guard_loop:
        Solo lee DB. Sin Playwright. Sin scraper.
@@ -1852,7 +1897,7 @@ class IntradayManager:
         try:
             self.notifier.send_raw(
                 "🟢 <b>Monitoreo intradía iniciado</b>\n"
-                "Mercado cada 90s · Portfolio cada 5min · Live cache cada 60s · "
+                "Mercado 10:40/12:00/16:40/17:02 · Portfolio/fills cada 10min · Live cache cada 60s · "
                 "Risk guard cada 60s · Revalidacion intradia official=False."
             )
         except Exception as e:
@@ -1888,15 +1933,16 @@ class IntradayManager:
 
     async def _scraper_loop(self) -> None:
         """
-        Un único loop de scraping.
+        Un unico loop de cuenta para portfolio y fills.
 
-        - En rueda (días hábiles 10:30-17:00 ART):
-        * scrapea mercado cada MARKET_POLL_SECONDS
+        - En rueda (dias habiles 10:30-17:00 ART):
         * scrapea portfolio cada PORTFOLIO_REFRESH_SECONDS
 
         - Fuera de rueda / fines de semana:
-        * NO scrapea mercado
-        * S? scrapea portfolio cada PORTFOLIO_OFFHOURS_REFRESH_SECONDS
+        * scrapea portfolio cada PORTFOLIO_OFFHOURS_REFRESH_SECONDS
+
+        El universo de mercado se refresca con jobs separados para evitar
+        logins y navegacion Playwright cada 90 segundos.
         """
         last_portfolio_ts: float = 0.0
         last_fills_ts: float = 0.0
@@ -1914,10 +1960,10 @@ class IntradayManager:
                 await asyncio.sleep(min(300, max(30, remaining)))
                 continue
 
-            do_market = _should_scrape_market(now)
+            in_market = _is_market_window(now)
             do_portfolio = _should_scrape_portfolio(now)
 
-            if not do_market and not do_portfolio:
+            if not do_portfolio:
                 await asyncio.sleep(60)
                 continue
 
@@ -1928,7 +1974,7 @@ class IntradayManager:
                 continue
 
             portfolio_interval = (
-                PORTFOLIO_REFRESH_SECONDS if do_market
+                PORTFOLIO_REFRESH_SECONDS if in_market
                 else PORTFOLIO_OFFHOURS_REFRESH_SECONDS
             )
             should_refresh_portfolio = (now_ts - last_portfolio_ts) >= portfolio_interval
@@ -1937,8 +1983,8 @@ class IntradayManager:
                 and (now_ts - last_fills_ts) >= FILL_REFRESH_SECONDS
             )
 
-            # Si no toca ni mercado ni portfolio, dormir lo justo
-            if not do_market and not should_refresh_portfolio and not should_refresh_fills:
+            # Si no toca portfolio ni fills, dormir lo justo.
+            if not should_refresh_portfolio and not should_refresh_fills:
                 await asyncio.sleep(60)
                 continue
 
@@ -1950,22 +1996,6 @@ class IntradayManager:
                         await db.connect()
                         async with CocosCapitalScraper(self.cfg.scraper) as scraper:
                             await scraper.login()
-
-                            # ── Mercado solo en rueda ───────────────────────────────
-                            if do_market:
-                                acciones = await scraper.scrape_market("ACCIONES")
-                                cedears = await scraper.scrape_cedears_segments()
-                                total_prices = len(acciones) + len(cedears)
-
-                                if total_prices > 0:
-                                    await db.save_market_prices(acciones + cedears)
-                                    await _heartbeat(MARKET_HEARTBEAT_KEY)
-                                    logger.info(
-                                        "Scraper loop: %d precios guardados (%dA + %dC)",
-                                        total_prices, len(acciones), len(cedears),
-                                    )
-                                else:
-                                    logger.info("Scraper loop: mercado sin filas en esta iteración")
 
                             # ── Portfolio siempre permitido ───────────────────────
                             if should_refresh_portfolio:
@@ -2044,8 +2074,8 @@ class IntradayManager:
                 except Exception:
                     pass
 
-            # En rueda dormir corto; fuera de rueda/finde, no hace falta tan seguido
-            await asyncio.sleep(MARKET_POLL_SECONDS if do_market else 300)
+            # En rueda revisar cadencias de cuenta; fuera de rueda dormir mas.
+            await asyncio.sleep(60 if in_market else 300)
 
     # ── Risk guard (solo DB) ────────────────────────────────────────────────────
 
@@ -2885,6 +2915,36 @@ async def _scheduler_main() -> None:
         replace_existing=True,
     )
     scheduler.add_job(
+        run_market_refresh,
+        _business_day_cron(hour=10, minute=40),
+        args=["10:40_MARKET"],
+        id="market_refresh_1040",
+        name="Market refresh 10:40 ART",
+        misfire_grace_time=300,
+        max_instances=1,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_market_refresh,
+        _business_day_cron(hour=12, minute=0),
+        args=["12:00_MARKET"],
+        id="market_refresh_1200",
+        name="Market refresh 12:00 ART",
+        misfire_grace_time=300,
+        max_instances=1,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_market_refresh,
+        _business_day_cron(hour=16, minute=40),
+        args=["16:40_MARKET"],
+        id="market_refresh_1640",
+        name="Market refresh 16:40 ART",
+        misfire_grace_time=300,
+        max_instances=1,
+        replace_existing=True,
+    )
+    scheduler.add_job(
         run_full,
         _business_day_cron(hour=17, minute=2),
         args=["17:02_FULL"],
@@ -3006,7 +3066,7 @@ async def _scheduler_main() -> None:
     )
     scheduler.start()
     logger.info(
-        "Scheduler activo: 10:31 apertura portfolio + intraday on; 10:45 post-open; 16:15/16:45 preclose alerts; 16:59 intraday off; 17:02 full; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
+        "Scheduler activo: 10:31 apertura portfolio + intraday on; mercado 10:40/12:00/16:40/17:02; 10:45 post-open; 16:15/16:45 preclose alerts; 16:59 intraday off; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
         % (
             "on" if SENTIMENT_PIPELINE_ENABLED else "off",
             "on" if THESIS_SHADOW_ENABLED else "off",
