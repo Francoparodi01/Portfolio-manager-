@@ -1896,6 +1896,7 @@ class PortfolioDatabase:
                     FROM market_prices
                     WHERE last_price IS NOT NULL
                       AND last_price > 0
+                      AND ts >= NOW() - INTERVAL '14 days'
                     GROUP BY ts::date
                     HAVING COUNT(DISTINCT ticker) >= $1
                     ORDER BY market_date DESC
@@ -1903,6 +1904,22 @@ class PortfolioDatabase:
                     """,
                     int(min_fresh_tickers),
                 )
+                if not latest_day:
+                    latest_day = await conn.fetchrow(
+                        """
+                        SELECT
+                            ts::date AS market_date,
+                            COUNT(DISTINCT ticker) AS ticker_count
+                        FROM market_prices
+                        WHERE last_price IS NOT NULL
+                          AND last_price > 0
+                        GROUP BY ts::date
+                        HAVING COUNT(DISTINCT ticker) >= $1
+                        ORDER BY market_date DESC
+                        LIMIT 1
+                        """,
+                        int(min_fresh_tickers),
+                    )
                 if not latest_day:
                     logger.warning(
                         "market_prices freshness: no hay rueda con >= %s tickers; "
@@ -1914,77 +1931,25 @@ class PortfolioDatabase:
                 market_date = latest_day["market_date"]
                 rows = await conn.fetch(
                     """
-                    WITH latest_per_ticker AS (
-                        SELECT DISTINCT ON (ticker)
-                            ticker,
-                            asset_type,
-                            currency,
-                            last_price,
-                            change_pct_1d,
-                            ts,
-                            ts::date AS latest_price_date
-                        FROM market_prices
-                        WHERE last_price IS NOT NULL
-                          AND last_price > 0
-                        ORDER BY ticker, ts DESC
-                    )
-                    SELECT
+                    SELECT DISTINCT ON (ticker)
                         ticker,
                         asset_type,
                         currency,
                         last_price,
                         change_pct_1d,
-                        ts,
-                        latest_price_date,
-                        (latest_price_date < $1::date) AS excluded_by_freshness
-                    FROM latest_per_ticker
-                    ORDER BY ticker
+                        ts
+                    FROM market_prices
+                    WHERE last_price IS NOT NULL
+                      AND last_price > 0
+                      AND ts >= $1::date
+                    ORDER BY ticker, ts DESC
                     """,
                     market_date,
                 )
-
-                fresh: list[dict] = []
-                excluded: list[dict] = []
-                for row in rows:
-                    item = dict(row)
-                    public_row = {
-                        key: item.get(key)
-                        for key in (
-                            "ticker",
-                            "asset_type",
-                            "currency",
-                            "last_price",
-                            "change_pct_1d",
-                            "ts",
-                        )
-                    }
-                    if item.get("excluded_by_freshness"):
-                        excluded.append({
-                            "ticker": item.get("ticker"),
-                            "latest_price_date": item.get("latest_price_date"),
-                        })
-                    else:
-                        fresh.append(public_row)
-
-                if excluded:
-                    sample = ", ".join(
-                        f"{str(item.get('ticker')).upper()}@{item.get('latest_price_date')}"
-                        for item in excluded[:20]
-                    )
-                    suffix = "" if len(excluded) <= 20 else f" (+{len(excluded) - 20} mas)"
-                    logger.warning(
-                        "market_prices freshness: excluidos %s tickers stale vs rueda %s "
-                        "(min_tickers=%s): %s%s",
-                        len(excluded),
-                        market_date,
-                        int(min_fresh_tickers),
-                        sample,
-                        suffix,
-                    )
+                fresh = [dict(row) for row in rows]
                 logger.info(
-                    "market_prices freshness: incluidos=%s excluidos=%s rueda=%s tickers_rueda=%s",
+                    "market_prices freshness: incluidos=%s rueda=%s tickers_rueda=%s",
                     len(fresh),
-                    len(excluded),
                     market_date,
                     int(latest_day["ticker_count"] or 0),
                 )

@@ -17,7 +17,7 @@ import type { ReactNode } from "react";
 import { useIsFetching } from "@tanstack/react-query";
 import { NavLink } from "react-router-dom";
 import { useSession } from "../../app/session";
-import { useHealthQuery, useIngestionQuery, useRefreshAll } from "../../hooks/useMonitorData";
+import { useHealthQuery, useRefreshAll } from "../../hooks/useMonitorData";
 import { getBoolean, getRecord, getString, nestedNumber } from "../../utils/data";
 import { ageLabel } from "../../utils/format";
 import { StatusBadge } from "../ui/StatusBadge";
@@ -37,15 +37,13 @@ const navItems = [
 export function AppShell({ children }: { children: ReactNode }) {
   const { logout, session } = useSession();
   const health = useHealthQuery();
-  const ingestion = useIngestionQuery();
   const refreshAll = useRefreshAll();
   const fetching = useIsFetching({ queryKey: ["monitor"] });
   const scheduler = getRecord(health.data?.services, "scheduler");
   const dbOk = getBoolean(health.data?.database, "ok");
   const redisOk = getBoolean(health.data?.redis, "ok");
   const schedulerAlive = getBoolean(scheduler, "alive");
-  const latestPortfolio = getRecord(ingestion.data?.portfolio, "latest");
-  const latestPortfolioAt = getString(latestPortfolio, "scraped_at");
+  const latestPortfolioAt = getString(health.data?.database, "latest_portfolio_at");
   const systemOk = Boolean(health.data?.ok && dbOk && redisOk && schedulerAlive);
   const schedulerAge = nestedNumber(health.data?.services, ["scheduler", "heartbeat_age_seconds"]);
 

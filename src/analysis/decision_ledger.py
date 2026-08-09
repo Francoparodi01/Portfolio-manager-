@@ -468,14 +468,6 @@ async def fetch_decision_ledger(
 
     pending_mark_rows = await conn.fetch(
         """
-        WITH latest AS (
-            SELECT DISTINCT ON (ticker)
-                ticker,
-                ts,
-                last_price::float AS last_price
-            FROM market_prices
-            ORDER BY ticker, ts DESC
-        )
         SELECT
             dl.id,
             dl.decided_at,
@@ -493,7 +485,15 @@ async def fetch_decision_ledger(
                 ELSE (latest.last_price / NULLIF(dl.price_at_decision, 0)) - 1
             END AS mark_return
         FROM decision_log dl
-        JOIN latest ON latest.ticker = dl.ticker
+        JOIN LATERAL (
+            SELECT
+                mp.ts,
+                mp.last_price::float AS last_price
+            FROM market_prices mp
+            WHERE mp.ticker = dl.ticker
+            ORDER BY mp.ts DESC
+            LIMIT 1
+        ) latest ON TRUE
         WHERE dl.decided_at >= NOW() - INTERVAL '10 days'
           AND ($1::bigint IS NULL OR dl.owner_chat_id = $1)
           AND dl.decision IN ('BUY', 'SELL')

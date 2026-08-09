@@ -42,12 +42,20 @@ def test_get_cocos_universe_assets_keeps_cocos_only_tickers():
     assert [asset["ticker"] for asset in assets] == ["COME", "YPFD", "BRKB"]
 
 
-def test_get_latest_market_prices_fresh_only_excludes_stale_ticker(caplog):
+def test_get_latest_market_prices_fresh_only_bounds_scan_to_latest_valid_day():
     class _Connection:
-        async def fetchrow(self, _statement, *_args):
+        def __init__(self):
+            self.fetchrow_statements = []
+            self.fetch_statement = None
+            self.fetch_args = None
+
+        async def fetchrow(self, statement, *_args):
+            self.fetchrow_statements.append(statement)
             return {"market_date": date(2026, 6, 22), "ticker_count": 2}
 
-        async def fetch(self, _statement, *_args):
+        async def fetch(self, statement, *args):
+            self.fetch_statement = statement
+            self.fetch_args = args
             return [
                 {
                     "ticker": "FRESH",
@@ -56,34 +64,29 @@ def test_get_latest_market_prices_fresh_only_excludes_stale_ticker(caplog):
                     "last_price": 100.0,
                     "change_pct_1d": 0.0,
                     "ts": datetime(2026, 6, 22, 20, 0, tzinfo=timezone.utc),
-                    "latest_price_date": date(2026, 6, 22),
-                    "excluded_by_freshness": False,
-                },
-                {
-                    "ticker": "STALE",
-                    "asset_type": "CEDEAR",
-                    "currency": "ARS",
-                    "last_price": 90.0,
-                    "change_pct_1d": 0.0,
-                    "ts": datetime(2026, 6, 19, 20, 0, tzinfo=timezone.utc),
-                    "latest_price_date": date(2026, 6, 19),
-                    "excluded_by_freshness": True,
                 },
             ]
 
-    class _Acquire:
+    class _Pool:
+        def __init__(self):
+            self.conn = _Connection()
+
+        def acquire(self):
+            return _AcquireWithConnection(self.conn)
+
+    class _AcquireWithConnection:
+        def __init__(self, conn):
+            self.conn = conn
+
         async def __aenter__(self):
-            return _Connection()
+            return self.conn
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-    class _Pool:
-        def acquire(self):
-            return _Acquire()
-
     db = PortfolioDatabase("postgresql://unused")
-    db._pool = _Pool()
+    pool = _Pool()
+    db._pool = pool
 
     rows = asyncio.run(
         db.get_latest_market_prices(fresh_only=True, min_fresh_tickers=2)
@@ -98,4 +101,50 @@ def test_get_latest_market_prices_fresh_only_excludes_stale_ticker(caplog):
         "change_pct_1d": 0.0,
         "ts": datetime(2026, 6, 22, 20, 0, tzinfo=timezone.utc),
     }
-    assert "STALE@2026-06-19" in caplog.text
+    assert "ts >= $1::date" in pool.conn.fetch_statement
+    assert "latest_per_ticker" not in pool.conn.fetch_statement
+    assert pool.conn.fetch_args == (date(2026, 6, 22),)
+    assert "INTERVAL '14 days'" in pool.conn.fetchrow_statements[0]
+
+
+def test_get_latest_market_prices_falls_back_when_recent_window_is_empty():
+    class _Connection:
+        def __init__(self):
+            self.fetchrow_calls = 0
+
+        async def fetchrow(self, _statement, *_args):
+            self.fetchrow_calls += 1
+            if self.fetchrow_calls == 1:
+                return None
+            return {"market_date": date(2026, 5, 1), "ticker_count": 2}
+
+        async def fetch(self, _statement, *_args):
+            return []
+
+    class _Acquire:
+        def __init__(self, conn):
+            self.conn = conn
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Pool:
+        def __init__(self):
+            self.conn = _Connection()
+
+        def acquire(self):
+            return _Acquire(self.conn)
+
+    db = PortfolioDatabase("postgresql://unused")
+    pool = _Pool()
+    db._pool = pool
+
+    rows = asyncio.run(
+        db.get_latest_market_prices(fresh_only=True, min_fresh_tickers=2)
+    )
+
+    assert rows == []
+    assert pool.conn.fetchrow_calls == 2

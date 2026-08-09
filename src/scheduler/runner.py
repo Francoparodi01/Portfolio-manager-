@@ -56,6 +56,7 @@ from src.core.portfolio_cache import (
     get_cached_portfolio_snapshot,
 )
 from src.core.redis_client import client as redis_client
+from src.core.report_artifacts import save_report_artifact
 from src.collector.cocos_scraper import (
     CocosAccessBlockedError,
     CocosAuthenticationError,
@@ -168,6 +169,7 @@ SEVERE_OFFHOURS_TERMS = {
 # Se crea la primera vez que se usa (dentro del event loop).
 _scraper_lock: asyncio.Lock | None = None
 _intraday_manager: "IntradayManager | None" = None
+_last_sentiment_run_at: datetime | None = None
 
 
 # ─── Helpers generales ─────────────────────────────────────────────────────────
@@ -200,6 +202,10 @@ def _is_market_hours(now: datetime | None = None) -> bool:
 def _is_market_window(now: datetime | None = None) -> bool:
     now = now or _now_art()
     return _is_business_day(now) and _is_market_hours(now)
+
+
+def _sentiment_interval_seconds(now: datetime | None = None) -> int:
+    return SENTIMENT_PIPELINE_INTERVAL_SECONDS if _is_market_window(now) else 3600
 
 
 def _should_scrape_market(now: datetime | None = None) -> bool:
@@ -1279,6 +1285,67 @@ async def run_daily_analysis() -> None:
             len(out),
             len(err),
         )
+        owner_chat_id = str(cfg.scraper.telegram_chat_id or "").strip()
+        if owner_chat_id.isdigit() and len(out.strip()) >= 80:
+            try:
+                await save_report_artifact(
+                    cfg.database.url,
+                    report_type="analysis",
+                    owner_chat_id=int(owner_chat_id),
+                    report_text=out.strip(),
+                    metadata={"source": "scheduler", "job": "daily_analysis"},
+                )
+                logger.info("daily_analysis cache Telegram actualizado")
+            except Exception as exc:
+                logger.warning("daily_analysis cache Telegram fallo: %s", exc)
+
+            radar_cmd = [
+                sys.executable,
+                "scripts/run_opportunity.py",
+                "--no-telegram",
+                "--period",
+                "1y",
+                "--top",
+                "6",
+                "--min-score",
+                "0.10",
+                "--no-persist",
+                "--owner-chat-id",
+                owner_chat_id,
+            ]
+            radar_started = time.perf_counter()
+            try:
+                radar_proc = await asyncio.create_subprocess_exec(
+                    *radar_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                radar_stdout, radar_stderr = await asyncio.wait_for(
+                    radar_proc.communicate(),
+                    timeout=300,
+                )
+                radar_out = radar_stdout.decode("utf-8", errors="replace").strip()
+                if radar_proc.returncode == 0 and len(radar_out) >= 80:
+                    await save_report_artifact(
+                        cfg.database.url,
+                        report_type="radar",
+                        owner_chat_id=int(owner_chat_id),
+                        report_text=radar_out,
+                        metadata={"source": "scheduler", "job": "daily_radar"},
+                    )
+                    logger.info(
+                        "daily_radar cache Telegram actualizado duration_s=%.2f",
+                        time.perf_counter() - radar_started,
+                    )
+                else:
+                    radar_err = radar_stderr.decode("utf-8", errors="replace")
+                    logger.warning(
+                        "daily_radar prewarm fallo rc=%s stderr=%s",
+                        radar_proc.returncode,
+                        radar_err[-1200:],
+                    )
+            except Exception as exc:
+                logger.warning("daily_radar prewarm fallo: %s", exc)
     except asyncio.TimeoutError:
         logger.error("daily_analysis timeout")
         notifier.notify_critical_error("daily_analysis", "Timeout ejecutando run_analysis.py")
@@ -1419,9 +1486,24 @@ async def run_preclose_alerts(slot: str = "16:45") -> dict:
 
 async def run_sentiment_pipeline_job() -> None:
     """Fetch/score/aggregate sentiment context without changing decisions."""
+    global _last_sentiment_run_at
     if not SENTIMENT_PIPELINE_ENABLED:
         logger.debug("sentiment_pipeline omitido: disabled")
         return
+
+    now = _now_art()
+    interval_seconds = _sentiment_interval_seconds(now)
+    if (
+        _last_sentiment_run_at is not None
+        and (now - _last_sentiment_run_at).total_seconds() < interval_seconds
+    ):
+        logger.debug(
+            "sentiment_pipeline omitido: cadence=%ss last=%s",
+            interval_seconds,
+            _last_sentiment_run_at.isoformat(),
+        )
+        return
+    _last_sentiment_run_at = now
 
     cmd = [
         sys.executable,
@@ -2502,15 +2584,7 @@ class IntradayManager:
 
             rows = await conn.fetch(
                 """
-                WITH latest_prices AS (
-                    SELECT DISTINCT ON (ticker)
-                        ticker,
-                        last_price
-                    FROM market_prices
-                    WHERE last_price IS NOT NULL
-                    ORDER BY ticker, ts DESC
-                ),
-                latest_buys AS (
+                WITH latest_buys AS (
                     SELECT DISTINCT ON (ticker)
                         ticker,
                         decided_at,
@@ -2537,7 +2611,14 @@ class IntradayManager:
                     b.target_price,
                     p.last_price
                 FROM latest_buys b
-                JOIN latest_prices p ON p.ticker = b.ticker
+                JOIN LATERAL (
+                    SELECT mp.last_price
+                    FROM market_prices mp
+                    WHERE mp.ticker = b.ticker
+                      AND mp.last_price IS NOT NULL
+                    ORDER BY mp.ts DESC
+                    LIMIT 1
+                ) p ON TRUE
                 """,
                 active_tickers,
             )

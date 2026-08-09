@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS market_candles (
     UNIQUE (ts, long_ticker, interval)
 );
 
+CREATE INDEX IF NOT EXISTS idx_market_candles_ticker_interval_ts
+    ON market_candles(ticker, interval, ts DESC);
+
 DO $$
 BEGIN
     IF EXISTS (
@@ -153,6 +156,26 @@ CREATE TABLE IF NOT EXISTS bot_users (
     created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Reportes renderizados para respuestas Telegram rapidas y auditables.
+-- No participa del scoring, optimizer ni decision_log.
+CREATE TABLE IF NOT EXISTS telegram_report_artifacts (
+    report_type          TEXT NOT NULL,
+    owner_chat_id        BIGINT NOT NULL,
+    input_fingerprint    TEXT NOT NULL,
+    artifact_version     TEXT NOT NULL,
+    report_text          TEXT NOT NULL,
+    generated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    portfolio_snapshot_id UUID,
+    portfolio_at         TIMESTAMPTZ,
+    market_data_at       TIMESTAMPTZ,
+    candle_data_at       TIMESTAMPTZ,
+    metadata             JSONB NOT NULL DEFAULT '{}'::jsonb,
+    PRIMARY KEY (report_type, owner_chat_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_report_artifacts_generated_at
+    ON telegram_report_artifacts(generated_at DESC);
 
 -- ── decision_log ──────────────────────────────────────────────────────────────
 -- Tabla central de decisiones, trades y lifecycle.

@@ -1,11 +1,14 @@
 import asyncio
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 from src.analysis.sentiment_fetcher import (
     NewsSource,
+    SentimentRawItem,
     _parse_rss,
     get_sentiment_sources,
     load_active_portfolio_tickers,
+    save_raw_sentiment_items,
 )
 from src.analysis.signal_aggregator import SentimentContext
 
@@ -94,3 +97,36 @@ def test_sentiment_context_metadata_declares_weighted_input():
     assert payload["used_in_score"] is True
     assert payload["reason"] == "used_as_sentiment_layer"
     assert "context_only" not in payload
+
+
+def test_raw_sentiment_skips_identical_existing_items():
+    item = SentimentRawItem(
+        source="reuters",
+        url="https://example.com/item",
+        headline="Same headline",
+        body_snippet="Same body",
+        published_at=datetime(2026, 8, 8, 12, tzinfo=timezone.utc),
+        raw_payload={"source": "rss"},
+    )
+
+    class _Connection:
+        executed = False
+
+        async def fetch(self, *_args):
+            return [{
+                "source": item.source,
+                "url_hash": item.url_hash,
+                "headline": item.headline,
+                "body_snippet": item.body_snippet,
+                "published_at": item.published_at,
+                "raw_payload": item.raw_payload,
+            }]
+
+        async def executemany(self, *_args):
+            self.executed = True
+
+    conn = _Connection()
+    saved = asyncio.run(save_raw_sentiment_items(conn, [item]))
+
+    assert saved == 0
+    assert conn.executed is False

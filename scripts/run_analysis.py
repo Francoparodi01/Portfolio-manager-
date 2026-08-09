@@ -3500,28 +3500,36 @@ def _ensure_corporate_action_blocks_in_plan(
 
 async def _load_cocos_history_frames(cfg, positions: list[dict], limit: int = 260) -> dict:
     """Carga historia local de Cocos desde DB para los tickers disponibles."""
-    frames = {}
+    frames: dict = {}
     db = PortfolioDatabase(cfg.database.url)
     await db.connect()
     try:
-        for position in positions:
+        semaphore = asyncio.Semaphore(5)
+
+        async def _load_one(position: dict):
             ticker = str(position.get("ticker", "") or "").upper()
             if not ticker:
-                continue
+                return None
             if not is_position_operable(position):
                 logger.warning(
                     "Ticker %s no operable para técnico: %s",
                     ticker,
                     position.get("market_data_reason", "precio no fresco"),
                 )
-                continue
-            rows = await db.get_market_candles(
-                ticker,
-                asset_type=position.get("asset_type"),
-                limit=limit,
-            )
+                return None
+            async with semaphore:
+                rows = await db.get_market_candles(
+                    ticker,
+                    asset_type=position.get("asset_type"),
+                    limit=limit,
+                )
             frame = candles_to_frame(rows)
-            if len(frame) >= 60:
+            return (ticker, frame) if len(frame) >= 60 else None
+
+        loaded = await asyncio.gather(*(_load_one(position) for position in positions))
+        for item in loaded:
+            if item is not None:
+                ticker, frame = item
                 frames[ticker] = frame
     finally:
         await db.close()

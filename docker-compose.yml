@@ -59,7 +59,9 @@ services:
           memory: 512M
 
   monitor_api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     container_name: cocos_monitor_api
     restart: always
     env_file:

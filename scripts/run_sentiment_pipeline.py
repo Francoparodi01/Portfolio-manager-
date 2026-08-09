@@ -50,12 +50,16 @@ async def main(
     }
     await db.connect()
     try:
-        await db.init_schema()
         pool = await db.get_pool()
         if not pool:
             raise RuntimeError("DB pool unavailable")
 
         async with pool.acquire() as conn:
+            schema_ready = await conn.fetchval(
+                "SELECT to_regclass('public.sentiment_raw') IS NOT NULL"
+            )
+            if not schema_ready:
+                raise RuntimeError("sentiment schema ausente; ejecutar scripts/init_db.py")
             if fetch:
                 active_tickers = await load_active_portfolio_tickers(conn)
                 result["yahoo_tickers"] = len(active_tickers)

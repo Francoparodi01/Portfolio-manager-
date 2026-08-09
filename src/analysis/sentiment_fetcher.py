@@ -405,6 +405,43 @@ async def save_raw_sentiment_items(conn, items: Iterable[SentimentRawItem]) -> i
     if not rows:
         return 0
 
+    existing_rows = await conn.fetch(
+        """
+        SELECT source, url_hash, headline, body_snippet, published_at, raw_payload
+        FROM sentiment_raw
+        WHERE url_hash = ANY($1::text[])
+        """,
+        [item.url_hash for item in rows],
+    )
+    existing = {str(row["url_hash"]): dict(row) for row in existing_rows}
+
+    def _json_key(value) -> str:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                pass
+        return json.dumps(value or {}, sort_keys=True, separators=(",", ":"), default=str)
+
+    def _changed(item: SentimentRawItem) -> bool:
+        current = existing.get(item.url_hash)
+        if current is None:
+            return True
+        effective_published_at = item.published_at or current.get("published_at")
+        return any(
+            (
+                str(current.get("source") or "") != str(item.source or ""),
+                str(current.get("headline") or "") != str(item.headline or ""),
+                str(current.get("body_snippet") or "") != str(item.body_snippet or ""),
+                current.get("published_at") != effective_published_at,
+                _json_key(current.get("raw_payload")) != _json_key(item.raw_payload),
+            )
+        )
+
+    rows = [item for item in rows if _changed(item)]
+    if not rows:
+        return 0
+
     values = [
         (
             item.source,

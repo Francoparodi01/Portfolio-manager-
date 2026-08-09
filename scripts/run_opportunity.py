@@ -164,19 +164,27 @@ async def _load_cocos_universe_assets(cfg) -> list[dict]:
 
 
 async def _load_cocos_history_frames(cfg, assets: list[dict], limit: int = 260) -> dict:
-    frames = {}
+    frames: dict = {}
     db = PortfolioDatabase(cfg.database.url)
     await db.connect()
     try:
-        for asset in assets:
-            rows = await db.get_market_candles(
-                asset["ticker"],
-                asset_type=asset.get("asset_type"),
-                limit=limit,
-            )
+        semaphore = asyncio.Semaphore(5)
+
+        async def _load_one(asset: dict):
+            async with semaphore:
+                rows = await db.get_market_candles(
+                    asset["ticker"],
+                    asset_type=asset.get("asset_type"),
+                    limit=limit,
+                )
             frame = candles_to_frame(rows)
-            if len(frame) >= 60:
-                frames[asset["ticker"]] = frame
+            return (asset["ticker"], frame) if len(frame) >= 60 else None
+
+        loaded = await asyncio.gather(*(_load_one(asset) for asset in assets))
+        for item in loaded:
+            if item is not None:
+                ticker, frame = item
+                frames[ticker] = frame
     finally:
         await db.close()
     return frames

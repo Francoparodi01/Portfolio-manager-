@@ -65,6 +65,10 @@ try:
         cache_portfolio_snapshot,
         get_cached_live_portfolio,
     )
+    from src.core.report_artifacts import (
+        load_report_artifact,
+        save_report_artifact,
+    )
     from src.core.redis_client import client as redis_client
     from src.collector.cocos_scraper import CocosCapitalScraper
     from src.collector.db import PortfolioDatabase
@@ -77,6 +81,8 @@ except Exception:
     market_closed_reason = None
     cache_portfolio_snapshot = None
     get_cached_live_portfolio = None
+    load_report_artifact = None
+    save_report_artifact = None
     redis_client = None
     CocosCapitalScraper = None
     PortfolioDatabase = None
@@ -101,6 +107,11 @@ if not logging.getLogger().handlers:
 
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 BOT_HEARTBEAT_KEY = "cocos:bot:last_heartbeat"
+OPERATIONAL_SYNC_KEY_PREFIX = "cocos:telegram:operational_sync"
+OPERATIONAL_SYNC_TTL_SECONDS = max(
+    30,
+    int(os.getenv("TELEGRAM_OPERATIONAL_SYNC_TTL_SECONDS", "300")),
+)
 
 MAX_MESSAGE_LENGTH = 3900
 COMMAND_TIMEOUT_SECONDS = 300
@@ -343,6 +354,75 @@ def _is_market_hours_now() -> bool:
     return 10 * 60 + 30 <= mins < 17 * 60
 
 
+def _report_cache_market_open() -> bool:
+    return (
+        _is_business_day_now()
+        and _is_market_hours_now()
+        and _market_closed_reason_now() is None
+    )
+
+
+def _cacheable_report(report: str) -> bool:
+    clean = str(report or "").strip()
+    return len(clean) >= 80 and not clean.startswith(("❌", "⚠️"))
+
+
+def _artifact_note(artifact: dict, full_command: str) -> str:
+    generated_at = artifact.get("generated_at")
+    market_data_at = artifact.get("market_data_at") or artifact.get("candle_data_at")
+
+    def _fmt(value) -> str:
+        if not value:
+            return "sin fecha"
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                return value
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.astimezone(TZ).strftime("%d/%m %H:%M")
+        return str(value)
+
+    return (
+        f"<i>Resultado cacheado: generado {_fmt(generated_at)}; "
+        f"datos al {_fmt(market_data_at)}. {full_command} fuerza actualización.</i>\n\n"
+    )
+
+
+async def _load_cached_report(report_type: str, chat_id: int) -> dict | None:
+    if load_report_artifact is None or get_config is None:
+        return None
+    try:
+        cfg = get_config()
+        return await load_report_artifact(
+            cfg.database.url,
+            report_type=report_type,
+            owner_chat_id=chat_id,
+            market_open=_report_cache_market_open(),
+        )
+    except Exception as exc:
+        logger.warning("[BOT][CACHE] read fallo type=%s: %s", report_type, exc)
+        return None
+
+
+async def _save_cached_report(report_type: str, chat_id: int, report: str) -> None:
+    if not _cacheable_report(report) or save_report_artifact is None or get_config is None:
+        return
+    try:
+        cfg = get_config()
+        await save_report_artifact(
+            cfg.database.url,
+            report_type=report_type,
+            owner_chat_id=chat_id,
+            report_text=report,
+            metadata={"source": "telegram", "market_open": _report_cache_market_open()},
+        )
+    except Exception as exc:
+        logger.warning("[BOT][CACHE] write fallo type=%s: %s", report_type, exc)
+
+
 def _freshness_badge(minutes: Optional[float], *, business_day: bool) -> tuple[str, str]:
     if minutes is None:
         return "⚪", ""
@@ -551,15 +631,61 @@ async def run_first_existing_script(
 # Menú principal
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def sync_operational_state(*, full: bool = False) -> str:
+def _operational_sync_key(owner_chat_id: int) -> str:
+    return f"{OPERATIONAL_SYNC_KEY_PREFIX}:{int(owner_chat_id)}"
+
+
+async def _has_recent_operational_sync(owner_chat_id: int | None) -> bool:
+    if owner_chat_id is None or redis_client is None:
+        return False
+    try:
+        return bool(await redis_client.get(_operational_sync_key(owner_chat_id)))
+    except Exception as exc:
+        logger.debug("[BOT][SYNC] cache get ignorado: %s", exc)
+        return False
+
+
+async def _mark_operational_sync(owner_chat_id: int | None) -> None:
+    if owner_chat_id is None or redis_client is None:
+        return
+    try:
+        await redis_client.set(
+            _operational_sync_key(owner_chat_id),
+            str(int(time.time())),
+            ex=OPERATIONAL_SYNC_TTL_SECONDS,
+        )
+    except Exception as exc:
+        logger.debug("[BOT][SYNC] cache set ignorado: %s", exc)
+
+
+async def sync_operational_state(
+    *,
+    full: bool = False,
+    owner_chat_id: int | None = None,
+) -> str:
+    if not full and await _has_recent_operational_sync(owner_chat_id):
+        logger.info(
+            "[BOT][SYNC] cache hit owner_chat_id=%s ttl=%ss",
+            owner_chat_id,
+            OPERATIONAL_SYNC_TTL_SECONDS,
+        )
+        return ""
+
     args = ["scripts/run_once.py", "--no-telegram", "--fills"]
     if full:
         args.append("--full")
-    rc, out, err, _elapsed = await run_cmd(
+    rc, out, err, elapsed = await run_cmd(
         [sys.executable, *args],
         timeout=360 if full else 240,
     )
     if rc == 0:
+        await _mark_operational_sync(owner_chat_id)
+        logger.info(
+            "[BOT][SYNC] refresh ok owner_chat_id=%s full=%s duration_s=%.2f",
+            owner_chat_id,
+            full,
+            elapsed,
+        )
         return ""
     detail = err[-1600:] or out[-1600:] or "sin detalle"
     return (
@@ -903,8 +1029,22 @@ async def action_weekly_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    started = time.perf_counter()
+    cached = await _load_cached_report("analysis", chat_id)
+    if cached:
+        logger.info(
+            "[BOT][ANALYSIS] cache_hit=true total_s=%.2f",
+            time.perf_counter() - started,
+        )
+        await send_text(
+            context,
+            chat_id,
+            _artifact_note(cached, "/analisis_full") + str(cached["report_text"]),
+        )
+        return
+
     owner_args = _owner_cli_args(chat_id)
-    sync_note = await sync_operational_state(full=False)
+    analysis_started = time.perf_counter()
     report = await run_first_existing_script(
         [
             ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--skip-radar", *owner_args],
@@ -914,7 +1054,13 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
         ],
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
-    await send_text(context, chat_id, sync_note + report)
+    logger.info(
+        "[BOT][ANALYSIS] cache_hit=false compute_s=%.2f total_s=%.2f",
+        time.perf_counter() - analysis_started,
+        time.perf_counter() - started,
+    )
+    await _save_cached_report("analysis", chat_id, report)
+    await send_text(context, chat_id, report)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -923,7 +1069,10 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
 
 async def action_analysis_test(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     owner_args = _owner_cli_args(chat_id)
-    sync_note = await sync_operational_state(full=False)
+    sync_note = await sync_operational_state(
+        full=False,
+        owner_chat_id=chat_id,
+    )
     report = await run_first_existing_script(
         [
             ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--skip-radar", "--no-persist", *owner_args],
@@ -938,7 +1087,7 @@ async def action_analysis_test(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
 async def action_analysis_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     owner_args = _owner_cli_args(chat_id)
-    sync_note = await sync_operational_state(full=True)
+    sync_note = await sync_operational_state(full=True, owner_chat_id=chat_id)
     report = await run_first_existing_script(
         [
             ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--no-persist", "--run-intent", "exploratory", *owner_args],
@@ -953,7 +1102,7 @@ async def action_analysis_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
 async def action_analysis_debug(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     owner_args = _owner_cli_args(chat_id)
-    sync_note = await sync_operational_state(full=True)
+    sync_note = await sync_operational_state(full=True, owner_chat_id=chat_id)
     report = await run_first_existing_script(
         [
             ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--no-persist", "--run-intent", "exploratory", *owner_args],
@@ -1092,7 +1241,6 @@ async def action_ticker_analysis(
 
 
 async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    sync_note = await sync_operational_state(full=False)
     report = await run_python_script(
         "scripts/run_performance.py",
         "--days",
@@ -1101,7 +1249,7 @@ async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
         *_owner_cli_args(chat_id),
         timeout=240,
     )
-    await send_text(context, chat_id, sync_note + report)
+    await send_text(context, chat_id, report)
 
 
 async def action_viability(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -1154,7 +1302,6 @@ async def action_viability(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
 
 
 async def action_override_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    sync_note = await sync_operational_state(full=False)
     report = await run_python_script(
         "scripts/run_override_audit.py",
         "--days",
@@ -1163,11 +1310,10 @@ async def action_override_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int
         *_owner_cli_args(chat_id),
         timeout=240,
     )
-    await send_text(context, chat_id, sync_note + report)
+    await send_text(context, chat_id, report)
 
 
 async def action_decision_ledger(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    sync_note = await sync_operational_state(full=False)
     report = await run_python_script(
         "scripts/run_decision_ledger.py",
         "--days",
@@ -1176,7 +1322,7 @@ async def action_decision_ledger(context: ContextTypes.DEFAULT_TYPE, chat_id: in
         *_owner_cli_args(chat_id),
         timeout=240,
     )
-    await send_text(context, chat_id, sync_note + report)
+    await send_text(context, chat_id, report)
 
 
 async def action_policy_tree(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -1380,6 +1526,21 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    started = time.perf_counter()
+    cached = await _load_cached_report("radar", chat_id)
+    if cached:
+        report = compact_radar_report(str(cached["report_text"]), max_items=6)
+        logger.info(
+            "[BOT][RADAR] cache_hit=true total_s=%.2f",
+            time.perf_counter() - started,
+        )
+        await send_text(
+            context,
+            chat_id,
+            _artifact_note(cached, "/radar_full") + report,
+        )
+        return
+
     report = await run_first_existing_script(
         [
             [
@@ -1405,7 +1566,13 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
             "<code>scripts/run_opportunity.py --no-telegram --period 1y --top 6 --min-score 0.10 --no-persist</code>"
         )
     else:
+        await _save_cached_report("radar", chat_id, report)
         report = compact_radar_report(report, max_items=6)
+
+    logger.info(
+        "[BOT][RADAR] cache_hit=false total_s=%.2f",
+        time.perf_counter() - started,
+    )
 
     await send_text(context, chat_id, report)
 

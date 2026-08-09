@@ -72,7 +72,7 @@ export default function DecisionsPage() {
   const decisions = useDecisionsQuery(period);
   const override = useOverrideQuery(period);
   const fills = useFillsQuery(period, movementLimit);
-  const timeline = useAuditTimelineQuery(period, 400);
+  const timeline = useAuditTimelineQuery(period, 120);
   const summary = getRecord(decisions.data, "summary");
   const fillSummary = getRecord(fills.data, "summary");
   const movementPayload = getRecord(fills.data, "movements");

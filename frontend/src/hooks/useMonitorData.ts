@@ -41,6 +41,7 @@ function useMonitorQuery<T>(
       return fetcher(session);
     },
     queryKey: ["monitor", key, session?.mode, session?.apiBase, ...params],
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -71,7 +72,7 @@ export function useLedgerQuery(days = 90) {
   return useMonitorQuery<RowRecord>("ledger", (session) => monitorApi.ledger(session, days), [days]);
 }
 
-export function useAuditTimelineQuery(days = 90, limit = 400) {
+export function useAuditTimelineQuery(days = 90, limit = 120) {
   return useMonitorQuery<AuditTimelinePayload>("timeline", (session) => monitorApi.timeline(session, days, limit), [days, limit]);
 }
 

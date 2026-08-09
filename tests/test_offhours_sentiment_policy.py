@@ -49,6 +49,14 @@ def test_business_day_preopen_analysis_is_exploratory_and_never_persists():
     )
 
 
+def test_sentiment_runs_hourly_offhours_and_keeps_market_interval():
+    market = datetime(2026, 8, 4, 12, 0, tzinfo=ART_TZ)
+    offhours = datetime(2026, 8, 4, 20, 0, tzinfo=ART_TZ)
+
+    assert runner._sentiment_interval_seconds(market) == runner.SENTIMENT_PIPELINE_INTERVAL_SECONDS
+    assert runner._sentiment_interval_seconds(offhours) == 3600
+
+
 def test_nuclear_attack_is_an_immediate_offhours_risk_event():
     event = {
         "headline": "Israel launches nuclear attack on Iran",
@@ -92,10 +100,12 @@ def test_risk_guard_filters_alerts_to_latest_snapshot_positions():
     class _Conn:
         def __init__(self):
             self.second_params = None
+            self.second_sql = None
 
         async def fetch(self, sql, *params):
             if "latest_snapshot" in sql:
                 return [{"ticker": "MU"}]
+            self.second_sql = sql
             self.second_params = params
             return [
                 {
@@ -140,6 +150,9 @@ def test_risk_guard_filters_alerts_to_latest_snapshot_positions():
 
     assert [alert.ticker for alert in alerts] == ["MU"]
     assert pool.conn.second_params == (["MU"],)
+    assert "JOIN LATERAL" in pool.conn.second_sql
+    assert "mp.ticker = b.ticker" in pool.conn.second_sql
+    assert "WITH latest_prices AS" not in pool.conn.second_sql
 
 
 def test_scrape_portfolio_retry_reloads_page_before_second_attempt():

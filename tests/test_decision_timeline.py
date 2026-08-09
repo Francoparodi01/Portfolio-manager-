@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from src.analysis import decision_ledger
 from src.analysis.decision_timeline import (
     build_decision_timeline,
     fetch_decision_timeline,
@@ -228,3 +229,32 @@ def test_monitor_registers_read_only_audit_timeline_route():
     monitor_api = (root / "src" / "monitor" / "api.py").read_text(encoding="utf-8")
 
     assert 'app.router.add_get("/api/audit-timeline", audit_timeline)' in monitor_api
+
+
+def test_pending_marks_lookup_latest_price_per_decision(monkeypatch):
+    async def _schema_ready(_conn):
+        return None
+
+    monkeypatch.setattr(
+        decision_ledger,
+        "ensure_decision_audit_scope_columns",
+        _schema_ready,
+    )
+    conn = _FakeConn()
+
+    asyncio.run(decision_ledger.fetch_decision_ledger(conn))
+
+    pending_query = conn.queries[-1]
+    assert "JOIN LATERAL" in pending_query
+    assert "mp.ticker = dl.ticker" in pending_query
+    assert "WITH latest AS" not in pending_query
+
+
+def test_monitor_json_responses_negotiate_compression():
+    root = Path(__file__).resolve().parents[1]
+    monitor_api = (root / "src" / "monitor" / "api.py").read_text(encoding="utf-8")
+    json_helper = monitor_api.split("def _json", 1)[1].split("async def", 1)[0]
+
+    assert "response.enable_compression()" in json_helper
+    assert 'getattr(response, "body", None)' in monitor_api
+    assert "except web.HTTPException as exc:" in monitor_api

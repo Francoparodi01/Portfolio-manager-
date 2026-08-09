@@ -33,7 +33,7 @@ from src.analysis.override_classification import (
     override_same_ratio as _override_same_ratio,
 )
 from src.core.config import get_config
-from src.core.logger import redact_secrets
+from src.core.logger import get_logger, redact_secrets
 from src.core.market_calendar import (
     is_settlement_day,
     is_trading_day,
@@ -47,6 +47,7 @@ ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 LOG_DIR = Path(os.getenv("LOG_DIR", PROJECT_ROOT / "logs"))
+logger = get_logger(__name__)
 
 MARKET_HEARTBEAT_KEY = "cocos:monitor:market:last_tick"
 RISK_HEARTBEAT_KEY = "cocos:monitor:risk:last_check"
@@ -75,7 +76,9 @@ def _is_market_hours(now: datetime | None = None) -> bool:
 
 def _json(data: dict, status: int = 200) -> web.Response:
     data.setdefault("generated_at", _now_art().isoformat())
-    return web.json_response(data, status=status)
+    response = web.json_response(data, status=status)
+    response.enable_compression()
+    return response
 
 
 async def _corporate_action_schema_ready(conn: asyncpg.Connection) -> bool:
@@ -356,6 +359,50 @@ async def auth_middleware(request: web.Request, handler):
 
 
 @web.middleware
+async def request_metrics_middleware(request: web.Request, handler):
+    started = time_module.perf_counter()
+    try:
+        response = await handler(request)
+    except web.HTTPException as exc:
+        elapsed_ms = (time_module.perf_counter() - started) * 1000
+        logger.info(
+            "[API] method=%s path=%s status=%s duration_ms=%.1f bytes=%s",
+            request.method,
+            request.path,
+            exc.status,
+            elapsed_ms,
+            exc.content_length,
+        )
+        raise
+    except Exception:
+        elapsed_ms = (time_module.perf_counter() - started) * 1000
+        logger.exception(
+            "[API] method=%s path=%s status=500 duration_ms=%.1f",
+            request.method,
+            request.path,
+            elapsed_ms,
+        )
+        raise
+
+    elapsed_ms = (time_module.perf_counter() - started) * 1000
+    response_body = getattr(response, "body", None)
+    response_bytes = (
+        len(response_body)
+        if response_body is not None
+        else getattr(response, "content_length", None)
+    )
+    logger.info(
+        "[API] method=%s path=%s status=%s duration_ms=%.1f bytes=%s",
+        request.method,
+        request.path,
+        response.status,
+        elapsed_ms,
+        response_bytes,
+    )
+    return response
+
+
+@web.middleware
 async def security_headers_middleware(request: web.Request, handler):
     response = await handler(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -436,9 +483,24 @@ async def auth_status(_request: web.Request) -> web.Response:
 async def health(request: web.Request) -> web.Response:
     pool: asyncpg.Pool = request.app["pool"]
     db_ok = False
+    latest_portfolio_at = None
     try:
         async with pool.acquire() as conn:
-            db_ok = bool(await conn.fetchval("SELECT 1"))
+            db_state = await conn.fetchrow(
+                """
+                SELECT
+                    1 AS ok,
+                    (
+                        SELECT scraped_at
+                        FROM portfolio_snapshots
+                        ORDER BY scraped_at DESC
+                        LIMIT 1
+                    ) AS latest_portfolio_at
+                """
+            )
+            db_ok = bool(db_state and db_state["ok"])
+            latest_value = db_state["latest_portfolio_at"] if db_state else None
+            latest_portfolio_at = latest_value.isoformat() if latest_value else None
     except Exception:
         db_ok = False
 
@@ -476,7 +538,7 @@ async def health(request: web.Request) -> web.Response:
 
     return _json({
         "ok": db_ok and redis_ok,
-        "database": {"ok": db_ok},
+        "database": {"ok": db_ok, "latest_portfolio_at": latest_portfolio_at},
         "redis": {"ok": redis_ok},
         "market": {
             "business_day": business,
@@ -504,7 +566,23 @@ async def health(request: web.Request) -> web.Response:
 
 
 async def ingestion(request: web.Request) -> web.Response:
-    pool: asyncpg.Pool = request.app["pool"]
+    now_mono = time_module.monotonic()
+    cache: dict = request.app["ingestion_cache"]
+    if cache.get("payload") and now_mono - cache.get("stored_at", 0) < 120:
+        return _json(dict(cache["payload"]))
+
+    lock: asyncio.Lock = request.app["ingestion_cache_lock"]
+    async with lock:
+        now_mono = time_module.monotonic()
+        if cache.get("payload") and now_mono - cache.get("stored_at", 0) < 120:
+            return _json(dict(cache["payload"]))
+
+        payload = await _load_ingestion_payload(request.app["pool"])
+        cache.update(stored_at=now_mono, payload=payload)
+        return _json(dict(payload))
+
+
+async def _load_ingestion_payload(pool: asyncpg.Pool) -> dict:
     async with pool.acquire() as conn:
         latest_portfolio = await conn.fetchrow("""
             SELECT scraped_at, total_value_ars, cash_ars, confidence_score
@@ -521,12 +599,13 @@ async def ingestion(request: web.Request) -> web.Response:
         """)
         latest_market = await conn.fetchrow("""
             SELECT
-                MAX(ts) AS latest_ts,
+                (SELECT ts FROM market_prices ORDER BY ts DESC LIMIT 1) AS latest_ts,
                 COUNT(*) FILTER (WHERE ts >= NOW() - INTERVAL '24 hours') AS rows_24h,
                 COUNT(DISTINCT ticker) FILTER (WHERE ts >= NOW() - INTERVAL '24 hours') AS tickers_24h,
                 COUNT(*) FILTER (WHERE ts >= NOW() - INTERVAL '7 days') AS rows_7d,
                 COUNT(DISTINCT ticker) FILTER (WHERE ts >= NOW() - INTERVAL '7 days') AS tickers_7d
             FROM market_prices
+            WHERE ts >= NOW() - INTERVAL '7 days'
         """)
         sample = await conn.fetch("""
             SELECT ticker, MAX(ts) AS latest_ts, COUNT(*) AS rows
@@ -541,6 +620,7 @@ async def ingestion(request: web.Request) -> web.Response:
                 SELECT DISTINCT ON (ticker)
                     ticker, asset_type, ts
                 FROM market_prices
+                WHERE ts >= NOW() - INTERVAL '14 days'
                 ORDER BY ticker, ts DESC
             )
             SELECT
@@ -553,7 +633,7 @@ async def ingestion(request: web.Request) -> web.Response:
             ORDER BY 1
         """)
 
-    return _json({
+    return {
         "ok": True,
         "portfolio": {
             "latest": _row(latest_portfolio),
@@ -564,7 +644,7 @@ async def ingestion(request: web.Request) -> web.Response:
             "sample": [_row(r) for r in sample],
             "asset_breakdown": [_row(r) for r in asset_breakdown],
         },
-    })
+    }
 
 
 async def candles(request: web.Request) -> web.Response:
@@ -1526,7 +1606,7 @@ async def decision_ledger(request: web.Request) -> web.Response:
 async def audit_timeline(request: web.Request) -> web.Response:
     try:
         days = max(1, min(int(request.query.get("days", "90")), 365))
-        limit = max(1, min(int(request.query.get("limit", "400")), 1000))
+        limit = max(1, min(int(request.query.get("limit", "120")), 1000))
         owner_raw = request.query.get("owner_chat_id")
         owner_chat_id = int(owner_raw) if owner_raw else None
     except (TypeError, ValueError):
@@ -2682,8 +2762,17 @@ async def create_app() -> web.Application:
         max_size=4,
     )
 
-    app = web.Application(middlewares=[security_headers_middleware, cors_middleware, auth_middleware])
+    app = web.Application(
+        middlewares=[
+            request_metrics_middleware,
+            security_headers_middleware,
+            cors_middleware,
+            auth_middleware,
+        ]
+    )
     app["pool"] = pool
+    app["ingestion_cache"] = {}
+    app["ingestion_cache_lock"] = asyncio.Lock()
     app["index_html"] = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     app.router.add_get("/", index)
     app.router.add_get("/api/auth/status", auth_status)
@@ -2715,7 +2804,7 @@ def main() -> None:
     if not TOKEN:
         raise RuntimeError("MONITOR_API_TOKEN es obligatorio para iniciar monitor_api")
     port = int(os.getenv("MONITOR_API_PORT", "8010"))
-    web.run_app(create_app(), host="0.0.0.0", port=port)
+    web.run_app(create_app(), host="0.0.0.0", port=port, access_log=None)
 
 
 if __name__ == "__main__":
