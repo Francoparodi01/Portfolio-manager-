@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_main_menu_exposes_ticker_analysis_button_and_command():
     source = (ROOT / "scripts" / "telegram_bot.py").read_text(encoding="utf-8")
 
-    assert '("ticker", "Analisis tecnico por accion")' in source
+    assert '("ticker", "Análisis por ticker")' in source
     assert 'callback_data="ticker_analysis"' in source
     assert '"ticker_analysis": action_ticker_prompt' in source
     assert 'CommandHandler("ticker",' in source

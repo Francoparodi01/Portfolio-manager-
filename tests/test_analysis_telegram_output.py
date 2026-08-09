@@ -87,18 +87,32 @@ def test_split_message_splits_oversized_single_lines():
 
 
 def test_events_command_is_registered_in_telegram_menu():
-    assert ("events", "Proximos balances") in BOT_COMMAND_SPECS
+    assert ("events", "Próximos balances") in BOT_COMMAND_SPECS
     assert CALLBACK_ALIASES["upcoming_events"] == "upcoming_events"
 
 
-def test_main_keyboard_callbacks_are_all_routable():
-    keyboard = main_keyboard()
+def test_all_menu_callbacks_are_routable():
+    from scripts.telegram_bot import audit_keyboard, results_keyboard
+
+    keyboards = [main_keyboard(), results_keyboard(), audit_keyboard()]
     callbacks = {
         button.callback_data
+        for keyboard in keyboards
         for row in keyboard.inline_keyboard
-        for button in row
-        if button.callback_data
+        for button in row if button.callback_data
     }
 
     assert callbacks
     assert callbacks - CALLBACK_ALIASES.keys() == set()
+
+
+def test_secondary_menu_views_keep_navigation_in_one_message():
+    from scripts.telegram_bot import menu_view
+
+    results = menu_view("menu_results")
+    audit = menu_view("menu_audit")
+    home = menu_view("menu_home")
+
+    assert results is not None and results[0] == "<b>RESULTADOS</b>"
+    assert audit is not None and audit[0] == "<b>AUDITORÍA</b>"
+    assert home is not None and "<b>QUANTIA</b>" in home[0]

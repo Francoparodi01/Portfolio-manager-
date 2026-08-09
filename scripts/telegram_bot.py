@@ -128,22 +128,22 @@ FAST_ACTIONS = {"status"}
 
 BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("menu", "Abrir panel principal"),
-    ("help", "Como leer el bot"),
+    ("help", "Cómo leer el bot"),
     ("portfolio", "Ver cartera actual"),
     ("analisis", "Plan de cartera"),
     ("analisis_test", "Probar analisis sin guardar"),
     ("analisis_full", "Vista completa sin guardar"),
     ("analisis_debug", "Diagnostico sin guardar"),
     ("mercado", "Contexto mercado/noticias"),
-    ("events", "Proximos balances"),
-    ("ticker", "Analisis tecnico por accion"),
+    ("events", "Próximos balances"),
+    ("ticker", "Análisis por ticker"),
     ("radar", "Radar compacto"),
     ("shadow", "Tesis shadow 5/20/40"),
     ("performance", "Performance operativa"),
-    ("viability", "Viabilidad bot-only"),
-    ("ledger", "Decision Ledger"),
-    ("policy", "Arbol operativo"),
-    ("bot_vs_humano", "Bot vs humano"),
+    ("viability", "Viabilidad del bot"),
+    ("ledger", "Libro de decisiones"),
+    ("policy", "Flujo operativo"),
+    ("bot_vs_humano", "Bot vs Franco"),
     ("confianza", "Confianza del sistema"),
     ("status", "Estado del sistema"),
 ]
@@ -698,68 +698,74 @@ async def sync_operational_state(
 def main_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton("💼 Portfolio",        callback_data="portfolio"),
-            InlineKeyboardButton("🧠 Plan de cartera", callback_data="weekly_analysis"),
+            InlineKeyboardButton("💼 Cartera", callback_data="portfolio"),
+            InlineKeyboardButton("🧠 Plan", callback_data="weekly_analysis"),
         ],
         [
-            InlineKeyboardButton("Analisis ticker",      callback_data="ticker_analysis"),
-            InlineKeyboardButton("Proximos balances",    callback_data="upcoming_events"),
+            InlineKeyboardButton("🔎 Ticker", callback_data="ticker_analysis"),
+            InlineKeyboardButton("🔭 Radar", callback_data="radar"),
         ],
         [
-            InlineKeyboardButton("📅 Resumen semanal",  callback_data="weekly_summary"),
-            InlineKeyboardButton("📊 Performance",      callback_data="performance"),
+            InlineKeyboardButton("📅 Balances", callback_data="upcoming_events"),
+            InlineKeyboardButton("📊 Resultados", callback_data="menu_results"),
         ],
         [
-            InlineKeyboardButton("Viability",           callback_data="viability"),
-            InlineKeyboardButton("Bot vs Humano",       callback_data="override_audit"),
-        ],
-        [
-            InlineKeyboardButton("🧭 Confianza",        callback_data="confidence_audit"),
-            InlineKeyboardButton("🔭 Radar",            callback_data="radar"),
-            InlineKeyboardButton("🔬 Shadow",           callback_data="shadow"),
-        ],
-        [
-            InlineKeyboardButton("📈 Regression",       callback_data="regression"),
-            InlineKeyboardButton("Decision Ledger",     callback_data="decision_ledger"),
+            InlineKeyboardButton("🧪 Auditoría", callback_data="menu_audit"),
+            InlineKeyboardButton("🩺 Estado", callback_data="status"),
         ]
     ]
-    final_row = [
-        InlineKeyboardButton("Policy Tree", callback_data="policy_tree"),
-        InlineKeyboardButton("🩺 Status", callback_data="status"),
-    ]
     if _multiuser_enabled():
-        final_row.append(
-            InlineKeyboardButton("⚙️ Configuración", callback_data="settings")
+        rows.append(
+            [InlineKeyboardButton("⚙️ Configuración", callback_data="settings")]
         )
-    rows.append(final_row)
     return InlineKeyboardMarkup(rows)
 
 
 def menu_text() -> str:
-    settings_line = (
-        "⚙️ <b>Configuración</b> — cuenta y credenciales\n"
-        if _multiuser_enabled()
-        else ""
-    )
     return (
-        "🤖 <b>Cocos Copilot</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "💼 <b>Portfolio</b> — último snapshot de la cartera\n"
-        "🧠 <b>Plan de cartera</b> — rotación y acciones sugeridas\n"
-        "<b>Analisis ticker</b> — tecnico + grafico por accion\n"
-        "📅 <b>Resumen semanal</b> — performance de la semana\n"
-        "📊 <b>Performance</b> — métricas canónicas y dataset operativo\n"
-        "Viability — bot-only vs manual-only por horizonte, neto de costos\n"
-        "Decision Ledger — atribución económica de decisiones y swaps\n"
-        "Policy Tree — ruta operativa de datos, señal, cartera y ejecución\n"
-        "🧭 <b>Confianza</b> — auditoría operativa del sistema\n"
-        "🔭 <b>Radar</b> — oportunidades operables del universo\n"
-        "🔬 <b>Shadow</b> — tesis de precio 5/20/40 sin ejecución\n"
-        "📈 <b>Regression</b> — auditoría de señales y outcomes\n"
-        "Bot vs Humano — compara planes aprobados contra movimientos reales\n"
-        "🩺 <b>Status</b> — estado del sistema y DB\n"
-        f"{settings_line}\n"
+        "<b>QUANTIA</b>\n"
+        "Cartera y decisiones\n\n"
+        "<i>Seleccioná una vista</i>"
     )
+
+
+def results_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Performance", callback_data="performance"),
+            InlineKeyboardButton("📅 Semana", callback_data="weekly_summary"),
+        ],
+        [
+            InlineKeyboardButton("⚖️ Bot vs Franco", callback_data="override_audit"),
+            InlineKeyboardButton("🧭 Viabilidad", callback_data="viability"),
+        ],
+        [InlineKeyboardButton("← Inicio", callback_data="menu_home")],
+    ])
+
+
+def audit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🧭 Confianza", callback_data="confidence_audit"),
+            InlineKeyboardButton("🔬 Shadow", callback_data="shadow"),
+        ],
+        [
+            InlineKeyboardButton("📈 Regresión", callback_data="regression"),
+            InlineKeyboardButton("📒 Decisiones", callback_data="decision_ledger"),
+        ],
+        [InlineKeyboardButton("🌳 Flujo operativo", callback_data="policy_tree")],
+        [InlineKeyboardButton("← Inicio", callback_data="menu_home")],
+    ])
+
+
+def menu_view(action: str) -> tuple[str, InlineKeyboardMarkup] | None:
+    if action == "menu_home":
+        return menu_text(), main_keyboard()
+    if action == "menu_results":
+        return "<b>RESULTADOS</b>", results_keyboard()
+    if action == "menu_audit":
+        return "<b>AUDITORÍA</b>", audit_keyboard()
+    return None
 
 
 def help_text() -> str:
@@ -2170,6 +2176,10 @@ async def action_admin_refresh_portfolio(context: ContextTypes.DEFAULT_TYPE, cha
 # ─────────────────────────────────────────────────────────────────────────────
 
 CALLBACK_ALIASES: dict[str, str] = {
+    # Navegación
+    "menu_home":        "menu_home",
+    "menu_results":     "menu_results",
+    "menu_audit":       "menu_audit",
     # Portfolio
     "portfolio":        "portfolio",
     "current_portfolio":"portfolio",
@@ -2640,6 +2650,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         logger.warning("[BOT] callback no mapeado: %s", raw_action)
         await send_menu(context, chat_id)
+        return
+
+    view = menu_view(action)
+    if view is not None:
+        text, keyboard = view
+        try:
+            await query.edit_message_text(
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
         return
 
     loading = ACTION_LOADING_TEXT.get(action, "🔄 Procesando...")
