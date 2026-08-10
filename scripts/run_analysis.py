@@ -3400,6 +3400,24 @@ async def _load_upcoming_earnings_events(
         await db.close()
 
 
+async def _load_issuer_event_context(cfg) -> dict[str, list[dict]]:
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        rows = await db.get_issuer_event_observations(limit=1000)
+    finally:
+        await db.close()
+
+    context: dict[str, list[dict]] = {}
+    for row in rows:
+        ticker = str(row.get("ticker") or "").upper().strip()
+        event_date = row.get("event_date")
+        if not ticker or event_date is None:
+            continue
+        context.setdefault(ticker, []).append(row)
+    return context
+
+
 async def _load_corporate_action_context(
     cfg,
 ) -> tuple[list[CorporateActionEffect], list[PriceQualityFlag]]:
@@ -3624,6 +3642,12 @@ async def main(
     except Exception as exc:
         logger.warning("No se pudieron cargar proximos balances: %s", exc)
 
+    issuer_events_by_ticker: dict[str, list[dict]] = {}
+    try:
+        issuer_events_by_ticker = await _load_issuer_event_context(cfg)
+    except Exception as exc:
+        logger.warning("No se pudo cargar contexto historico de issuer events: %s", exc)
+
     corporate_action_effects: list[CorporateActionEffect] = []
     corporate_action_flags: list[PriceQualityFlag] = []
     corporate_action_applications: list = []
@@ -3685,12 +3709,16 @@ async def main(
         cocos_frames,
         effects=corporate_action_effects,
         portfolio_history=history,
+        issuer_events_by_ticker=issuer_events_by_ticker,
         observed_at=datetime.now(timezone.utc),
     )
     cocos_frames = frame_guard.frames
     corporate_action_flags.extend(frame_guard.flags)
     corporate_action_applications.extend(frame_guard.applications)
     corporate_action_blocklist.update(frame_guard.blocked_by_ticker)
+    for flag in frame_guard.flags:
+        if flag.resolution_status == "DISMISSED":
+            corporate_action_blocklist.pop(flag.ticker, None)
     effect_ticker_by_id = {
         effect.effect_id: effect.ticker for effect in corporate_action_effects
     }
@@ -3889,12 +3917,16 @@ async def main(
                 universe_frames,
                 effects=corporate_action_effects,
                 portfolio_history=history,
+                issuer_events_by_ticker=issuer_events_by_ticker,
                 observed_at=datetime.now(timezone.utc),
             )
             universe_frames = universe_frame_guard.frames
             corporate_action_flags.extend(universe_frame_guard.flags)
             corporate_action_applications.extend(universe_frame_guard.applications)
             corporate_action_blocklist.update(universe_frame_guard.blocked_by_ticker)
+            for flag in universe_frame_guard.flags:
+                if flag.resolution_status == "DISMISSED":
+                    corporate_action_blocklist.pop(flag.ticker, None)
             for blocked_ticker in corporate_action_blocklist:
                 universe_frames.pop(blocked_ticker, None)
             logger.info(

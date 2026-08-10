@@ -1149,6 +1149,26 @@ class PortfolioDatabase:
         async with self._pool.acquire() as conn:
             await self._ensure_corporate_actions_schema(conn)
             for flag in flags:
+                if flag.resolution_status == "DISMISSED":
+                    await conn.execute(
+                        """
+                        UPDATE price_quality_flags
+                        SET resolution_status = 'DISMISSED',
+                            action_taken = $3,
+                            reason = $4,
+                            evidence = COALESCE(evidence, '{}'::jsonb) || $5::jsonb,
+                            updated_at = NOW()
+                        WHERE UPPER(ticker) = UPPER($1)
+                          AND resolution_status = 'OPEN'
+                          AND evidence_level = 'HEURISTIC_ONLY'
+                          AND observed_at::date BETWEEN ($2::date - 1) AND ($2::date + 1)
+                        """,
+                        flag.ticker,
+                        flag.observed_at,
+                        flag.action_taken,
+                        flag.reason,
+                        json.dumps(flag.evidence or {}, ensure_ascii=False),
+                    )
                 if flag.resolution_status == "CONFIRMED":
                     await conn.execute(
                         """

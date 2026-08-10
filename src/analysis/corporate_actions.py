@@ -6,7 +6,7 @@ It does not change model scores or trading thresholds.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
 from fractions import Fraction
@@ -1077,6 +1077,7 @@ def guard_history_frames(
     *,
     effects: Sequence[CorporateActionEffect] = (),
     portfolio_history: Sequence[Mapping[str, Any]] = (),
+    issuer_events_by_ticker: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     observed_at: datetime | None = None,
 ) -> FrameGuardResult:
     observed_at = observed_at or datetime.now(timezone.utc)
@@ -1215,6 +1216,50 @@ def guard_history_frames(
             current_quantity=current_quantity,
         )
         if flag is not None:
+            previous_day = normalized.index[-2].date()
+            current_day = normalized.index[-1].date()
+            matching_earnings = next(
+                (
+                    event
+                    for event in (issuer_events_by_ticker or {}).get(ticker, ())
+                    if str(event.get("event_type") or "").upper() == "EARNINGS"
+                    and str(event.get("lifecycle_status") or "").upper()
+                    not in {"CANCELLED", "DISMISSED"}
+                    and event.get("event_date") is not None
+                    and previous_day <= event["event_date"] <= current_day
+                ),
+                None,
+            )
+            if (
+                matching_earnings is not None
+                and flag.evidence_level == EvidenceLevel.HEURISTIC_ONLY.value
+            ):
+                event_day = matching_earnings["event_date"]
+                flags.append(
+                    replace(
+                        flag,
+                        resolution_status="DISMISSED",
+                        action_taken="DISMISSED_BY_ISSUER_EVENT_CONTEXT",
+                        reason=(
+                            "HEURISTIC_DISMISSED: price gap overlaps known earnings "
+                            f"event on {event_day.isoformat()}; no quantity or official "
+                            "corporate-action evidence corroborates a ratio change"
+                        ),
+                        evidence={
+                            **flag.evidence,
+                            "competing_event_type": "EARNINGS",
+                            "competing_event_date": event_day.isoformat(),
+                            "competing_event_source": str(
+                                matching_earnings.get("source") or ""
+                            ),
+                            "competing_event_title": str(
+                                matching_earnings.get("title") or ""
+                            ),
+                        },
+                    )
+                )
+                output[ticker] = normalized
+                continue
             flags.append(flag)
             blocked[ticker] = flag.reason
             continue

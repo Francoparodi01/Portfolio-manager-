@@ -151,6 +151,119 @@ def test_real_crash_that_matches_ratio_is_quarantined_not_confirmed():
     assert "confirmation is still missing" in flag.reason
 
 
+def test_earnings_gap_is_not_misclassified_as_unconfirmed_ratio_change():
+    frame = _frame(pre_close=3765.0, post_close=4982.5)
+    frame.index = pd.to_datetime(["2026-08-05T20:00:00Z", "2026-08-07T20:00:00Z"])
+    result = guard_history_frames(
+        {"TEAM": frame},
+        issuer_events_by_ticker={
+            "TEAM": [
+                {
+                    "event_type": "EARNINGS",
+                    "lifecycle_status": "ANNOUNCED",
+                    "event_date": datetime(2026, 8, 6, tzinfo=UTC).date(),
+                    "source": "YAHOO",
+                    "title": "TEAM Q4 2026 Earnings Announcement",
+                }
+            ]
+        },
+        observed_at=datetime(2026, 8, 10, 19, 46, tzinfo=UTC),
+    )
+
+    assert "TEAM" in result.frames
+    assert result.blocked_by_ticker == {}
+    assert len(result.flags) == 1
+    assert result.flags[0].resolution_status == "DISMISSED"
+    assert result.flags[0].action_taken == "DISMISSED_BY_ISSUER_EVENT_CONTEXT"
+    assert result.flags[0].evidence["competing_event_type"] == "EARNINGS"
+
+
+def test_earnings_context_does_not_override_quantity_corroboration():
+    frame = _frame(pre_close=90.0, post_close=9.0)
+    result = guard_history_frames(
+        {"YPFD": frame},
+        portfolio_history=[
+            {
+                "scraped_at": "2026-08-03T20:00:00+00:00",
+                "positions": [{"ticker": "YPFD", "quantity": 5.0}],
+            },
+            {
+                "scraped_at": "2026-08-04T20:00:00+00:00",
+                "positions": [{"ticker": "YPFD", "quantity": 50.0}],
+            },
+        ],
+        issuer_events_by_ticker={
+            "YPFD": [
+                {
+                    "event_type": "EARNINGS",
+                    "lifecycle_status": "ANNOUNCED",
+                    "event_date": datetime(2026, 8, 4, tzinfo=UTC).date(),
+                }
+            ]
+        },
+        observed_at=datetime(2026, 8, 4, 20, 0, tzinfo=UTC),
+    )
+
+    assert "YPFD" not in result.frames
+    assert "YPFD" in result.blocked_by_ticker
+    assert result.flags[0].evidence_level == "CORROBORATED"
+
+
+def test_saving_dismissed_flag_closes_only_open_heuristics_for_same_window():
+    dismissed = detect_price_anomaly(
+        ticker="TEAM",
+        reference_price=3765.0,
+        current_price=5020.0,
+        observed_at=datetime(2026, 8, 7, 20, 0, tzinfo=UTC),
+    )
+    assert dismissed is not None
+    dismissed = replace(
+        dismissed,
+        resolution_status="DISMISSED",
+        action_taken="DISMISSED_BY_ISSUER_EVENT_CONTEXT",
+    )
+
+    class _Conn:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, sql, *params):
+            self.calls.append((sql, params))
+            return "UPDATE 1" if sql.lstrip().startswith("UPDATE") else "INSERT 0 1"
+
+    class _Acquire:
+        def __init__(self, conn):
+            self.conn = conn
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Pool:
+        def __init__(self):
+            self.conn = _Conn()
+
+        def acquire(self):
+            return _Acquire(self.conn)
+
+    db = PortfolioDatabase("postgresql://unused")
+    db._pool = _Pool()
+
+    async def _skip_schema(_conn):
+        return None
+
+    db._ensure_corporate_actions_schema = _skip_schema
+    asyncio.run(db.save_price_quality_flags([dismissed]))
+
+    dismissal_sql, dismissal_params = db._pool.conn.calls[0]
+    assert "evidence_level = 'HEURISTIC_ONLY'" in dismissal_sql
+    assert "resolution_status = 'OPEN'" in dismissal_sql
+    assert dismissal_params[0] == "TEAM"
+    assert dismissal_params[2] == "DISMISSED_BY_ISSUER_EVENT_CONTEXT"
+
+
 def test_reverse_split_is_detected_from_price_and_quantity_factors():
     flag = detect_price_anomaly(
         ticker="REV",
