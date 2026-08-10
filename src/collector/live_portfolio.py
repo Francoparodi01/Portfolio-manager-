@@ -115,6 +115,7 @@ def build_live_portfolio(
     enriched_snapshot_positions = enrich_positions_with_market_metadata(
         snapshot.get("positions") or [],
         latest_prices or [],
+        reference_at=generated_at,
     )
 
     positions: list[dict] = []
@@ -157,9 +158,11 @@ def build_live_portfolio(
         market_value = quantity * price if quantity > 0 and price > 0 else _safe_float(raw.get("market_value"))
         change_pct_1d = latest.get("change_pct_1d")
         previous_close_price = _safe_float(latest.get("previous_close_price"))
+        # Cocos exposes Var% in percentage points (2.8 means 2.8%, not 280%).
+        # A stale quote must never contribute a daily return or trigger an alert.
         change_pct_1d_f = (
-            _safe_float(change_pct_1d)
-            if change_pct_1d is not None
+            _safe_float(change_pct_1d) / 100.0
+            if change_pct_1d is not None and price_is_fresh
             else None
         )
         if previous_close_price > 0 and latest_price > 0 and price_is_fresh:
@@ -224,9 +227,11 @@ def build_live_portfolio(
     cash_ars = _safe_float(snapshot.get("cash_ars"))
     total_value_ars = invested_ars + cash_ars
     previous_invested_ars = invested_ars - day_pnl_ars
+    has_complete_price_coverage = bool(positions) and covered_positions == len(positions)
     day_change_pct = (
         day_pnl_ars / previous_invested_ars
-        if previous_invested_ars > 0 else None
+        if has_complete_price_coverage and previous_invested_ars > 0
+        else None
     )
 
     for position in positions:

@@ -28,7 +28,11 @@ from src.analysis.execution_planner import (
 )
 from src.analysis.preclose_alerts import build_preclose_alerts
 from src.analysis.thesis_shadow import mature_forecast
-from src.collector.live_portfolio import build_live_portfolio, select_portfolio_move_alerts
+from src.collector.live_portfolio import (
+    build_live_portfolio,
+    render_opening_portfolio_report,
+    select_portfolio_move_alerts,
+)
 from src.collector.db import PortfolioDatabase
 
 
@@ -400,6 +404,128 @@ def test_live_portfolio_rebases_pre_event_snapshot_and_uses_normalized_return():
     assert position["change_pct_1d"] == pytest.approx(0.0)
     assert position["price_quality_status"] == PriceQualityStatus.RECONCILED.value
     assert select_portfolio_move_alerts(live) == []
+
+
+def test_stale_market_rows_do_not_create_daily_moves_or_alerts():
+    opening_at = datetime(2026, 8, 10, 13, 31, tzinfo=UTC)
+    live = build_live_portfolio(
+        {
+            "snapshot_id": "opening",
+            "scraped_at": opening_at,
+            "cash_ars": 8709,
+            "positions": [
+                {
+                    "ticker": "EFX",
+                    "quantity": 13,
+                    "current_price": 18030,
+                    "market_value": 234390,
+                },
+                {
+                    "ticker": "AXP",
+                    "quantity": 7,
+                    "current_price": 35800,
+                    "market_value": 250600,
+                },
+            ],
+        },
+        [
+            {
+                "ticker": "EFX",
+                "last_price": 17710,
+                "change_pct_1d": 2.8,
+                "ts": datetime(2026, 8, 7, 19, 0, tzinfo=UTC),
+            },
+            {
+                "ticker": "AXP",
+                "last_price": 35900,
+                "change_pct_1d": -0.4,
+                "ts": datetime(2026, 8, 7, 19, 0, tzinfo=UTC),
+            },
+        ],
+        generated_at=opening_at,
+    )
+
+    by_ticker = {position["ticker"]: position for position in live["positions"]}
+    assert live["price_coverage_count"] == 0
+    assert live["day_change_pct"] is None
+    assert by_ticker["EFX"]["current_price"] == pytest.approx(18030)
+    assert by_ticker["EFX"]["change_pct_1d"] is None
+    assert by_ticker["AXP"]["change_pct_1d"] is None
+    assert select_portfolio_move_alerts(live) == []
+
+    report = render_opening_portfolio_report(live)
+    assert "Movimiento cartera: <b>N/A</b>" in report
+    assert "+280.00%" not in report
+    assert "-40.00%" not in report
+
+
+def test_fresh_cocos_percentage_points_are_normalized_without_previous_close():
+    opening_at = datetime(2026, 8, 10, 13, 31, tzinfo=UTC)
+    live = build_live_portfolio(
+        {
+            "snapshot_id": "post-open",
+            "scraped_at": opening_at,
+            "cash_ars": 0,
+            "positions": [
+                {
+                    "ticker": "EFX",
+                    "quantity": 13,
+                    "current_price": 18030,
+                    "market_value": 234390,
+                }
+            ],
+        },
+        [
+            {
+                "ticker": "EFX",
+                "last_price": 17710,
+                "change_pct_1d": 2.8,
+                "ts": datetime(2026, 8, 10, 13, 40, tzinfo=UTC),
+            }
+        ],
+        generated_at=opening_at,
+    )
+
+    position = live["positions"][0]
+    assert live["price_coverage_count"] == 1
+    assert position["price_source"] == "market_prices"
+    assert position["change_pct_1d"] == pytest.approx(0.028)
+    assert live["day_change_pct"] == pytest.approx(0.028)
+
+
+def test_partial_coverage_does_not_claim_total_portfolio_return():
+    opening_at = datetime(2026, 8, 10, 13, 31, tzinfo=UTC)
+    live = build_live_portfolio(
+        {
+            "snapshot_id": "partial",
+            "scraped_at": opening_at,
+            "cash_ars": 0,
+            "positions": [
+                {"ticker": "AMD", "quantity": 1, "current_price": 75000},
+                {"ticker": "NVS", "quantity": 1, "current_price": 61000},
+            ],
+        },
+        [
+            {
+                "ticker": "AMD",
+                "last_price": 76000,
+                "previous_close_price": 75000,
+                "change_pct_1d": 1.3,
+                "ts": datetime(2026, 8, 10, 13, 40, tzinfo=UTC),
+            },
+            {
+                "ticker": "NVS",
+                "last_price": 60825,
+                "change_pct_1d": 0,
+                "ts": datetime(2026, 8, 5, 19, 0, tzinfo=UTC),
+            },
+        ],
+        generated_at=opening_at,
+    )
+
+    assert live["price_coverage_count"] == 1
+    assert live["day_pnl_ars"] == pytest.approx(1000)
+    assert live["day_change_pct"] is None
 
 
 def test_position_reconciliation_preserves_value_and_cost_basis():

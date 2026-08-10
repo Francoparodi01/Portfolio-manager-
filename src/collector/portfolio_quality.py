@@ -72,6 +72,8 @@ def market_rows_by_ticker(latest_market_rows: Iterable[Mapping[str, Any]]) -> di
 def enrich_positions_with_market_metadata(
     positions: Iterable[Mapping[str, Any]],
     latest_market_rows: Iterable[Mapping[str, Any]],
+    *,
+    reference_at: datetime | None = None,
 ) -> list[dict]:
     """Return portfolio positions with Cocos asset type and price freshness metadata.
 
@@ -80,7 +82,11 @@ def enrich_positions_with_market_metadata(
     This prevents old quotes from silently participating in decisions.
     """
     market_rows = list(latest_market_rows or [])
-    reference_day = _latest_market_day(market_rows)
+    reference_day = (
+        _art_date(reference_at)
+        if reference_at is not None
+        else _latest_market_day(market_rows)
+    )
     by_ticker = market_rows_by_ticker(market_rows)
 
     enriched: list[dict] = []

@@ -2712,6 +2712,7 @@ class IntradayManager:
         *,
         corporate_action_effects=None,
         blocked_price_tickers: set[str] | None = None,
+        as_of: datetime | None = None,
     ) -> list[RiskAlert]:
         blocked_price_tickers = {
             str(ticker or "").upper()
@@ -2769,10 +2770,11 @@ class IntradayManager:
                     b.stop_loss_pct,
                     b.stop_loss_price,
                     b.target_price,
-                    p.last_price
+                    p.last_price,
+                    p.market_price_ts
                 FROM latest_buys b
                 JOIN LATERAL (
-                    SELECT mp.last_price
+                    SELECT mp.last_price, mp.ts AS market_price_ts
                     FROM market_prices mp
                     WHERE mp.ticker = b.ticker
                       AND mp.last_price IS NOT NULL
@@ -2785,6 +2787,7 @@ class IntradayManager:
 
         alerts: list[RiskAlert] = []
         active_ticker_set = set(active_tickers)
+        risk_day = (as_of or _now_art()).astimezone(ART_TZ).date()
         for row in rows:
             ticker = str(row["ticker"]).upper()
             if ticker not in active_ticker_set:
@@ -2792,6 +2795,13 @@ class IntradayManager:
             if ticker in blocked_price_tickers:
                 logger.warning(
                     "Risk guard: %s omitido por PRICE_NOT_COMPARABLE activo",
+                    ticker,
+                )
+                continue
+            market_price_ts = row.get("market_price_ts") if hasattr(row, "get") else None
+            if market_price_ts is None or market_price_ts.astimezone(ART_TZ).date() != risk_day:
+                logger.info(
+                    "Risk guard: %s omitido por precio fuera de la rueda actual",
                     ticker,
                 )
                 continue

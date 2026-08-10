@@ -110,19 +110,23 @@ def test_risk_guard_filters_alerts_to_latest_snapshot_positions():
             return [
                 {
                     "ticker": "MU",
+                    "decided_at": None,
                     "price_at_decision": 100.0,
                     "stop_loss_pct": None,
                     "stop_loss_price": None,
                     "target_price": None,
                     "last_price": 90.0,
+                    "market_price_ts": datetime(2026, 8, 10, 14, 0, tzinfo=ART_TZ),
                 },
                 {
                     "ticker": "NFLX",
+                    "decided_at": None,
                     "price_at_decision": 100.0,
                     "stop_loss_pct": None,
                     "stop_loss_price": None,
                     "target_price": None,
                     "last_price": 70.0,
+                    "market_price_ts": datetime(2026, 8, 10, 14, 0, tzinfo=ART_TZ),
                 },
             ]
 
@@ -146,13 +150,59 @@ def test_risk_guard_filters_alerts_to_latest_snapshot_positions():
     pool = _Pool()
     manager = runner.IntradayManager.__new__(runner.IntradayManager)
 
-    alerts = asyncio.run(manager._compute_risk_alerts(pool))
+    alerts = asyncio.run(
+        manager._compute_risk_alerts(
+            pool,
+            as_of=datetime(2026, 8, 10, 14, 5, tzinfo=ART_TZ),
+        )
+    )
 
     assert [alert.ticker for alert in alerts] == ["MU"]
     assert pool.conn.second_params == (["MU"],)
     assert "JOIN LATERAL" in pool.conn.second_sql
     assert "mp.ticker = b.ticker" in pool.conn.second_sql
+    assert "mp.ts AS market_price_ts" in pool.conn.second_sql
     assert "WITH latest_prices AS" not in pool.conn.second_sql
+
+
+def test_risk_guard_ignores_price_from_previous_market_day():
+    class _Conn:
+        async def fetch(self, sql, *_params):
+            if "latest_snapshot" in sql:
+                return [{"ticker": "AMD"}]
+            return [
+                {
+                    "ticker": "AMD",
+                    "decided_at": None,
+                    "price_at_decision": 81850.0,
+                    "stop_loss_pct": None,
+                    "stop_loss_price": None,
+                    "target_price": None,
+                    "last_price": 76125.0,
+                    "market_price_ts": datetime(2026, 8, 7, 17, 0, tzinfo=ART_TZ),
+                }
+            ]
+
+    class _Acquire:
+        async def __aenter__(self):
+            return _Conn()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    manager = runner.IntradayManager.__new__(runner.IntradayManager)
+    alerts = asyncio.run(
+        manager._compute_risk_alerts(
+            _Pool(),
+            as_of=datetime(2026, 8, 10, 10, 32, tzinfo=ART_TZ),
+        )
+    )
+
+    assert alerts == []
 
 
 def test_scrape_portfolio_retry_reloads_page_before_second_attempt():
