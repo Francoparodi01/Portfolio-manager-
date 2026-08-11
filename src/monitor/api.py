@@ -25,7 +25,12 @@ from src.analysis.corporate_actions import (
 )
 from src.analysis.decision_ledger import fetch_decision_ledger
 from src.analysis.decision_timeline import fetch_decision_timeline
+from src.analysis.inferred_activity import (
+    fetch_inferred_activity,
+    mark_inferred_activity_types,
+)
 from src.analysis.override_classification import (
+    attach_inferred_activity,
     classify_override as _classify_override,
     dominant_override_status,
     override_delta as _override_delta,
@@ -1402,7 +1407,12 @@ async def override_audit(request: web.Request) -> web.Response:
                     COALESCE(run_intent, 'formal_plan') AS run_intent,
                     COALESCE(decision_stage, 'approved_decision') AS decision_stage,
                     COALESCE(metric_scope, 'planner_audit') AS metric_scope,
-                    ABS(COALESCE(theoretical_amount_ars, executed_amount_ars, 0)) AS target_amount_ars,
+                    ABS(COALESCE(
+                        NULLIF(layers->>'amount_ars', '')::numeric,
+                        NULLIF(executed_amount_ars, 0),
+                        theoretical_amount_ars,
+                        0
+                    )) AS target_amount_ars,
                     COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
                     COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
                     COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
@@ -1532,8 +1542,18 @@ async def override_audit(request: web.Request) -> web.Response:
             ) opposite_fill ON TRUE
             ORDER BY d.decided_at DESC
         """, days, match_window_days)
+        inferred_activity = await fetch_inferred_activity(
+            conn,
+            days=min(days, 30),
+        )
+        await mark_inferred_activity_types(conn, inferred_activity)
 
     items = [_row(r) for r in rows]
+    attach_inferred_activity(
+        items,
+        inferred_activity,
+        match_window_sessions=match_window_days,
+    )
     for item in items:
         item["override_status"] = _classify_override(item)
         item["same_ratio"] = _override_same_ratio(item)

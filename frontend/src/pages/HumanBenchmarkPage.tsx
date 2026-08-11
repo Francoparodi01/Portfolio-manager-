@@ -104,7 +104,12 @@ const overrideColumns: TableColumn<RowRecord>[] = [
     render: (row) => {
       const outcome = getNumber(row, "outcome_5d");
       if (outcome === null) return "No existe evidencia suficiente para concluir";
-      if (getString(row, "override_status") === "FOLLOWED") return "La decisión real siguió la recomendación";
+      if (["FOLLOWED", "OVERFOLLOWED"].includes(getString(row, "override_status"))) {
+        return "La decisión real siguió la recomendación";
+      }
+      if (["FOLLOWED_PROVISIONAL", "OVERFOLLOWED_PROVISIONAL"].includes(getString(row, "override_status"))) {
+        return "El snapshot indica que seguiste la recomendación; falta confirmación de Cocos";
+      }
       return outcome > 0 ? "La recomendación de Quantia tuvo mejor resultado observado" : "La decisión real obtuvo mejor resultado observado";
     },
   },

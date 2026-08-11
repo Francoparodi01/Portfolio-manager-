@@ -191,7 +191,12 @@ async def fetch_decision_ledger(
                 COALESCE(run_intent, 'formal_plan') AS run_intent,
                 COALESCE(decision_stage, 'approved_decision') AS decision_stage,
                 COALESCE(metric_scope, 'planner_audit') AS metric_scope,
-                ABS(COALESCE(theoretical_amount_ars, executed_amount_ars, 0)) AS target_amount_ars,
+                ABS(COALESCE(
+                    NULLIF(layers->>'amount_ars', '')::numeric,
+                    NULLIF(executed_amount_ars, 0),
+                    theoretical_amount_ars,
+                    0
+                )) AS target_amount_ars,
                 COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
                 COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
                 COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,

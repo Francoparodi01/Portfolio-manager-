@@ -38,6 +38,11 @@ export function statusLabel(value: unknown): string {
   if (key === "BLOCKED") return "Bloqueada";
   if (key === "THEORETICAL") return "Teórica";
   if (key === "FOLLOWED") return "Seguida";
+  if (key === "OVERFOLLOWED") return "Seguida por encima";
+  if (key === "FOLLOWED_PROVISIONAL") return "Seguida (snapshot)";
+  if (key === "OVERFOLLOWED_PROVISIONAL") return "Seguida por encima (snapshot)";
+  if (key === "PARTIAL_PROVISIONAL") return "Parcial (snapshot)";
+  if (key === "OPPOSITE_PROVISIONAL") return "Contraria (snapshot)";
   if (key === "IGNORED") return "Ignorada";
   if (key === "PARTIAL") return "Parcial";
   if (key === "OPPOSITE") return "Contraria";
@@ -56,9 +61,10 @@ export function toneForScope(value: unknown): Tone {
 
 export function toneForStatus(value: unknown): Tone {
   const key = String(value || "").toUpperCase();
-  if (key === "EXECUTED" || key === "FOLLOWED") return "real";
-  if (key === "APPROVED" || key === "PARTIAL") return "info";
-  if (key === "BLOCKED" || key === "OPPOSITE") return "blocked";
+  if (key === "EXECUTED" || key === "FOLLOWED" || key === "OVERFOLLOWED") return "real";
+  if (key === "FOLLOWED_PROVISIONAL" || key === "OVERFOLLOWED_PROVISIONAL") return "info";
+  if (key === "APPROVED" || key === "PARTIAL" || key === "PARTIAL_PROVISIONAL") return "info";
+  if (key === "BLOCKED" || key === "OPPOSITE" || key === "OPPOSITE_PROVISIONAL") return "blocked";
   if (key === "THEORETICAL") return "theoretical";
   if (key === "IGNORED") return "warning";
   return "neutral";

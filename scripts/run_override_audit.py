@@ -25,10 +25,15 @@ import asyncpg
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.analysis.override_classification import (
+    attach_inferred_activity,
     classify_override as _classify,
     dominant_override_status,
     override_delta as _override_delta,
     override_same_ratio as _same_ratio,
+)
+from src.analysis.inferred_activity import (
+    fetch_inferred_activity,
+    mark_inferred_activity_types,
 )
 from src.collector.notifier import TelegramNotifier
 from src.core.config import get_config
@@ -176,7 +181,12 @@ async def _fetch_audit_rows(
                 decision,
                 final_score,
                 price_at_decision,
-                ABS(COALESCE(theoretical_amount_ars, executed_amount_ars, 0)) AS target_amount_ars,
+                ABS(COALESCE(
+                    NULLIF(layers->>'amount_ars', '')::numeric,
+                    NULLIF(executed_amount_ars, 0),
+                    theoretical_amount_ars,
+                    0
+                )) AS target_amount_ars,
                 COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
                 COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
                 COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d,
@@ -556,6 +566,11 @@ def render_report(
     activity_context: dict | None = None,
     inferred_activity: list[dict] | None = None,
 ) -> str:
+    attach_inferred_activity(
+        rows,
+        inferred_activity or [],
+        match_window_sessions=match_window_days,
+    )
     for row in rows:
         row["override_status"] = _classify(row)
 
@@ -578,6 +593,7 @@ def render_report(
         f"   Intenciones unicas: <b>{summary['unique_intents']}</b> (ticker + lado) | repetidas: <b>{summary['repeated_plans']}</b>",
         f"   Cerrados 5D: <b>{summary['closed_5d']}</b> planes | <b>{by_intent.get('closed_5d', 0)}</b> intenciones",
         f"   FOLLOWED: {by_status.get('FOLLOWED', 0)} | OVER: {by_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_status.get('PARTIAL', 0)} | IGNORED: {by_status.get('IGNORED', 0)} | OPPOSITE: {by_status.get('OPPOSITE', 0)} | PENDING_OPEN: {by_status.get('PENDING_OPEN', 0)}",
+        f"   Provisional snapshot: seguidos {by_status.get('FOLLOWED_PROVISIONAL', 0)} | sobre {by_status.get('OVERFOLLOWED_PROVISIONAL', 0)} | parciales {by_status.get('PARTIAL_PROVISIONAL', 0)} | opuestos {by_status.get('OPPOSITE_PROVISIONAL', 0)}",
         f"   Bot hipotetico 5D por plan: <b>{_pct(summary['avg_bot_5d'])}</b>",
         f"   Delta humano vs bot 5D por plan: <b>{_pct(summary['avg_override_delta_5d'])}</b>",
         f"   Bot hipotetico 5D por intencion: <b>{_pct(by_intent.get('avg_bot_5d'))}</b>",
@@ -608,6 +624,7 @@ def render_report(
         lines += [
             tg_section("Lectura por intención"),
             f"   FOLLOWED: {by_intent_status.get('FOLLOWED', 0)} | OVER: {by_intent_status.get('OVERFOLLOWED', 0)} | PARTIAL: {by_intent_status.get('PARTIAL', 0)} | IGNORED: {by_intent_status.get('IGNORED', 0)} | OPPOSITE: {by_intent_status.get('OPPOSITE', 0)} | PENDING_OPEN: {by_intent_status.get('PENDING_OPEN', 0)}",
+            f"   Provisional snapshot: seguidos {by_intent_status.get('FOLLOWED_PROVISIONAL', 0)} | sobre {by_intent_status.get('OVERFOLLOWED_PROVISIONAL', 0)} | parciales {by_intent_status.get('PARTIAL_PROVISIONAL', 0)} | opuestos {by_intent_status.get('OPPOSITE_PROVISIONAL', 0)}",
             "   Esta vista reduce el peso de senales repetidas del mismo ticker/lado.",
             "",
         ]
@@ -621,7 +638,7 @@ def render_report(
                 f"   {len(inferred)} cambios de cantidad detectados por snapshots "
                 f"({pending_inferred} sin confirmar por Cocos movements)."
             ),
-            "   Provisional: no entra al EV ni cambia FOLLOWED/IGNORED hasta tener movimiento canonico.",
+            "   Provisional: puede marcar seguimiento por snapshot, pero no entra al EV hasta tener movimiento canonico.",
         ]
         for row in inferred[:6]:
             status = "confirmado" if row.get("confirmed_at") else "inferido"
@@ -654,7 +671,8 @@ def render_report(
         for row in recent:
             status = row["override_status"]
             target = _money(row.get("target_amount_ars"))
-            same = _money(row.get("same_amount_ars")) if row.get("same_amount_ars") else "$0"
+            effective_same = row.get("same_amount_ars") or row.get("inferred_same_amount_ars")
+            same = _money(effective_same) if effective_same else "$0"
             same_ratio = _same_ratio(row)
             same_ratio_txt = f" ({same_ratio:.1f}x)" if same_ratio >= 0.15 else ""
             outcome = row.get("outcome_5d")
@@ -671,6 +689,8 @@ def render_report(
                 or row.get("opposite_executed_at_precision")
             )
             precision_txt = f" | <code>{precision}</code>" if precision else ""
+            if row.get("match_evidence") == "portfolio_snapshot":
+                precision_txt += " | <code>SNAPSHOT</code>"
             lines.append(
                 f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> "
                 f"<code>{status}</code> target {target} | mov. {same}{same_ratio_txt} -> {result}{precision_txt}"
@@ -716,7 +736,8 @@ async def async_main(args: argparse.Namespace) -> int:
             owner_chat_id=args.owner_chat_id,
         )
         activity_context = await _fetch_activity_context(conn)
-        inferred_activity = await _fetch_inferred_activity(conn, days=min(args.days, 7))
+        inferred_activity = await fetch_inferred_activity(conn, days=min(args.days, 7))
+        await mark_inferred_activity_types(conn, inferred_activity)
     finally:
         await conn.close()
 
