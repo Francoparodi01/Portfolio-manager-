@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from src.analysis.override_classification import (
     classify_override,
     dominant_override_status,
@@ -49,3 +51,13 @@ def test_override_delta_signs_are_human_vs_bot():
 def test_dominant_override_status_uses_shared_rank():
     assert dominant_override_status(["IGNORED", "PARTIAL", "FOLLOWED"]) == "FOLLOWED"
     assert dominant_override_status([]) == "UNKNOWN"
+
+
+def test_monitor_override_audit_keeps_executed_plans_visible():
+    source = (Path(__file__).resolve().parents[1] / "src" / "monitor" / "api.py").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("async def override_audit")
+    end = source.index("async def decision_ledger", start)
+
+    assert "status IN ('APPROVED', 'EXECUTED')" in source[start:end]

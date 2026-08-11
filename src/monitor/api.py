@@ -1426,7 +1426,7 @@ async def override_audit(request: web.Request) -> web.Response:
                   AND COALESCE(source, layers->>'source') = 'execution_plan'
                   AND COALESCE(run_intent, 'formal_plan') = 'formal_plan'
                   AND COALESCE(metric_scope, 'planner_audit') IN ('planner_audit', 'primary')
-                  AND status = 'APPROVED'
+                  AND status IN ('APPROVED', 'EXECUTED')
                   AND decision_type = 'executable'
                   AND decision IN ('BUY', 'SELL')
                   AND price_at_decision IS NOT NULL
