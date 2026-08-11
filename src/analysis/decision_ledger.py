@@ -66,6 +66,43 @@ def _money(value) -> str:
     return f"${float(value):,.0f}".replace(",", ".")
 
 
+def _signed_money(value) -> str:
+    if value is None:
+        return "N/A"
+    number = float(value)
+    if number > 0:
+        rendered = f"+${number:,.0f}"
+    elif number < 0:
+        rendered = f"-${abs(number):,.0f}"
+    else:
+        rendered = "$0"
+    return rendered.replace(",", ".")
+
+
+def _result_icon(value) -> str:
+    if value is None:
+        return "⚪"
+    number = _as_float(value)
+    if number > 0:
+        return "🟢"
+    if number < 0:
+        return "🔴"
+    return "⚪"
+
+
+def _status_display(value) -> tuple[str, str]:
+    status = str(value or "UNKNOWN").upper()
+    labels = {
+        "FOLLOWED": ("✅", "SEGUIDO"),
+        "OVERFOLLOWED": ("✅", "SOBRE-EJECUTADO"),
+        "PARTIAL": ("🟡", "PARCIAL"),
+        "IGNORED": ("⚪", "IGNORADO"),
+        "OPPOSITE": ("🔄", "CONTRARIO"),
+        "PENDING_OPEN": ("⏳", "PENDIENTE"),
+    }
+    return labels.get(status, ("⚪", status))
+
+
 def _clean_text(value) -> str:
     text = "" if value is None else str(value)
     return (
@@ -634,184 +671,108 @@ def render_decision_ledger(data: dict) -> str:
     real = data.get("real_executions") or []
     radar = data.get("radar") or []
     pending = data.get("pending_mark") or []
-    real_pnl = summary.get("real_pnl_5d_ars")
-    human_delta = summary.get("human_vs_bot_5d_ars")
-    radar_avg = summary.get("radar_avg_5d")
-    swap_alpha = summary.get("swap_avg_alpha_5d")
-
-    executive_lines = []
-    if real_pnl is not None:
-        executive_lines.append(
-            "La operatoria real cerrada viene positiva."
-            if _as_float(real_pnl) > 0
-            else "La operatoria real cerrada viene negativa."
-        )
-    if human_delta is not None:
-        executive_lines.append(
-            "El humano supero al bot full hipotetico en la muestra cerrada."
-            if _as_float(human_delta) > 0
-            else "El bot full hipotetico supero a la ejecucion humana en la muestra cerrada."
-        )
-    if radar_avg is not None:
-        executive_lines.append(
-            "El radar muestra deteccion positiva, pero parte de la muestra es teorica o bloqueada."
-            if _as_float(radar_avg) > 0
-            else "El radar no muestra ventaja promedio en las ideas cerradas."
-        )
-    if swap_alpha is not None:
-        executive_lines.append(
-            "Los swaps maduros muestran alpha positivo contra el activo sacrificado."
-            if _as_float(swap_alpha) > 0
-            else "Los swaps maduros no superan al activo sacrificado."
-        )
+    pending_by_id = {row.get("id"): row for row in pending}
 
     lines = tg_header(
         "📒 Decision Ledger",
-        subtitle=(
-            f"Periodo: {int(data.get('days') or 0)} dias | "
-            f"ventana match: {int(data.get('match_window_days') or 0)}d"
-        ),
+        subtitle=f"{int(data.get('days') or 0)}d · resultado 5D · lectura económica",
     ) + [
-        tg_section("Qué mide"),
-        "   Atribución económica de decisiones, ejecuciones reales, radar y swaps.",
-        "   No toca analysis, scores, optimizer, planner ni thresholds.",
-        "   BUY gana si sube; SELL gana si baja.",
+        tg_section("Resultados"),
+        "💼 <b>Ejecución real</b>",
+        (
+            f"   {summary.get('real_closed_5d', 0)}/{summary.get('real_total', 0)} cerradas · "
+            f"{_rate(summary.get('real_win_rate_5d'))} positivas"
+        ),
+        (
+            f"   PnL direccional: {_result_icon(summary.get('real_pnl_5d_ars'))} "
+            f"<b>{_signed_money(summary.get('real_pnl_5d_ars'))}</b>"
+        ),
+        "",
+        "🧭 <b>Planes seguidos</b> <code>NORMALIZADO</code>",
+        (
+            f"   {followed.get('closed_5d', 0)}/{followed.get('eligible', 0)} maduros · "
+            f"{_rate(followed.get('win_rate_5d'))} positivos"
+        ),
+        (
+            f"   Retorno bruto {_pct(followed.get('avg_return_5d'))} · "
+            f"PnL bruto {_result_icon(followed.get('actual_pnl_5d_ars'))} "
+            f"<b>{_signed_money(followed.get('actual_pnl_5d_ars'))}</b>"
+        ),
+        "",
+        "🤖 <b>Bot vs ejecución humana</b> <code>PLAN-LEVEL</code>",
+        f"   {summary.get('plans_closed_5d', 0)} planes maduros · no deduplicado",
+        (
+            f"   Bot {_signed_money(summary.get('bot_full_pnl_5d_ars'))} · "
+            f"Humano {_signed_money(summary.get('human_matched_pnl_5d_ars'))}"
+        ),
+        f"   Delta humano-bot: <b>{_signed_money(summary.get('human_vs_bot_5d_ars'))}</b>",
+        "",
+        tg_section("Radar y swaps · TEÓRICO"),
+        (
+            f"🔎 Radar: {summary.get('radar_closed_5d', 0)}/{summary.get('radar_total', 0)} ideas · "
+            f"retorno medio {_pct(summary.get('radar_avg_5d'))}"
+        ),
+        (
+            f"   Operables {summary.get('radar_operable_closed_5d', 0)} · "
+            f"{_pct(summary.get('radar_operable_avg_5d'))}  |  "
+            f"Vigilancia {summary.get('radar_blocked_closed_5d', 0)} · "
+            f"{_pct(summary.get('radar_blocked_avg_5d'))}"
+        ),
+        (
+            f"🔁 Swaps: {summary.get('swap_closed_5d', 0)}/{summary.get('swap_total', 0)} · "
+            f"alpha medio <b>{_pct(summary.get('swap_avg_alpha_5d'))}</b> · "
+            f"{_signed_money(summary.get('swap_alpha_5d_ars'))}"
+        ),
         "",
     ]
 
-    if executive_lines:
-        lines += [
-            tg_section("Lectura ejecutiva"),
-            f"   {escape(' '.join(executive_lines))}",
-            "   Muestra aun limitada: usar como auditoria, no como prueba estadistica final.",
-            "",
-        ]
-
-    lines += [
-        tg_section("Resumen ARS"),
-        (
-            f"   Seguido normalizado: <b>{followed.get('closed_5d', 0)}</b> cerradas 5D / "
-            f"{followed.get('eligible', 0)} elegibles | win bruto {_rate(followed.get('win_rate_5d'))} | "
-            f"retorno bruto medio {_pct(followed.get('avg_return_5d'))} | "
-            f"PnL bruto atribuido {_money(followed.get('actual_pnl_5d_ars'))}"
-        ),
-        (
-            f"   Real ejecutado: <b>{summary.get('real_closed_5d', 0)}</b> cerradas 5D / "
-            f"{summary.get('real_total', 0)} eventos | PnL 5D {_money(summary.get('real_pnl_5d_ars'))} | "
-            f"win {_rate(summary.get('real_win_rate_5d'))}"
-        ),
-        (
-            f"   Bot vs humano: <b>{summary.get('plans_closed_5d', 0)}</b> planes cerrados 5D | "
-            f"bot full {_money(summary.get('bot_full_pnl_5d_ars'))} | "
-            f"humano {_money(summary.get('human_matched_pnl_5d_ars'))} | "
-            f"delta {_money(summary.get('human_vs_bot_5d_ars'))}"
-        ),
-        (
-            f"   Radar: <b>{summary.get('radar_closed_5d', 0)}</b> ideas cerradas 5D / "
-            f"{summary.get('radar_total', 0)} | avg {_pct(summary.get('radar_avg_5d'))} | "
-            f"PnL teorico {_money(summary.get('radar_candidate_pnl_5d_ars'))}"
-        ),
-        (
-            f"   Swaps radar: <b>{summary.get('swap_closed_5d', 0)}</b> comparados 5D / "
-            f"{summary.get('swap_total', 0)} | alpha avg {_pct(summary.get('swap_avg_alpha_5d'))} | "
-            f"alpha ARS {_money(summary.get('swap_alpha_5d_ars'))}"
-        ),
-        "",
-        tg_section("Radar por operabilidad"),
-        (
-            f"   Operable/teorico: <b>{summary.get('radar_operable_closed_5d', 0)}</b> cerradas / "
-            f"{summary.get('radar_operable_total', 0)} | avg {_pct(summary.get('radar_operable_avg_5d'))} | "
-            f"PnL {_money(summary.get('radar_operable_pnl_5d_ars'))}"
-        ),
-        (
-            f"   Bloqueado/vigilancia: <b>{summary.get('radar_blocked_closed_5d', 0)}</b> cerradas / "
-            f"{summary.get('radar_blocked_total', 0)} | avg {_pct(summary.get('radar_blocked_avg_5d'))} | "
-            f"PnL {_money(summary.get('radar_blocked_pnl_5d_ars'))}"
-        ),
-        "   Nota: separar esto evita que radar teórico infle conclusiones operativas.",
-        "",
-    ]
-
-    if real:
-        lines += [tg_section("Ejecuciones reales recientes")]
-        shown = 0
-        for row in real:
-            if shown >= 6:
-                break
-            pnl = row.get("pnl_5d_ars")
+    closed_real = [row for row in real if row.get("outcome_5d") is not None]
+    if closed_real:
+        lines.append(tg_section("Últimas ejecuciones"))
+        for row in closed_real[:4]:
             outcome = row.get("outcome_5d")
-            if pnl is None and shown >= 3:
-                continue
-            precision = _precision_label(row.get("execution_precision"))
-            precision_txt = f" <code>{precision}</code>" if precision else ""
             lines.append(
-                f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> "
-                f"{_money(row.get('amount_ars'))}{precision_txt} -> 5D {_pct(outcome)} / {_money(pnl)}"
+                f"{_result_icon(outcome)} {_fmt_dt(row.get('decided_at'))} "
+                f"<b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> · "
+                f"{_pct(outcome)} · {_signed_money(row.get('pnl_5d_ars'))}"
             )
-            shown += 1
         lines.append("")
 
     if plans:
-        lines += [
-            tg_section("Bot vs humano económico"),
-            "   Plan-level no deduplicado; FOLLOWED confirmado usa plan_execution_attributions.",
-        ]
-        shown = 0
-        for row in plans:
-            if shown >= 8:
-                break
-            status = row.get("override_status") or "UNKNOWN"
-            bot_pnl = row.get("bot_pnl_5d_ars")
-            if bot_pnl is None and shown >= 4:
-                continue
-            precision = _precision_label(
-                row.get("same_executed_at_precision")
-                or row.get("opposite_executed_at_precision")
-            )
-            precision_txt = f" | <code>{precision}</code>" if precision else ""
+        lines.append(tg_section("Planes recientes"))
+        for row in plans[:5]:
+            icon, label = _status_display(row.get("override_status"))
+            mark = pending_by_id.get(row.get("id")) or {}
+            if mark.get("mark_return") is not None:
+                result = f"bot mark {_pct(mark.get('mark_return'))}"
+            elif row.get("outcome_5d") is not None:
+                result = f"bot 5D {_pct(row.get('outcome_5d'))}"
+            else:
+                result = "sin outcome maduro"
             lines.append(
-                f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> "
-                f"<code>{escape(str(status))}</code> target {_money(row.get('target_amount_ars'))} | "
-                f"bot {_money(bot_pnl)} | humano {_money(row.get('human_pnl_5d_ars'))} | "
-                f"delta {_money(row.get('human_vs_bot_5d_ars'))}{precision_txt}"
+                f"{icon} {_fmt_dt(row.get('decided_at'))} "
+                f"<b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> · "
+                f"<code>{label}</code> · {result}"
             )
-            reason = row.get("reason")
-            if reason and status in {"IGNORED", "PARTIAL", "OPPOSITE", "OVERFOLLOWED"}:
-                lines.append(f"      Motivo: {escape(_clean_text(reason))[:160]}")
-            shown += 1
         lines.append("")
 
-    swap_rows = [row for row in radar if row.get("edge_vs")]
-    if swap_rows:
-        lines += [tg_section("Radar / swaps")]
-        swap_display = [
-            row for row in swap_rows if row.get("swap_alpha_5d") is not None
-        ] + [
-            row for row in swap_rows if row.get("swap_alpha_5d") is None
-        ]
-        for row in swap_display[:8]:
+    mature_swaps = [row for row in radar if row.get("swap_alpha_5d") is not None]
+    if mature_swaps:
+        ranked = sorted(mature_swaps, key=lambda row: _as_float(row.get("swap_alpha_5d")), reverse=True)
+        highlighted = ranked[:2]
+        highlighted += [row for row in ranked[-2:] if row not in highlighted]
+        lines.append(tg_section("Swaps destacados · 2 mejores / 2 peores"))
+        for row in highlighted:
+            alpha = row.get("swap_alpha_5d")
             lines.append(
-                f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('ticker')))}</b> vs "
-                f"<b>{escape(str(row.get('edge_vs')))}</b> | "
-                f"cand {_pct(row.get('outcome_5d'))} vs base {_pct(row.get('edge_outcome_5d'))} | "
-                f"alpha {_pct(row.get('swap_alpha_5d'))} / {_money(row.get('swap_alpha_5d_ars'))}"
-            )
-        lines.append("   Nota: swap mide candidato vs activo sacrificado guardado en edge_vs.")
-        lines.append("")
-
-    if pending:
-        lines += [tg_section("Pendientes vivos")]
-        lines.append("   No son outcomes cerrados; muestran como vienen con ultimo precio guardado.")
-        for row in pending[:8]:
-            lines.append(
-                f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> "
-                f"[{escape(str(row.get('source')))}] {_money(row.get('amount_ars'))} -> "
-                f"{_pct(row.get('mark_return'))} / {_money(row.get('mark_pnl_ars'))}"
+                f"{_result_icon(alpha)} <b>{escape(str(row.get('ticker')))}</b> vs "
+                f"{escape(str(row.get('edge_vs')))} · alpha {_pct(alpha)}"
             )
         lines.append("")
 
     lines += [
-        tg_note("Ledger descriptivo: mide dinero y costo de oportunidad; no recalibra el cerebro del bot."),
+        tg_note("Bruto = antes de costos. Radar = teórico. Plan-level repite recomendaciones; normalizado deduplica operaciones."),
+        tg_note("/viability muestra EV neto, costos y gates. Solo auditoría; no cambia decisiones."),
     ]
     report = "\n".join(lines)
     valid_html, errors = validate_telegram_html(report)
