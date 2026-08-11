@@ -642,6 +642,16 @@ async def run_full(run_type: str = "FULL") -> dict:
                         reconciled_fills = await db.reconcile_broker_fills()
                         manual_fills = await db.materialize_unmatched_broker_fills()
                         if new_movements:
+                            try:
+                                attribution_summary = await db.sync_plan_execution_attributions()
+                                logger.info("run_full: plan-follow=%s", attribution_summary)
+                            except Exception as exc:
+                                logger.warning(
+                                    "run_full: plan-follow sync fallo (no critico): %s",
+                                    exc,
+                                    exc_info=True,
+                                )
+                        if new_movements:
                             movement_event_risk = await _safe_manual_event_risk_by_ticker(
                                 db,
                                 [movement.ticker for movement in new_movements],
@@ -2148,6 +2158,16 @@ class IntradayManager:
                                 saved_fills = await db.save_broker_fills(fills)
                                 reconciled_fills = await db.reconcile_broker_fills()
                                 manual_fills = await db.materialize_unmatched_broker_fills()
+                                if new_movements:
+                                    try:
+                                        attribution_summary = await db.sync_plan_execution_attributions()
+                                        logger.info("Scraper loop: plan-follow=%s", attribution_summary)
+                                    except Exception as exc:
+                                        logger.warning(
+                                            "Scraper loop: plan-follow sync fallo (no critico): %s",
+                                            exc,
+                                            exc_info=True,
+                                        )
                                 if new_movements:
                                     movement_event_risk = await _safe_manual_event_risk_by_ticker(
                                         db,

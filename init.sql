@@ -372,6 +372,66 @@ CREATE TABLE IF NOT EXISTS broker_movements (
     UNIQUE (source, external_movement_id)
 );
 
+-- Vinculo derivado y auditable entre planes formales y movimientos reales.
+-- No cambia decision_log ni implica ejecucion automatica. La tabla principal
+-- contiene una fila por respuesta operativa deduplicada; las tablas puente
+-- conservan todos los planes repetidos y movimientos que la componen.
+CREATE TABLE IF NOT EXISTS plan_execution_attributions (
+    id                          BIGSERIAL PRIMARY KEY,
+    attribution_key             TEXT NOT NULL UNIQUE,
+    representative_decision_log_id BIGINT NOT NULL REFERENCES decision_log(id) ON DELETE CASCADE,
+    owner_chat_id               BIGINT,
+    ticker                      TEXT NOT NULL,
+    side                        TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    plan_decided_at             TIMESTAMPTZ NOT NULL,
+    executed_at                 TIMESTAMPTZ NOT NULL,
+    executed_at_precision       TEXT NOT NULL DEFAULT 'unknown',
+    executed_at_source          TEXT NOT NULL DEFAULT 'unknown',
+    target_amount_ars           NUMERIC(20,4) NOT NULL,
+    executed_amount_ars         NUMERIC(20,4) NOT NULL,
+    follow_ratio                FLOAT NOT NULL,
+    follow_status               TEXT NOT NULL CHECK (follow_status IN ('PARTIAL', 'FOLLOWED', 'OVERFOLLOWED')),
+    temporal_quality            TEXT NOT NULL CHECK (temporal_quality IN ('CONFIRMED_SEQUENCE', 'AMBIGUOUS_SAME_DAY')),
+    eligible_for_viability      BOOLEAN NOT NULL DEFAULT FALSE,
+    match_window_sessions       INTEGER NOT NULL DEFAULT 2,
+    matching_version            TEXT NOT NULL,
+    metadata                    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS plan_execution_attribution_plans (
+    attribution_id             BIGINT NOT NULL REFERENCES plan_execution_attributions(id) ON DELETE CASCADE,
+    decision_log_id            BIGINT NOT NULL REFERENCES decision_log(id) ON DELETE CASCADE,
+    is_representative          BOOLEAN NOT NULL DEFAULT FALSE,
+    target_amount_ars          NUMERIC(20,4) NOT NULL,
+    matched_amount_ars         NUMERIC(20,4) NOT NULL,
+    follow_ratio               FLOAT NOT NULL,
+    follow_status              TEXT NOT NULL,
+    temporal_quality           TEXT NOT NULL,
+    PRIMARY KEY (attribution_id, decision_log_id)
+);
+
+CREATE TABLE IF NOT EXISTS plan_execution_attribution_movements (
+    attribution_id             BIGINT NOT NULL REFERENCES plan_execution_attributions(id) ON DELETE CASCADE,
+    broker_movement_id         BIGINT NOT NULL REFERENCES broker_movements(id) ON DELETE CASCADE,
+    amount_ars                 NUMERIC(20,4) NOT NULL,
+    PRIMARY KEY (attribution_id, broker_movement_id),
+    UNIQUE (broker_movement_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_execution_attributions_plan
+    ON plan_execution_attributions(representative_decision_log_id);
+CREATE INDEX IF NOT EXISTS idx_plan_execution_attributions_viability
+    ON plan_execution_attributions(executed_at DESC)
+    WHERE eligible_for_viability = TRUE;
+CREATE INDEX IF NOT EXISTS idx_plan_execution_attributions_ticker
+    ON plan_execution_attributions(ticker, side, executed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_plan_execution_attribution_plans_decision
+    ON plan_execution_attribution_plans(decision_log_id);
+CREATE INDEX IF NOT EXISTS idx_plan_execution_attribution_movements_attribution
+    ON plan_execution_attribution_movements(attribution_id);
+
 -- FEATURE: ML - feature store experimental para entrenamiento e inferencia.
 CREATE TABLE IF NOT EXISTS ml_decision_features (
     decision_log_id                  BIGINT PRIMARY KEY REFERENCES decision_log(id) ON DELETE CASCADE,

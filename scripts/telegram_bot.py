@@ -2347,7 +2347,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
     "net_decisions": "Calculando neto por corrida y decisión...",
-    "viability":     "Auditando viabilidad bot-only...",
+    "viability":     "Auditando bot-only, seguido y manual...",
     "override_audit": "Comparando planes del bot contra movimientos reales...",
     "decision_ledger": "Calculando atribución económica...",
     "policy_tree":   "Construyendo árbol operativo...",

@@ -1,9 +1,10 @@
 """
-Run the read-only 180d viability audit.
+Run the 180d viability audit.
 
-The report separates bot-only and manual-only execution, measures
+The report separates bot-only, followed-by-user and manual-only execution, measures
 5d/10d/20d/40d independently, and checks positive IC, lower drawdown, and
-better net EV after costs. It does not change thresholds or planner behavior.
+better net EV after costs. It refreshes derived plan/movement links but does not
+change thresholds, planner behavior, source movements, or decision_log.
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import asyncpg
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.analysis.viability_audit import (  # noqa: E402
@@ -24,6 +27,7 @@ from src.analysis.viability_audit import (  # noqa: E402
     run_viability_audit,
 )
 from src.collector.notifier import TelegramNotifier  # noqa: E402
+from src.analysis.plan_follow_attribution import sync_plan_execution_attributions  # noqa: E402
 from src.core.config import get_config  # noqa: E402
 from src.core.logger import get_logger  # noqa: E402
 from src.core.telegram_format import validate_telegram_html  # noqa: E402
@@ -43,6 +47,13 @@ async def main() -> None:
     args = parser.parse_args()
 
     cfg = get_config()
+    dsn = cfg.database.url.replace("postgresql+asyncpg://", "postgresql://")
+    conn = await asyncpg.connect(dsn)
+    try:
+        await sync_plan_execution_attributions(conn, days=args.days)
+    finally:
+        await conn.close()
+
     report = await run_viability_audit(
         ViabilityAuditConfig(
             database_url=cfg.database.url,

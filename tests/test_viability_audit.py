@@ -98,6 +98,45 @@ def test_viability_audit_separates_bot_and_manual_primary_metrics():
     assert "VIABLE PARA 180D" in report.verdict
 
 
+def test_viability_audit_reports_followed_scope_without_changing_bot_gates():
+    rows = [
+        _row(
+            source="execution_plan",
+            status="EXECUTED",
+            final_score=0.1,
+            outcome_5d=0.02,
+        ),
+        _row(
+            source="plan_execution_attribution",
+            status="EXECUTED_FOLLOWED",
+            final_score=0.1,
+            outcome_5d=0.05,
+        ),
+    ]
+    frame = pd.DataFrame(rows)
+    frame.attrs["followed_summary"] = {
+        "attributions": 2,
+        "eligible": 1,
+        "ambiguous": 1,
+        "plan_links": 3,
+    }
+
+    report = run_viability_audit_sync(
+        frame,
+        ViabilityAuditConfig(
+            database_url="postgresql://unused",
+            horizons=("5d",),
+            min_sample=1,
+            cost_bps=0,
+        ),
+    )
+
+    assert report.metrics["bot_only"]["5d"].n == 1
+    assert report.metrics["followed"]["5d"].n == 1
+    assert report.metrics["followed"]["5d"].net_ev == 0.05
+    assert report.followed_summary["ambiguous"] == 1
+
+
 def test_viability_audit_prefers_executable_outcome_when_present():
     report = run_viability_audit_sync(
         pd.DataFrame(
@@ -207,6 +246,9 @@ def test_viability_loader_excludes_decisions_backed_only_by_superseded_fills(mon
                     ]
                 ]
             return []
+
+        async def fetchval(self, statement, *args):
+            return False
 
         async def close(self):
             return None

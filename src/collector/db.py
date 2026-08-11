@@ -68,6 +68,9 @@ from src.collector.schema_migrations import (
     EXECUTION_TIMESTAMP_META_SQL,
     OUTCOME_HORIZON_SQL,
 )
+from src.analysis.plan_follow_attribution import (
+    sync_plan_execution_attributions as sync_plan_execution_attributions_derived,
+)
 from src.core.credentials import CredentialCipher, UserCredentials
 
 try:
@@ -588,6 +591,21 @@ class PortfolioDatabase:
             raise RuntimeError("Llamar connect() primero")
         async with self._pool.acquire() as conn:
             await self._ensure_manual_market_events_schema(conn)
+
+    async def sync_plan_execution_attributions(
+        self,
+        *,
+        days: int = 180,
+        match_window_sessions: int = 2,
+    ) -> dict[str, int]:
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        async with self._pool.acquire() as conn:
+            return await sync_plan_execution_attributions_derived(
+                conn,
+                days=days,
+                match_window_sessions=match_window_sessions,
+            )
 
     async def _ensure_corporate_actions_schema(self, conn) -> None:
         if self._corporate_actions_ready:

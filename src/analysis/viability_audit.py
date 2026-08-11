@@ -1,7 +1,7 @@
 """
 Read-only viability audit for the trading project.
 
-This module separates bot-only and manual-only execution as the primary metric,
+This module separates bot-only, followed-by-user and manual-only execution,
 measures 5d/10d/20d/40d independently, and reports whether the bot clears a
 conservative bar: positive IC, lower drawdown, and better net EV after costs.
 It does not change guards, thresholds, optimizer weights, or execution logic.
@@ -10,6 +10,7 @@ It does not change guards, thresholds, optimizer weights, or execution logic.
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -25,9 +26,10 @@ from src.analysis.regression_audit import DEFAULT_HORIZONS, normalize_decision_f
 
 ACTIVE_ACTIONS = ("BUY", "SELL", "SELL_PARTIAL", "SELL_FULL")
 SELL_ACTIONS = ("SELL", "SELL_PARTIAL", "SELL_FULL")
-SCOPE_ORDER = ("bot_only", "manual_only")
+SCOPE_ORDER = ("bot_only", "followed", "manual_only")
 SCOPE_LABELS = {
     "bot_only": "bot-only",
+    "followed": "seguido",
     "manual_only": "manual-only",
 }
 
@@ -79,6 +81,7 @@ class ViabilityAuditReport:
     gates: list[ViabilityGate]
     verdict: str
     warnings: list[str]
+    followed_summary: dict[str, int]
 
 
 async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFrame:
@@ -142,13 +145,144 @@ async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFr
             """,
             cutoff,
         )
+        rows = [dict(row) for row in rows]
+
+        followed_rows = []
+        followed_summary = {
+            "attributions": 0,
+            "eligible": 0,
+            "ambiguous": 0,
+            "plan_links": 0,
+        }
+        attribution_ready = await conn.fetchval(
+            "SELECT to_regclass('public.plan_execution_attributions') IS NOT NULL"
+        )
+        if attribution_ready:
+            selected_followed = []
+            for column in selected:
+                if column == "source":
+                    selected_followed.append("'plan_execution_attribution'::text AS source")
+                elif column == "status":
+                    selected_followed.append("'EXECUTED_FOLLOWED'::text AS status")
+                elif column == "metric_scope":
+                    selected_followed.append("'followed_plan'::text AS metric_scope")
+                elif column == "is_primary_metric":
+                    selected_followed.append("TRUE AS is_primary_metric")
+                else:
+                    selected_followed.append(f"dl.{column}")
+            followed_rows = await conn.fetch(
+                f"""
+                SELECT
+                    {", ".join(selected_followed)},
+                    attribution.id AS attribution_id,
+                    attribution.follow_status,
+                    attribution.temporal_quality,
+                    attribution.follow_ratio,
+                    attribution.executed_amount_ars AS attributed_amount_ars,
+                    attribution.executed_at AS attributed_executed_at
+                FROM plan_execution_attributions attribution
+                JOIN decision_log dl
+                  ON dl.id = attribution.representative_decision_log_id
+                WHERE attribution.plan_decided_at >= $1
+                  AND attribution.eligible_for_viability = TRUE
+                ORDER BY attribution.plan_decided_at
+                """,
+                cutoff,
+            )
+            summary_row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*) AS attributions,
+                    COUNT(*) FILTER (WHERE eligible_for_viability) AS eligible,
+                    COUNT(*) FILTER (WHERE NOT eligible_for_viability) AS ambiguous,
+                    (
+                        SELECT COUNT(*)
+                        FROM plan_execution_attribution_plans link
+                        JOIN plan_execution_attributions linked
+                          ON linked.id = link.attribution_id
+                        WHERE linked.plan_decided_at >= $1
+                    ) AS plan_links
+                FROM plan_execution_attributions
+                WHERE plan_decided_at >= $1
+                """,
+                cutoff,
+            )
+            if summary_row:
+                followed_summary = {
+                    key: int(summary_row[key] or 0)
+                    for key in followed_summary
+                }
+            linked_external_ids = {
+                str(row["external_movement_id"])
+                for row in await conn.fetch(
+                    """
+                    SELECT bm.external_movement_id
+                    FROM plan_execution_attribution_movements link
+                    JOIN plan_execution_attributions attribution
+                      ON attribution.id = link.attribution_id
+                    JOIN broker_movements bm
+                      ON bm.id = link.broker_movement_id
+                    WHERE attribution.plan_decided_at >= $1
+                      AND attribution.eligible_for_viability = TRUE
+                    """,
+                    cutoff,
+                )
+            }
+            duplicate_synthetic_ids = {
+                str(row["external_movement_id"])
+                for row in await conn.fetch(
+                    """
+                    SELECT synthetic.external_movement_id
+                    FROM broker_movements synthetic
+                    WHERE synthetic.external_movement_id LIKE 'synthetic:%'
+                      AND synthetic.executed_at >= $1
+                      AND EXISTS (
+                          SELECT 1
+                          FROM broker_movements real
+                          WHERE real.external_movement_id NOT LIKE 'synthetic:%'
+                            AND real.ticker = synthetic.ticker
+                            AND real.movement_type = synthetic.movement_type
+                            AND (real.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date =
+                                (synthetic.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                            AND NOT (COALESCE(real.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
+                      )
+                    """,
+                    cutoff,
+                )
+            }
+            for row in rows:
+                payload = row.get("layers")
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except (TypeError, ValueError):
+                        payload = {}
+                movement_meta = payload.get("broker_movement", {}) if isinstance(payload, dict) else {}
+                external_ids = {
+                    str(value) for value in movement_meta.get("external_fill_ids", []) if value
+                }
+                row["attributed_followed"] = bool(external_ids & linked_external_ids)
+                row["duplicate_movement"] = bool(external_ids) and external_ids.issubset(
+                    duplicate_synthetic_ids
+                )
     finally:
         await conn.close()
 
-    if not rows:
-        return pd.DataFrame(columns=selected)
+    if not rows and not followed_rows:
+        frame = pd.DataFrame(columns=selected)
+        frame.attrs["followed_summary"] = followed_summary
+        return frame
 
-    return pd.DataFrame([dict(r) for r in rows])
+    frame = pd.concat(
+        [
+            pd.DataFrame([dict(row) for row in rows]),
+            pd.DataFrame([dict(row) for row in followed_rows]),
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    frame.attrs["followed_summary"] = followed_summary
+    return frame
 
 
 async def run_viability_audit(config: ViabilityAuditConfig) -> ViabilityAuditReport:
@@ -172,9 +306,12 @@ def run_viability_audit_sync(
             gates=[],
             verdict="SIN MUESTRA: todavia no hay decisiones ejecutadas con outcomes.",
             warnings=["No se cargaron filas desde decision_log."],
+            followed_summary=dict(frame.attrs.get("followed_summary") or {}),
         )
 
     df = _prepare_frame(frame, config.horizons)
+    followed_summary = dict(frame.attrs.get("followed_summary") or {})
+    followed_summary["comparable"] = int(_scope_mask(df, "followed").sum())
     metrics: dict[str, dict[str, HorizonMetrics]] = {}
     cost = float(config.cost_bps) / 10_000.0
 
@@ -203,6 +340,7 @@ def run_viability_audit_sync(
         gates=gates,
         verdict=verdict,
         warnings=warnings,
+        followed_summary=followed_summary,
     )
 
 
@@ -215,7 +353,9 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
             f"costo: <b>{cost:.2%}</b> | "
             f"muestra minima: <b>{int(report.min_sample)}</b>"
         ),
-        "Metrica principal: bot-only vs manual-only. Guards y thresholds quedan intactos.",
+        "Scopes separados: bot-only, planes seguidos por usuario y manual-only.",
+        "Los gates siguen usando bot-only; seguido es evidencia descriptiva deduplicada.",
+        "Guards y thresholds quedan intactos.",
         "",
         "<b>Metricas por horizonte</b>",
         *_render_metric_table(report),
@@ -242,6 +382,20 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
         for warning in report.warnings[:6]:
             lines.append(f"   - {escape(warning)}")
 
+    followed = report.followed_summary or {}
+    if followed.get("attributions"):
+        lines += [
+            "",
+            "<b>Trazabilidad seguida</b>",
+            (
+                f"   Operaciones: <b>{int(followed.get('attributions', 0))}</b> | "
+                f"elegibles: <b>{int(followed.get('eligible', 0))}</b> | "
+                f"comparables: <b>{int(followed.get('comparable', 0))}</b> | "
+                f"hora ambigua: <b>{int(followed.get('ambiguous', 0))}</b> | "
+                f"planes vinculados: <b>{int(followed.get('plan_links', 0))}</b>"
+            ),
+        ]
+
     return "\n".join(lines)
 
 
@@ -261,6 +415,7 @@ def render_viability_chart(
     muted = "#9fb0bd"
     grid = "#23313d"
     bot_color = "#4cb3ff"
+    followed_color = "#ffd166"
     manual_color = "#9bd46a"
     trend_color = "#b88cff"
     reversion_color = "#ffb86b"
@@ -281,13 +436,13 @@ def render_viability_chart(
     draw.text((54, 42), f"Viability Audit {int(report.days)}d", fill=text, font=title_font)
     draw.text(
         (56, 92),
-        f"Bot-only vs manual-only | costo {float(report.cost_bps) / 10_000:.2%} | muestra minima {report.min_sample}",
+        f"Bot-only / seguido / manual-only | costo {float(report.cost_bps) / 10_000:.2%} | muestra minima {report.min_sample}",
         fill=muted,
         font=small_font,
     )
     draw.text(
         (56, 124),
-        "Read-only: no cambia guards, thresholds ni planner.",
+        "La atribucion es derivada: no cambia guards, thresholds ni planner.",
         fill=muted,
         font=small_font,
     )
@@ -332,6 +487,7 @@ def render_viability_chart(
         horizons=horizons,
         series=[
             ("bot", [_metric(report, "bot_only", h).net_ev for h in horizons], bot_color),
+            ("seguido", [_metric(report, "followed", h).net_ev for h in horizons], followed_color),
             ("manual", [_metric(report, "manual_only", h).net_ev for h in horizons], manual_color),
         ],
         value_fmt=_fmt_chart_pct,
@@ -371,6 +527,7 @@ def render_viability_chart(
         horizons=horizons,
         series=[
             ("bot", [_metric(report, "bot_only", h).max_drawdown for h in horizons], bot_color),
+            ("seguido", [_metric(report, "followed", h).max_drawdown for h in horizons], followed_color),
             ("manual", [_metric(report, "manual_only", h).max_drawdown for h in horizons], manual_color),
         ],
         value_fmt=_fmt_chart_pct,
@@ -391,6 +548,7 @@ def render_viability_chart(
         text=text,
         muted=muted,
         bot_color=bot_color,
+        followed_color=followed_color,
         manual_color=manual_color,
         danger=danger,
         ok=ok,
@@ -637,6 +795,7 @@ def _draw_sample_panel(
     text: str,
     muted: str,
     bot_color: str,
+    followed_color: str,
     manual_color: str,
     danger: str,
     ok: str,
@@ -656,24 +815,27 @@ def _draw_sample_panel(
 
     y = y1 + 105
     draw.text((x1 + 24, y), "Hz", fill=muted, font=mono_font)
-    draw.text((x1 + 85, y), "bot n", fill=bot_color, font=mono_font)
-    draw.text((x1 + 170, y), "bot EV", fill=bot_color, font=mono_font)
-    draw.text((x1 + 270, y), "bot IC", fill=bot_color, font=mono_font)
-    draw.text((x1 + 370, y), "manual n", fill=manual_color, font=mono_font)
-    draw.text((x1 + 485, y), "manual EV", fill=manual_color, font=mono_font)
+    draw.text((x1 + 72, y), "bot n", fill=bot_color, font=mono_font)
+    draw.text((x1 + 137, y), "bot EV", fill=bot_color, font=mono_font)
+    draw.text((x1 + 226, y), "seg n", fill=followed_color, font=mono_font)
+    draw.text((x1 + 294, y), "seg EV", fill=followed_color, font=mono_font)
+    draw.text((x1 + 388, y), "man n", fill=manual_color, font=mono_font)
+    draw.text((x1 + 458, y), "man EV", fill=manual_color, font=mono_font)
     y += 30
 
     for horizon in report.metrics.get("bot_only", {}):
         bot = _metric(report, "bot_only", horizon)
+        followed = _metric(report, "followed", horizon)
         manual = _metric(report, "manual_only", horizon)
         ev_color = ok if bot.net_ev is not None and bot.net_ev > 0 else danger
         ic_color = ok if bot.ic_final is not None and bot.ic_final > 0 else danger
         draw.text((x1 + 24, y), horizon, fill=text, font=mono_font)
-        draw.text((x1 + 85, y), str(bot.n), fill=text, font=mono_font)
-        draw.text((x1 + 170, y), _fmt_chart_pct(bot.net_ev), fill=ev_color, font=mono_font)
-        draw.text((x1 + 270, y), _fmt_chart_float(bot.ic_final), fill=ic_color, font=mono_font)
-        draw.text((x1 + 370, y), str(manual.n), fill=text, font=mono_font)
-        draw.text((x1 + 485, y), _fmt_chart_pct(manual.net_ev), fill=text, font=mono_font)
+        draw.text((x1 + 72, y), str(bot.n), fill=text, font=mono_font)
+        draw.text((x1 + 137, y), _fmt_chart_pct(bot.net_ev), fill=ev_color, font=mono_font)
+        draw.text((x1 + 226, y), str(followed.n), fill=text, font=mono_font)
+        draw.text((x1 + 294, y), _fmt_chart_pct(followed.net_ev), fill=followed_color, font=mono_font)
+        draw.text((x1 + 388, y), str(manual.n), fill=text, font=mono_font)
+        draw.text((x1 + 458, y), _fmt_chart_pct(manual.net_ev), fill=text, font=mono_font)
         y += 34
 
     y += 18
@@ -742,8 +904,20 @@ def _scope_mask(df: pd.DataFrame, scope: str) -> pd.Series:
     if scope == "bot_only":
         return source.eq("execution_plan") & status.eq("EXECUTED")
 
+    if scope == "followed":
+        return source.eq("plan_execution_attribution") & status.eq("EXECUTED_FOLLOWED")
+
     if scope == "manual_only":
-        return status.eq("EXECUTED_MANUAL") | source.isin(["broker_movement", "broker_fill"])
+        attributed = df.get(
+            "attributed_followed",
+            pd.Series(False, index=df.index, dtype=bool),
+        ).astype("boolean").fillna(False).astype(bool)
+        duplicate = df.get(
+            "duplicate_movement",
+            pd.Series(False, index=df.index, dtype=bool),
+        ).astype("boolean").fillna(False).astype(bool)
+        manual = status.eq("EXECUTED_MANUAL") | source.isin(["broker_movement", "broker_fill"])
+        return manual & ~attributed & ~duplicate
 
     raise ValueError(f"Unsupported scope: {scope}")
 
@@ -761,7 +935,8 @@ def _compute_horizon_metrics(
 
     data = frame.copy()
     data["_gross"] = pd.to_numeric(data[outcome_col], errors="coerce")
-    data = data.replace([np.inf, -np.inf], np.nan).dropna(subset=["_gross"])
+    data.loc[~np.isfinite(data["_gross"].astype(float)), "_gross"] = np.nan
+    data = data.dropna(subset=["_gross"])
 
     if data.empty:
         return _empty_horizon(scope, horizon)
@@ -873,11 +1048,18 @@ def _build_warnings(df: pd.DataFrame, config: ViabilityAuditConfig) -> list[str]
 
     source_counts = df["source"].value_counts(dropna=False).to_dict()
     bot_count = int(_scope_mask(df, "bot_only").sum())
+    followed_count = int(_scope_mask(df, "followed").sum())
     manual_count = int(_scope_mask(df, "manual_only").sum())
     if bot_count == 0:
         warnings.append("No hay filas bot-only execution_plan/EXECUTED en la ventana.")
     if manual_count == 0:
         warnings.append("No hay filas manual-only/broker en la ventana.")
+    if followed_count == 0:
+        warnings.append("No hay atribuciones plan-seguido elegibles en la ventana.")
+    else:
+        warnings.append(
+            f"Seguimiento normalizado: {followed_count} operaciones deduplicadas elegibles."
+        )
     if bot_count and manual_count:
         warnings.append(
             f"Se separaron scopes: bot-only={bot_count}, manual-only={manual_count}; no se mezclan en el EV principal."
