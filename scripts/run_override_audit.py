@@ -35,6 +35,10 @@ from src.analysis.inferred_activity import (
     fetch_inferred_activity,
     mark_inferred_activity_types,
 )
+from src.analysis.plan_follow_reporting import (
+    apply_plan_follow_overlay,
+    fetch_plan_follow_reporting_data,
+)
 from src.collector.notifier import TelegramNotifier
 from src.core.config import get_config
 from src.core.telegram_format import (
@@ -336,6 +340,7 @@ async def _fetch_audit_rows(
     manual_only = await conn.fetch(
         """
         SELECT
+            bm.id,
             bm.executed_at,
             bm.executed_at_precision,
             bm.executed_at_source,
@@ -587,14 +592,17 @@ def render_report(
     match_window_days: int,
     activity_context: dict | None = None,
     inferred_activity: list[dict] | None = None,
+    attribution_data: dict | None = None,
 ) -> str:
     attach_inferred_activity(
         rows,
         inferred_activity or [],
         match_window_sessions=match_window_days,
     )
+    attribution_data = attribution_data or {}
+    apply_plan_follow_overlay(rows, attribution_data.get("links_by_plan") or {})
     for row in rows:
-        row["override_status"] = _classify(row)
+        row["override_status"] = row.get("normalized_override_status") or _classify(row)
 
     confirmed_snapshot_matches = {
         (
@@ -609,6 +617,7 @@ def render_report(
     manual_only = [
         row
         for row in manual_only
+        if int(row.get("id") or 0) not in (attribution_data.get("linked_movement_ids") or set())
         if (
             str(row.get("ticker") or "").upper(),
             str(row.get("movement_type") or "").upper(),
@@ -618,6 +627,8 @@ def render_report(
     ]
 
     summary = _summary(rows)
+    normalized_summary = attribution_data.get("summary") or {}
+    normalized_status = normalized_summary.get("by_status") or {}
     by_status = summary["by_status"]
     by_intent = summary.get("by_intent") or {}
     by_intent_status = by_intent.get("by_status") or {}
@@ -630,6 +641,23 @@ def render_report(
         "   Compara planes aprobados/ejecutados del bot contra movimientos reales Cocos.",
         "   No cambia analysis, optimizer, planner ni thresholds.",
         "   Si una señal EOD no tuvo precio fresco de apertura, queda PENDING_OPEN.",
+        "",
+        tg_section("Atribución normalizada"),
+        (
+            f"   Operaciones: <b>{normalized_summary.get('operations', 0)}</b> | "
+            f"elegibles: <b>{normalized_summary.get('eligible', 0)}</b> | "
+            f"ambiguas: <b>{normalized_summary.get('ambiguous', 0)}</b>"
+        ),
+        (
+            f"   FOLLOWED: {normalized_status.get('FOLLOWED', 0)} | "
+            f"OVER: {normalized_status.get('OVERFOLLOWED', 0)} | "
+            f"PARTIAL: {normalized_status.get('PARTIAL', 0)}"
+        ),
+        (
+            f"   Planes vinculados: <b>{normalized_summary.get('plan_links', 0)}</b> | "
+            "una operación real cuenta una sola vez."
+        ),
+        "   Fuente primaria para FOLLOWED/PARTIAL/OVERFOLLOWED confirmados.",
         "",
         tg_section("Resumen"),
         f"   Planes aprobados/ejecutados: <b>{summary['total']}</b>",
@@ -734,6 +762,8 @@ def render_report(
             precision_txt = f" | <code>{precision}</code>" if precision else ""
             if row.get("match_evidence") == "portfolio_snapshot":
                 precision_txt += " | <code>SNAPSHOT</code>"
+            elif row.get("match_evidence") == "plan_execution_attribution":
+                precision_txt += " | <code>ATTRIBUTION</code>"
             lines.append(
                 f"   {_fmt_dt(row.get('decided_at'))} <b>{escape(str(row.get('decision')))} {escape(str(row.get('ticker')))}</b> "
                 f"<code>{status}</code> target {target} | mov. {same}{same_ratio_txt} -> {result}{precision_txt}"
@@ -771,6 +801,7 @@ async def async_main(args: argparse.Namespace) -> int:
     conn = await asyncpg.connect(dsn)
     activity_context = {}
     inferred_activity = []
+    attribution_data = {}
     try:
         rows, manual_only = await _fetch_audit_rows(
             conn,
@@ -781,6 +812,11 @@ async def async_main(args: argparse.Namespace) -> int:
         activity_context = await _fetch_activity_context(conn)
         inferred_activity = await fetch_inferred_activity(conn, days=min(args.days, 7))
         await mark_inferred_activity_types(conn, inferred_activity)
+        attribution_data = await fetch_plan_follow_reporting_data(
+            conn,
+            days=args.days,
+            owner_chat_id=args.owner_chat_id,
+        )
     finally:
         await conn.close()
 
@@ -791,6 +827,7 @@ async def async_main(args: argparse.Namespace) -> int:
         match_window_days=args.match_window_days,
         activity_context=activity_context,
         inferred_activity=inferred_activity,
+        attribution_data=attribution_data,
     )
     print(report)
 

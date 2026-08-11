@@ -14,6 +14,10 @@ from src.analysis.override_classification import (
     override_same_ratio as _same_ratio,
     override_target as _target,
 )
+from src.analysis.plan_follow_reporting import (
+    apply_plan_follow_overlay,
+    fetch_plan_follow_reporting_data,
+)
 from src.core.telegram_format import (
     header as tg_header,
     note as tg_note,
@@ -332,6 +336,12 @@ async def fetch_decision_ledger(
         owner_chat_id,
     )
 
+    attribution_data = await fetch_plan_follow_reporting_data(
+        conn,
+        days=days,
+        owner_chat_id=owner_chat_id,
+    )
+
     radar_rows = await conn.fetch(
         """
         WITH radar AS (
@@ -530,8 +540,9 @@ async def fetch_decision_ledger(
                 row.get(f"outcome_{horizon}"),
             )
 
+    apply_plan_follow_overlay(plans, attribution_data.get("links_by_plan") or {})
     for row in plans:
-        row["override_status"] = classify_override(row)
+        row["override_status"] = row.get("normalized_override_status") or classify_override(row)
         row["same_ratio"] = _same_ratio(row)
         row["opposite_ratio"] = _opposite_ratio(row)
         for horizon in ("5d", "10d", "20d"):
@@ -607,6 +618,7 @@ async def fetch_decision_ledger(
             "swap_avg_alpha_5d": _mean([_as_float(r.get("swap_alpha_5d")) for r in swap_closed_5d]),
             "pending_mark_count": len(pending),
             "pending_mark_pnl_ars": _sum([r.get("mark_pnl_ars") for r in pending]),
+            "followed_normalized": attribution_data.get("summary") or {},
         },
         "real_executions": [_row(r) for r in real[:60]],
         "bot_vs_human": [_row(r) for r in plans[:60]],
@@ -617,6 +629,7 @@ async def fetch_decision_ledger(
 
 def render_decision_ledger(data: dict) -> str:
     summary = data.get("summary") or {}
+    followed = summary.get("followed_normalized") or {}
     plans = data.get("bot_vs_human") or []
     real = data.get("real_executions") or []
     radar = data.get("radar") or []
@@ -677,6 +690,12 @@ def render_decision_ledger(data: dict) -> str:
     lines += [
         tg_section("Resumen ARS"),
         (
+            f"   Seguido normalizado: <b>{followed.get('closed_5d', 0)}</b> cerradas 5D / "
+            f"{followed.get('eligible', 0)} elegibles | win bruto {_rate(followed.get('win_rate_5d'))} | "
+            f"retorno bruto medio {_pct(followed.get('avg_return_5d'))} | "
+            f"PnL bruto atribuido {_money(followed.get('actual_pnl_5d_ars'))}"
+        ),
+        (
             f"   Real ejecutado: <b>{summary.get('real_closed_5d', 0)}</b> cerradas 5D / "
             f"{summary.get('real_total', 0)} eventos | PnL 5D {_money(summary.get('real_pnl_5d_ars'))} | "
             f"win {_rate(summary.get('real_win_rate_5d'))}"
@@ -733,7 +752,10 @@ def render_decision_ledger(data: dict) -> str:
         lines.append("")
 
     if plans:
-        lines += [tg_section("Bot vs humano económico")]
+        lines += [
+            tg_section("Bot vs humano económico"),
+            "   Plan-level no deduplicado; FOLLOWED confirmado usa plan_execution_attributions.",
+        ]
         shown = 0
         for row in plans:
             if shown >= 8:
