@@ -346,55 +346,100 @@ def run_viability_audit_sync(
 
 def render_viability_audit(report: ViabilityAuditReport) -> str:
     cost = float(report.cost_bps) / 10_000.0
+    upper_verdict = report.verdict.upper()
+    if "VIABLE PARA" in upper_verdict:
+        verdict_icon = "✅"
+    elif "EDGE BOT NO VALIDADO" in upper_verdict or "EDGE BOT PARCIAL" in upper_verdict:
+        verdict_icon = "🟡"
+    elif "SIN MUESTRA" in upper_verdict or "NO VALIDADO" in upper_verdict:
+        verdict_icon = "⚪"
+    else:
+        verdict_icon = "🔴"
+
     lines = [
-        "<b>VIABILITY AUDIT</b>",
+        "<b>🧪 Viability</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         (
-            f"Periodo: <b>{int(report.days)}d</b> | "
-            f"costo: <b>{cost:.2%}</b> | "
-            f"muestra minima: <b>{int(report.min_sample)}</b>"
+            f"{int(report.days)}d · costo <b>{cost:.2%}</b> · "
+            f"gate mínimo <b>n{int(report.min_sample)}</b>"
         ),
-        "Scopes separados: bot-only, planes seguidos por usuario y manual-only.",
-        "Los gates siguen usando bot-only; seguido es evidencia descriptiva deduplicada.",
-        "Guards y thresholds quedan intactos.",
         "",
-        "<b>Metricas por horizonte</b>",
-        *_render_metric_table(report),
+        "<b>Veredicto</b>",
+        f"{verdict_icon} <b>{escape(report.verdict)}</b>",
         "",
-        "<b>Gates</b>",
+        "<b>Resultados netos por horizonte</b>",
+        f"<i>Win y EV descuentan {cost:.2%} de costo por operación.</i>",
     ]
 
+    horizons = list(report.metrics.get("bot_only", {}).keys())
+    for horizon in horizons:
+        bot = report.metrics.get("bot_only", {}).get(horizon)
+        followed = report.metrics.get("followed", {}).get(horizon)
+        manual = report.metrics.get("manual_only", {}).get(horizon)
+        lines += [
+            "",
+            f"<b>{escape(horizon.upper())}</b>",
+            (
+                f"🤖 Bot · n{bot.n if bot else 0} · win {_fmt_pct(bot.win_rate if bot else None, signed=False)} · "
+                f"EV <b>{_fmt_pct(bot.net_ev if bot else None)}</b>"
+            ),
+            (
+                f"🧭 Seguido · n{followed.n if followed else 0} · "
+                f"win {_fmt_pct(followed.win_rate if followed else None, signed=False)} · "
+                f"EV <b>{_fmt_pct(followed.net_ev if followed else None)}</b>"
+            ),
+            (
+                f"👤 Manual · n{manual.n if manual else 0} · "
+                f"win {_fmt_pct(manual.win_rate if manual else None, signed=False)} · "
+                f"EV <b>{_fmt_pct(manual.net_ev if manual else None)}</b>"
+            ),
+        ]
+
+    gate_labels = {
+        "muestra bot-only 5d": "Muestra bot 5D",
+        "IC bot-only 5d positivo": "IC bot 5D",
+        "EV neto bot-only 5d positivo": "EV neto bot 5D",
+        "EV neto bot-only mayor que manual-only 5d": "Ventaja vs manual",
+        "drawdown bot-only menor que manual-only 5d": "Drawdown vs manual",
+        "comparacion contra manual-only 5d": "Comparación manual",
+    }
+    lines += ["", "<b>Gates bot-only</b>"]
     if report.gates:
         for gate in report.gates:
-            label = "OK" if gate.passed is True else "NO" if gate.passed is False else "N/A"
-            lines.append(f"   {label} - {escape(gate.name)}: {escape(gate.detail)}")
+            icon = "✅" if gate.passed is True else "❌" if gate.passed is False else "⚪"
+            name = gate_labels.get(gate.name, gate.name)
+            lines.append(f"{icon} {escape(name)} · {escape(gate.detail)}")
     else:
-        lines.append("   N/A - sin muestra suficiente para evaluar gates.")
-
-    lines += [
-        "",
-        "<b>Lectura</b>",
-        f"   {escape(report.verdict)}",
-        "   No se aflojaron thresholds: esto mide evidencia, no cambia decisiones.",
-    ]
-
-    if report.warnings:
-        lines += ["", "<b>Caveats</b>"]
-        for warning in report.warnings[:6]:
-            lines.append(f"   - {escape(warning)}")
+        lines.append("⚪ Sin muestra suficiente para evaluar gates.")
 
     followed = report.followed_summary or {}
     if followed.get("attributions"):
         lines += [
             "",
-            "<b>Trazabilidad seguida</b>",
+            "<b>Trazabilidad de seguimiento</b>",
             (
-                f"   Operaciones: <b>{int(followed.get('attributions', 0))}</b> | "
-                f"elegibles: <b>{int(followed.get('eligible', 0))}</b> | "
-                f"comparables: <b>{int(followed.get('comparable', 0))}</b> | "
-                f"hora ambigua: <b>{int(followed.get('ambiguous', 0))}</b> | "
-                f"planes vinculados: <b>{int(followed.get('plan_links', 0))}</b>"
+                f"🔗 {int(followed.get('attributions', 0))} operaciones · "
+                f"{int(followed.get('eligible', 0))} elegibles · "
+                f"{int(followed.get('comparable', 0))} comparables"
+            ),
+            (
+                f"⚠️ {int(followed.get('ambiguous', 0))} ambiguas excluidas · "
+                f"{int(followed.get('plan_links', 0))} planes vinculados"
             ),
         ]
+
+    maturity_warning = next(
+        (warning for warning in report.warnings if "40d" in warning.lower()),
+        None,
+    )
+    if maturity_warning:
+        lines += ["", f"⚠️ {escape(maturity_warning)}"]
+
+    lines += [
+        "",
+        "<i>Bot-only define los gates. Seguido es una cohorte descriptiva; manual-only queda separado.</i>",
+        "<i>Guards y thresholds quedan intactos. Esto audita evidencia; no cambia decisiones.</i>",
+    ]
 
     return "\n".join(lines)
 

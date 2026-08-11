@@ -187,6 +187,49 @@ def test_viability_render_states_no_threshold_change():
     assert "Guards y thresholds quedan intactos" in text
 
 
+def test_viability_render_is_mobile_compact_and_scope_explicit():
+    rows = []
+    for source, status, outcome in [
+        ("execution_plan", "EXECUTED", 0.03),
+        ("plan_execution_attribution", "EXECUTED_FOLLOWED", 0.04),
+        ("broker_movement", "EXECUTED_MANUAL", -0.02),
+    ]:
+        rows.append(
+            _row(
+                source=source,
+                status=status,
+                final_score=0.1,
+                outcome_5d=outcome,
+            )
+        )
+    frame = pd.DataFrame(rows)
+    frame.attrs["followed_summary"] = {
+        "attributions": 2,
+        "eligible": 1,
+        "ambiguous": 1,
+        "plan_links": 3,
+    }
+    report = run_viability_audit_sync(
+        frame,
+        ViabilityAuditConfig(
+            database_url="postgresql://unused",
+            horizons=("5d",),
+            min_sample=1,
+            cost_bps=75,
+        ),
+    )
+
+    text = render_viability_audit(report)
+
+    assert len(text) < 4096
+    assert "Resultados netos por horizonte" in text
+    assert "🤖 Bot" in text
+    assert "🧭 Seguido" in text
+    assert "👤 Manual" in text
+    assert "Gates bot-only" in text
+    assert "ambiguas excluidas" in text
+
+
 def test_viability_chart_renders_png(tmp_path):
     report = run_viability_audit_sync(
         pd.DataFrame(
