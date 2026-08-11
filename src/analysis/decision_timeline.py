@@ -139,6 +139,7 @@ async def fetch_decision_timeline(
                 external_movement_id
             FROM broker_movements
             WHERE executed_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND NOT (COALESCE(raw_payload, '{}'::jsonb) ? 'superseded_by_real')
               AND ($2::text IS NULL OR ticker = $2)
             ORDER BY executed_at DESC, id DESC
             LIMIT $3

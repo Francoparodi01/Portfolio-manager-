@@ -81,3 +81,59 @@ def test_broker_fills_keep_synthetic_placeholder_until_real_ticket_arrives():
 
     assert len(fills) == 1
     assert fills[0].external_fill_id.startswith("synthetic:2026-06-09:TSM:BUY:")
+
+
+def test_broker_movements_parse_current_activity_payload():
+    payload = {
+        "data": [
+            {
+                "date": "2026-08-10",
+                "movements": [
+                    {
+                        "amount": -71575.43,
+                        "createdAt": "2026-08-10T21:22:27.489Z",
+                        "currency": "ARS",
+                        "executionDate": "2026-08-10",
+                        "idTicket": 140695362,
+                        "labelConcept": "Compraste",
+                        "movementType": "BUY",
+                        "price": None,
+                        "quantity": {"executed": 9, "total": 9},
+                        "settlementDate": "2026-08-10",
+                        "ticker": "YPFD",
+                    },
+                    {
+                        "amount": 65883.98,
+                        "createdAt": "2026-08-10T21:10:35.527Z",
+                        "currency": "ARS",
+                        "executionDate": "2026-08-10",
+                        "idTicket": 140670943,
+                        "labelConcept": "Vendiste",
+                        "movementType": "SELL",
+                        "price": None,
+                        "quantity": {"executed": -9, "total": -9},
+                        "settlementDate": "2026-08-10",
+                        "ticker": "ASTS",
+                    },
+                ],
+            }
+        ]
+    }
+
+    movements = broker_movements_from_cocos_payloads([payload])
+    fills = broker_fills_from_movements(movements)
+
+    assert [(m.ticker, m.movement_type, m.quantity) for m in movements] == [
+        ("YPFD", "BUY", 9),
+        ("ASTS", "SELL", -9),
+    ]
+    assert movements[0].amount == 71575.43
+    assert movements[1].amount == -65883.98
+    assert movements[0].price == 71575.43 / 9
+    assert movements[0].executed_at_precision == "date_only"
+    assert movements[0].executed_at_source == "cocos_movements.executionDate"
+    assert [(f.external_fill_id, f.ticker, f.side, f.quantity) for f in fills] == [
+        ("140695362", "YPFD", "BUY", 9),
+        ("140670943", "ASTS", "SELL", 9),
+    ]
+    assert fills[0].gross_amount_ars == 71575.43

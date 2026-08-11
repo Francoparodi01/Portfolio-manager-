@@ -94,7 +94,20 @@ def _precision_label(value) -> str:
         return "WINDOW"
     if text == "inferred":
         return "INFERRED"
+    if text == "observed_after":
+        return "OBSERVED_AFTER"
     return ""
+
+
+def _local_date(value):
+    if not value:
+        return None
+    if not isinstance(value, datetime):
+        try:
+            value = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    return value.astimezone(ART).date() if value.tzinfo else value.date()
 
 
 def _as_float(value, default: float = 0.0) -> float:
@@ -268,6 +281,7 @@ async def _fetch_audit_rows(
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = d.decision
+              AND NOT (COALESCE(bm.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
               AND d.match_start_at IS NOT NULL
               AND (
                   (
@@ -275,6 +289,8 @@ async def _fetch_audit_rows(
                       AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
                   )
                   OR (
+                      COALESCE(bm.executed_at_precision, 'unknown') = 'date_only'
+                      AND
                       d.match_day IS NOT NULL
                       AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
                       AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
@@ -292,6 +308,7 @@ async def _fetch_audit_rows(
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = CASE WHEN d.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
+              AND NOT (COALESCE(bm.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
               AND d.match_start_at IS NOT NULL
               AND (
                   (
@@ -299,6 +316,8 @@ async def _fetch_audit_rows(
                       AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
                   )
                   OR (
+                      COALESCE(bm.executed_at_precision, 'unknown') = 'date_only'
+                      AND
                       d.match_day IS NOT NULL
                       AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
                       AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
@@ -326,6 +345,7 @@ async def _fetch_audit_rows(
             bm.price
         FROM broker_movements bm
         WHERE bm.executed_at >= NOW() - ($1::int * INTERVAL '1 day')
+          AND NOT (COALESCE(bm.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
           AND bm.movement_type IN ('BUY', 'SELL')
           AND bm.ticker IS NOT NULL
           AND bm.quantity IS NOT NULL
@@ -391,6 +411,7 @@ async def _fetch_activity_context(conn: asyncpg.Connection) -> dict:
                     SELECT MAX(executed_at)
                     FROM broker_movements
                     WHERE movement_type IN ('BUY', 'SELL')
+                      AND NOT (COALESCE(raw_payload, '{}'::jsonb) ? 'superseded_by_real')
                       AND quantity IS NOT NULL
                       AND price IS NOT NULL
                 ) AS latest_broker_movement_at
@@ -490,6 +511,7 @@ async def _fetch_inferred_activity(conn: asyncpg.Connection, *, days: int = 7) -
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = CASE WHEN d.quantity_delta > 0 THEN 'BUY' ELSE 'SELL' END
+              AND NOT (COALESCE(bm.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
               AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date =
                   (d.scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
               AND ABS(ABS(bm.quantity::float) - ABS(d.quantity_delta)) <= 0.000001
@@ -573,6 +595,27 @@ def render_report(
     )
     for row in rows:
         row["override_status"] = _classify(row)
+
+    confirmed_snapshot_matches = {
+        (
+            str(row.get("ticker") or "").upper(),
+            str(row.get("decision") or "").upper(),
+            _local_date(row.get("inferred_executed_at")),
+        )
+        for row in rows
+        if row.get("match_evidence") == "cocos_movement+portfolio_snapshot"
+        and row.get("inferred_executed_at")
+    }
+    manual_only = [
+        row
+        for row in manual_only
+        if (
+            str(row.get("ticker") or "").upper(),
+            str(row.get("movement_type") or "").upper(),
+            _local_date(row.get("executed_at")),
+        )
+        not in confirmed_snapshot_matches
+    ]
 
     summary = _summary(rows)
     by_status = summary["by_status"]

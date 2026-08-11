@@ -64,6 +64,7 @@ def test_monitor_override_audit_keeps_executed_plans_visible():
 
     assert "status IN ('APPROVED', 'EXECUTED')" in source[start:end]
     assert "NULLIF(layers->>'amount_ars', '')::numeric" in source[start:end]
+    assert "COALESCE(bm.executed_at_precision, 'unknown') = 'date_only'" in source[start:end]
 
 
 def test_snapshot_activity_marks_plan_followed_provisionally_across_weekend():
@@ -91,3 +92,36 @@ def test_snapshot_activity_marks_plan_followed_provisionally_across_weekend():
     assert classify_override(plans[0]) == "FOLLOWED_PROVISIONAL"
     assert override_same_ratio(plans[0]) == 71_370 / 62_920
     assert plans[0]["match_evidence"] == "portfolio_snapshot"
+
+
+def test_confirmed_date_only_movement_uses_snapshot_chronology():
+    plans = [
+        _row(
+            ticker="YPFD",
+            decision="BUY",
+            target_amount_ars=62_920,
+            match_start_at=datetime(2026, 8, 6, 19, 8, tzinfo=timezone.utc),
+        ),
+        _row(
+            ticker="YPFD",
+            decision="BUY",
+            target_amount_ars=364_500,
+            match_start_at=datetime(2026, 8, 10, 19, 56, tzinfo=timezone.utc),
+        ),
+    ]
+    activity = [
+        {
+            "ticker": "YPFD",
+            "side": "BUY",
+            "scraped_at": datetime(2026, 8, 10, 15, 2, tzinfo=timezone.utc),
+            "inferred_amount_ars": 71_370,
+            "confirmed_at": datetime(2026, 8, 10, 15, 2, tzinfo=timezone.utc),
+            "activity_type": "HUMAN_TRADE_CANDIDATE",
+        }
+    ]
+
+    attach_inferred_activity(plans, activity, match_window_sessions=2)
+
+    assert classify_override(plans[0]) == "FOLLOWED"
+    assert plans[0]["match_evidence"] == "cocos_movement+portfolio_snapshot"
+    assert classify_override(plans[1]) == "IGNORED"

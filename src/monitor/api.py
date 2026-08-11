@@ -1501,6 +1501,7 @@ async def override_audit(request: web.Request) -> web.Response:
                 FROM broker_movements bm
                 WHERE bm.ticker = d.ticker
                   AND bm.movement_type = d.decision
+                  AND NOT (COALESCE(bm.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
                   AND d.match_start_at IS NOT NULL
                   AND (
                       (
@@ -1508,6 +1509,8 @@ async def override_audit(request: web.Request) -> web.Response:
                           AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
                       )
                       OR (
+                          COALESCE(bm.executed_at_precision, 'unknown') = 'date_only'
+                          AND
                           d.match_day IS NOT NULL
                           AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
                           AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
@@ -1525,6 +1528,7 @@ async def override_audit(request: web.Request) -> web.Response:
                 FROM broker_movements bm
                 WHERE bm.ticker = d.ticker
                   AND bm.movement_type = CASE WHEN d.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
+                  AND NOT (COALESCE(bm.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
                   AND d.match_start_at IS NOT NULL
                   AND (
                       (
@@ -1532,6 +1536,8 @@ async def override_audit(request: web.Request) -> web.Response:
                           AND bm.executed_at < d.match_start_at + ($2::int * INTERVAL '1 day')
                       )
                       OR (
+                          COALESCE(bm.executed_at_precision, 'unknown') = 'date_only'
+                          AND
                           d.match_day IS NOT NULL
                           AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date >= d.match_day
                           AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date < d.match_day + $2::int
@@ -1895,6 +1901,7 @@ async def human_activity(request: web.Request) -> web.Response:
                 FROM broker_movements bm
                 WHERE bm.ticker = d.ticker
                   AND bm.movement_type = CASE WHEN d.quantity_delta > 0 THEN 'BUY' ELSE 'SELL' END
+                  AND NOT (COALESCE(bm.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
                   AND bm.executed_at >= d.prev_scraped_at - INTERVAL '15 minutes'
                   AND bm.executed_at <= d.scraped_at + INTERVAL '12 hours'
                   AND bm.quantity IS NOT NULL
@@ -2101,12 +2108,14 @@ async def fills(request: web.Request) -> web.Response:
                 MAX(executed_at) AS latest_executed_at
             FROM broker_movements
             WHERE executed_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND NOT (COALESCE(raw_payload, '{}'::jsonb) ? 'superseded_by_real')
         """, days)
         movements_recent = await conn.fetch("""
             SELECT executed_at, settlement_date, ticker, movement_type,
                    quantity, price, amount, currency, instrument_type
             FROM broker_movements
             WHERE executed_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND NOT (COALESCE(raw_payload, '{}'::jsonb) ? 'superseded_by_real')
               AND movement_type IN ('BUY', 'SELL')
               AND ticker IS NOT NULL
               AND quantity IS NOT NULL

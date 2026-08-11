@@ -111,17 +111,25 @@ def _parse_float(value: Any) -> float | None:
 
 
 def _synthetic_ticker_movement_id(row: dict[str, Any], movement_type: str) -> str:
-    ticker = str(row.get("instrument_code") or "").upper().strip()
-    day = str(row.get("execution_date") or row.get("date") or "")[:10]
-    settlement = str(row.get("settlement_date") or "")[:10]
+    ticker = str(row.get("instrument_code") or row.get("ticker") or "").upper().strip()
+    day = str(
+        row.get("execution_date")
+        or row.get("executionDate")
+        or row.get("date")
+        or ""
+    )[:10]
+    settlement = str(row.get("settlement_date") or row.get("settlementDate") or "")[:10]
+    quantity = row.get("quantity")
+    if isinstance(quantity, dict):
+        quantity = quantity.get("executed", quantity.get("total"))
     raw = "|".join(
         [
             day,
             settlement,
             ticker,
             movement_type,
-            str(row.get("id_instrument") or ""),
-            str(row.get("quantity") or ""),
+            str(row.get("id_instrument") or row.get("identifierId") or ""),
+            str(quantity or ""),
             str(row.get("price") or ""),
             str(row.get("amount") or ""),
         ]
@@ -147,7 +155,10 @@ def _raw_bool(row: dict[str, Any] | None, key: str) -> bool:
 
 def _movement_type(row: dict[str, Any]) -> str:
     raw = str(
-        row.get("label")
+        row.get("movement_type")
+        or row.get("movementType")
+        or row.get("label")
+        or row.get("labelConcept")
         or row.get("description")
         or row.get("detail")
         or row.get("operation_type")
@@ -268,15 +279,24 @@ def _ticker_movement_from_row(
     *,
     source: str,
 ) -> BrokerMovement | None:
-    external_id = row.get("id_ticket") or row.get("id_movement") or row.get("id")
-    ticker = str(row.get("instrument_code") or "").upper().strip()
+    external_id = (
+        row.get("id_ticket")
+        or row.get("idTicket")
+        or row.get("id_movement")
+        or row.get("identifierId")
+        or row.get("id")
+    )
+    ticker = str(row.get("instrument_code") or row.get("ticker") or "").upper().strip()
     if not ticker:
         return None
 
     movement_type = _movement_type(row)
     if external_id in (None, ""):
         external_id = _synthetic_ticker_movement_id(row, movement_type)
-    quantity = _parse_float(row.get("quantity"))
+    quantity_value = row.get("quantity")
+    if isinstance(quantity_value, dict):
+        quantity_value = quantity_value.get("executed", quantity_value.get("total"))
+    quantity = _parse_float(quantity_value)
     amount = _parse_float(row.get("amount"))
     if amount is not None:
         if movement_type == "SELL":
@@ -284,9 +304,31 @@ def _ticker_movement_from_row(
         elif movement_type == "BUY":
             amount = abs(amount)
 
+    price = _parse_float(row.get("price"))
+    price_derived = False
+    if price is None and amount is not None and quantity not in (None, 0):
+        price = abs(amount / quantity)
+        price_derived = True
+
+    raw_payload = dict(row)
+    if row.get("idTicket") is not None:
+        raw_payload.setdefault("id_ticket", row.get("idTicket"))
+        raw_payload.setdefault("settlement_date", row.get("settlementDate"))
+        raw_payload.setdefault("label", row.get("labelConcept"))
+        raw_payload["_cocos_schema"] = "activity_v2"
+    if price_derived:
+        raw_payload["_price_derived_from_amount"] = True
+
     executed_at, precision, ts_source = _timestamp_from_row(
         row,
-        ("execution_date", "timestamp", "created_at", "date"),
+        (
+            "execution_date",
+            "executionDate",
+            "timestamp",
+            "created_at",
+            "createdAt",
+            "date",
+        ),
         source=source,
     )
 
@@ -297,16 +339,22 @@ def _ticker_movement_from_row(
         currency=str(row.get("id_currency") or row.get("currency") or "ARS").upper(),
         amount=amount,
         quantity=quantity,
-        price=_parse_float(row.get("price")),
+        price=price,
         ticker=ticker,
-        instrument_type=str(row.get("instrument_type") or "").upper().strip() or None,
-        settlement_date=_parse_date(row.get("settlement_date")),
-        description=str(row.get("description") or "").strip() or None,
+        instrument_type=str(
+            row.get("instrument_type") or row.get("instrumentType") or ""
+        ).upper().strip() or None,
+        settlement_date=_parse_date(
+            row.get("settlement_date") or row.get("settlementDate")
+        ),
+        description=str(
+            row.get("description") or row.get("labelConcept") or ""
+        ).strip() or None,
         detail=str(row.get("detail") or "").strip() or None,
-        label=str(row.get("label") or "").strip() or None,
+        label=str(row.get("label") or row.get("labelConcept") or "").strip() or None,
         balance=None,
         source=source,
-        raw_payload=row,
+        raw_payload=raw_payload,
         executed_at_precision=precision,
         executed_at_source=ts_source,
     )
@@ -328,11 +376,12 @@ def _iter_cash_movements(payload: Any) -> Iterable[dict[str, Any]]:
 
 def _iter_ticker_movements(payload: Any) -> Iterable[dict[str, Any]]:
     if isinstance(payload, dict):
-        value = payload.get("tickerMovements")
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    yield item
+        for key in ("tickerMovements", "movements"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        yield item
         for child in payload.values():
             yield from _iter_ticker_movements(child)
     elif isinstance(payload, list):

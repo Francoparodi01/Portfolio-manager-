@@ -102,6 +102,121 @@ def _manual_broker_decided_at(fill_date: date) -> datetime:
     return datetime.combine(fill_date, time(15, 0), tzinfo=ART_TZ)
 
 
+async def _portfolio_observation_times(
+    conn: Any,
+    candidates: Sequence[tuple[str, datetime, str, str, str, float | None]],
+) -> dict[str, datetime]:
+    """Find the first stable portfolio snapshot that confirms a date-only fill."""
+    eligible = [
+        item
+        for item in candidates
+        if str(item[2]).lower() == "date_only"
+        and str(item[3]).upper() in {"BUY", "SELL"}
+        and item[4]
+        and item[5] not in (None, 0)
+    ]
+    if not eligible:
+        return {}
+
+    local_dates = [
+        executed_at.astimezone(ART_TZ).date()
+        if executed_at.tzinfo
+        else executed_at.date()
+        for _, executed_at, _, _, _, _ in eligible
+    ]
+    start_at = datetime.combine(
+        min(local_dates) - timedelta(days=4),
+        time.min,
+        tzinfo=ART_TZ,
+    )
+    end_at = datetime.combine(
+        max(local_dates) + timedelta(days=2),
+        time.max,
+        tzinfo=ART_TZ,
+    )
+    tickers = sorted({str(item[4]).upper() for item in eligible})
+
+    rows = await conn.fetch(
+        """
+        WITH snaps AS (
+            SELECT
+                snapshot_id,
+                scraped_at,
+                LAG(snapshot_id) OVER (ORDER BY scraped_at) AS prev_snapshot_id,
+                LEAD(snapshot_id) OVER (ORDER BY scraped_at) AS next_snapshot_id
+            FROM portfolio_snapshots
+            WHERE scraped_at >= $1
+              AND scraped_at <= $2
+        ),
+        pair_tickers AS (
+            SELECT DISTINCT
+                s.snapshot_id,
+                s.prev_snapshot_id,
+                s.next_snapshot_id,
+                s.scraped_at,
+                p.ticker
+            FROM snaps s
+            JOIN positions p
+              ON p.snapshot_id IN (s.snapshot_id, s.prev_snapshot_id)
+            WHERE s.prev_snapshot_id IS NOT NULL
+              AND p.ticker = ANY($3::text[])
+        )
+        SELECT
+            pt.scraped_at,
+            pt.ticker,
+            CASE
+                WHEN COALESCE(cur.quantity, 0) - COALESCE(prev.quantity, 0) > 0
+                    THEN 'BUY'
+                ELSE 'SELL'
+            END AS side,
+            ABS(COALESCE(cur.quantity, 0) - COALESCE(prev.quantity, 0))::float AS quantity
+        FROM pair_tickers pt
+        LEFT JOIN positions cur
+          ON cur.snapshot_id = pt.snapshot_id
+         AND cur.ticker = pt.ticker
+        LEFT JOIN positions prev
+          ON prev.snapshot_id = pt.prev_snapshot_id
+         AND prev.ticker = pt.ticker
+        LEFT JOIN positions nxt
+          ON nxt.snapshot_id = pt.next_snapshot_id
+         AND nxt.ticker = pt.ticker
+        WHERE pt.next_snapshot_id IS NOT NULL
+          AND ABS(COALESCE(cur.quantity, 0) - COALESCE(prev.quantity, 0)) > 0.000001
+          AND ABS(COALESCE(nxt.quantity, 0) - COALESCE(cur.quantity, 0)) <= 0.000001
+        ORDER BY pt.scraped_at
+        """,
+        start_at,
+        end_at,
+        tickers,
+    )
+
+    observed: dict[str, datetime] = {}
+    for key, executed_at, _, side, ticker, quantity in eligible:
+        execution_day = (
+            executed_at.astimezone(ART_TZ).date()
+            if executed_at.tzinfo
+            else executed_at.date()
+        )
+        for row in rows:
+            observed_at = row["scraped_at"]
+            observed_day = (
+                observed_at.astimezone(ART_TZ).date()
+                if observed_at.tzinfo
+                else observed_at.date()
+            )
+            if observed_day != execution_day:
+                continue
+            if str(row["ticker"]).upper() != str(ticker).upper():
+                continue
+            if str(row["side"]).upper() != str(side).upper():
+                continue
+            if abs(abs(float(row["quantity"])) - abs(float(quantity or 0))) > 0.000001:
+                continue
+            observed[key] = observed_at
+            break
+    return observed
+
+
 def _manual_broker_run_id(
     *,
     decision_source: str,
@@ -303,6 +418,110 @@ async def _mark_superseded_broker_fills_for_saved_rows(conn, rows: list[tuple]) 
                     external_fill_id,
                 )
             )
+            aggregate_rows = await conn.fetch(
+                """
+                WITH real_fill AS (
+                    SELECT id, source, external_fill_id, executed_at, ticker, side, quantity
+                    FROM broker_fills
+                    WHERE source = $1
+                      AND external_fill_id = $2
+                      AND external_fill_id NOT LIKE 'synthetic:%'
+                ),
+                synthetic_group AS (
+                    SELECT
+                        real_fill.id AS real_id,
+                        ARRAY_AGG(synthetic.id) AS synthetic_ids,
+                        SUM(ABS(synthetic.quantity)) AS synthetic_quantity,
+                        ABS(real_fill.quantity) AS real_quantity
+                    FROM real_fill
+                    JOIN broker_fills synthetic
+                      ON synthetic.source = real_fill.source
+                     AND synthetic.id <> real_fill.id
+                     AND synthetic.external_fill_id LIKE 'synthetic:%'
+                     AND synthetic.executed_at::date = real_fill.executed_at::date
+                     AND synthetic.ticker = real_fill.ticker
+                     AND synthetic.side = real_fill.side
+                     AND NOT (COALESCE(synthetic.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
+                    GROUP BY real_fill.id, real_fill.quantity
+                    HAVING ABS(SUM(ABS(synthetic.quantity)) - ABS(real_fill.quantity)) <= 0.000001
+                )
+                UPDATE broker_fills synthetic
+                SET raw_payload = COALESCE(synthetic.raw_payload, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'superseded_by_real',
+                        jsonb_build_object(
+                            'fill_id', real_fill.id,
+                            'external_fill_id', real_fill.external_fill_id,
+                            'reason', $3::text
+                        )
+                    )
+                FROM real_fill, synthetic_group
+                WHERE synthetic.id = ANY(synthetic_group.synthetic_ids)
+                RETURNING synthetic.id
+                """,
+                source,
+                external_fill_id,
+                SUPERSEDED_BROKER_FILL_REASON,
+            )
+            marked.update(int(row["id"]) for row in aggregate_rows)
+    return len(marked)
+
+
+async def _mark_superseded_broker_movements_for_saved_rows(conn, rows: list[tuple]) -> int:
+    marked: set[int] = set()
+    for row in rows:
+        source = str(row[0])
+        external_movement_id = str(row[1])
+        if external_movement_id.startswith("synthetic:"):
+            continue
+        aggregate_rows = await conn.fetch(
+            """
+            WITH real_movement AS (
+                SELECT id, source, external_movement_id, executed_at,
+                       ticker, movement_type, quantity
+                FROM broker_movements
+                WHERE source = $1
+                  AND external_movement_id = $2
+                  AND external_movement_id NOT LIKE 'synthetic:%'
+                  AND quantity IS NOT NULL
+            ),
+            synthetic_group AS (
+                SELECT
+                    real_movement.id AS real_id,
+                    ARRAY_AGG(synthetic.id) AS synthetic_ids,
+                    SUM(ABS(synthetic.quantity)) AS synthetic_quantity,
+                    ABS(real_movement.quantity) AS real_quantity
+                FROM real_movement
+                JOIN broker_movements synthetic
+                  ON synthetic.source = real_movement.source
+                 AND synthetic.id <> real_movement.id
+                 AND synthetic.external_movement_id LIKE 'synthetic:%'
+                 AND synthetic.executed_at::date = real_movement.executed_at::date
+                 AND synthetic.ticker = real_movement.ticker
+                 AND synthetic.movement_type = real_movement.movement_type
+                 AND NOT (COALESCE(synthetic.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
+                GROUP BY real_movement.id, real_movement.quantity
+                HAVING ABS(SUM(ABS(synthetic.quantity)) - ABS(real_movement.quantity)) <= 0.000001
+            )
+            UPDATE broker_movements synthetic
+            SET raw_payload = COALESCE(synthetic.raw_payload, '{}'::jsonb)
+                || jsonb_build_object(
+                    'superseded_by_real',
+                    jsonb_build_object(
+                        'movement_id', real_movement.id,
+                        'external_movement_id', real_movement.external_movement_id,
+                        'reason', $3::text
+                    )
+                )
+            FROM real_movement, synthetic_group
+            WHERE synthetic.id = ANY(synthetic_group.synthetic_ids)
+            RETURNING synthetic.id
+            """,
+            source,
+            external_movement_id,
+            SUPERSEDED_BROKER_FILL_REASON,
+        )
+        marked.update(int(saved["id"]) for saved in aggregate_rows)
     return len(marked)
 
 
@@ -2328,6 +2547,24 @@ class PortfolioDatabase:
         ]
 
         async with self._pool.acquire() as conn:
+            observed_at = await _portfolio_observation_times(
+                conn,
+                [
+                    (row[1], row[2], row[3], row[6], row[5], row[7])
+                    for row in rows
+                ],
+            )
+            rows = [
+                (
+                    row[0],
+                    row[1],
+                    observed_at.get(row[1], row[2]),
+                    "observed_after" if row[1] in observed_at else row[3],
+                    "portfolio_snapshots.quantity_delta" if row[1] in observed_at else row[4],
+                    *row[5:],
+                )
+                for row in rows
+            ]
             await self._ensure_execution_timestamp_meta_columns(conn)
             await conn.executemany(
                 """
@@ -2353,10 +2590,25 @@ class PortfolioDatabase:
                     ticker           = EXCLUDED.ticker,
                     side             = EXCLUDED.side,
                     quantity         = EXCLUDED.quantity,
-                    avg_fill_price   = EXCLUDED.avg_fill_price,
-                    gross_amount_ars = EXCLUDED.gross_amount_ars,
-                    fees_ars         = EXCLUDED.fees_ars,
-                    raw_payload      = EXCLUDED.raw_payload
+                    avg_fill_price   = CASE
+                        WHEN COALESCE(EXCLUDED.raw_payload->>'_price_derived_from_amount', 'false') = 'true'
+                             AND broker_fills.avg_fill_price IS NOT NULL
+                            THEN broker_fills.avg_fill_price
+                        ELSE EXCLUDED.avg_fill_price
+                    END,
+                    gross_amount_ars = CASE
+                        WHEN COALESCE(EXCLUDED.raw_payload->>'_price_derived_from_amount', 'false') = 'true'
+                             AND broker_fills.gross_amount_ars IS NOT NULL
+                            THEN broker_fills.gross_amount_ars
+                        ELSE EXCLUDED.gross_amount_ars
+                    END,
+                    fees_ars         = COALESCE(broker_fills.fees_ars, EXCLUDED.fees_ars),
+                    raw_payload      = CASE
+                        WHEN COALESCE(EXCLUDED.raw_payload->>'_price_derived_from_amount', 'false') = 'true'
+                             AND broker_fills.avg_fill_price IS NOT NULL
+                            THEN broker_fills.raw_payload
+                        ELSE EXCLUDED.raw_payload
+                    END
                 """,
                 rows,
             )
@@ -2400,6 +2652,24 @@ class PortfolioDatabase:
         ]
 
         async with self._pool.acquire() as conn:
+            observed_at = await _portfolio_observation_times(
+                conn,
+                [
+                    (row[1], row[2], row[3], row[5], row[10], row[8])
+                    for row in rows
+                ],
+            )
+            rows = [
+                (
+                    row[0],
+                    row[1],
+                    observed_at.get(row[1], row[2]),
+                    "observed_after" if row[1] in observed_at else row[3],
+                    "portfolio_snapshots.quantity_delta" if row[1] in observed_at else row[4],
+                    *row[5:],
+                )
+                for row in rows
+            ]
             await self._ensure_execution_timestamp_meta_columns(conn)
             for row in rows:
                 external_id = str(row[1])
@@ -2483,8 +2753,13 @@ class PortfolioDatabase:
                 """,
                 rows,
             )
+            superseded = await _mark_superseded_broker_movements_for_saved_rows(conn, rows)
 
-        logger.info("%s broker movements guardados", len(rows))
+        logger.info(
+            "%s broker movements guardados; %s placeholders synthetic superseded",
+            len(rows),
+            superseded,
+        )
         return len(rows)
 
     async def existing_broker_movement_keys(

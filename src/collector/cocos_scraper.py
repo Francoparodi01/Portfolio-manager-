@@ -97,7 +97,7 @@ FILL_API_KEYWORDS = (
     "ticker",
 )
 MOVEMENTS_API_KEYWORDS = ("cash_movements", "movements", "movement")
-MOVEMENTS_PAGE_LIMIT = 50
+MOVEMENTS_PAGE_LIMIT = 30
 MOVEMENTS_MAX_PAGES = 6
 
 
@@ -1737,7 +1737,7 @@ class CocosCapitalScraper:
                     logger.info("Sondeando fills Cocos: %s", url)
                     await self._page.goto(url, wait_until="domcontentloaded", timeout=45_000)
                     await self._page.wait_for_timeout(wait_ms)
-                    if path.rstrip("/") in {"/movements", "/movimientos"}:
+                    if path.rstrip("/") in {"/activity", "/movements", "/movimientos"}:
                         await self._select_movements_instrumentos_tab()
                         await self._page.wait_for_timeout(wait_ms)
                 except Exception as exc:
@@ -1764,6 +1764,9 @@ class CocosCapitalScraper:
         if not self._page:
             return
         for selector in (
+            "button:has-text('Movimientos')",
+            "[role='tab']:has-text('Movimientos')",
+            "text=/^Movimientos$/i",
             "button:has-text('Instrumentos')",
             "[role='button']:has-text('Instrumentos')",
             "text=/^Instrumentos$/i",
@@ -1772,11 +1775,11 @@ class CocosCapitalScraper:
                 locator = self._page.locator(selector).first
                 if await locator.count():
                     await locator.click(timeout=8_000)
-                    logger.info("Tab movements Instrumentos seleccionado")
+                    logger.info("Tab de movimientos seleccionado")
                     return
             except Exception:
                 continue
-        logger.warning("No se pudo seleccionar tab Instrumentos en movements")
+        logger.warning("No se pudo seleccionar la vista de movimientos")
 
     async def scrape_portfolio_movements(
         self,
@@ -1819,6 +1822,8 @@ class CocosCapitalScraper:
                     request_headers["cash"] = await response.request.all_headers()
                 elif "tickers_movements" in lower:
                     request_headers["ticker"] = await response.request.all_headers()
+                elif "/api/movements" in lower:
+                    request_headers["activity"] = await response.request.all_headers()
                 payloads.append(await response.json())
                 logger.info("Cocos movements JSON: %s", url)
             except Exception as exc:
@@ -1830,7 +1835,7 @@ class CocosCapitalScraper:
         self._page.on("response", on_response)
         try:
             await self._page.goto(
-                "https://app.cocos.capital/movements",
+                "https://app.cocos.capital/activity",
                 wait_until="domcontentloaded",
                 timeout=45_000,
             )
@@ -1870,6 +1875,12 @@ class CocosCapitalScraper:
             return
 
         endpoints = (
+            (
+                "activity",
+                "https://api.cocos.capital/api/movements"
+                "?sort_by=execution_date&offset={offset}&limit={limit}",
+                ("movements",),
+            ),
             (
                 "cash",
                 "https://api.cocos.capital/api/v1/wallet/cash_movements"

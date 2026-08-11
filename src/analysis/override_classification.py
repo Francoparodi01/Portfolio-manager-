@@ -71,6 +71,7 @@ def classify_override(item: Mapping[str, Any]) -> str:
     provisional = (
         as_float(item.get("same_amount_ars")) <= 0
         and as_float(item.get("opposite_amount_ars")) <= 0
+        and not bool(item.get("inferred_evidence_confirmed"))
         and (
             as_float(item.get("inferred_same_amount_ars")) > 0
             or as_float(item.get("inferred_opposite_amount_ars")) > 0
@@ -133,9 +134,10 @@ def attach_inferred_activity(
         same_amount = 0.0
         opposite_amount = 0.0
         matched_at: datetime | None = None
+        matched_confirmed = False
 
         for event in activity:
-            if event.get("confirmed_at") or event.get("activity_type") == "CORPORATE_ACTION":
+            if event.get("activity_type") == "CORPORATE_ACTION":
                 continue
             if str(event.get("ticker") or "").upper() != ticker:
                 continue
@@ -156,6 +158,8 @@ def attach_inferred_activity(
                 opposite_amount += amount
             if matched_at is None or observed_at < matched_at:
                 matched_at = observed_at
+            if event.get("confirmed_at"):
+                matched_confirmed = True
 
         if same_amount > 0:
             plan["inferred_same_amount_ars"] = same_amount
@@ -163,7 +167,12 @@ def attach_inferred_activity(
             plan["inferred_opposite_amount_ars"] = opposite_amount
         if matched_at is not None:
             plan["inferred_executed_at"] = matched_at.isoformat()
-            plan["match_evidence"] = "portfolio_snapshot"
+            plan["inferred_evidence_confirmed"] = matched_confirmed
+            plan["match_evidence"] = (
+                "cocos_movement+portfolio_snapshot"
+                if matched_confirmed
+                else "portfolio_snapshot"
+            )
 
     return plans
 

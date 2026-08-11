@@ -88,6 +88,7 @@ async def fetch_inferred_activity(
             FROM broker_movements bm
             WHERE bm.ticker = d.ticker
               AND bm.movement_type = CASE WHEN d.quantity_delta > 0 THEN 'BUY' ELSE 'SELL' END
+              AND NOT (COALESCE(bm.raw_payload, '{}'::jsonb) ? 'superseded_by_real')
               AND (bm.executed_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date =
                   (d.scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
               AND ABS(ABS(bm.quantity::float) - ABS(d.quantity_delta)) <= 0.000001
