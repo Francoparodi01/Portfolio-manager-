@@ -67,6 +67,7 @@ tests/*
 !tests/test_operational_tools.py
 !tests/test_cocos_access_block.py
 !tests/test_learning_shadow.py
+!tests/test_net_decision_report.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json

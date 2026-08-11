@@ -140,6 +140,7 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("radar", "Radar compacto"),
     ("shadow", "Tesis shadow 5/20/40"),
     ("performance", "Performance operativa"),
+    ("neto", "Neto por analisis"),
     ("viability", "Viabilidad del bot"),
     ("ledger", "Libro de decisiones"),
     ("policy", "Flujo operativo"),
@@ -735,6 +736,7 @@ def results_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Performance", callback_data="performance"),
             InlineKeyboardButton("📅 Semana", callback_data="weekly_summary"),
         ],
+        [InlineKeyboardButton("💹 Neto por análisis", callback_data="net_decisions")],
         [
             InlineKeyboardButton("⚖️ Bot vs Franco", callback_data="override_audit"),
             InlineKeyboardButton("🧭 Viabilidad", callback_data="viability"),
@@ -779,6 +781,7 @@ def help_text() -> str:
         "<code>/ticker NVDA</code>: analisis tecnico y grafico por accion.\n"
         "<code>/radar</code>: oportunidades no ejecutadas.\n"
         "<code>/performance</code>: resultado real con fills/movimientos.\n"
+        "<code>/neto</code>: neto por corrida y decisión, con CSV completo.\n"
         "<code>/ledger</code>: atribucion economica de decisiones.\n"
         "<code>/bot_vs_humano</code>: planes vs movimientos reales.\n"
         "<code>/status</code>: salud de DB, mercado y snapshots.\n\n"
@@ -1256,6 +1259,69 @@ async def action_performance(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
         timeout=240,
     )
     await send_text(context, chat_id, report)
+
+
+async def action_net_decisions(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    stamp = int(time.time())
+    csv_path = Path("/tmp") / f"quantia_neto_decisiones_{chat_id}_{stamp}.csv"
+    runs_csv_path = Path("/tmp") / f"quantia_neto_analisis_{chat_id}_{stamp}.csv"
+    rc, out, err, elapsed = await run_cmd(
+        [
+            sys.executable,
+            "scripts/run_net_decision_report.py",
+            "--days",
+            "180",
+            "--limit-runs",
+            "6",
+            "--no-telegram",
+            "--csv-out",
+            str(csv_path),
+            "--runs-csv-out",
+            str(runs_csv_path),
+            *_owner_cli_args(chat_id),
+        ],
+        timeout=240,
+    )
+    if rc != 0:
+        await send_text(
+            context,
+            chat_id,
+            (
+                "<b>No pude calcular el neto por análisis</b>\n"
+                f"Tiempo: <b>{elapsed:.1f}s</b>\n"
+                f"<code>{html_text(err[-2200:] or out[-2200:] or 'Sin detalle')}</code>"
+            ),
+        )
+        return
+
+    report = "\n".join(
+        line for line in (out or "").splitlines()
+        if not line.startswith(("[csv]", "[runs_csv]"))
+    ).strip()
+    await send_text(context, chat_id, report)
+    try:
+        if csv_path.exists():
+            with csv_path.open("rb") as document:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=document,
+                    filename="quantia_neto_decisiones_180d.csv",
+                    caption="Detalle completo: una fila por decisión, con bruto, costo y neto 5/10/20/40r.",
+                )
+        if runs_csv_path.exists():
+            with runs_csv_path.open("rb") as document:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=document,
+                    filename="quantia_neto_analisis_180d.csv",
+                    caption="Resumen completo: una fila por corrida de análisis con resultado agregado.",
+                )
+    finally:
+        for path in (csv_path, runs_csv_path):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 async def action_viability(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -2217,6 +2283,9 @@ CALLBACK_ALIASES: dict[str, str] = {
     "performance":      "performance",
     "perf":             "performance",
     "run_performance":  "performance",
+    "net_decisions":    "net_decisions",
+    "neto":             "net_decisions",
+    "resultado_neto":   "net_decisions",
     "viability":        "viability",
     "viabilidad":       "viability",
     "bot_only":         "viability",
@@ -2277,6 +2346,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "analysis":      "🧠 Generando plan de cartera...",
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
+    "net_decisions": "Calculando neto por corrida y decisión...",
     "viability":     "Auditando viabilidad bot-only...",
     "override_audit": "Comparando planes del bot contra movimientos reales...",
     "decision_ledger": "Calculando atribución económica...",
@@ -2304,6 +2374,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "ticker_analysis": action_ticker_prompt,
         "weekly_summary": action_weekly_summary,
         "performance":    action_performance,
+        "net_decisions":  action_net_decisions,
         "viability":      action_viability,
         "override_audit": action_override_audit,
         "decision_ledger": action_decision_ledger,
@@ -2434,6 +2505,10 @@ async def weekly_summary_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def performance_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "performance")
+
+
+async def net_decisions_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "net_decisions")
 
 
 async def viability_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2793,6 +2868,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("weekly_summary",   weekly_summary_handler))
     app.add_handler(CommandHandler("resumen_semanal",  weekly_summary_handler))
     app.add_handler(CommandHandler("performance",      performance_handler))
+    app.add_handler(CommandHandler("neto",             net_decisions_handler))
+    app.add_handler(CommandHandler("resultado_neto",   net_decisions_handler))
     app.add_handler(CommandHandler("viability",        viability_handler))
     app.add_handler(CommandHandler("viabilidad",       viability_handler))
     app.add_handler(CommandHandler("ledger",           decision_ledger_handler))
