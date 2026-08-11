@@ -66,6 +66,7 @@ tests/*
 !tests/test_issuer_event_sources.py
 !tests/test_operational_tools.py
 !tests/test_cocos_access_block.py
+!tests/test_cocos_movement_poll.py
 !tests/test_learning_shadow.py
 !tests/test_net_decision_report.py
 !tests/fixtures/

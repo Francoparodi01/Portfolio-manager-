@@ -12,8 +12,9 @@ Qué hace:
 
 Diseño intradía:
   Un único loop de scraping (sin competencia, sin login doble):
-    - Mercado cada 90s.
     - Portfolio cada ~10min (dentro del mismo login).
+    - Movimientos cada ~60s recargando Actividad en la misma sesión.
+  El mercado completo se actualiza en jobs horarios separados.
   Risk guard separado: solo lee DB, sin Playwright.
 
 Redis:
@@ -343,7 +344,7 @@ def _render_new_movements_notice(
 
     lines.append("")
     if portfolio_refreshed:
-        lines.append("Portfolio sincronizado. El proximo analisis usa esta cartera actualizada.")
+        lines.append("Portfolio sincronizado. /analisis ya usa esta cartera actualizada.")
     else:
         lines.append("Movimientos registrados. Si el portfolio no se refresco aun, el proximo scrape lo alinea.")
 
@@ -2037,7 +2038,8 @@ class IntradayManager:
         try:
             self.notifier.send_raw(
                 "🟢 <b>Monitoreo intradía iniciado</b>\n"
-                "Mercado 10:40/12:00/16:40/17:02 · Portfolio/fills cada 10min · Live cache cada 60s · "
+                f"Mercado 10:40/12:00/16:40/17:02 · Portfolio cada {PORTFOLIO_REFRESH_SECONDS // 60}min · "
+                f"Movimientos cada {FILL_REFRESH_SECONDS}s · Live cache cada {PORTFOLIO_LIVE_POLL_SECONDS}s · "
                 "Risk guard cada 60s · Revalidacion intradia official=False."
             )
         except Exception as e:
@@ -2073,159 +2075,201 @@ class IntradayManager:
 
     async def _scraper_loop(self) -> None:
         """
-        Un unico loop de cuenta para portfolio y fills.
+        Un unico loop de cuenta para portfolio y movimientos.
 
         - En rueda (dias habiles 10:30-17:00 ART):
         * scrapea portfolio cada PORTFOLIO_REFRESH_SECONDS
+        * refresca Actividad y captura su API cada FILL_REFRESH_SECONDS
 
         - Fuera de rueda / fines de semana:
         * scrapea portfolio cada PORTFOLIO_OFFHOURS_REFRESH_SECONDS
 
         El universo de mercado se refresca con jobs separados para evitar
-        logins y navegacion Playwright cada 90 segundos.
+        logins y navegacion Playwright frecuentes. La sesion de cuenta se
+        conserva abierta mientras el loop esta activo.
         """
         last_portfolio_ts: float = 0.0
         last_fills_ts: float = 0.0
         access_block_until: float = 0.0
+        account_scraper: CocosCapitalScraper | None = None
 
-        while self._running:
-            now = _now_art()
-            now_ts = time.monotonic()
-            if access_block_until > now_ts:
-                remaining = int(access_block_until - now_ts)
-                logger.warning(
-                    "Scraper loop pausado por bloqueo de Cocos; reintento en %ss",
-                    remaining,
-                )
-                await asyncio.sleep(min(300, max(30, remaining)))
-                continue
-
-            in_market = _is_market_window(now)
-            do_portfolio = _should_scrape_portfolio(now)
-
-            if not do_portfolio:
-                await asyncio.sleep(60)
-                continue
-
-            lock = _get_scraper_lock()
-            if lock.locked():
-                logger.info("Scraper loop: lock ocupado por job scheduled, esperando 20s...")
-                await asyncio.sleep(20)
-                continue
-
-            portfolio_interval = (
-                PORTFOLIO_REFRESH_SECONDS if in_market
-                else PORTFOLIO_OFFHOURS_REFRESH_SECONDS
-            )
-            should_refresh_portfolio = (now_ts - last_portfolio_ts) >= portfolio_interval
-            should_refresh_fills = (
-                COCOS_SYNC_FILLS
-                and (now_ts - last_fills_ts) >= FILL_REFRESH_SECONDS
-            )
-
-            # Si no toca portfolio ni fills, dormir lo justo.
-            if not should_refresh_portfolio and not should_refresh_fills:
-                await asyncio.sleep(60)
-                continue
-
-            db = PortfolioDatabase(self.cfg.database.url)
+        async def close_account_scraper() -> None:
+            nonlocal account_scraper
+            if account_scraper is None:
+                return
             try:
-                async with lock:
-                    await _redis_set(SCRAPER_LOCK_KEY, "intraday_loop", ex=120)
-                    try:
-                        await db.connect()
-                        async with CocosCapitalScraper(self.cfg.scraper) as scraper:
-                            await scraper.login()
-
-                            # ── Portfolio siempre permitido ───────────────────────
-                            if should_refresh_portfolio:
-                                snapshot = await scraper.scrape_portfolio()
-                                await db.save_snapshot(snapshot)
-                                await _cache_snapshot(snapshot)
-                                last_portfolio_ts = time.monotonic()
-                                logger.info(
-                                    "Scraper loop: portfolio guardado · %d posiciones · conf %.2f",
-                                    len(snapshot.positions),
-                                    snapshot.confidence_score,
-                                )
-
-                            if should_refresh_fills:
-                                movements = await scraper.scrape_portfolio_movements()
-                                fills = broker_fills_from_movements(movements)
-                                existing_movement_keys = await db.existing_broker_movement_keys(movements)
-                                new_movements = _new_trade_movements(movements, existing_movement_keys)
-                                saved_movements = await db.save_broker_movements(movements)
-                                saved_fills = await db.save_broker_fills(fills)
-                                reconciled_fills = await db.reconcile_broker_fills()
-                                manual_fills = await db.materialize_unmatched_broker_fills()
-                                if new_movements:
-                                    try:
-                                        attribution_summary = await db.sync_plan_execution_attributions()
-                                        logger.info("Scraper loop: plan-follow=%s", attribution_summary)
-                                    except Exception as exc:
-                                        logger.warning(
-                                            "Scraper loop: plan-follow sync fallo (no critico): %s",
-                                            exc,
-                                            exc_info=True,
-                                        )
-                                if new_movements:
-                                    movement_event_risk = await _safe_manual_event_risk_by_ticker(
-                                        db,
-                                        [movement.ticker for movement in new_movements],
-                                    )
-                                    self.notifier.send_raw(
-                                        _render_new_movements_notice(
-                                            new_movements,
-                                            portfolio_refreshed=bool(should_refresh_portfolio),
-                                            manual_event_risk_by_ticker=movement_event_risk,
-                                        )
-                                    )
-                                last_fills_ts = time.monotonic()
-                                logger.info(
-                                    "Scraper loop: movements=%d/%d fills=%d/%d reconciliados=%d manuales=%d",
-                                    len(movements),
-                                    saved_movements,
-                                    len(fills),
-                                    saved_fills,
-                                    reconciled_fills,
-                                    manual_fills,
-                                )
-
-                    finally:
-                        await _redis_delete(SCRAPER_LOCK_KEY)
-
-            except asyncio.CancelledError:
-                raise
-            except CocosAccessBlockedError as e:
-                access_block_until = time.monotonic() + COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS
-                logger.warning(
-                    "Scraper loop detecto bloqueo de Cocos; pausando scraper por %ss: %s",
-                    COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS,
-                    e,
-                    exc_info=True,
-                )
-            except CocosAuthenticationError as e:
-                access_block_until = time.monotonic() + COCOS_AUTH_FAILURE_COOLDOWN_SECONDS
-                logger.warning(
-                    "Scraper loop detecto fallo de autenticacion Cocos; pausando scraper por %ss: %s",
-                    COCOS_AUTH_FAILURE_COOLDOWN_SECONDS,
-                    e,
-                    exc_info=True,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Scraper loop error (reintentará luego): %s",
-                    e,
-                    exc_info=True,
-                )
+                await account_scraper.__aexit__(None, None, None)
+            except Exception as exc:
+                logger.debug("No se pudo cerrar scraper persistente: %s", exc)
             finally:
-                try:
-                    await db.close()
-                except Exception:
-                    pass
+                account_scraper = None
 
-            # En rueda revisar cadencias de cuenta; fuera de rueda dormir mas.
-            await asyncio.sleep(60 if in_market else 300)
+        try:
+            while self._running:
+                now = _now_art()
+                now_ts = time.monotonic()
+                if access_block_until > now_ts:
+                    remaining = int(access_block_until - now_ts)
+                    logger.warning(
+                        "Scraper loop pausado por bloqueo de Cocos; reintento en %ss",
+                        remaining,
+                    )
+                    await asyncio.sleep(min(300, max(30, remaining)))
+                    continue
+
+                in_market = _is_market_window(now)
+                if not _should_scrape_portfolio(now):
+                    await asyncio.sleep(60)
+                    continue
+
+                lock = _get_scraper_lock()
+                if lock.locked():
+                    logger.info("Scraper loop: lock ocupado por job scheduled, esperando 20s...")
+                    await asyncio.sleep(20)
+                    continue
+
+                portfolio_interval = (
+                    PORTFOLIO_REFRESH_SECONDS if in_market
+                    else PORTFOLIO_OFFHOURS_REFRESH_SECONDS
+                )
+                should_refresh_portfolio = (now_ts - last_portfolio_ts) >= portfolio_interval
+                should_refresh_fills = (
+                    COCOS_SYNC_FILLS
+                    and (now_ts - last_fills_ts) >= FILL_REFRESH_SECONDS
+                )
+
+                if not should_refresh_portfolio and not should_refresh_fills:
+                    await asyncio.sleep(15 if in_market else 300)
+                    continue
+
+                db = PortfolioDatabase(self.cfg.database.url)
+                try:
+                    async with lock:
+                        await _redis_set(SCRAPER_LOCK_KEY, "intraday_loop", ex=120)
+                        await db.connect()
+                        if account_scraper is None:
+                            account_scraper = CocosCapitalScraper(self.cfg.scraper)
+                            try:
+                                await account_scraper.__aenter__()
+                                await account_scraper.login()
+                                logger.info("Scraper loop: sesion de cuenta persistente iniciada")
+                            except Exception:
+                                await close_account_scraper()
+                                raise
+
+                        portfolio_refreshed = False
+                        if should_refresh_portfolio:
+                            snapshot = await account_scraper.scrape_portfolio()
+                            await db.save_snapshot(snapshot)
+                            await _cache_snapshot(snapshot)
+                            last_portfolio_ts = time.monotonic()
+                            portfolio_refreshed = True
+                            logger.info(
+                                "Scraper loop: portfolio guardado · %d posiciones · conf %.2f",
+                                len(snapshot.positions),
+                                snapshot.confidence_score,
+                            )
+
+                        if should_refresh_fills:
+                            movements = await account_scraper.poll_portfolio_movements()
+                            fills = broker_fills_from_movements(movements)
+                            existing_movement_keys = await db.existing_broker_movement_keys(movements)
+                            new_movements = _new_trade_movements(movements, existing_movement_keys)
+                            saved_movements = await db.save_broker_movements(movements)
+                            saved_fills = await db.save_broker_fills(fills)
+                            reconciled_fills = await db.reconcile_broker_fills()
+                            manual_fills = await db.materialize_unmatched_broker_fills()
+
+                            if new_movements and not portfolio_refreshed:
+                                try:
+                                    snapshot = await account_scraper.scrape_portfolio(
+                                        force_refresh=True
+                                    )
+                                    await db.save_snapshot(snapshot)
+                                    await _cache_snapshot(snapshot)
+                                    last_portfolio_ts = time.monotonic()
+                                    portfolio_refreshed = True
+                                    logger.info(
+                                        "Scraper loop: portfolio refrescado por %d movimiento(s) nuevo(s)",
+                                        len(new_movements),
+                                    )
+                                except Exception as exc:
+                                    logger.warning(
+                                        "Scraper loop: movimiento guardado pero portfolio inmediato fallo: %s",
+                                        exc,
+                                        exc_info=True,
+                                    )
+
+                            if new_movements:
+                                try:
+                                    attribution_summary = await db.sync_plan_execution_attributions()
+                                    logger.info("Scraper loop: plan-follow=%s", attribution_summary)
+                                except Exception as exc:
+                                    logger.warning(
+                                        "Scraper loop: plan-follow sync fallo (no critico): %s",
+                                        exc,
+                                        exc_info=True,
+                                    )
+                                movement_event_risk = await _safe_manual_event_risk_by_ticker(
+                                    db,
+                                    [movement.ticker for movement in new_movements],
+                                )
+                                self.notifier.send_raw(
+                                    _render_new_movements_notice(
+                                        new_movements,
+                                        portfolio_refreshed=portfolio_refreshed,
+                                        manual_event_risk_by_ticker=movement_event_risk,
+                                    )
+                                )
+
+                            last_fills_ts = time.monotonic()
+                            logger.info(
+                                "Scraper loop: movements=%d/%d fills=%d/%d reconciliados=%d manuales=%d",
+                                len(movements),
+                                saved_movements,
+                                len(fills),
+                                saved_fills,
+                                reconciled_fills,
+                                manual_fills,
+                            )
+
+                except asyncio.CancelledError:
+                    raise
+                except CocosAccessBlockedError as e:
+                    await close_account_scraper()
+                    access_block_until = time.monotonic() + COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS
+                    logger.warning(
+                        "Scraper loop detecto bloqueo de Cocos; pausando scraper por %ss: %s",
+                        COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS,
+                        e,
+                        exc_info=True,
+                    )
+                except CocosAuthenticationError as e:
+                    await close_account_scraper()
+                    access_block_until = time.monotonic() + COCOS_AUTH_FAILURE_COOLDOWN_SECONDS
+                    logger.warning(
+                        "Scraper loop detecto fallo de autenticacion Cocos; pausando scraper por %ss: %s",
+                        COCOS_AUTH_FAILURE_COOLDOWN_SECONDS,
+                        e,
+                        exc_info=True,
+                    )
+                except Exception as e:
+                    await close_account_scraper()
+                    logger.warning(
+                        "Scraper loop error (reintentara luego): %s",
+                        e,
+                        exc_info=True,
+                    )
+                finally:
+                    await _redis_delete(SCRAPER_LOCK_KEY)
+                    try:
+                        await db.close()
+                    except Exception:
+                        pass
+
+                await asyncio.sleep(15 if in_market else 300)
+        finally:
+            await close_account_scraper()
 
     # ── Risk guard (solo DB) ────────────────────────────────────────────────────
 

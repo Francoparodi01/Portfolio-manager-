@@ -1030,9 +1030,9 @@ class CocosCapitalScraper:
     # ── Portfolio ─────────────────────────────────
 
     @timed("scraper.portfolio")
-    async def scrape_portfolio(self) -> PortfolioSnapshot:
+    async def scrape_portfolio(self, *, force_refresh: bool = False) -> PortfolioSnapshot:
         cache_key = "portfolio"
-        cached = self._cache.get(cache_key)
+        cached = None if force_refresh else self._cache.get(cache_key)
         if cached:
             logger.info("Portfolio desde cache")
             return cached
@@ -1785,6 +1785,7 @@ class CocosCapitalScraper:
         self,
         *,
         wait_ms: int = 4000,
+        fetch_api_pages: bool = True,
     ) -> list[BrokerMovement]:
         """
         Captura movimientos visibles en Actividad/Movimientos de Cocos.
@@ -1834,10 +1835,14 @@ class CocosCapitalScraper:
 
         self._page.on("response", on_response)
         try:
-            await self._page.goto(
+            response = await self._page.goto(
                 "https://app.cocos.capital/activity",
                 wait_until="domcontentloaded",
                 timeout=45_000,
+            )
+            await self._raise_if_access_blocked(
+                "portfolio_movements",
+                response_status=response.status if response else None,
             )
             await self._page.wait_for_timeout(wait_ms)
             await self._select_movements_instrumentos_tab()
@@ -1845,7 +1850,8 @@ class CocosCapitalScraper:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 tasks.clear()
-            await self._fetch_movements_api_pages(payloads, seen_urls, request_headers)
+            if fetch_api_pages:
+                await self._fetch_movements_api_pages(payloads, seen_urls, request_headers)
         finally:
             try:
                 self._page.remove_listener("response", on_response)
@@ -1863,6 +1869,13 @@ class CocosCapitalScraper:
             len(seen_urls),
         )
         return movements
+
+    async def poll_portfolio_movements(self) -> list[BrokerMovement]:
+        """Refresh the activity view while reusing the authenticated session."""
+        return await self.scrape_portfolio_movements(
+            wait_ms=500,
+            fetch_api_pages=False,
+        )
 
     async def _fetch_movements_api_pages(
         self,
