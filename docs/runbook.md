@@ -60,6 +60,9 @@ Minimas para runtime real:
 Opcionales/relevantes:
 
 - `REDIS_URL`.
+- `PORTFOLIO_REFRESH_REQUEST_POLL_SECONDS` y
+  `TELEGRAM_OPERATIONAL_SYNC_TTL_SECONDS` controlan el canal de refresco
+  bajo demanda entre Telegram y la sesion persistente del scheduler.
 - `SENTIMENT_PIPELINE_ENABLED`, `SENTIMENT_PIPELINE_INTERVAL_SECONDS`,
   `SENTIMENT_OLLAMA_MODEL`, `OLLAMA_URL`.
 - `THESIS_SHADOW_ENABLED`.
@@ -81,12 +84,12 @@ Definidos en `_scheduler_main()` de [src/scheduler/runner.py](../src/scheduler/r
 
 | Job | Hora ART | Funcion |
 |---|---:|---|
-| `opening_portfolio_report` | 10:31 | Reporte apertura + arranque loops intradia. |
+| `account_session` | continuo | Una sesion Cocos propiedad del scheduler; atiende portfolio/movimientos periodicos y pedidos de Telegram. |
+| `opening_portfolio_report` | 10:31 | Refresca mediante la sesion persistente y genera el reporte de apertura. |
 | `post_open_portfolio_report` | 10:45 | Marca post-open. |
 | `preclose_alerts_1615` | 16:15 | Alertas pre-cierre. |
 | `preclose_alerts_1645` | 16:45 | Alertas pre-cierre. |
-| `intraday_stop` | 16:59 | Detiene loops intradia. |
-| `portfolio_eod` | 17:02 | Full EOD. |
+| `portfolio_eod` | 17:02 | Portfolio, movimientos y mercado EOD mediante la misma sesion persistente. |
 | `build_daily_candles` | 17:05 | Construye velas internas. |
 | `verify_daily_candles` | 17:10 | Verifica cobertura de velas. |
 | `daily_analysis` | 17:12 | Analisis diario formal. |
@@ -94,6 +97,12 @@ Definidos en `_scheduler_main()` de [src/scheduler/runner.py](../src/scheduler/r
 | `update_outcomes_daily` | 21:30 | Actualiza outcomes. |
 | `sentiment_pipeline` | intervalo | Sentiment si `SENTIMENT_PIPELINE_ENABLED`. |
 | `issuer_event_ingestion` | intervalo | Evidencia Yahoo/SEC/CNV/FMP/Finnhub si `ISSUER_EVENT_INGESTION_ENABLED`. |
+
+`/portfolio`, `/analisis`, `/analisis_full` y el refresh administrativo no
+abren Playwright en `telegram_bot`. Publican una solicitud en Redis; el
+`scheduler` actualiza Cocos con su navegador autenticado, persiste el snapshot
+y responde cuando DB/cache ya quedaron sincronizadas. Si el canal falla, el
+bot informa que sirve la ultima foto disponible y no intenta un segundo login.
 
 ## Comandos de diagnostico
 

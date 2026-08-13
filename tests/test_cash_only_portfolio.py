@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from src.collector.cocos_scraper import CocosCapitalScraper
 from src.collector.data.models import PortfolioSnapshot
@@ -100,3 +101,36 @@ def test_portfolio_api_extracts_totals_from_balance_payload():
 
     assert float(total) == 302190.0
     assert float(cash) == 1015.0
+
+
+def test_portfolio_total_is_normalized_to_position_ledger_after_ui_change():
+    payload = {
+        "holdings": [
+            {
+                "ticker": "NVDA",
+                "type": "CEDEARS",
+                "currencyId": "ARS",
+                "settlements": [
+                    {"period": "24hs", "amount": 373500, "quantity": 25},
+                ],
+            },
+            {
+                "ticker": "AMD",
+                "type": "CEDEARS",
+                "currencyId": "ARS",
+                "settlements": [
+                    {"period": "24hs", "amount": 78600, "quantity": 1},
+                ],
+            },
+        ]
+    }
+    positions, _ = CocosCapitalScraper._extract_positions_from_portfolio_api(payload)
+
+    total, cash = CocosCapitalScraper._normalize_portfolio_totals(
+        positions,
+        total=Decimal("5849"),
+        cash=Decimal("0"),
+    )
+
+    assert float(total) == 452100.0
+    assert float(cash) == 0.0

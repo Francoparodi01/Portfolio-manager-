@@ -395,7 +395,7 @@ def test_sync_user_portfolio_uses_private_session_and_owner(monkeypatch):
     async def _fake_send_text(_context, _chat_id, text, parse_mode=None):
         sent.append(text)
 
-    async def _fake_action_portfolio(_context, _chat_id):
+    async def _fake_action_portfolio(_context, _chat_id, **_kwargs):
         sent.append("PORTFOLIO")
 
     async def _fake_send_menu(_context, _chat_id):

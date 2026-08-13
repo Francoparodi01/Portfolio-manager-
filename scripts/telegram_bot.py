@@ -65,6 +65,7 @@ try:
         cache_portfolio_snapshot,
         get_cached_live_portfolio,
     )
+    from src.core.portfolio_refresh import request_portfolio_refresh
     from src.core.report_artifacts import (
         load_report_artifact,
         save_report_artifact,
@@ -81,6 +82,7 @@ except Exception:
     market_closed_reason = None
     cache_portfolio_snapshot = None
     get_cached_live_portfolio = None
+    request_portfolio_refresh = None
     load_report_artifact = None
     save_report_artifact = None
     redis_client = None
@@ -109,8 +111,8 @@ TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 BOT_HEARTBEAT_KEY = "cocos:bot:last_heartbeat"
 OPERATIONAL_SYNC_KEY_PREFIX = "cocos:telegram:operational_sync"
 OPERATIONAL_SYNC_TTL_SECONDS = max(
-    30,
-    int(os.getenv("TELEGRAM_OPERATIONAL_SYNC_TTL_SECONDS", "300")),
+    10,
+    int(os.getenv("TELEGRAM_OPERATIONAL_SYNC_TTL_SECONDS", "30")),
 )
 
 MAX_MESSAGE_LENGTH = 3900
@@ -663,8 +665,9 @@ async def sync_operational_state(
     *,
     full: bool = False,
     owner_chat_id: int | None = None,
+    force: bool = False,
 ) -> str:
-    if not full and await _has_recent_operational_sync(owner_chat_id):
+    if not force and not full and await _has_recent_operational_sync(owner_chat_id):
         logger.info(
             "[BOT][SYNC] cache hit owner_chat_id=%s ttl=%ss",
             owner_chat_id,
@@ -672,25 +675,37 @@ async def sync_operational_state(
         )
         return ""
 
-    args = ["scripts/run_once.py", "--no-telegram", "--fills"]
-    if full:
-        args.append("--full")
-    rc, out, err, elapsed = await run_cmd(
-        [sys.executable, *args],
-        timeout=360 if full else 240,
-    )
-    if rc == 0:
+    if request_portfolio_refresh is None:
+        return (
+            "<b>Advertencia:</b> el canal de refresco persistente no está disponible. "
+            "Muestro la lectura con la DB disponible.\n\n"
+        )
+
+    started = time.perf_counter()
+    try:
+        result = await request_portfolio_refresh(
+            requester="telegram",
+            owner_chat_id=owner_chat_id,
+            include_fills=True,
+            include_market=full,
+            timeout_seconds=300 if full else 150,
+        )
+    except Exception as exc:
+        result = {"ok": False, "error": "refresh_channel_failed", "detail": str(exc)}
+    elapsed = time.perf_counter() - started
+    if result.get("ok"):
         await _mark_operational_sync(owner_chat_id)
         logger.info(
-            "[BOT][SYNC] refresh ok owner_chat_id=%s full=%s duration_s=%.2f",
+            "[BOT][SYNC] persistent refresh ok owner_chat_id=%s full=%s duration_s=%.2f snapshot=%s",
             owner_chat_id,
             full,
             elapsed,
+            result.get("snapshot_id"),
         )
         return ""
-    detail = err[-1600:] or out[-1600:] or "sin detalle"
+    detail = str(result.get("error") or result.get("detail") or "sin detalle")
     return (
-        "<b>Advertencia:</b> no pude refrescar Cocos antes del reporte. "
+        "<b>Advertencia:</b> la sesión persistente no pudo refrescar Cocos antes del reporte. "
         "Muestro la lectura con la DB disponible.\n"
         f"<code>{detail}</code>\n\n"
     )
@@ -856,28 +871,38 @@ def _render_portfolio_positions(positions: list[dict], total_invested: float) ->
 # Acción: Portfolio
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+async def action_portfolio(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    *,
+    refresh: bool = True,
+) -> None:
     if not get_config or not PortfolioDatabase:
         await send_text(context, chat_id, "❌ No pude importar config/db del proyecto.")
         return
 
     cfg = get_config()
     owner_chat_id = chat_id if getattr(cfg, "multiuser_enabled", False) else None
-    snap = (
-        await get_cached_live_portfolio(owner_chat_id=owner_chat_id)
-        if get_cached_live_portfolio
-        else None
+    sync_note = (
+        await sync_operational_state(
+            full=False,
+            owner_chat_id=chat_id,
+            force=True,
+        )
+        if refresh
+        else ""
     )
-    valuation_mode = str((snap or {}).get("valuation_mode", "snapshot"))
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        snap = await db.get_latest_snapshot(owner_chat_id=owner_chat_id)
+    finally:
+        await db.close()
+    valuation_mode = "snapshot"
 
-    if not snap:
-        db  = PortfolioDatabase(cfg.database.url)
-        await db.connect()
-        try:
-            snap = await db.get_latest_snapshot(owner_chat_id=owner_chat_id)
-        finally:
-            await db.close()
-        valuation_mode = "snapshot"
+    if not snap and get_cached_live_portfolio:
+        snap = await get_cached_live_portfolio(owner_chat_id=owner_chat_id)
+        valuation_mode = str((snap or {}).get("valuation_mode", "snapshot"))
 
     if not snap:
         if getattr(cfg, "multiuser_enabled", False):
@@ -891,7 +916,8 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         await send_text(
             context,
             chat_id,
-            "⚠️ Sin snapshots en DB.\nEjecutá <code>/admin_scrape</code> para actualizar.",
+            sync_note
+            + "⚠️ Sin snapshots en DB. La sesión persistente no pudo generar una foto nueva.",
         )
         return
 
@@ -1002,7 +1028,7 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "<i>Portfolio — Cocos Copilot</i>",
         ]
-        await send_text(context, chat_id, "\n".join(lines))
+        await send_text(context, chat_id, sync_note + "\n".join(lines))
         return
 
     lines += [
@@ -1016,7 +1042,7 @@ async def action_portfolio(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         "<i>Portfolio — Cocos Copilot</i>",
     ]
 
-    await send_text(context, chat_id, "\n".join(lines))
+    await send_text(context, chat_id, sync_note + "\n".join(lines))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1039,6 +1065,10 @@ async def action_weekly_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int
 
 async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     started = time.perf_counter()
+    sync_note = await sync_operational_state(
+        full=False,
+        owner_chat_id=chat_id,
+    )
     cached = await _load_cached_report("analysis", chat_id)
     if cached:
         logger.info(
@@ -1048,7 +1078,9 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
         await send_text(
             context,
             chat_id,
-            _artifact_note(cached, "/analisis_full") + str(cached["report_text"]),
+            sync_note
+            + _artifact_note(cached, "/analisis_full")
+            + str(cached["report_text"]),
         )
         return
 
@@ -1069,7 +1101,7 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
         time.perf_counter() - started,
     )
     await _save_cached_report("analysis", chat_id, report)
-    await send_text(context, chat_id, report)
+    await send_text(context, chat_id, sync_note + report)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2197,7 +2229,7 @@ async def _sync_user_portfolio_once(
             chat_id,
             "✅ Portfolio inicial sincronizado.",
         )
-        await action_portfolio(context, chat_id)
+        await action_portfolio(context, chat_id, refresh=False)
     except Exception as exc:
         logger.exception("[BOT] Sync inicial de portfolio falló para chat_id=%s", chat_id)
         await send_text(
@@ -2240,16 +2272,14 @@ async def action_admin_refresh_portfolio(context: ContextTypes.DEFAULT_TYPE, cha
         await send_text(context, chat_id, "🚫 Comando restringido a administradores.")
         logger.warning("[BOT] /admin_refresh_portfolio bloqueado para chat_id=%s", chat_id)
         return
-    report = await run_first_existing_script(
-        [
-            ["scripts/run_once.py"],
-            ["scripts/run_once.py", "--full"],
-            ["scripts/scrape_once.py"],
-        ],
-        timeout=240,
+    sync_note = await sync_operational_state(
+        full=False,
+        owner_chat_id=chat_id,
+        force=True,
     )
-    await send_text(context, chat_id, report)
-    await action_portfolio(context, chat_id)
+    if sync_note:
+        await send_text(context, chat_id, sync_note)
+    await action_portfolio(context, chat_id, refresh=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

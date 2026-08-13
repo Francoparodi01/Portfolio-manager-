@@ -56,7 +56,8 @@ def test_weekly_analysis_uses_report_cache_and_full_analysis_forces_sync():
     assert "await _has_recent_operational_sync(owner_chat_id)" in sync
     assert "await _mark_operational_sync(owner_chat_id)" in sync
     assert '_load_cached_report("analysis", chat_id)' in action
-    assert "sync_operational_state" not in action
+    assert "sync_operational_state" in action
+    assert action.index("sync_operational_state") < action.index("_load_cached_report")
     assert "sync_operational_state(full=True, owner_chat_id=chat_id)" in full_action
     assert "[BOT][ANALYSIS] cache_hit=" in action
 

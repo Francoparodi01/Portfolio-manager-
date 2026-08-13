@@ -57,6 +57,11 @@ from src.core.portfolio_cache import (
     cache_portfolio_snapshot,
     get_cached_portfolio_snapshot,
 )
+from src.core.portfolio_refresh import (
+    complete_portfolio_refresh_request,
+    pop_portfolio_refresh_request,
+    request_portfolio_refresh,
+)
 from src.core.redis_client import client as redis_client
 from src.core.report_artifacts import save_report_artifact
 from src.collector.cocos_scraper import (
@@ -101,6 +106,9 @@ MARKET_CLOSE_H, MARKET_CLOSE_M = 17, 0
 RISK_POLL_SECONDS = 60         # frecuencia del risk guard
 PORTFOLIO_REFRESH_SECONDS = int(os.getenv("PORTFOLIO_REFRESH_SECONDS", "600"))
 PORTFOLIO_OFFHOURS_REFRESH_SECONDS = 3600
+PORTFOLIO_REFRESH_REQUEST_POLL_SECONDS = float(
+    os.getenv("PORTFOLIO_REFRESH_REQUEST_POLL_SECONDS", "2")
+)
 COCOS_SYNC_FILLS = os.getenv("COCOS_SYNC_FILLS", "true").lower() == "true"
 FILL_REFRESH_SECONDS = int(os.getenv("FILL_REFRESH_SECONDS", "600"))
 COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS = int(os.getenv("COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS", "1800"))
@@ -485,7 +493,7 @@ async def run_scrape(run_type: str = "SCHEDULED") -> dict:
 
 
 async def run_market_refresh(run_type: str = "SCHEDULED_MARKET") -> dict:
-    """Refresh the full market universe without touching portfolio or analysis."""
+    """Refresh market data through the scheduler-owned Cocos session."""
     now = _now_art()
     result: dict = {"success": False, "run_type": run_type}
     if not _is_business_day(now):
@@ -494,56 +502,35 @@ async def run_market_refresh(run_type: str = "SCHEDULED_MARKET") -> dict:
         result.update(skipped="market_closed", reason=reason)
         return result
 
-    cfg = get_config()
-    db = PortfolioDatabase(cfg.database.url)
-    lock = _get_scraper_lock()
-    wait_deadline = time.monotonic() + 180
-    while lock.locked() and time.monotonic() < wait_deadline:
-        logger.info("run_market_refresh [%s]: esperando scraper de cuenta", run_type)
-        await asyncio.sleep(5)
-    if lock.locked():
-        logger.warning("run_market_refresh [%s]: scraper ocupado tras 180s; abortando", run_type)
-        result["aborted"] = "scraper_busy_timeout"
-        return result
-
     logger.info("=== run_market_refresh [%s] iniciando ===", run_type)
-    async with lock:
-        await _redis_set(SCRAPER_LOCK_KEY, f"market_refresh:{run_type}", ex=300)
-        try:
-            await db.connect()
-            async with CocosCapitalScraper(cfg.scraper) as scraper:
-                await scraper.login()
-                acciones = await scraper.scrape_market("ACCIONES")
-                cedears = await scraper.scrape_cedears_segments()
-
-            total_prices = len(acciones) + len(cedears)
-            if total_prices <= 0:
-                result["error"] = "market_without_rows"
-                logger.warning("run_market_refresh [%s]: mercado sin filas", run_type)
-                return result
-
-            await db.save_market_prices(acciones + cedears)
-            await _heartbeat(MARKET_HEARTBEAT_KEY)
-            result.update(
-                success=True,
-                acciones=len(acciones),
-                cedears=len(cedears),
-                prices=total_prices,
-            )
-            logger.info(
-                "run_market_refresh [%s] ok: %d precios (%dA + %dC)",
-                run_type,
-                total_prices,
-                len(acciones),
-                len(cedears),
-            )
-        except Exception as exc:
-            result["error"] = str(exc)
-            logger.error("run_market_refresh [%s] fallo: %s", run_type, exc, exc_info=True)
-        finally:
-            await _redis_delete(SCRAPER_LOCK_KEY)
-            await db.close()
-
+    try:
+        refresh = await request_portfolio_refresh(
+            requester=f"scheduler:{run_type}",
+            include_fills=False,
+            include_market=True,
+            timeout_seconds=360,
+        )
+        total_prices = int(refresh.get("market_rows") or 0)
+        if not refresh.get("ok") or total_prices <= 0:
+            result["error"] = refresh.get("error") or "market_without_rows"
+            logger.warning("run_market_refresh [%s]: %s", run_type, result["error"])
+            return result
+        result.update(
+            success=True,
+            acciones=int(refresh.get("acciones") or 0),
+            cedears=int(refresh.get("cedears") or 0),
+            prices=total_prices,
+        )
+        logger.info(
+            "run_market_refresh [%s] ok por sesion persistente: %d precios (%dA + %dC)",
+            run_type,
+            total_prices,
+            result["acciones"],
+            result["cedears"],
+        )
+    except Exception as exc:
+        result["error"] = str(exc)
+        logger.error("run_market_refresh [%s] fallo: %s", run_type, exc, exc_info=True)
     return result
 
 
@@ -781,27 +768,23 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
 
     logger.info("=== run_opening_portfolio_report [%s] iniciando ===", run_type)
 
-    lock = _get_scraper_lock()
-    if lock.locked():
-        logger.warning(
-            "run_opening_portfolio_report [%s]: scraper ocupado — abortando",
-            run_type,
+    try:
+        refresh = await request_portfolio_refresh(
+            requester=f"scheduler:{run_type}",
+            include_fills=True,
+            timeout_seconds=180,
         )
-        result["aborted"] = "scraper_busy"
-        return result
+        if not refresh.get("ok"):
+            raise RuntimeError(
+                f"la sesion persistente no pudo refrescar el portfolio: "
+                f"{refresh.get('error', 'sin detalle')}"
+            )
+        await db.connect()
+        snapshot_payload = await db.get_latest_snapshot()
+        if not snapshot_payload:
+            raise RuntimeError("refresh confirmado sin snapshot disponible en DB")
 
-    async with lock:
-        await _redis_set(SCRAPER_LOCK_KEY, f"opening_portfolio:{run_type}", ex=300)
         try:
-            await db.connect()
-            async with CocosCapitalScraper(cfg.scraper) as scraper:
-                await scraper.login()
-
-                snapshot = await scraper.scrape_portfolio()
-                await db.save_snapshot(snapshot)
-                snapshot_payload = snapshot.to_dict()
-                await _cache_snapshot(snapshot)
-
             latest_prices = await _latest_prices_with_previous_close(
                 db,
                 [p.get("ticker") for p in snapshot_payload.get("positions") or []],
@@ -836,22 +819,21 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
             notifier.send_raw(render_opening_portfolio_report(live_portfolio, title=title))
             result.update(
                 success=True,
-                positions=len(snapshot.positions),
+                positions=len(snapshot_payload.get("positions") or []),
                 price_coverage=live_portfolio.get("price_coverage_count", 0),
             )
             logger.info(
                 "opening portfolio ok: %d posiciones · cobertura %s/%s",
-                len(snapshot.positions),
+                len(snapshot_payload.get("positions") or []),
                 live_portfolio.get("price_coverage_count", 0),
                 live_portfolio.get("positions_count", 0),
             )
-        except Exception as e:
-            logger.error("run_opening_portfolio_report [%s] falló: %s", run_type, e, exc_info=True)
-            notifier.notify_critical_error(run_type, str(e))
-            result["error"] = str(e)
         finally:
-            await _redis_delete(SCRAPER_LOCK_KEY)
             await db.close()
+    except Exception as e:
+        logger.error("run_opening_portfolio_report [%s] falló: %s", run_type, e, exc_info=True)
+        notifier.notify_critical_error(run_type, str(e))
+        result["error"] = str(e)
 
     return result
 
@@ -2046,16 +2028,17 @@ class IntradayManager:
             self._portfolio_live_loop(), name="intraday_portfolio_live"
         )
         await _set_monitor_state("running")
-        logger.info("IntradayManager: loops intradía iniciados")
-        try:
-            self.notifier.send_raw(
-                "🟢 <b>Monitoreo intradía iniciado</b>\n"
-                f"Mercado 10:40/12:00/16:40/17:02 · Portfolio cada {PORTFOLIO_REFRESH_SECONDS // 60}min · "
-                f"Movimientos cada {FILL_REFRESH_SECONDS}s · Live cache cada {PORTFOLIO_LIVE_POLL_SECONDS}s · "
-                "Risk guard cada 60s · Revalidacion intradia official=False."
-            )
-        except Exception as e:
-            logger.warning("No se pudo notificar inicio de monitoreo: %s", e)
+        logger.info("AccountManager: sesion persistente y loops iniciados")
+        if _is_market_window():
+            try:
+                self.notifier.send_raw(
+                    "🟢 <b>Monitoreo intradía iniciado</b>\n"
+                    f"Mercado 10:40/12:00/16:40/17:02 · Portfolio cada {PORTFOLIO_REFRESH_SECONDS // 60}min · "
+                    f"Movimientos cada {FILL_REFRESH_SECONDS}s · Live cache cada {PORTFOLIO_LIVE_POLL_SECONDS}s · "
+                    "Risk guard cada 60s · Sesion Cocos persistente."
+                )
+            except Exception as e:
+                logger.warning("No se pudo notificar inicio de monitoreo: %s", e)
 
     async def stop(self) -> None:
         self._running = False
@@ -2077,11 +2060,7 @@ class IntradayManager:
             await asyncio.gather(*tasks, return_exceptions=True)
 
         await _set_monitor_state("stopped")
-        logger.info("IntradayManager: loops intradía detenidos")
-        try:
-            self.notifier.send_raw("🔴 <b>Monitoreo intradía detenido</b>")
-        except Exception as e:
-            logger.warning("No se pudo notificar fin de monitoreo: %s", e)
+        logger.info("AccountManager: sesion persistente y loops detenidos")
 
     # ── Loop único de scraping ─────────────────────────────────────────────────
 
@@ -2103,6 +2082,7 @@ class IntradayManager:
         last_portfolio_ts: float = 0.0
         last_fills_ts: float = 0.0
         access_block_until: float = 0.0
+        consecutive_failures: int = 0
         account_scraper: CocosCapitalScraper | None = None
 
         async def close_account_scraper() -> None:
@@ -2120,13 +2100,54 @@ class IntradayManager:
             while self._running:
                 now = _now_art()
                 now_ts = time.monotonic()
+                try:
+                    refresh_request = await pop_portfolio_refresh_request()
+                except Exception as exc:
+                    refresh_request = None
+                    logger.debug("Scraper loop: cola de refresh no disponible: %s", exc)
+
+                if refresh_request is not None and getattr(
+                    self.cfg, "multiuser_enabled", False
+                ):
+                    configured_owner = str(
+                        getattr(self.cfg.scraper, "telegram_chat_id", "") or ""
+                    ).strip()
+                    requested_owner = str(refresh_request.owner_chat_id or "").strip()
+                    if requested_owner and requested_owner != configured_owner:
+                        try:
+                            await complete_portfolio_refresh_request(
+                                refresh_request,
+                                {
+                                    "ok": False,
+                                    "error": "persistent_session_not_owned_by_user",
+                                },
+                            )
+                        except Exception as exc:
+                            logger.debug("No se pudo responder owner mismatch: %s", exc)
+                        await asyncio.sleep(PORTFOLIO_REFRESH_REQUEST_POLL_SECONDS)
+                        continue
+
                 if access_block_until > now_ts:
                     remaining = int(access_block_until - now_ts)
                     logger.warning(
                         "Scraper loop pausado por bloqueo de Cocos; reintento en %ss",
                         remaining,
                     )
-                    await asyncio.sleep(min(300, max(30, remaining)))
+                    if refresh_request is not None:
+                        try:
+                            await complete_portfolio_refresh_request(
+                                refresh_request,
+                                {
+                                    "ok": False,
+                                    "error": "cocos_access_cooldown",
+                                    "retry_after_seconds": remaining,
+                                },
+                            )
+                        except Exception as exc:
+                            logger.debug("No se pudo responder cooldown: %s", exc)
+                    await asyncio.sleep(
+                        min(PORTFOLIO_REFRESH_REQUEST_POLL_SECONDS, max(0.25, remaining))
+                    )
                     continue
 
                 in_market = _is_market_window(now)
@@ -2135,29 +2156,44 @@ class IntradayManager:
                     continue
 
                 lock = _get_scraper_lock()
-                if lock.locked():
+                if lock.locked() and refresh_request is None:
                     logger.info("Scraper loop: lock ocupado por job scheduled, esperando 20s...")
-                    await asyncio.sleep(20)
+                    await asyncio.sleep(PORTFOLIO_REFRESH_REQUEST_POLL_SECONDS)
                     continue
 
                 portfolio_interval = (
                     PORTFOLIO_REFRESH_SECONDS if in_market
                     else PORTFOLIO_OFFHOURS_REFRESH_SECONDS
                 )
-                should_refresh_portfolio = (now_ts - last_portfolio_ts) >= portfolio_interval
+                should_refresh_portfolio = (
+                    refresh_request is not None
+                    or (now_ts - last_portfolio_ts) >= portfolio_interval
+                )
                 should_refresh_fills = (
                     COCOS_SYNC_FILLS
-                    and (now_ts - last_fills_ts) >= FILL_REFRESH_SECONDS
+                    and (
+                        bool(refresh_request and refresh_request.include_fills)
+                        or (
+                            in_market
+                            and (now_ts - last_fills_ts) >= FILL_REFRESH_SECONDS
+                        )
+                    )
                 )
 
                 if not should_refresh_portfolio and not should_refresh_fills:
-                    await asyncio.sleep(15 if in_market else 300)
+                    await asyncio.sleep(PORTFOLIO_REFRESH_REQUEST_POLL_SECONDS)
                     continue
 
                 db = PortfolioDatabase(self.cfg.database.url)
+                refresh_result: dict | None = None
                 try:
                     async with lock:
-                        await _redis_set(SCRAPER_LOCK_KEY, "intraday_loop", ex=120)
+                        lock_reason = (
+                            f"requested_refresh:{refresh_request.requester}"
+                            if refresh_request is not None
+                            else "persistent_account_loop"
+                        )
+                        await _redis_set(SCRAPER_LOCK_KEY, lock_reason, ex=300)
                         await db.connect()
                         if account_scraper is None:
                             account_scraper = CocosCapitalScraper(self.cfg.scraper)
@@ -2170,9 +2206,15 @@ class IntradayManager:
                                 raise
 
                         portfolio_refreshed = False
+                        saved_movements = 0
+                        saved_fills = 0
+                        reconciled_fills = 0
+                        manual_fills = 0
                         if should_refresh_portfolio:
-                            snapshot = await account_scraper.scrape_portfolio()
-                            await db.save_snapshot(snapshot)
+                            snapshot = await account_scraper.scrape_portfolio(
+                                force_refresh=refresh_request is not None
+                            )
+                            snapshot_id = await db.save_snapshot(snapshot)
                             await _cache_snapshot(snapshot)
                             last_portfolio_ts = time.monotonic()
                             portfolio_refreshed = True
@@ -2245,10 +2287,42 @@ class IntradayManager:
                                 manual_fills,
                             )
 
+                        acciones_count = 0
+                        cedears_count = 0
+                        market_rows = 0
+                        if refresh_request is not None and refresh_request.include_market:
+                            acciones = await account_scraper.scrape_market("ACCIONES")
+                            cedears = await account_scraper.scrape_cedears_segments()
+                            acciones_count = len(acciones)
+                            cedears_count = len(cedears)
+                            market_rows = acciones_count + cedears_count
+                            await db.save_market_prices(acciones + cedears)
+                            await _heartbeat(MARKET_HEARTBEAT_KEY)
+
+                        if refresh_request is not None:
+                            refresh_result = {
+                                "ok": True,
+                                "requester": refresh_request.requester,
+                                "snapshot_id": str(snapshot_id),
+                                "scraped_at": snapshot.scraped_at.isoformat(),
+                                "positions": len(snapshot.positions),
+                                "confidence": snapshot.confidence_score,
+                                "fills_checked": should_refresh_fills,
+                                "saved_movements": saved_movements,
+                                "saved_fills": saved_fills,
+                                "reconciled_fills": reconciled_fills,
+                                "materialized_fills": manual_fills,
+                                "acciones": acciones_count,
+                                "cedears": cedears_count,
+                                "market_rows": market_rows,
+                            }
+                        consecutive_failures = 0
+
                 except asyncio.CancelledError:
                     raise
                 except CocosAccessBlockedError as e:
                     await close_account_scraper()
+                    consecutive_failures = 0
                     access_block_until = time.monotonic() + COCOS_ACCESS_BLOCK_COOLDOWN_SECONDS
                     logger.warning(
                         "Scraper loop detecto bloqueo de Cocos; pausando scraper por %ss: %s",
@@ -2256,8 +2330,10 @@ class IntradayManager:
                         e,
                         exc_info=True,
                     )
+                    refresh_result = {"ok": False, "error": "cocos_access_blocked"}
                 except CocosAuthenticationError as e:
                     await close_account_scraper()
+                    consecutive_failures = 0
                     access_block_until = time.monotonic() + COCOS_AUTH_FAILURE_COOLDOWN_SECONDS
                     logger.warning(
                         "Scraper loop detecto fallo de autenticacion Cocos; pausando scraper por %ss: %s",
@@ -2265,21 +2341,46 @@ class IntradayManager:
                         e,
                         exc_info=True,
                     )
+                    refresh_result = {"ok": False, "error": "cocos_authentication_failed"}
                 except Exception as e:
-                    await close_account_scraper()
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        await close_account_scraper()
+                        consecutive_failures = 0
                     logger.warning(
-                        "Scraper loop error (reintentara luego): %s",
+                        "Scraper loop error (reintentara con la misma sesion; "
+                        "recicla tras 3 fallos): %s",
                         e,
                         exc_info=True,
                     )
+                    refresh_result = {
+                        "ok": False,
+                        "error": "portfolio_refresh_failed",
+                        "detail": str(e),
+                    }
                 finally:
                     await _redis_delete(SCRAPER_LOCK_KEY)
                     try:
                         await db.close()
                     except Exception:
                         pass
+                    if refresh_request is not None:
+                        try:
+                            await complete_portfolio_refresh_request(
+                                refresh_request,
+                                refresh_result or {
+                                    "ok": False,
+                                    "error": "portfolio_refresh_incomplete",
+                                },
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Scraper loop: no se pudo responder refresh %s: %s",
+                                refresh_request.request_id,
+                                exc,
+                            )
 
-                await asyncio.sleep(15 if in_market else 300)
+                await asyncio.sleep(PORTFOLIO_REFRESH_REQUEST_POLL_SECONDS)
         finally:
             await close_account_scraper()
 
@@ -3108,6 +3209,41 @@ async def run_opening_portfolio_report_then_start_intraday() -> None:
     await start_intraday_loops()
 
 
+async def run_persistent_eod_refresh(run_type: str = "17:02_FULL") -> dict:
+    """Persist portfolio, fills and market through the existing account session."""
+    now = _now_art()
+    if not _is_business_day(now):
+        reason = market_closed_reason(now) or "mercado cerrado"
+        return {"success": False, "run_type": run_type, "skipped": reason}
+
+    cfg = get_config()
+    notifier = TelegramNotifier(
+        cfg.scraper.telegram_bot_token,
+        cfg.scraper.telegram_chat_id,
+    )
+    try:
+        refresh = await request_portfolio_refresh(
+            requester=f"scheduler:{run_type}",
+            include_fills=True,
+            include_market=True,
+            timeout_seconds=420,
+        )
+        if not refresh.get("ok"):
+            raise RuntimeError(str(refresh.get("error") or "refresh_failed"))
+        notifier.send_raw(
+            "📊 <b>Cierre Cocos sincronizado</b>\n"
+            f"Portfolio: {int(refresh.get('positions') or 0)} posiciones · "
+            f"Mercado: {int(refresh.get('acciones') or 0)} acciones + "
+            f"{int(refresh.get('cedears') or 0)} CEDEARs · "
+            f"Fills guardados: {int(refresh.get('saved_fills') or 0)}."
+        )
+        return {"success": True, "run_type": run_type, **refresh}
+    except Exception as exc:
+        logger.error("run_persistent_eod_refresh fallo: %s", exc, exc_info=True)
+        notifier.notify_critical_error(run_type, str(exc))
+        return {"success": False, "run_type": run_type, "error": str(exc)}
+
+
 async def _scheduler_main() -> None:
     if not HAS_APSCHEDULER:
         raise ImportError("apscheduler no instalado: pip install apscheduler>=3.10")
@@ -3161,7 +3297,7 @@ async def _scheduler_main() -> None:
         replace_existing=True,
     )
     scheduler.add_job(
-        run_full,
+        run_persistent_eod_refresh,
         _business_day_cron(hour=17, minute=2),
         args=["17:02_FULL"],
         id="portfolio_eod",
@@ -3197,14 +3333,6 @@ async def _scheduler_main() -> None:
         name="Pre-close predictive alerts 16:45 ART",
         misfire_grace_time=180,
         max_instances=1,
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        stop_intraday_loops,
-        _business_day_cron(hour=16, minute=59),
-        id="intraday_stop",
-        name="Intraday stop 16:59 ART",
-        misfire_grace_time=300,
         replace_existing=True,
     )
     scheduler.add_job(
@@ -3294,8 +3422,9 @@ async def _scheduler_main() -> None:
         name="scheduler_heartbeat",
     )
     scheduler.start()
+    await start_intraday_loops()
     logger.info(
-        "Scheduler activo: 10:31 apertura portfolio + intraday on; mercado 10:40/12:00/16:40/17:02; 10:45 post-open; 16:15/16:45 preclose alerts; radar audit 16:50=%s; 16:59 intraday off; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
+        "Scheduler activo: sesion Cocos persistente; 10:31 apertura portfolio; mercado 10:40/12:00/16:40/17:02; 10:45 post-open; 16:15/16:45 preclose alerts; radar audit 16:50=%s; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
         % (
             "on" if RADAR_AUDIT_CAPTURE_ENABLED else "off",
             "on" if SENTIMENT_PIPELINE_ENABLED else "off",
@@ -3304,15 +3433,6 @@ async def _scheduler_main() -> None:
             "on" if ISSUER_EVENT_INGESTION_ENABLED else "off",
         )
     )
-
-    # Si arrancamos durante rueda, iniciar loops de inmediato
-    now = _now_art()
-    if _is_market_window(now):
-        logger.info(
-            "Scheduler arrancó dentro de rueda (%s ART) — iniciando loops intradía",
-            now.strftime("%H:%M:%S"),
-        )
-        await start_intraday_loops()
 
     stop_event = asyncio.Event()
 

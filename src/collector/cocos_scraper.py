@@ -715,6 +715,28 @@ class CocosCapitalScraper:
 
         return total, cash
 
+    @staticmethod
+    def _normalize_portfolio_totals(
+        positions: list[Position],
+        total: Decimal,
+        cash: Decimal,
+    ) -> tuple[Decimal, Decimal]:
+        """Keep invested value consistent with the parsed position ledger."""
+        invested = sum((position.market_value for position in positions), Decimal("0"))
+        if not positions or invested <= 0:
+            return total, cash
+
+        tolerance = max(Decimal("1000"), invested * Decimal("0.02"))
+        if total <= 0 or abs(total - invested) > tolerance:
+            logger.warning(
+                "Tenencia informada inconsistente con posiciones; "
+                "normalizando total %s -> %s",
+                total,
+                invested,
+            )
+            total = invested
+        return total, cash
+
     async def _resolve_trusted_device_step(self) -> bool:
         if not self._page:
             return False
@@ -1130,9 +1152,18 @@ class CocosCapitalScraper:
 
             self._page.on("response", on_response)
             try:
-                await self._page.goto(
+                response = await self._page.goto(
                     self._cfg.portfolio_url, timeout=self._cfg.timeout_ms
                 )
+                await self._raise_if_access_blocked(
+                    "portfolio_refresh",
+                    response_status=response.status if response else None,
+                )
+                if self._is_login_url(self._page.url or ""):
+                    self._is_logged_in = False
+                    raise CocosAuthenticationError(
+                        "La sesion persistente vencio durante el refresh de portfolio"
+                    )
                 await self._page.wait_for_load_state("domcontentloaded", timeout=60_000)
                 # Esperar al menos un assetWrapper (posición) — verificado Mar 2026
                 await self._wait_for_portfolio_loaded(timeout=self._cfg.timeout_ms)
@@ -1185,6 +1216,12 @@ class CocosCapitalScraper:
                     logger.info(f"Total portfolio API: ${total_value}, Cash: ${cash}")
                 else:
                     total_value, cash = await self._extract_totals()
+
+                total_value, cash = self._normalize_portfolio_totals(
+                    positions,
+                    total_value,
+                    cash,
+                )
 
                 snapshot = PortfolioSnapshot(
                     scraped_at=utcnow(),
