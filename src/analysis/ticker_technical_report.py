@@ -13,6 +13,7 @@ from typing import Any
 import logging
 import math
 import re
+from zoneinfo import ZoneInfo
 
 from src.analysis.technical import Signal, analyze_ticker_from_frame, fetch_history
 from src.collector.cocos_history import candles_to_frame
@@ -27,6 +28,9 @@ SMA_OVERLAY_ALPHA = 0.52
 SMA_OVERLAY_ZORDER = 0.8
 
 logger = logging.getLogger(__name__)
+ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+TECHNICAL_BUY_THRESHOLD = 3.5
+TECHNICAL_SELL_THRESHOLD = -3.5
 
 
 @dataclass(frozen=True)
@@ -188,7 +192,14 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
     thesis_lines = _thesis_lines(stats)
     opinion_change_lines = _opinion_change_lines(stats)
     risk_lines = _risk_lines(report, stats)
-    confidence_lines = _confidence_lines(report, stats)
+    result_lines = _result_lines(report, stats)
+    technical_shadow_lines = _technical_shadow_v2_lines(signal)
+    technical_buy_v3_lines = _technical_buy_shadow_v3_lines(signal)
+    strength_label = (
+        "Neutralidad interna"
+        if str(signal.signal or "").upper() == "HOLD"
+        else "Intensidad interna"
+    )
 
     lines = [
         f"<b>{escape(report.ticker)} - {escape(verdict_title)}</b>",
@@ -196,8 +207,18 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
         "",
         f"Precio: <b>{_fmt_level(signal.price_usd)}</b>",
         f"Señal operativa: <b>{escape(operative_signal)}</b>",
-        f"Score técnico: <code>{signal.score_raw:+.2f}</code> | "
-        f"Intensidad: <b>{signal.strength:.0%}</b> <i>(no es probabilidad)</i>",
+        f"Score técnico interno: <code>{signal.score_raw:+.2f}</code>",
+        f"Referencia interna: BUY ≥ <code>{TECHNICAL_BUY_THRESHOLD:+.1f}</code> | "
+        f"SELL ≤ <code>{TECHNICAL_SELL_THRESHOLD:+.1f}</code>",
+        "Lectura del score: <b>heurístico, sin calibración predictiva aprobada</b> "
+        "<i>(no es probabilidad ni retorno esperado)</i>",
+        f"{strength_label}: <b>{signal.strength:.0%}</b>",
+    ]
+
+    if warning_lines:
+        lines += ["", "<b>Advertencias</b>", *warning_lines]
+
+    lines += [
         "",
         f"Recuperación: <b>{recovery}</b>",
         f"Soporte inmediato: <b>{support_immediate}</b>",
@@ -208,6 +229,10 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
 
     if thesis_lines:
         lines += ["", "<b>Tesis</b>", *thesis_lines]
+    if technical_shadow_lines:
+        lines += ["", "<b>Experimento técnico v2</b>", *technical_shadow_lines]
+    if technical_buy_v3_lines:
+        lines += ["", "<b>Análisis de compra V3</b>", *technical_buy_v3_lines]
     if opinion_change_lines:
         lines += ["", "<b>Qué cambiaría la visión</b>", *opinion_change_lines]
     if risk_lines:
@@ -230,8 +255,6 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
         lines += ["", "<b>Contexto cartera</b>", *position_lines]
     if decision_lines:
         lines += ["", "<b>Última decisión registrada</b>", *decision_lines]
-    if warning_lines:
-        lines += ["", "<b>Advertencias</b>", *warning_lines]
 
     source = _source_label(report.signal, report.data_source)
     lines += [
@@ -241,9 +264,67 @@ def render_ticker_telegram_report(report: TickerTechnicalReport) -> str:
         f"   Velas: <b>{report.candle_count}</b> | Hasta: <b>{escape(_fmt_dt(report.as_of))}</b>",
         "   Modo: <b>read-only</b> - no genera órdenes, no persiste decision_log y no cambia thresholds.",
     ]
-    if confidence_lines:
-        lines += ["", "<b>Confianza argumentada</b>", *confidence_lines]
+    if result_lines:
+        lines += ["", *result_lines]
     return "\n".join(lines)
+
+
+def _technical_shadow_v2_lines(signal: Signal) -> list[str]:
+    shadow = dict(getattr(signal, "technical_shadow_v2", {}) or {})
+    if not shadow:
+        return []
+    score = _num(shadow.get("score"))
+    trend = _num(shadow.get("trend_input"))
+    reversion = _num(shadow.get("reversion_input"))
+    bias_labels = {
+        "POSITIVE": "POSITIVO",
+        "NEGATIVE": "NEGATIVO",
+        "NEUTRAL": "NEUTRAL",
+    }
+    rule_labels = {
+        "trend_continuation": "continuidad de tendencia; extensión queda como riesgo",
+        "range_reversion": "reversión priorizada dentro de rango",
+        "downtrend_confirmation": "sobreventa exige confirmación antes de giro",
+        "transitional_reduced": "señal reducida por régimen transicional",
+    }
+    bias = bias_labels.get(str(shadow.get("bias") or "NEUTRAL"), "NEUTRAL")
+    rule = rule_labels.get(str(shadow.get("rule") or ""), "regla experimental")
+    return [
+        f"   Sesgo: <b>{bias}</b> | score <code>{score:+.3f}</code>"
+        if score is not None else f"   Sesgo: <b>{bias}</b>",
+        f"   Entradas: trend <code>{trend:+.3f}</code> | reversión <code>{reversion:+.3f}</code>"
+        if trend is not None and reversion is not None else "   Entradas incompletas",
+        f"   Regla: {escape(rule)}",
+        "   <i>Shadow no calibrado: no modifica /analisis, planes ni órdenes.</i>",
+    ]
+
+
+def _technical_buy_shadow_v3_lines(signal: Signal) -> list[str]:
+    shadow = dict(getattr(signal, "technical_buy_shadow_v3", {}) or {})
+    if not shadow:
+        return []
+    labels = {
+        "PRIMARY_BUY_CANDIDATE": "CANDIDATO PRIMARIO",
+        "SECONDARY_BUY_CANDIDATE": "CANDIDATO SECUNDARIO",
+        "WATCH_BUY_SETUP": "ESPERAR SETUP",
+        "REJECTED_FOR_BUY_RESEARCH": "NO ELEGIBLE PARA COMPRA",
+    }
+    classification = str(shadow.get("classification") or "WATCH_BUY_SETUP")
+    tier = str(shadow.get("priority_tier") or "-")
+    gates = [str(item) for item in shadow.get("gates", []) if item]
+    warnings = [str(item) for item in shadow.get("warnings", []) if item]
+    lines = [
+        f"   20 días: <b>{escape(labels.get(classification, classification))}</b> | nivel <b>{escape(tier)}</b>",
+        "   Objetivo: detectar compras nuevas; no evalúa ventas de cartera.",
+    ]
+    if gates:
+        lines.append(f"   Filtros activos: <code>{escape(', '.join(gates))}</code>")
+    if warnings:
+        lines.append(f"   Calidad: <code>{escape(', '.join(warnings))}</code>")
+    lines.append(
+        "   <i>Shadow: no cambia Radar, /analisis, scoring, planes ni órdenes.</i>"
+    )
+    return lines
 
 
 def render_ticker_technical_chart(
@@ -1016,6 +1097,9 @@ def _thesis_lines(stats: dict[str, float | None]) -> list[str]:
     else:
         lines.append("   • Momentum corto plazo mixto")
 
+    if int(_num(stats.get("trailing_missing_volume")) or 0) >= 3:
+        lines.append("   △ Volumen reciente incompleto (ver Advertencias)")
+
     if last is not None and support is not None and last > support:
         lines.append("   ✓ No hay evidencia de cambio estructural")
     elif last is not None and support is not None:
@@ -1059,50 +1143,21 @@ def _risk_lines(report: TickerTechnicalReport, stats: dict[str, float | None]) -
         risks.append("   • Momentum negativo")
     if _medium_state(stats) == "Correctivo":
         risks.append("   • Corrección de medio plazo")
-    if int(_num(stats.get("trailing_missing_volume")) or 0) >= 3:
-        risks.append("   • Falta volumen reciente")
-    if str(report.asset_type or "").upper() == "CEDEAR":
-        risks.append("   • CEDEAR: no separa subyacente USD, CCL y liquidez todavía")
     if not risks:
         risks.append("   • Sin riesgo técnico dominante detectado")
     return risks[:4]
 
 
-def _confidence_lines(
+def _result_lines(
     report: TickerTechnicalReport,
     stats: dict[str, float | None],
 ) -> list[str]:
     result = _result_label(report)
     follow_up = _follow_up_sentence(report, stats)
-    lines = ["¿Por qué el sistema piensa esto?"]
-
-    if _long_state(stats) == "Alcista":
-        lines.append("   ✓ Tendencia primaria alcista")
-    elif _long_state(stats) == "Bajista":
-        lines.append("   △ Tendencia primaria bajista")
-    else:
-        lines.append("   • Tendencia primaria neutral")
-
-    if _medium_state(stats) == "Correctivo" and _long_state(stats) == "Alcista":
-        lines.append("   ✓ Corrección dentro de estructura")
-    elif _medium_state(stats) == "Alcista":
-        lines.append("   ✓ Medio plazo constructivo")
-    elif _medium_state(stats) == "Correctivo":
-        lines.append("   △ Corrección de medio plazo")
-
-    if _short_state(stats) == "Bajista":
-        lines.append("   △ Momentum corto plazo deteriorado")
-    elif _short_state(stats) == "Alcista":
-        lines.append("   ✓ Momentum corto plazo favorable")
-
-    if int(_num(stats.get("trailing_missing_volume")) or 0) >= 3:
-        lines.append("   △ Volumen reciente incompleto")
-
-    lines += [
+    return [
         f"Resultado: <b>{escape(result)}</b>.",
         escape(follow_up),
     ]
-    return lines
 
 
 def _result_label(report: TickerTechnicalReport) -> str:
@@ -1320,7 +1375,7 @@ def _position_lines(position: TickerPositionContext | None) -> list[str]:
         weight = f" ({_fmt_pct(position.portfolio_weight)})" if position.portfolio_weight is not None else ""
         lines.append(f"   Valor: <b>{_fmt_money(position.market_value_ars)}</b>{weight}")
     if position.snapshot_at:
-        lines.append(f"   Snapshot: <b>{escape(_fmt_dt(position.snapshot_at))}</b>")
+        lines.append(f"   Snapshot: <b>{escape(_fmt_dt_art(position.snapshot_at))}</b>")
     return lines or ["   Posicion detectada sin valores normalizados."]
 
 
@@ -1333,7 +1388,10 @@ def _decision_lines(decision: TickerDecisionContext | None) -> list[str]:
     if decision.decision:
         chunks.append(escape(decision.decision))
     if decision.status:
-        chunks.append(escape(decision.status))
+        status = escape(decision.status)
+        if decision.status.upper() == "EXECUTED_MANUAL":
+            status += " <i>(manual sin plan vinculado; no señal del bot)</i>"
+        chunks.append(status)
     if decision.final_score is not None:
         chunks.append(f"score {decision.final_score:+.3f}")
     if decision.source:
@@ -1341,7 +1399,7 @@ def _decision_lines(decision: TickerDecisionContext | None) -> list[str]:
     line = " | ".join(chunks) if chunks else "sin detalle"
     return [
         f"   {line}",
-        f"   Fecha: <b>{escape(_fmt_dt(decision.decided_at))}</b>",
+        f"   Fecha: <b>{escape(_fmt_dt_art(decision.decided_at))} ART</b>",
     ]
 
 
@@ -1443,6 +1501,23 @@ def _fmt_dt(value: Any) -> str:
             value = value.to_pydatetime()
         if isinstance(value, datetime):
             return value.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        pass
+    return str(value)
+
+
+def _fmt_dt_art(value: Any) -> str:
+    if value is None:
+        return "N/A"
+    try:
+        if hasattr(value, "to_pydatetime"):
+            value = value.to_pydatetime()
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=ART_TZ)
+            return value.astimezone(ART_TZ).strftime("%Y-%m-%d %H:%M")
     except Exception:
         pass
     return str(value)

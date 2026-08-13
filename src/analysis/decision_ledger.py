@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from html import escape
 from zoneinfo import ZoneInfo
@@ -17,6 +17,11 @@ from src.analysis.override_classification import (
 from src.analysis.plan_follow_reporting import (
     apply_plan_follow_overlay,
     fetch_plan_follow_reporting_data,
+)
+from src.analysis.plan_follow_attribution import (
+    compute_execution_session_outcomes,
+    fetch_canonical_outcome_candles,
+    fetch_outcome_corporate_effects,
 )
 from src.core.telegram_format import (
     header as tg_header,
@@ -206,13 +211,27 @@ async def fetch_decision_ledger(
             COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
             COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
             COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d
-        FROM decision_log
-        WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
-          AND ($2::bigint IS NULL OR owner_chat_id = $2)
-          AND decision IN ('BUY', 'SELL')
-          AND COALESCE(outcome_basis, '') <> 'legacy_external'
-          AND is_primary_metric = TRUE
-        ORDER BY decided_at DESC, id DESC
+        FROM decision_log dl
+        WHERE dl.decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+          AND ($2::bigint IS NULL OR dl.owner_chat_id = $2)
+          AND dl.decision IN ('BUY', 'SELL')
+          AND COALESCE(dl.outcome_basis, '') <> 'legacy_external'
+          AND dl.is_primary_metric = TRUE
+          AND COALESCE(dl.source, dl.layers->>'source') IN ('broker_movement', 'broker_fill')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM plan_execution_attribution_movements link
+              JOIN plan_execution_attributions attribution
+                ON attribution.id = link.attribution_id
+               AND attribution.eligible_for_viability = TRUE
+              JOIN broker_movements movement
+                ON movement.id = link.broker_movement_id
+              JOIN broker_fills bf
+                ON bf.external_fill_id = movement.external_movement_id
+              WHERE bf.decision_log_id = dl.id
+                AND ($2::bigint IS NULL OR attribution.owner_chat_id = $2)
+          )
+        ORDER BY dl.decided_at DESC, dl.id DESC
         """,
         days,
         owner_chat_id,
@@ -566,9 +585,93 @@ async def fetch_decision_ledger(
     )
 
     real = [dict(r) for r in real_rows]
+    for operation in attribution_data.get("operations") or []:
+        if not operation.get("eligible_for_viability"):
+            continue
+        real.append(
+            {
+                "id": -int(operation["attribution_id"]),
+                "decided_at": operation.get("executed_at"),
+                "ticker": operation.get("ticker"),
+                "decision": operation.get("side"),
+                "source": "plan_execution_attribution",
+                "status": "EXECUTED_FOLLOWED",
+                "decision_type": "followed_execution",
+                "run_intent": "formal_plan",
+                "decision_stage": "executed",
+                "metric_scope": "followed_plan",
+                "price_at_decision": operation.get("execution_price"),
+                "amount_ars": (
+                    operation.get("execution_notional_ars")
+                    or operation.get("executed_amount_ars")
+                ),
+                "execution_precision": operation.get("executed_at_precision"),
+                "execution_timestamp_source": operation.get("executed_at_source"),
+                "outcome_5d": operation.get("outcome_5d"),
+                "outcome_10d": operation.get("outcome_10d"),
+                "outcome_20d": operation.get("outcome_20d"),
+            }
+        )
+    real.sort(key=lambda row: row.get("decided_at") or datetime.min.replace(tzinfo=ART), reverse=True)
     plans = [dict(r) for r in plan_rows]
     radar = [dict(r) for r in radar_rows]
     pending = [dict(r) for r in pending_mark_rows]
+
+    edge_tickers = sorted(
+        {str(row.get("edge_vs") or "").upper() for row in radar if row.get("edge_vs")}
+    )
+    edge_start_days = [row.get("audit_start_day") for row in radar if row.get("edge_vs")]
+    if edge_tickers and edge_start_days:
+        edge_candles = await fetch_canonical_outcome_candles(
+            conn,
+            edge_tickers,
+            since=min(edge_start_days),
+        )
+        edge_effects = await fetch_outcome_corporate_effects(
+            conn,
+            edge_tickers,
+            since=min(edge_start_days),
+        )
+        for row in radar:
+            edge_ticker = str(row.get("edge_vs") or "").upper()
+            if not edge_ticker:
+                continue
+            for horizon in (5, 10, 20):
+                row[f"edge_close_{horizon}d"] = None
+                row[f"edge_outcome_{horizon}d"] = None
+
+            start_day = row.get("audit_start_day")
+            candles = edge_candles.get(edge_ticker, [])
+            entry = next(
+                (
+                    candle
+                    for candle in candles
+                    if candle.get("ts") is not None
+                    and candle["ts"].date() >= start_day
+                ),
+                None,
+            )
+            if entry is None:
+                row["edge_entry_price"] = None
+                continue
+
+            entry_day = entry["ts"].date()
+            entry_price = _as_float(entry.get("close_price"))
+            row["edge_entry_price"] = entry_price
+            edge_outcomes = compute_execution_session_outcomes(
+                execution_price=entry_price,
+                executed_at=datetime.combine(entry_day, time(12), tzinfo=ART),
+                side="BUY",
+                candles=candles,
+                corporate_effects=edge_effects.get(edge_ticker, ()),
+            )
+            for horizon in (5, 10, 20):
+                row[f"edge_close_{horizon}d"] = edge_outcomes.get(
+                    f"outcome_price_{horizon}d"
+                )
+                row[f"edge_outcome_{horizon}d"] = edge_outcomes.get(
+                    f"outcome_{horizon}d"
+                )
 
     for row in real:
         for horizon in ("5d", "10d", "20d"):
@@ -695,7 +798,7 @@ def render_decision_ledger(data: dict) -> str:
         ),
         (
             f"   Retorno bruto {_pct(followed.get('avg_return_5d'))} · "
-            f"PnL bruto {_result_icon(followed.get('actual_pnl_5d_ars'))} "
+            f"PnL direccional bruto {_result_icon(followed.get('actual_pnl_5d_ars'))} "
             f"<b>{_signed_money(followed.get('actual_pnl_5d_ars'))}</b>"
         ),
         "",

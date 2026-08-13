@@ -15,6 +15,7 @@ export function sourceLabel(value: unknown): string {
   if (key === "broker_movement") return "Movimiento manual";
   if (key === "broker_fill") return "Fill broker";
   if (key === "execution_plan") return "Plan de Quantia";
+  if (key === "plan_execution_attribution") return "Plan seguido";
   if (key === "radar") return "Radar teórico";
   if (key === "optimizer") return "Optimizador";
   return String(value || "Sin fuente");
@@ -24,6 +25,7 @@ export function scopeLabel(value: unknown): string {
   const key = String(value || "").toLowerCase();
   if (key === "primary") return "Métrica principal";
   if (key === "planner_audit") return "Auditoría planner";
+  if (key === "followed_plan") return "Ejecución seguida";
   if (key === "radar_audit") return "Radar auditado";
   if (key === "blocked_audit") return "Bloqueado auditado";
   if (key === "debug") return "Debug";
@@ -52,6 +54,7 @@ export function statusLabel(value: unknown): string {
 export function toneForScope(value: unknown): Tone {
   const key = String(value || "").toLowerCase();
   if (key === "primary") return "real";
+  if (key === "followed_plan") return "real";
   if (key === "planner_audit") return "info";
   if (key === "radar_audit") return "theoretical";
   if (key === "blocked_audit") return "blocked";

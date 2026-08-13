@@ -57,7 +57,8 @@ def summarize_plan_follow_operations(operations: Iterable[Mapping[str, Any]]) ->
 
     gross_returns = [_as_float(row.get("outcome_5d")) for row in closed_5d]
     actual_pnl = [
-        _as_float(row.get("executed_amount_ars")) * _as_float(row.get("outcome_5d"))
+        _as_float(row.get("execution_notional_ars") or row.get("executed_amount_ars"))
+        * _as_float(row.get("outcome_5d"))
         for row in closed_5d
     ]
     target_pnl = [
@@ -133,13 +134,27 @@ async def fetch_plan_follow_reporting_data(
             attribution.executed_at,
             attribution.target_amount_ars,
             attribution.executed_amount_ars,
+            attribution.execution_quantity,
+            attribution.execution_price,
+            attribution.execution_notional_ars,
             attribution.follow_ratio,
             attribution.follow_status,
             attribution.temporal_quality,
             attribution.eligible_for_viability,
-            COALESCE(dl.executable_outcome_5d, dl.outcome_5d) AS outcome_5d,
-            COALESCE(dl.executable_outcome_10d, dl.outcome_10d) AS outcome_10d,
-            COALESCE(dl.executable_outcome_20d, dl.outcome_20d) AS outcome_20d,
+            attribution.outcome_5d,
+            attribution.outcome_10d,
+            attribution.outcome_20d,
+            attribution.outcome_40d,
+            attribution.outcome_date_5d,
+            attribution.outcome_date_10d,
+            attribution.outcome_date_20d,
+            attribution.outcome_date_40d,
+            attribution.outcome_price_5d,
+            attribution.outcome_price_10d,
+            attribution.outcome_price_20d,
+            attribution.outcome_price_40d,
+            attribution.outcome_basis,
+            attribution.outcome_version,
             (SELECT COUNT(*) FROM plan_execution_attribution_plans p
              WHERE p.attribution_id = attribution.id) AS plan_link_count,
             (SELECT COUNT(*) FROM plan_execution_attribution_movements m

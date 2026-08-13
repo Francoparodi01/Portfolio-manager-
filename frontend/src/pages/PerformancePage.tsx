@@ -15,7 +15,7 @@ import { formatDateTime, formatNumber, formatPercent, formatScore, sampleLabel, 
 import { decisionLabel, scopeLabel, sourceLabel, statusLabel, toneForScope, toneForStatus } from "../utils/labels";
 
 const viewOptions = ["score", "fuentes", "senales", "tickers", "recientes"] as const;
-const scopeOptions = ["todos", "primary", "planner_audit", "radar_audit", "blocked_audit"] as const;
+const scopeOptions = ["todos", "primary", "followed_plan", "planner_audit", "radar_audit", "blocked_audit"] as const;
 const actionOptions = ["todas", "BUY", "SELL", "HOLD"] as const;
 const scoreOptions = ["con_score", "score_0", "todos"] as const;
 

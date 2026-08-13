@@ -1073,12 +1073,18 @@ class PortfolioDatabase:
             )
         return [corporate_action_effect_from_row(dict(row)) for row in rows]
 
-    async def get_latest_portfolio_instrument_seeds(self) -> list[dict[str, str]]:
-        """Return local instruments from each owner's newest portfolio snapshot.
+    async def get_latest_portfolio_instrument_seeds(
+        self,
+        *,
+        recent_exit_days: int = 5,
+    ) -> list[dict[str, str]]:
+        """Return current instruments plus recently exited portfolio tickers.
 
         The result is discovery input only. It is not an instruction to create
         an effect or trade, and may contain an issuer hint from a previously
-        confirmed corporate action such as YPFD -> YPF.
+        confirmed corporate action such as YPFD -> YPF. Recent exits remain in
+        the event universe briefly so an imminent filing is not lost as soon as
+        the position reaches zero.
         """
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
@@ -1091,26 +1097,106 @@ class PortfolioDatabase:
                         snapshot_id
                     FROM portfolio_snapshots
                     ORDER BY COALESCE(owner_chat_id, 0), scraped_at DESC
+                ), current_instruments AS (
+                    SELECT DISTINCT ON (UPPER(p.ticker), p.asset_type, p.currency)
+                        UPPER(p.ticker) AS ticker,
+                        COALESCE(p.asset_type, 'UNKNOWN') AS asset_type,
+                        COALESCE(p.currency, 'ARS') AS currency
+                    FROM positions p
+                    JOIN latest_snapshots latest USING (snapshot_id)
+                    WHERE COALESCE(p.ticker, '') <> ''
+                    ORDER BY UPPER(p.ticker), p.asset_type, p.currency
+                ), recent_exit_tickers AS (
+                    SELECT DISTINCT UPPER(bm.ticker) AS ticker
+                    FROM broker_movements bm
+                    WHERE bm.movement_type = 'SELL'
+                      AND bm.source = 'cocos_movements'
+                      AND COALESCE(bm.executed_at, bm.created_at)
+                          >= NOW() - MAKE_INTERVAL(days => $1)
+                      AND COALESCE(bm.ticker, '') <> ''
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM current_instruments current
+                          WHERE current.ticker = UPPER(bm.ticker)
+                      )
+                ), latest_instrument_history AS (
+                    SELECT DISTINCT ON (UPPER(p.ticker))
+                        UPPER(p.ticker) AS ticker,
+                        COALESCE(p.asset_type, 'UNKNOWN') AS asset_type,
+                        COALESCE(p.currency, 'ARS') AS currency
+                    FROM positions p
+                    WHERE COALESCE(p.ticker, '') <> ''
+                    ORDER BY UPPER(p.ticker), p.scraped_at DESC
+                ), candidate_instruments AS (
+                    SELECT ticker, asset_type, currency
+                    FROM current_instruments
+                    UNION
+                    SELECT history.ticker, history.asset_type, history.currency
+                    FROM recent_exit_tickers recent
+                    JOIN latest_instrument_history history USING (ticker)
                 )
-                SELECT DISTINCT ON (UPPER(p.ticker), p.asset_type, p.currency)
-                    UPPER(p.ticker) AS ticker,
-                    COALESCE(p.asset_type, 'UNKNOWN') AS asset_type,
-                    COALESCE(p.currency, 'ARS') AS currency,
+                SELECT DISTINCT ON (candidate.ticker, candidate.asset_type, candidate.currency)
+                    candidate.ticker,
+                    candidate.asset_type,
+                    candidate.currency,
                     COALESCE(corporate.issuer_id, '') AS issuer_hint
-                FROM positions p
-                JOIN latest_snapshots latest USING (snapshot_id)
+                FROM candidate_instruments candidate
                 LEFT JOIN LATERAL (
                     SELECT event.issuer_id
                     FROM corporate_event_instrument_effects effect
                     JOIN corporate_events event ON event.id = effect.event_id
-                    WHERE UPPER(effect.ticker) = UPPER(p.ticker)
+                    WHERE UPPER(effect.ticker) = candidate.ticker
                       AND event.lifecycle_status IN ('CONFIRMED', 'EFFECTIVE')
                     ORDER BY event.effective_at DESC, event.id DESC
                     LIMIT 1
                 ) corporate ON TRUE
-                WHERE COALESCE(p.ticker, '') <> ''
-                ORDER BY UPPER(p.ticker), p.asset_type, p.currency
+                ORDER BY candidate.ticker, candidate.asset_type, candidate.currency
+                """,
+                max(0, int(recent_exit_days)),
+            )
+        return [dict(row) for row in rows]
+
+    async def get_recent_portfolio_exits(
+        self,
+        *,
+        since: datetime,
+        owner_chat_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return recent full exits, inferred from real sells and latest holdings."""
+        if not self._pool:
+            raise RuntimeError("Llamar connect() primero")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
                 """
+                WITH latest_snapshot AS (
+                    SELECT snapshot_id
+                    FROM portfolio_snapshots
+                    WHERE ($2::bigint IS NULL OR owner_chat_id = $2)
+                    ORDER BY scraped_at DESC
+                    LIMIT 1
+                ), current_tickers AS (
+                    SELECT DISTINCT UPPER(p.ticker) AS ticker
+                    FROM positions p
+                    JOIN latest_snapshot latest USING (snapshot_id)
+                )
+                SELECT
+                    UPPER(bm.ticker) AS ticker,
+                    MAX(COALESCE(bm.executed_at, bm.created_at)) AS exited_at
+                FROM broker_movements bm
+                WHERE bm.movement_type = 'SELL'
+                  AND bm.source = 'cocos_movements'
+                  AND COALESCE(bm.executed_at, bm.created_at) >= $1
+                  AND COALESCE(bm.ticker, '') <> ''
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM current_tickers current
+                      WHERE current.ticker = UPPER(bm.ticker)
+                  )
+                GROUP BY UPPER(bm.ticker)
+                ORDER BY exited_at DESC, ticker
+                """,
+                since,
+                owner_chat_id,
             )
         return [dict(row) for row in rows]
 
@@ -2293,6 +2379,75 @@ class PortfolioDatabase:
             )
         return [dict(row) for row in rows]
 
+    async def get_post_event_price_reaction(
+        self,
+        ticker: str,
+        *,
+        session_date: date,
+    ) -> dict[str, Any] | None:
+        """Read the first/latest session prices and prior canonical close."""
+        if not self._pool:
+            return None
+        clean_ticker = str(ticker or "").upper().strip()
+        if not clean_ticker:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                WITH previous_close AS (
+                    SELECT close_price::float AS price
+                    FROM market_candles
+                    WHERE ticker = $1
+                      AND interval = '1d'
+                      AND close_price IS NOT NULL
+                      AND close_price > 0
+                      AND ts::date < $2::date
+                    ORDER BY
+                        ts DESC,
+                        CASE
+                            WHEN source = 'COCOS' THEN 0
+                            WHEN source = 'TRADINGVIEW_BYMA' THEN 1
+                            WHEN source = 'internal_snapshot' THEN 2
+                            ELSE 3
+                        END,
+                        scraped_at DESC
+                    LIMIT 1
+                ), first_sample AS (
+                    SELECT last_price::float AS price, ts
+                    FROM market_prices
+                    WHERE ticker = $1
+                      AND last_price IS NOT NULL
+                      AND last_price > 0
+                      AND (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = $2::date
+                      AND (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '10:30'
+                    ORDER BY ts
+                    LIMIT 1
+                ), latest_sample AS (
+                    SELECT last_price::float AS price, ts
+                    FROM market_prices
+                    WHERE ticker = $1
+                      AND last_price IS NOT NULL
+                      AND last_price > 0
+                      AND (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date = $2::date
+                      AND (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '10:30'
+                    ORDER BY ts DESC
+                    LIMIT 1
+                )
+                SELECT
+                    $1::text AS ticker,
+                    $2::date AS session_date,
+                    previous_close.price AS previous_close,
+                    first_sample.price AS first_price,
+                    first_sample.ts AS first_observed_at,
+                    latest_sample.price AS latest_price,
+                    latest_sample.ts AS observed_at
+                FROM previous_close, first_sample, latest_sample
+                """,
+                clean_ticker,
+                session_date,
+            )
+        return dict(row) if row else None
+
     async def get_cocos_universe(self) -> list[str]:
         prices = await self.get_cocos_universe_assets()
         tickers = sorted({
@@ -2830,6 +2985,7 @@ class PortfolioDatabase:
             row = await conn.fetchrow(
                 """
                 SELECT
+                    id,
                     executed_at,
                     executed_at_precision,
                     executed_at_source,
@@ -2841,7 +2997,7 @@ class PortfolioDatabase:
                     created_at
                 FROM broker_movements
                 WHERE movement_type IN ('BUY', 'SELL')
-                ORDER BY created_at DESC
+                ORDER BY COALESCE(executed_at, created_at) DESC, id DESC
                 LIMIT 1
                 """
             )

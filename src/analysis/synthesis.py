@@ -66,6 +66,7 @@ class SynthesisResult:
     technical_candle_sources: tuple[str, ...] = field(default_factory=tuple)
     technical_candle_source_counts: dict[str, int] = field(default_factory=dict)
     technical_signal: str = "HOLD"
+    technical_score_raw: float = 0.0
     technical_regime: str = "TRANSITIONAL"
     trend_score: float = 0.0
     trend_components: dict[str, float] = field(default_factory=dict)
@@ -73,6 +74,7 @@ class SynthesisResult:
     reversion_components: dict[str, float] = field(default_factory=dict)
     structural_break_confirmed: bool = False
     overbought_momentum: bool = False
+    technical_shadow_v2: dict = field(default_factory=dict)
     stop_triggered: bool = False
 
     def to_telegram(self) -> str:

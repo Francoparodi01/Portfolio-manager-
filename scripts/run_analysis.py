@@ -125,6 +125,7 @@ from src.analysis.audit_scope import (
 )
 from src.analysis.decision_context import build_decision_run_context
 from src.analysis.feature_snapshot import build_feature_snapshot_from_layers
+from src.analysis.technical_shadow_v2 import build_technical_shadow_v2
 from src.collector.cocos_history import candles_to_frame
 from src.collector.portfolio_quality import (
     PRICE_STATUS_FRESH,
@@ -207,14 +208,23 @@ def _render_analysis_data_context(
     if latest_broker_movement:
         side = escape(str(latest_broker_movement.get("movement_type") or "").upper())
         ticker = escape(str(latest_broker_movement.get("ticker") or "").upper())
+        executed_at = latest_broker_movement.get("executed_at")
         created_at = latest_broker_movement.get("created_at")
         precision = str(latest_broker_movement.get("executed_at_precision") or "").upper()
-        lines.append(
-            f"Ultimo movimiento real detectado: <b>{ticker} {side}</b> "
-            f"({_fmt_dt_art(created_at)})."
-        )
         if precision == "DATE_ONLY":
-            lines.append("Hora broker: <b>DATE_ONLY</b>; Cocos informa fecha, no hora intradia exacta.")
+            execution_label = _fmt_dt_art(executed_at, "%d/%m")
+            lines.append(
+                f"Ultimo movimiento real: <b>{ticker} {side}</b> · "
+                f"operacion {execution_label} (hora no informada) · "
+                f"detectado {_fmt_dt_art(created_at)}."
+            )
+        else:
+            observation_label = "observado" if precision == "OBSERVED_AFTER" else "ejecutado"
+            lines.append(
+                f"Ultimo movimiento real: <b>{ticker} {side}</b> · "
+                f"{observation_label} {_fmt_dt_art(executed_at)} · "
+                f"detectado {_fmt_dt_art(created_at)}."
+            )
 
     return lines
 
@@ -1044,6 +1054,20 @@ def _layers_payload_for_decision(
         "components": dict(getattr(result, "reversion_components", {}) or {}),
         "connected_to_primary_score": False,
     }
+    technical_shadow_v2 = dict(getattr(result, "technical_shadow_v2", {}) or {})
+    if not technical_shadow_v2:
+        technical_shadow_v2 = build_technical_shadow_v2(
+            regime=str(getattr(result, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"),
+            trend_score=_safe_float(getattr(result, "trend_score", 0.0)),
+            reversion_score=_safe_float(getattr(result, "reversion_score", 0.0)),
+            structural_break_confirmed=bool(
+                getattr(result, "structural_break_confirmed", False)
+            ),
+            baseline_score_raw=_safe_float(
+                getattr(result, "technical_score_raw", 0.0)
+            ),
+        ).to_dict()
+    payload["technical_shadow_v2"] = technical_shadow_v2
 
     return _attach_feature_snapshot_and_context()
 
@@ -2468,7 +2492,7 @@ def _render_compact_report(
     ]
     context_lines = _render_analysis_data_context(portfolio_snapshot, latest_broker_movement)
     if context_lines:
-        lines.extend(context_lines[:2])
+        lines.extend(context_lines)
     event_lines = render_manual_market_events_html(
         manual_market_events or [],
         compact=True,
@@ -3341,6 +3365,7 @@ async def _load_portfolio(cfg, owner_chat_id: int | None = None):
             positions = normalize_positions_with_fresh_market_prices(
                 positions,
                 await db.get_latest_market_prices(),
+                reference_at=snap.get("scraped_at"),
             )
             discrepancies = price_discrepancy_warnings(positions)
             if discrepancies:
@@ -3846,6 +3871,7 @@ async def main(
             technical_candle_source_counts=getattr(tech, "candle_source_counts", {}),
         )
         result.technical_signal = str(getattr(tech, "signal", "HOLD") or "HOLD")
+        result.technical_score_raw = float(getattr(tech, "score_raw", 0.0) or 0.0)
         result.technical_regime = str(
             getattr(tech, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"
         )
@@ -3857,6 +3883,9 @@ async def main(
             getattr(tech, "structural_break_confirmed", False)
         )
         result.overbought_momentum = bool(getattr(tech, "overbought_momentum", False))
+        result.technical_shadow_v2 = dict(
+            getattr(tech, "technical_shadow_v2", {}) or {}
+        )
         context = sentiment_contexts.get(ticker)
         if context is not None:
             result.sentiment_context = context
@@ -4003,6 +4032,9 @@ async def main(
                 if context is not None:
                     u_result.sentiment_context = context
                 u_result.technical_signal = str(getattr(u_tech, "signal", "HOLD") or "HOLD")
+                u_result.technical_score_raw = float(
+                    getattr(u_tech, "score_raw", 0.0) or 0.0
+                )
                 u_result.technical_regime = str(
                     getattr(u_tech, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"
                 )
@@ -4017,6 +4049,9 @@ async def main(
                 )
                 u_result.overbought_momentum = bool(
                     getattr(u_tech, "overbought_momentum", False)
+                )
+                u_result.technical_shadow_v2 = dict(
+                    getattr(u_tech, "technical_shadow_v2", {}) or {}
                 )
                 universe_results.append(u_result)
 

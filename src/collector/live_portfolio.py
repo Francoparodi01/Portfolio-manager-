@@ -58,7 +58,7 @@ def _opening_state(day_change, covered: int, positions_count: int) -> str:
     if positions_count and coverage_ratio < 0.8:
         return "REVISION: cobertura incompleta"
     if day_change is None:
-        return "SIN VARIACION COMPARABLE"
+        return "PARCIAL: total no comparable"
     change = _safe_float(day_change)
     if change >= 0.01:
         return "POSITIVO"
@@ -405,14 +405,25 @@ def render_opening_portfolio_report(
         reverse=True,
     )[:3]
 
-    lines = tg_header(title, subtitle="Marca post-open de la cartera; no confirma operaciones") + [
+    if covered == 0:
+        subtitle = "Snapshot actualizado; precios de la rueda aun no disponibles"
+    elif day_change is None:
+        subtitle = "Valuacion parcial; la variacion total aun no es comparable"
+    else:
+        subtitle = "Marca post-open de la cartera; no confirma operaciones"
+    lines = tg_header(title, subtitle=subtitle) + [
         tg_section("Lectura rapida"),
         f"Estado: <b>{state}</b>",
         (
             f"Movimiento cartera: <b>{_fmt_pct(day_change)}</b> "
             f"(<b>{_fmt_ars(day_pnl, signed=True)} ARS</b>)"
             if day_change is not None
-            else "Movimiento cartera: <b>N/A</b>"
+            else (
+                f"P&amp;L parcial ({covered}/{positions_count}): "
+                f"<b>{_fmt_ars(day_pnl, signed=True)} ARS</b>"
+                if day_pnl is not None and covered > 0
+                else "Movimiento cartera: <b>N/A</b>"
+            )
         ),
         f"Precios de mercado: <b>{covered}/{positions_count}</b> ({coverage_ratio:.0%})",
         "",
@@ -469,5 +480,9 @@ def render_opening_portfolio_report(
     warning = str(live_portfolio.get("post_open_warning") or "").strip()
     if warning:
         lines.append(f"<b>Advertencia:</b> {escape(warning)}")
-    lines.append(tg_note("Plan EOD = proxima rueda. Este reporte marca cartera post-open con precios operables; no confirma operaciones."))
+    if covered < positions_count:
+        footer = "Reporte parcial: los precios faltantes permanecen a valor snapshot; no usar el total como rendimiento."
+    else:
+        footer = "Plan EOD = proxima rueda. La marca usa precios operables y no confirma operaciones."
+    lines.append(tg_note(footer))
     return "\n".join(lines)

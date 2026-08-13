@@ -28,6 +28,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from src.analysis.execution_planner import MIN_TRADE_ARS
+from src.analysis.technical_buy_shadow_v3 import build_technical_buy_shadow_v3
 from src.core.telegram_format import (
     header as tg_header,
     note as tg_note,
@@ -216,6 +217,11 @@ class OpportunityCandidate:
     momentum_score:      float = 0.0
     reversion_score:     float = 0.0
     reversion_components: dict[str, float] = field(default_factory=dict)
+    technical_regime:    str = "TRANSITIONAL"
+    trend_score:         float = 0.0
+    trend_components:    dict[str, float] = field(default_factory=dict)
+    technical_shadow_v2: dict[str, object] = field(default_factory=dict)
+    technical_buy_shadow_v3: dict[str, object] = field(default_factory=dict)
     shadow_expected_return_20: float | None = None
     shadow_probability_up_20:  float | None = None
     shadow_action:             str = ""
@@ -1227,6 +1233,19 @@ def run_opportunity_analysis(
         shadow_alignment, shadow_er20, shadow_p20, shadow_action = _shadow_alignment_from_context(
             shadow_contexts.get(ticker)
         )
+        base_buy_v3 = dict(getattr(tech, "technical_buy_shadow_v3", {}) or {})
+        technical_buy_v3 = build_technical_buy_shadow_v3(
+            technical_shadow_v2=dict(getattr(tech, "technical_shadow_v2", {}) or {}),
+            regime=str(getattr(tech, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"),
+            trend_score=float(getattr(tech, "trend_score", 0.0) or 0.0),
+            reversion_score=float(getattr(tech, "reversion_score", 0.0) or 0.0),
+            structural_break_confirmed=bool(
+                getattr(tech, "structural_break_confirmed", False)
+            ),
+            asset_type=screener_m.asset_type,
+            source_mode=str(getattr(tech, "candle_source_mode", "unknown") or "unknown"),
+            volume_quality_20=base_buy_v3.get("volume_quality_20"),
+        ).to_dict()
 
         cand = OpportunityCandidate(
             ticker               = ticker,
@@ -1241,6 +1260,15 @@ def run_opportunity_analysis(
             momentum_score       = round(float(momentum_s), 4),
             reversion_score      = round(float(getattr(tech, "reversion_score", 0.0) or 0.0), 4),
             reversion_components = dict(getattr(tech, "reversion_components", {}) or {}),
+            technical_regime     = str(
+                getattr(tech, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"
+            ),
+            trend_score          = round(float(getattr(tech, "trend_score", 0.0) or 0.0), 4),
+            trend_components     = dict(getattr(tech, "trend_components", {}) or {}),
+            technical_shadow_v2  = dict(
+                getattr(tech, "technical_shadow_v2", {}) or {}
+            ),
+            technical_buy_shadow_v3 = technical_buy_v3,
             shadow_expected_return_20 = shadow_er20,
             shadow_probability_up_20  = shadow_p20,
             shadow_action             = shadow_action,
@@ -1409,6 +1437,23 @@ def render_opportunity_report(
             f"Confirmar antes de entrar."
         )
 
+    def _technical_buy_v3_reader_line(candidate: OpportunityCandidate) -> str:
+        payload = dict(getattr(candidate, "technical_buy_shadow_v3", {}) or {})
+        if not payload:
+            return ""
+        labels = {
+            "PRIMARY_BUY_CANDIDATE": "compra primaria",
+            "SECONDARY_BUY_CANDIDATE": "compra secundaria",
+            "WATCH_BUY_SETUP": "esperar setup",
+            "REJECTED_FOR_BUY_RESEARCH": "no elegible para compra",
+        }
+        classification = str(payload.get("classification") or "WATCH_BUY_SETUP")
+        tier = str(payload.get("priority_tier") or "-")
+        return (
+            f"Compra técnica V3: <b>{escape(tier)}</b> · "
+            f"{escape(labels.get(classification, classification))} · 20d · shadow"
+        )
+
     def _technical_source_label(c: OpportunityCandidate) -> str:
         mode = str(c.technical_candle_source_mode or "unknown")
         counts = c.technical_candle_source_counts or {}
@@ -1462,7 +1507,7 @@ def render_opportunity_report(
     def _render_action_text(c: OpportunityCandidate) -> tuple[str, str]:
         action = str(c.action_concreta or "").strip() or "Revisar setup"
         if market_session_open:
-            return "Acción sugerida", action
+            return "Lectura radar", action
         return (
             "Revalidación requerida",
             f"Revalidar al abrir: {action}. No ejecutar ahora con mercado cerrado.",
@@ -1512,7 +1557,9 @@ def render_opportunity_report(
         h.append("   Mercado cerrado/sin rueda: ideas para revalidar en la próxima apertura.")
     if report.vix_level:
         h.append(f"   VIX: {report.vix_level:.1f}")
-    h.append("   Nota: radar detecta ideas; no cuenta como ejecución real ni entra al EV principal.")
+    h.append(
+        "   Nota: radar detecta ideas teóricas. La aprobación operativa corresponde al plan de cartera."
+    )
     h.append("")
 
     if not report.candidates:
@@ -1554,6 +1601,9 @@ def render_opportunity_report(
             h.append(prior_outcome)
         if c.shadow_alignment != "SIN SHADOW":
             h.append(f"🔬 Shadow: <b>{escape(c.shadow_alignment)}</b> — {escape(_shadow_reader_note(c))}")
+        buy_v3 = dict(getattr(c, "technical_buy_shadow_v3", {}) or {})
+        if buy_v3:
+            h.append(_technical_buy_v3_reader_line(c))
         h.append(f"Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
 
         # Contradicción técnica — nota explícita
@@ -1640,6 +1690,8 @@ def render_opportunity_report(
             h.append(f"   {prior_outcome}")
         if c.shadow_alignment != "SIN SHADOW":
             h.append(f"   🔬 Shadow: <b>{escape(c.shadow_alignment)}</b> — {escape(_shadow_reader_note(c))}")
+        if getattr(c, "technical_buy_shadow_v3", None):
+            h.append(f"   {_technical_buy_v3_reader_line(c)}")
         h.append(f"   Gráfico: <a href=\"{_tv_chart_url(c.ticker)}\">TradingView/BYMA</a>")
         # Contradicción técnica en compacto
         if c.tech_contradiction:

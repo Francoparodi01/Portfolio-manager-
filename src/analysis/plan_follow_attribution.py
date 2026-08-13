@@ -12,12 +12,16 @@ from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
+from src.analysis.decision_engine import directional_return
 from src.collector.schema_migrations import PLAN_EXECUTION_ATTRIBUTION_SQL
 from src.core.market_calendar import is_trading_day
 
 
 ART = ZoneInfo("America/Argentina/Buenos_Aires")
 MATCHING_VERSION = "plan-follow-v1"
+OUTCOME_VERSION = "execution-sessions-v1"
+OUTCOME_BASIS = "canonical_cocos"
+OUTCOME_HORIZONS = (5, 10, 20, 40)
 FOLLOW_STATUSES = {"PARTIAL", "FOLLOWED", "OVERFOLLOWED"}
 
 
@@ -79,6 +83,96 @@ def _movement_amount(row: Mapping[str, Any]) -> float:
     if amount:
         return abs(amount)
     return abs(_as_float(row.get("quantity")) * _as_float(row.get("price")))
+
+
+def _execution_reference(
+    movements: Iterable[Mapping[str, Any]],
+) -> tuple[float, float, float]:
+    quantity = 0.0
+    notional = 0.0
+    for row in movements:
+        row_quantity = abs(_as_float(row.get("quantity")))
+        row_price = _as_float(row.get("price"))
+        if row_quantity <= 0 or row_price <= 0:
+            continue
+        quantity += row_quantity
+        notional += row_quantity * row_price
+    price = notional / quantity if quantity > 0 else 0.0
+    return quantity, price, notional
+
+
+def _session_target_days(
+    execution_day: date,
+    horizons: Iterable[int] = OUTCOME_HORIZONS,
+) -> dict[int, date]:
+    wanted = sorted({int(value) for value in horizons if int(value) > 0})
+    if not wanted:
+        return {}
+    targets: dict[int, date] = {}
+    session = 0
+    cursor = execution_day
+    while session < wanted[-1]:
+        cursor += timedelta(days=1)
+        if not is_trading_day(cursor):
+            continue
+        session += 1
+        if session in wanted:
+            targets[session] = cursor
+    return targets
+
+
+def compute_execution_session_outcomes(
+    *,
+    execution_price: float,
+    executed_at: datetime,
+    side: str,
+    candles: Iterable[Mapping[str, Any]],
+    corporate_effects: Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """Compute exact trading-session outcomes from the real execution basis."""
+    if execution_price <= 0:
+        return {}
+    execution_day = executed_at.astimezone(ART).date()
+    target_days = _session_target_days(execution_day)
+    candles_by_day: dict[date, Mapping[str, Any]] = {}
+    for candle in candles:
+        ts = candle.get("ts")
+        candle_day = ts.date() if isinstance(ts, datetime) else _as_date(ts)
+        close = _as_float(candle.get("close_price"))
+        if candle_day is not None and close > 0:
+            candles_by_day[candle_day] = candle
+
+    effects = []
+    for effect in corporate_effects:
+        effective_at = _as_datetime(effect.get("effective_at"))
+        price_factor = _as_float(effect.get("price_factor"), 1.0)
+        lifecycle_status = str(effect.get("lifecycle_status") or "").upper()
+        if (
+            effective_at is not None
+            and price_factor > 0
+            and lifecycle_status in {"CONFIRMED", "EFFECTIVE"}
+        ):
+            effects.append((effective_at.astimezone(ART).date(), price_factor))
+
+    result: dict[str, Any] = {}
+    for horizon, target_day in target_days.items():
+        candle = candles_by_day.get(target_day)
+        if candle is None:
+            continue
+        adjusted_entry = float(execution_price)
+        for effect_day, price_factor in effects:
+            if execution_day < effect_day <= target_day:
+                adjusted_entry *= price_factor
+        close = _as_float(candle.get("close_price"))
+        result[f"outcome_{horizon}d"] = directional_return(
+            adjusted_entry,
+            close,
+            side,
+        )
+        result[f"outcome_date_{horizon}d"] = target_day
+        result[f"outcome_price_{horizon}d"] = close
+        result[f"outcome_source_{horizon}d"] = str(candle.get("source") or "unknown")
+    return result
 
 
 def canonicalize_movements(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -298,6 +392,9 @@ def normalize_plan_execution_attributions(
         sources = {str(row.get("executed_at_source") or "unknown") for row in movement_rows}
         executed_at = _as_datetime(first_movement.get("executed_at"))
         plan = representative["plan"]
+        execution_quantity, execution_price, execution_notional = _execution_reference(
+            movement_rows
+        )
 
         attributions.append(
             {
@@ -312,6 +409,9 @@ def normalize_plan_execution_attributions(
                 "executed_at_source": next(iter(sources)) if len(sources) == 1 else "mixed",
                 "target_amount_ars": target_amount,
                 "executed_amount_ars": executed_amount,
+                "execution_quantity": execution_quantity,
+                "execution_price": execution_price,
+                "execution_notional_ars": execution_notional,
                 "follow_ratio": follow_ratio,
                 "follow_status": follow_status,
                 "temporal_quality": temporal_quality,
@@ -333,6 +433,93 @@ def normalize_plan_execution_attributions(
 
 async def ensure_plan_execution_attribution_schema(conn) -> None:
     await conn.execute(PLAN_EXECUTION_ATTRIBUTION_SQL)
+
+
+async def fetch_canonical_outcome_candles(
+    conn,
+    tickers: Iterable[str],
+    *,
+    since: date,
+) -> dict[str, list[dict[str, Any]]]:
+    clean_tickers = sorted({str(ticker).upper() for ticker in tickers if ticker})
+    if not clean_tickers:
+        return {}
+    rows = await conn.fetch(
+        """
+        WITH ranked AS (
+            SELECT
+                ts, ticker, close_price, source,
+                ROW_NUMBER() OVER (
+                    PARTITION BY UPPER(ticker), (ts AT TIME ZONE 'UTC')::date
+                    ORDER BY
+                        CASE
+                            WHEN source = 'COCOS' THEN 0
+                            WHEN source = 'TRADINGVIEW_BYMA' THEN 1
+                            WHEN source = 'internal_snapshot' THEN 2
+                            ELSE 3
+                        END,
+                        scraped_at DESC,
+                        ts DESC
+                ) AS source_rank
+            FROM market_candles
+            WHERE UPPER(ticker) = ANY($1::text[])
+              AND ts >= $2::date
+              AND interval = '1d'
+              AND close_price IS NOT NULL
+              AND close_price > 0
+        )
+        SELECT ts, UPPER(ticker) AS ticker, close_price, source
+        FROM ranked
+        WHERE source_rank = 1
+        ORDER BY ticker, ts
+        """,
+        clean_tickers,
+        since,
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        item = dict(row)
+        grouped.setdefault(str(item["ticker"]), []).append(item)
+    return grouped
+
+
+async def fetch_outcome_corporate_effects(
+    conn,
+    tickers: Iterable[str],
+    *,
+    since: date,
+) -> dict[str, list[dict[str, Any]]]:
+    clean_tickers = sorted({str(ticker).upper() for ticker in tickers if ticker})
+    if not clean_tickers:
+        return {}
+    ready = await conn.fetchval(
+        "SELECT to_regclass('public.corporate_event_instrument_effects') IS NOT NULL"
+    )
+    if not ready:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT
+            UPPER(effect.ticker) AS ticker,
+            event.effective_at,
+            event.lifecycle_status,
+            effect.price_factor
+        FROM corporate_event_instrument_effects effect
+        JOIN corporate_events event ON event.id = effect.event_id
+        WHERE effect.is_active = TRUE
+          AND event.lifecycle_status IN ('CONFIRMED', 'EFFECTIVE')
+          AND UPPER(effect.ticker) = ANY($1::text[])
+          AND event.effective_at >= $2::date
+        ORDER BY ticker, event.effective_at, event.id, effect.id
+        """,
+        clean_tickers,
+        since,
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        item = dict(row)
+        grouped.setdefault(str(item["ticker"]), []).append(item)
+    return grouped
 
 
 async def _fetch_plans(conn, *, cutoff: datetime) -> list[dict[str, Any]]:
@@ -446,6 +633,33 @@ async def sync_plan_execution_attributions(
         movements,
         match_window_sessions=match_window_sessions,
     )
+    outcome_since = min(
+        row["executed_at"].astimezone(ART).date() for row in attributions
+    ) if attributions else cutoff.astimezone(ART).date()
+    candles_by_ticker = await fetch_canonical_outcome_candles(
+        conn,
+        (row["ticker"] for row in attributions),
+        since=outcome_since,
+    )
+    effects_by_ticker = await fetch_outcome_corporate_effects(
+        conn,
+        (row["ticker"] for row in attributions),
+        since=outcome_since,
+    )
+    for row in attributions:
+        outcomes = compute_execution_session_outcomes(
+            execution_price=float(row["execution_price"]),
+            executed_at=row["executed_at"],
+            side=row["side"],
+            candles=candles_by_ticker.get(row["ticker"], ()),
+            corporate_effects=effects_by_ticker.get(row["ticker"], ()),
+        )
+        row["outcomes"] = outcomes
+        row["metadata"]["outcome_sources"] = {
+            str(horizon): outcomes.get(f"outcome_source_{horizon}d")
+            for horizon in OUTCOME_HORIZONS
+            if outcomes.get(f"outcome_source_{horizon}d")
+        }
     keys = [row["attribution_key"] for row in attributions]
 
     async with conn.transaction():
@@ -458,9 +672,12 @@ async def sync_plan_execution_attributions(
                     executed_at_precision, executed_at_source,
                     target_amount_ars, executed_amount_ars, follow_ratio,
                     follow_status, temporal_quality, eligible_for_viability,
-                    match_window_sessions, matching_version, metadata, updated_at
+                    match_window_sessions, matching_version,
+                    execution_quantity, execution_price, execution_notional_ars,
+                    metadata, updated_at
                 ) VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,NOW()
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+                    $18,$19,$20,$21::jsonb,NOW()
                 )
                 ON CONFLICT (attribution_key) DO UPDATE SET
                     representative_decision_log_id = EXCLUDED.representative_decision_log_id,
@@ -479,6 +696,9 @@ async def sync_plan_execution_attributions(
                     eligible_for_viability = EXCLUDED.eligible_for_viability,
                     match_window_sessions = EXCLUDED.match_window_sessions,
                     matching_version = EXCLUDED.matching_version,
+                    execution_quantity = EXCLUDED.execution_quantity,
+                    execution_price = EXCLUDED.execution_price,
+                    execution_notional_ars = EXCLUDED.execution_notional_ars,
                     metadata = EXCLUDED.metadata,
                     updated_at = NOW()
                 RETURNING id
@@ -500,7 +720,56 @@ async def sync_plan_execution_attributions(
                 row["eligible_for_viability"],
                 row["match_window_sessions"],
                 row["matching_version"],
+                row["execution_quantity"],
+                row["execution_price"],
+                row["execution_notional_ars"],
                 json.dumps(row["metadata"]),
+            )
+            outcomes = row["outcomes"]
+            has_outcome = any(
+                outcomes.get(f"outcome_{horizon}d") is not None
+                for horizon in OUTCOME_HORIZONS
+            )
+            await conn.execute(
+                """
+                UPDATE plan_execution_attributions SET
+                    outcome_5d = $2,
+                    outcome_10d = $3,
+                    outcome_20d = $4,
+                    outcome_40d = $5,
+                    outcome_date_5d = $6,
+                    outcome_date_10d = $7,
+                    outcome_date_20d = $8,
+                    outcome_date_40d = $9,
+                    outcome_price_5d = $10,
+                    outcome_price_10d = $11,
+                    outcome_price_20d = $12,
+                    outcome_price_40d = $13,
+                    outcome_basis = $14,
+                    outcome_version = $15,
+                    outcome_filled_at = CASE
+                        WHEN $16 THEN COALESCE(outcome_filled_at, NOW())
+                        ELSE NULL
+                    END,
+                    updated_at = NOW()
+                WHERE id = $1
+                """,
+                attribution_id,
+                outcomes.get("outcome_5d"),
+                outcomes.get("outcome_10d"),
+                outcomes.get("outcome_20d"),
+                outcomes.get("outcome_40d"),
+                outcomes.get("outcome_date_5d"),
+                outcomes.get("outcome_date_10d"),
+                outcomes.get("outcome_date_20d"),
+                outcomes.get("outcome_date_40d"),
+                outcomes.get("outcome_price_5d"),
+                outcomes.get("outcome_price_10d"),
+                outcomes.get("outcome_price_20d"),
+                outcomes.get("outcome_price_40d"),
+                OUTCOME_BASIS,
+                OUTCOME_VERSION,
+                has_outcome,
             )
             await conn.execute(
                 "DELETE FROM plan_execution_attribution_plans WHERE attribution_id = $1",
@@ -584,8 +853,14 @@ async def sync_plan_execution_attributions(
 
 __all__ = [
     "FOLLOW_STATUSES",
+    "fetch_canonical_outcome_candles",
+    "fetch_outcome_corporate_effects",
     "MATCHING_VERSION",
+    "OUTCOME_BASIS",
+    "OUTCOME_HORIZONS",
+    "OUTCOME_VERSION",
     "canonicalize_movements",
+    "compute_execution_session_outcomes",
     "ensure_plan_execution_attribution_schema",
     "normalize_plan_execution_attributions",
     "sync_plan_execution_attributions",

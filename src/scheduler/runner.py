@@ -37,7 +37,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
@@ -139,6 +139,9 @@ ISSUER_EVENT_INGESTION_ENABLED = os.getenv(
 ).lower() == "true"
 ISSUER_EVENT_INGESTION_INTERVAL_SECONDS = int(
     os.getenv("ISSUER_EVENT_INGESTION_INTERVAL_SECONDS", "21600")
+)
+ISSUER_EVENT_INGESTION_STARTUP_DELAY_SECONDS = int(
+    os.getenv("ISSUER_EVENT_INGESTION_STARTUP_DELAY_SECONDS", "30")
 )
 ISSUER_EVENT_INGESTION_SOURCES = os.getenv(
     "ISSUER_EVENT_INGESTION_SOURCES", "yahoo,sec,cnv,fmp,finnhub"
@@ -331,9 +334,16 @@ def _render_new_movements_notice(
         side = str(movement.movement_type or "").upper()
         ticker_raw = str(movement.ticker or "").upper()
         ticker = escape(ticker_raw)
-        qty = _fmt_qty(movement.quantity)
+        qty = _fmt_qty(abs(float(movement.quantity)))
         amount = _fmt_ars(_movement_amount_ars(movement))
-        lines.append(f"{ticker} {side} | {qty} nominales | {amount}")
+        precision = str(movement.executed_at_precision or "").lower()
+        if precision == "date_only":
+            movement_time = movement.executed_at.astimezone(ART_TZ).strftime("operacion %d/%m; hora no informada")
+        elif precision == "observed_after":
+            movement_time = movement.executed_at.astimezone(ART_TZ).strftime("observado %d/%m %H:%M")
+        else:
+            movement_time = movement.executed_at.astimezone(ART_TZ).strftime("ejecutado %d/%m %H:%M")
+        lines.append(f"{ticker} {side} | {qty} nominales | {amount} | {movement_time}")
         if side == "BUY" and manual_event_risk_by_ticker.get(ticker_raw):
             reason = _short_notice_text(manual_event_risk_by_ticker[ticker_raw])
             lines.append(f"⚠️ BUY contra EVENT_RISK activo: {escape(reason)}")
@@ -348,8 +358,8 @@ def _render_new_movements_notice(
     else:
         lines.append("Movimientos registrados. Si el portfolio no se refresco aun, el proximo scrape lo alinea.")
 
-    if any(str(m.executed_at_precision or "").lower() == "date_only" for m in ordered):
-        lines.append("Nota: Cocos informa fecha de operacion, no hora exacta intradia.")
+    if any(str(m.executed_at_precision or "").lower() == "observed_after" for m in ordered):
+        lines.append("Nota: 'observado' indica el primer snapshot que permite inferir el movimiento.")
 
     return "\n".join(lines)
 
@@ -816,12 +826,14 @@ async def run_opening_portfolio_report(run_type: str = "10:31_OPENING_PORTFOLIO"
                 ttl_seconds=PORTFOLIO_CACHE_TTL_SECONDS,
             )
 
-            notifier.send_raw(
-                render_opening_portfolio_report(
-                    live_portfolio,
-                    title="APERTURA DE MERCADO - PORTFOLIO ACTUALIZADO",
-                )
+            warning = _post_open_quality_warning(live_portfolio, now)
+            if warning:
+                live_portfolio["post_open_warning"] = warning
+            title = (
+                "APERTURA - PRECIOS AUN NO DISPONIBLES"
+                if warning else "APERTURA DE MERCADO - PORTFOLIO ACTUALIZADO"
             )
+            notifier.send_raw(render_opening_portfolio_report(live_portfolio, title=title))
             result.update(
                 success=True,
                 positions=len(snapshot.positions),
@@ -3269,6 +3281,9 @@ async def _scheduler_main() -> None:
             ),
             id="issuer_event_ingestion",
             name="Issuer event ingestion shadow",
+            next_run_time=datetime.now(ART_TZ) + timedelta(
+                seconds=max(5, ISSUER_EVENT_INGESTION_STARTUP_DELAY_SECONDS)
+            ),
             misfire_grace_time=300,
             max_instances=1,
             replace_existing=True,

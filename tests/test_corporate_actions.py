@@ -639,6 +639,10 @@ def test_partial_coverage_does_not_claim_total_portfolio_return():
     assert live["price_coverage_count"] == 1
     assert live["day_pnl_ars"] == pytest.approx(1000)
     assert live["day_change_pct"] is None
+    report = render_opening_portfolio_report(live)
+    assert "REVISION: cobertura incompleta" in report
+    assert "P&amp;L parcial (1/2): <b>+$1.000 ARS</b>" in report
+    assert "no usar el total como rendimiento" in report
 
 
 def test_position_reconciliation_preserves_value_and_cost_basis():

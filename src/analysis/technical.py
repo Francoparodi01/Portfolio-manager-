@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from src.analysis.trend_regime import TrendRegime, assess_trend
+from src.analysis.technical_buy_shadow_v3 import build_technical_buy_shadow_v3
+from src.analysis.technical_shadow_v2 import build_technical_shadow_v2
 
 try:
     import pandas as pd
@@ -61,7 +63,7 @@ class Signal:
     ticker: str
     signal: str           # "BUY" | "SELL" | "HOLD"
     strength: float       # 0.0 – 1.0
-    score_raw: float      # score sin clampear (-9 a +9) para síntesis
+    score_raw: float      # score aditivo sin clampear; strength usa divisor 12
     reasons: list[str]
     price_usd: float
     candle_source_mode: str = "unknown"   # official | reconstructed | mixed | unknown
@@ -75,6 +77,8 @@ class Signal:
     reversion_components: dict[str, float] = field(default_factory=dict)
     structural_break_confirmed: bool = False
     overbought_momentum: bool = False
+    technical_shadow_v2: dict[str, object] = field(default_factory=dict)
+    technical_buy_shadow_v3: dict[str, object] = field(default_factory=dict)
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_telegram(self) -> str:
@@ -490,6 +494,20 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
 
     trend = assess_trend(ind)
     reversion_score = max(-1.0, min(1.0, reversion_raw / 7.0))
+    technical_shadow_v2 = build_technical_shadow_v2(
+        regime=trend.regime.value,
+        trend_score=trend.trend_score,
+        reversion_score=reversion_score,
+        structural_break_confirmed=trend.structural_break_confirmed,
+        baseline_score_raw=score,
+    )
+    technical_buy_shadow_v3 = build_technical_buy_shadow_v3(
+        technical_shadow_v2=technical_shadow_v2.to_dict(),
+        regime=trend.regime.value,
+        trend_score=trend.trend_score,
+        reversion_score=reversion_score,
+        structural_break_confirmed=trend.structural_break_confirmed,
+    )
     return Signal(
         ticker=ind.ticker,
         signal=direction,
@@ -507,6 +525,8 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
         },
         structural_break_confirmed=trend.structural_break_confirmed,
         overbought_momentum=trend.overbought_momentum,
+        technical_shadow_v2=technical_shadow_v2.to_dict(),
+        technical_buy_shadow_v3=technical_buy_shadow_v3.to_dict(),
     )
 
 
@@ -541,8 +561,27 @@ def analyze_ticker_from_frame(ticker: str, frame: "pd.DataFrame") -> Optional[Si
     signal.has_reconstructed_candles = has_reconstructed
     signal.candle_sources = sources
     signal.candle_source_counts = source_counts
+    signal.technical_buy_shadow_v3 = build_technical_buy_shadow_v3(
+        technical_shadow_v2=signal.technical_shadow_v2,
+        regime=signal.technical_regime,
+        trend_score=signal.trend_score,
+        reversion_score=signal.reversion_score,
+        structural_break_confirmed=signal.structural_break_confirmed,
+        source_mode=signal.candle_source_mode,
+        volume_quality_20=_volume_quality_20(frame),
+    ).to_dict()
     logger.info(f"{ticker}: {signal.signal} (fuerza={signal.strength:.0%}, score_reasons={len(signal.reasons)})")
     return signal
+
+
+def _volume_quality_20(frame: "pd.DataFrame") -> float | None:
+    if frame is None or "Volume" not in frame.columns:
+        return None
+    recent = frame["Volume"].tail(20)
+    if recent.empty:
+        return None
+    numeric = pd.to_numeric(recent, errors="coerce").fillna(0.0)
+    return float((numeric > 0.0).mean())
 
 
 def analyze_portfolio(tickers: list[str], period: str = "1y") -> list[Signal]:

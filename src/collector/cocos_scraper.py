@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from email.mime import message
+import json
 import os
 import re
 import time
@@ -284,6 +285,7 @@ class CocosCapitalScraper:
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._is_logged_in = False
+        self._session_loaded = False
         self._known_dom_hashes: dict[str, str] = {}
 
         # Telegram MFA (None si no está configurado)
@@ -299,18 +301,56 @@ class CocosCapitalScraper:
     async def __aenter__(self) -> "CocosCapitalScraper":
         await self._init_browser()
 
-        if self._session_file.exists():
+        context_options = {
+            "viewport": {"width": 1440, "height": 900},
+            "user_agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0.0.0 Safari/537.36"
+            ),
+            "locale": "es-AR",
+            "timezone_id": "America/Argentina/Buenos_Aires",
+        }
+        if self._has_saved_session():
             logger.info("Cargando sesión Playwright guardada")
-            self.context = await self._browser.new_context(
-                storage_state=str(self._session_file)
-            )
+            context_options["storage_state"] = str(self._session_file)
+            self._session_loaded = True
         else:
-            logger.info("No hay sesión guardada, creando contexto nuevo")
-            self.context = await self._browser.new_context()
+            logger.info("No hay sesión válida guardada, creando contexto nuevo")
 
-        self.page = await self.context.new_page()
+        self._context = await self._browser.new_context(**context_options)
+        await self._context.route(
+            "**/(analytics|tracking|hotjar|sentry|gtm)/**",
+            lambda route: route.abort(),
+        )
+        self._page = await self._context.new_page()
 
         return self
+
+    def _has_saved_session(self) -> bool:
+        if not self._session_file.exists():
+            return False
+        try:
+            state = json.loads(self._session_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("Sesion Playwright invalida; se ignora: %s", exc)
+            return False
+        return bool(state.get("cookies") or state.get("origins"))
+
+    async def _save_session_state(self) -> None:
+        if not self._context:
+            raise RuntimeError("contexto Playwright no inicializado")
+        self._session_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self._session_file.with_name(
+            f".{self._session_file.name}.{os.getpid()}.{id(self)}.tmp"
+        )
+        try:
+            await self._context.storage_state(path=str(temporary_path), indexed_db=True)
+            os.replace(temporary_path, self._session_file)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        self._session_loaded = True
+        logger.info("Sesion Playwright guardada")
 
     async def __aexit__(self, *_):
         await self._teardown()
@@ -330,21 +370,6 @@ class CocosCapitalScraper:
                 "--disable-software-rasterizer",
             ],
         )
-        self._context = await self._browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/121.0.0.0 Safari/537.36"
-            ),
-            locale="es-AR",
-            timezone_id="America/Argentina/Buenos_Aires",
-        )
-        await self._context.route(
-            "**/(analytics|tracking|hotjar|sentry|gtm)/**",
-            lambda route: route.abort(),
-        )
-        self._page = await self._context.new_page()
         logger.info("Browser inicializado", extra={"extra": {"headless": self._cfg.headless}})
 
     async def _teardown(self):
@@ -778,6 +803,38 @@ class CocosCapitalScraper:
 
     # ── Login con Telegram MFA ────────────────────
 
+    async def _restore_saved_session(self) -> bool:
+        if not self._session_loaded:
+            return False
+        try:
+            logger.info("Validando sesion Playwright guardada...")
+            response = await self._page.goto(
+                self._cfg.portfolio_url,
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+            await self._raise_if_access_blocked(
+                "saved_session",
+                response_status=response.status if response else None,
+            )
+            await self._page.wait_for_load_state("domcontentloaded", timeout=30_000)
+            await self._page.wait_for_timeout(1_000)
+            if await self._resolve_trusted_device_step():
+                await self._save_session_state()
+
+            final_url = self._page.url or ""
+            if self._is_portfolio_url(final_url) and not self._is_login_url(final_url):
+                self._is_logged_in = True
+                logger.info("Sesion Playwright guardada validada")
+                return True
+            logger.info("Sesion Playwright vencida; se requiere autenticacion")
+        except CocosAccessBlockedError:
+            raise
+        except Exception as exc:
+            logger.warning("No se pudo reutilizar la sesion guardada: %s", exc)
+        self._session_loaded = False
+        return False
+
     @timed("scraper.login")
     async def login(self) -> bool:
         """
@@ -789,6 +846,9 @@ class CocosCapitalScraper:
             return True
 
         try:
+            if await self._restore_saved_session():
+                return True
+
             logger.info("Navegando a Cocos Capital...")
             response = await self._page.goto(
                 "https://app.cocos.capital/sign-in",
@@ -845,9 +905,10 @@ class CocosCapitalScraper:
             await self._page.wait_for_load_state("domcontentloaded", timeout=60_000)
 
             # ── Login directo sin MFA ────────────
-            if "capital-portfolio" in self._page.url:
+            if self._is_portfolio_url(self._page.url):
                 self._is_logged_in = True
                 logger.info("Login exitoso sin MFA")
+                await self._save_session_state()
                 return True
 
             # ── MFA requerido ──────────────────────
@@ -1017,9 +1078,7 @@ class CocosCapitalScraper:
 
             self._is_logged_in = True
             logger.info("Login con MFA confirmado")
-            self._session_file.parent.mkdir(parents=True, exist_ok=True)
-            await self.context.storage_state(path=str(self._session_file))
-            logger.info("Sesion Playwright guardada")
+            await self._save_session_state()
             return True
 
         except Exception as e:

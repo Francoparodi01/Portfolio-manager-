@@ -205,3 +205,26 @@ def test_new_buy_movement_notice_marks_manual_event_risk():
 
     assert "BUY contra EVENT_RISK activo" in rendered
     assert "Micron earnings" in rendered
+
+
+def test_movement_notice_uses_absolute_quantity_and_execution_date():
+    rendered = _render_new_movements_notice(
+        [
+            BrokerMovement(
+                external_movement_id="m2",
+                executed_at=datetime(2026, 8, 11, 0, 0, tzinfo=ART_TZ),
+                movement_type="SELL",
+                currency="ARS",
+                amount=-246_603.96,
+                quantity=-31,
+                price=7_954.9665,
+                ticker="YPFD",
+                executed_at_precision="date_only",
+            )
+        ],
+        portfolio_refreshed=True,
+    )
+
+    assert "YPFD SELL | 31 nominales" in rendered
+    assert "operacion 11/08; hora no informada" in rendered
+    assert "-31 nominales" not in rendered

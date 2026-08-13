@@ -82,7 +82,12 @@ async def run(
                 currency=str(row.get("currency") or "ARS"),
                 issuer_hint=str(row.get("issuer_hint") or ""),
             )
-            for row in await db.get_latest_portfolio_instrument_seeds()
+            for row in await db.get_latest_portfolio_instrument_seeds(
+                recent_exit_days=max(
+                    0,
+                    int(os.getenv("ISSUER_EVENT_RECENT_EXIT_DAYS", "5")),
+                )
+            )
         ]
         summary["registry"]["seeds"] = len(seeds)
         if not seeds:

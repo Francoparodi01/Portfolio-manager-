@@ -1,7 +1,12 @@
 import sys
 import types
+from datetime import datetime, timezone
+from pathlib import Path
 
 from scripts import run_analysis
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 if "telegram" not in sys.modules:
@@ -45,6 +50,7 @@ if "telegram" not in sys.modules:
 from scripts.telegram_bot import (
     BOT_COMMAND_SPECS,
     CALLBACK_ALIASES,
+    compact_radar_report,
     main_keyboard,
     split_message,
 )
@@ -91,6 +97,14 @@ def test_events_command_is_registered_in_telegram_menu():
     assert CALLBACK_ALIASES["upcoming_events"] == "upcoming_events"
 
 
+def test_upcoming_events_refreshes_sources_before_rendering():
+    source = (ROOT / "scripts" / "telegram_bot.py").read_text(encoding="utf-8")
+    start = source.index("async def action_upcoming_events")
+    end = source.index("async def action_ticker_prompt", start)
+
+    assert '"--refresh"' in source[start:end]
+
+
 def test_all_menu_callbacks_are_routable():
     from scripts.telegram_bot import audit_keyboard, results_keyboard
 
@@ -116,3 +130,48 @@ def test_secondary_menu_views_keep_navigation_in_one_message():
     assert results is not None and results[0] == "<b>RESULTADOS</b>"
     assert audit is not None and audit[0] == "<b>AUDITORÍA</b>"
     assert home is not None and "<b>QUANTIA</b>" in home[0]
+
+
+def test_analysis_context_separates_execution_from_detection_time():
+    lines = run_analysis._render_analysis_data_context(
+        None,
+        {
+            "ticker": "YPFD",
+            "movement_type": "SELL",
+            "executed_at": datetime(2026, 8, 11, 3, 0, tzinfo=timezone.utc),
+            "created_at": datetime(2026, 8, 12, 13, 32, tzinfo=timezone.utc),
+            "executed_at_precision": "date_only",
+        },
+    )
+
+    rendered = "\n".join(lines)
+    assert "operacion 11/08 (hora no informada)" in rendered
+    assert "detectado 12/08 10:32" in rendered
+    assert "YPFD SELL (12/08 10:32)" not in rendered
+
+
+def test_compact_radar_labels_idea_separately_from_portfolio_plan(monkeypatch):
+    import scripts.telegram_bot as telegram_bot_module
+
+    monkeypatch.setattr(telegram_bot_module, "_is_business_day_now", lambda: True)
+    monkeypatch.setattr(telegram_bot_module, "_is_market_hours_now", lambda: True)
+    monkeypatch.setattr(telegram_bot_module, "_market_closed_reason_now", lambda: None)
+    full_report = """<b>🔭 Radar de oportunidades</b>
+🔍 Universo: 10 tickers → 3 ideas rankeadas
+✅ Estado operativo: <b>NORMAL</b>
+   VIX: 15.0
+
+<b>━━ GDX ━━</b>  🆕
+Score: <code>+0.230</code> | Conv: <b>70%</b> | Precio: <b>$14500.00</b>
+Edge: 🟢 <code>+0.063</code>
+R/R <b>3.3x</b>
+💰 Sizing sugerido: <b>9.0%</b> ≈ $210.305 ARS
+🔬 Shadow: <b>SHADOW DÉBIL</b> — no perseguir sin pullback
+🎯 <b>Lectura radar:</b> Abrir posición
+"""
+
+    compact = compact_radar_report(full_report)
+
+    assert "Idea radar: Abrir posición" in compact
+    assert "solo /analisis puede convertirlas en un plan de cartera" in compact
+    assert "🎯: Abrir posición" not in compact

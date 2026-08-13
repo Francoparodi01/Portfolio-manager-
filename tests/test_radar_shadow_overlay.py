@@ -71,6 +71,22 @@ def test_radar_candidate_layers_include_shadow_context():
         shadow_action="WATCH_ENTRY",
         reversion_score=0.43,
         reversion_components={"rsi": 1.5, "bollinger": 2.0},
+        technical_shadow_v2={
+            "version": "technical-shadow-v2",
+            "score": 0.31,
+            "bias": "POSITIVE",
+            "affects_analysis": False,
+            "affects_execution": False,
+        },
+        technical_buy_shadow_v3={
+            "version": "technical-buy-shadow-v3",
+            "classification": "PRIMARY_BUY_CANDIDATE",
+            "priority_tier": "A",
+            "eligible_for_buy_research": True,
+            "affects_radar_ranking": False,
+            "affects_analysis": False,
+            "affects_execution": False,
+        },
     )
 
     layers = _radar_candidate_layers(candidate)
@@ -84,6 +100,52 @@ def test_radar_candidate_layers_include_shadow_context():
         "components": {"rsi": 1.5, "bollinger": 2.0},
         "informational_only": True,
     }
+    assert layers["technical_shadow_v2"]["version"] == "technical-shadow-v2"
+    assert layers["technical_shadow_v2"]["score"] == 0.31
+    assert layers["technical_shadow_v2"]["affects_execution"] is False
+    assert layers["technical_buy_shadow_v3"]["version"] == "technical-buy-shadow-v3"
+    assert layers["technical_buy_shadow_v3"]["priority_tier"] == "A"
+    assert layers["technical_buy_shadow_v3_protocol"] == {
+        "cohort": "prospective_daily_radar",
+        "target_horizon_days": 20,
+        "benchmark": "same_date_eligible_universe_median",
+        "promotion_eligible": False,
+        "affects_radar_ranking": False,
+        "affects_analysis": False,
+        "affects_execution": False,
+    }
+
+
+def test_radar_render_shows_buy_v3_without_changing_candidate_status():
+    candidate = OpportunityCandidate(
+        ticker="AMD",
+        status=CandidateStatus.VIGILANCIA_A,
+        trade_type=TradeType.WATCHLIST,
+        final_score=0.12,
+        conviction=0.60,
+        price_usd=81_825,
+        action_concreta="Vigilar confirmación",
+        technical_buy_shadow_v3={
+            "version": "technical-buy-shadow-v3",
+            "classification": "PRIMARY_BUY_CANDIDATE",
+            "priority_tier": "A",
+            "affects_radar_ranking": False,
+        },
+    )
+    report = OpportunityReport(
+        universe_size=1,
+        screened_count=1,
+        ranked_count=1,
+        displayed_count=1,
+        candidates=[candidate],
+        en_vigilancia=[candidate],
+    )
+
+    rendered = render_opportunity_report(report)
+
+    assert candidate.status == CandidateStatus.VIGILANCIA_A
+    assert "Compra técnica V3" in rendered
+    assert "compra primaria" in rendered
 
 
 def test_radar_render_shows_reversion_and_prior_audited_returns():

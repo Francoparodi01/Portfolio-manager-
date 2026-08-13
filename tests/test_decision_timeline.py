@@ -249,6 +249,11 @@ def test_pending_marks_lookup_latest_price_per_decision(monkeypatch):
     assert "mp.ticker = dl.ticker" in pending_query
     assert "WITH latest AS" not in pending_query
 
+    real_query = conn.queries[0]
+    assert "('broker_movement', 'broker_fill')" in real_query
+    assert "plan_execution_attribution_movements" in real_query
+    assert "bf.decision_log_id = dl.id" in real_query
+
 
 def test_monitor_json_responses_negotiate_compression():
     root = Path(__file__).resolve().parents[1]

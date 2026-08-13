@@ -96,6 +96,7 @@ async def _load_portfolio(cfg, owner_chat_id: int | None = None):
             positions = normalize_positions_with_fresh_market_prices(
                 positions,
                 await db.get_latest_market_prices(),
+                reference_at=snap.get("scraped_at"),
             )
             discrepancies = price_discrepancy_warnings(positions)
             if discrepancies:
@@ -455,6 +456,21 @@ def _radar_candidate_layers(candidate) -> dict:
             "score": float(getattr(candidate, "reversion_score", 0.0) or 0.0),
             "components": dict(getattr(candidate, "reversion_components", {}) or {}),
             "informational_only": True,
+        },
+        "technical_shadow_v2": dict(
+            getattr(candidate, "technical_shadow_v2", {}) or {}
+        ),
+        "technical_buy_shadow_v3": dict(
+            getattr(candidate, "technical_buy_shadow_v3", {}) or {}
+        ),
+        "technical_buy_shadow_v3_protocol": {
+            "cohort": "prospective_daily_radar",
+            "target_horizon_days": 20,
+            "benchmark": "same_date_eligible_universe_median",
+            "promotion_eligible": False,
+            "affects_radar_ranking": False,
+            "affects_analysis": False,
+            "affects_execution": False,
         },
         "final_score": candidate.final_score,
         "conviction": candidate.conviction,

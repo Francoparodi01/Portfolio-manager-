@@ -21,6 +21,7 @@ construir una memoria operacional confiable: datos, decisiones, fills y outcomes
 | [09-frontend-data-audit.md](09-frontend-data-audit.md) | auditoria de datos capturados, API, frontend y cruces priorizables |
 | [10-learning-shadow.md](10-learning-shadow.md) | aprendizaje audit-only sobre bloqueos, metricas y revision humana |
 | [11-backend-performance-audit-2026-08-08.md](11-backend-performance-audit-2026-08-08.md) | auditoria medida de performance y practicidad del backend |
+| [12-technical-shadow-v2.md](12-technical-shadow-v2.md) | calibracion tecnica por regimen, aislada del analisis y la ejecucion |
 
 ## Documentacion de Evaluacion
 

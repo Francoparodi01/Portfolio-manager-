@@ -773,7 +773,7 @@ def menu_view(action: str) -> tuple[str, InlineKeyboardMarkup] | None:
 def help_text() -> str:
     return (
         "<b>Como leer Quantia</b>\n"
-        "El bot informa y audita. No ejecuta ordenes.\n\n"
+        "El bot informa y audita. No ejecuta ordenes.\n"
         "<b>Uso rapido</b>\n"
         "<code>/portfolio</code>: cartera actual y concentracion.\n"
         "<code>/analisis</code>: plan operativo compacto.\n"
@@ -1140,8 +1140,9 @@ async def action_upcoming_events(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     report = await run_python_script(
         "scripts/run_upcoming_events.py",
         "--no-telegram",
+        "--refresh",
         *_owner_cli_args(chat_id),
-        timeout=60,
+        timeout=120,
     )
     await send_text(context, chat_id, report)
 
@@ -1502,10 +1503,14 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
         edge = re.search(r"Edge:\s*[🟢🟡🟠🔴]?\s*([+-]?\d+\.\d+)", block)
         sizing_ars = re.search(r"≈\s*\$([0-9.]+)\s*ARS", block)
         shadow = re.search(r"🔬 Shadow:\s*([A-ZÁÉÍÓÚÑ ]+)\s*—\s*(.+)", block)
+        buy_v3 = re.search(
+            r"Compra técnica V3:\s*([^\s·<]+)\s*·\s*([^·\n]+)",
+            block,
+        )
         reversion = re.search(r"↩️ Reversión:\s*(.+)", block)
         prior_radar = re.search(r"📊 Última idea radar\s*(.+)", block)
         action = re.search(
-            r"🎯 (?:Acción sugerida|Revalidación requerida):\s*(.+)",
+            r"🎯 (?:Lectura radar|Acción sugerida|Revalidación requerida):\s*(.+)",
             block,
         )
         compete = re.search(r"Compite con:\s*([A-Z0-9.-]+)", block)
@@ -1531,6 +1536,8 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
             "action": action_text,
             "shadow_label": shadow.group(1).strip() if shadow else "",
             "shadow_note": shadow.group(2).strip() if shadow else "",
+            "buy_v3_tier": buy_v3.group(1).strip() if buy_v3 else "",
+            "buy_v3_classification": buy_v3.group(2).strip() if buy_v3 else "",
             "reversion": reversion.group(1).strip() if reversion else "",
             "prior_radar": prior_radar.group(1).strip() if prior_radar else "",
         })
@@ -1565,7 +1572,7 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
     if market_closed:
         lines.append("Mercado cerrado/sin rueda: ideas no ejecutables hasta revalidar apertura.")
     lines += [
-        "Nota: radar detecta ideas; no confirma ejecución ni entra al EV principal.",
+        "Nota: son ideas teóricas; solo /analisis puede convertirlas en un plan de cartera.",
         "",
         top_title,
     ]
@@ -1585,12 +1592,19 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
         if item["shadow_label"]:
             lines.append(f"   🔬 Shadow: <b>{item['shadow_label']}</b> — {item['shadow_note']}")
 
+        if item["buy_v3_tier"]:
+            lines.append(
+                "   Compra V3: "
+                f"<b>{item['buy_v3_tier']}</b> · "
+                f"{item['buy_v3_classification']} · 20d · shadow"
+            )
+
         if item["reversion"]:
             lines.append(f"   ↩️ Reversión: {item['reversion']}")
         if item["prior_radar"]:
             lines.append(f"   📊 Última idea radar {item['prior_radar']}")
 
-        action_prefix = "Revalidar" if market_closed else "🎯"
+        action_prefix = "Revalidar idea" if market_closed else "Idea radar"
         lines.append(f"   {action_prefix}: {item['action']}")
 
     lines += [
@@ -1603,7 +1617,8 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
 
 
 def _radar_cache_supports_reversion(report: str) -> bool:
-    return "↩️ Reversión:" in str(report or "")
+    text = str(report or "")
+    return "↩️ Reversión:" in text and "Compra técnica V3:" in text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1614,7 +1629,7 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
     started = time.perf_counter()
     cached = await _load_cached_report("radar", chat_id)
     if cached and not _radar_cache_supports_reversion(str(cached.get("report_text") or "")):
-        logger.info("[BOT][RADAR] cache_schema_miss=reversion")
+        logger.info("[BOT][RADAR] cache_schema_miss=reversion_or_buy_v3")
         cached = None
     if cached:
         report = compact_radar_report(str(cached["report_text"]), max_items=6)

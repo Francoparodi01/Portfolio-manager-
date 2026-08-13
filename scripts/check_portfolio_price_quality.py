@@ -116,6 +116,7 @@ async def main() -> int:
     normalized = normalize_positions_with_fresh_market_prices(
         raw_positions,
         [dict(row) for row in market_rows],
+        reference_at=snap["scraped_at"],
         discrepancy_threshold=args.threshold,
     )
     warnings = price_discrepancy_warnings(normalized, threshold=args.threshold)

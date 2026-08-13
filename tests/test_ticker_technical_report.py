@@ -102,7 +102,14 @@ def test_ticker_report_renders_context_and_valid_telegram_html():
 
     assert "NVDA - " in text
     assert "Señal operativa" in text
-    assert "Intensidad" in text
+    assert "Score técnico interno" in text
+    assert "BUY ≥ <code>+3.5</code>" in text
+    assert "SELL ≤ <code>-3.5</code>" in text
+    assert "escala teórica -12/+12" not in text
+    assert "sin calibración predictiva aprobada" in text
+    assert "no es probabilidad ni retorno esperado" in text
+    assert "Experimento técnico v2" in text
+    assert "Shadow no calibrado: no modifica /analisis, planes ni órdenes." in text
     assert "Tesis" in text
     assert "Qué cambiaría la visión" in text
     assert "Riesgos actuales" in text
@@ -110,7 +117,8 @@ def test_ticker_report_renders_context_and_valid_telegram_html():
     assert "Contexto cartera" in text
     assert "Última decisión registrada" in text
     assert "Modo: <b>read-only</b>" in text
-    assert "Confianza argumentada" in text
+    assert "Fecha: <b>2026-07-25 12:00 ART</b>" in text
+    assert "Confianza argumentada" not in text
     assert not text.rstrip().endswith("no cambia thresholds.</i>")
     valid, errors = validate_telegram_html(text)
     assert valid, errors
@@ -140,7 +148,7 @@ def test_ticker_report_renders_hold_without_position_as_wait():
     assert "MU - esperar" in text
     assert "no abrir posición" in text
     assert "Señal operativa: <b>SIN ENTRADA</b>" in text
-    assert "Intensidad: <b>94%</b> <i>(no es probabilidad)</i>" in text
+    assert "Neutralidad interna: <b>94%</b>" in text
     assert "Soporte inmediato" in text
     assert "Soporte crítico" in text
     assert "Invalidación: cierre sostenido debajo" in text
@@ -153,6 +161,49 @@ def test_ticker_report_renders_hold_without_position_as_wait():
     assert "–" in text
     assert "Razones tecnicas" not in text
     assert "CEDEAR/precio local" in text
+    assert text.index("<b>Advertencias</b>") < text.index("Recuperación:")
+    valid, errors = validate_telegram_html(text)
+    assert valid, errors
+
+
+def test_ticker_report_consolidates_data_quality_warnings():
+    frame = _correction_frame()
+    frame.loc[frame.index[-58:], "Volume"] = 0.0
+    frame.loc[frame.index[-58:], "Source"] = "internal_snapshot"
+    frame.attrs["candle_sources"] = ("COCOS", "internal_snapshot")
+    frame.attrs["candle_source_counts"] = {"COCOS": 202, "internal_snapshot": 58}
+    frame.attrs["has_reconstructed_candles"] = True
+    report = build_ticker_technical_report("AMD", frame, asset_type="CEDEAR")
+
+    text = render_ticker_telegram_report(report)
+
+    assert text.count("CEDEAR/precio local") == 1
+    assert text.count("faltan datos informados en las últimas 58 velas") == 1
+    assert text.count("Volumen reciente incompleto (ver Advertencias)") == 1
+    assert "Falta volumen reciente" not in text
+    assert text.index("<b>Advertencias</b>") < text.index("Recuperación:")
+    valid, errors = validate_telegram_html(text)
+    assert valid, errors
+
+
+def test_ticker_report_labels_manual_execution_as_human_without_linked_plan():
+    report = build_ticker_technical_report(
+        "AMD",
+        _frame(),
+        latest_decision=TickerDecisionContext(
+            decision_id=756,
+            decided_at="2026-08-04T18:00:00Z",
+            decision="BUY",
+            status="EXECUTED_MANUAL",
+            final_score=0.0,
+            source="broker_movement",
+        ),
+    )
+
+    text = render_ticker_telegram_report(report)
+
+    assert "manual sin plan vinculado; no señal del bot" in text
+    assert "score +0.000" in text
     valid, errors = validate_telegram_html(text)
     assert valid, errors
 

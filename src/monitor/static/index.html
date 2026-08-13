@@ -3157,6 +3157,7 @@
         if (key === "broker_movement") return "Manual Cocos";
         if (key === "broker_fill") return "Fill broker";
         if (key === "execution_plan") return "Bot";
+        if (key === "plan_execution_attribution") return "Bot seguido";
         if (key === "radar") return "Radar";
         if (key === "optimizer") return "Optimizer";
         if (key === "sin_source") return "Sin source";
@@ -3167,6 +3168,7 @@
         const key = String(value || "").toLowerCase();
         if (key === "primary") return "Real primario";
         if (key === "planner_audit") return "Plan bot audit";
+        if (key === "followed_plan") return "Ejecución seguida";
         if (key === "blocked_audit") return "Bloqueado audit";
         if (key === "radar_audit") return "Radar audit";
         if (key === "debug") return "Debug";

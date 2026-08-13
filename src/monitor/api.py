@@ -37,6 +37,7 @@ from src.analysis.override_classification import (
     override_opposite_ratio as _override_opposite_ratio,
     override_same_ratio as _override_same_ratio,
 )
+from src.analysis.plan_follow_attribution import ensure_plan_execution_attribution_schema
 from src.analysis.thesis_shadow_store import MAX_ABS_REALIZED_RETURN_FOR_METRICS
 from src.core.config import get_config
 from src.core.logger import get_logger, redact_secrets
@@ -894,6 +895,7 @@ async def performance_view(request: web.Request) -> web.Response:
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         await ensure_decision_audit_scope_columns(conn)
+        await ensure_plan_execution_attribution_schema(conn)
         perf_base_cte = """
             WITH fill_link AS (
                 SELECT
@@ -903,22 +905,49 @@ async def performance_view(request: web.Request) -> web.Response:
                 WHERE decision_log_id IS NOT NULL
                 GROUP BY decision_log_id
             ),
-            perf_base AS (
+            attributed_fill_decisions AS (
+                SELECT DISTINCT bf.decision_log_id
+                FROM plan_execution_attribution_movements link
+                JOIN plan_execution_attributions attribution
+                  ON attribution.id = link.attribution_id
+                 AND attribution.eligible_for_viability = TRUE
+                JOIN broker_movements movement
+                  ON movement.id = link.broker_movement_id
+                JOIN broker_fills bf
+                  ON bf.external_fill_id = movement.external_movement_id
+                WHERE bf.decision_log_id IS NOT NULL
+            ),
+            decision_base AS (
                 SELECT
                     dl.id,
-                    COALESCE(fl.fill_executed_at, dl.next_executable_at, dl.decided_at) AS effective_at,
+                    CASE
+                        WHEN COALESCE(dl.source, dl.layers->>'source') = 'execution_plan'
+                            THEN COALESCE(dl.next_executable_at, dl.decided_at)
+                        ELSE COALESCE(fl.fill_executed_at, dl.next_executable_at, dl.decided_at)
+                    END AS effective_at,
                     dl.decided_at,
                     dl.ticker,
                     dl.decision,
                     dl.status,
-                    COALESCE(dl.metric_scope, 'debug') AS metric_scope,
+                    CASE
+                        WHEN COALESCE(dl.source, dl.layers->>'source') = 'execution_plan'
+                         AND COALESCE(dl.metric_scope, 'debug') = 'primary'
+                            THEN 'planner_audit'
+                        ELSE COALESCE(dl.metric_scope, 'debug')
+                    END AS metric_scope,
                     COALESCE(dl.run_intent, 'unknown') AS run_intent,
                     COALESCE(dl.source, dl.layers->>'source') AS source,
                     COALESCE(dl.layers->>'reason', dl.block_reason, '') AS reason,
                     dl.final_score,
                     dl.confidence,
                     dl.outcome_basis,
-                    COALESCE(dl.is_primary_metric, FALSE) AS is_primary_metric,
+                    CASE
+                        WHEN COALESCE(dl.source, dl.layers->>'source') = 'execution_plan'
+                            THEN FALSE
+                        WHEN attributed.decision_log_id IS NOT NULL
+                            THEN FALSE
+                        ELSE COALESCE(dl.is_primary_metric, FALSE)
+                    END AS is_primary_metric,
                     COALESCE(dl.executable_was_correct, dl.was_correct) AS was_correct,
                     COALESCE(dl.executable_outcome_5d, dl.outcome_5d) AS outcome_5d,
                     COALESCE(dl.executable_outcome_10d, dl.outcome_10d) AS outcome_10d,
@@ -928,30 +957,100 @@ async def performance_view(request: web.Request) -> web.Response:
                     dl.decision_type,
                     dl.signal_strength,
                     COALESCE(dl.delta_weight::float, 0.0) AS delta_weight,
+                    dl.layers
+                FROM decision_log dl
+                LEFT JOIN fill_link fl ON fl.decision_log_id = dl.id
+                LEFT JOIN attributed_fill_decisions attributed
+                  ON attributed.decision_log_id = dl.id
+            ),
+            followed_base AS (
+                SELECT
+                    -attribution.id AS id,
+                    attribution.executed_at AS effective_at,
+                    attribution.executed_at AS decided_at,
+                    attribution.ticker,
+                    attribution.side AS decision,
+                    'EXECUTED_FOLLOWED'::text AS status,
+                    'followed_plan'::text AS metric_scope,
+                    'formal_plan'::text AS run_intent,
+                    'plan_execution_attribution'::text AS source,
+                    COALESCE(dl.layers->>'reason', dl.block_reason, '') AS reason,
+                    dl.final_score,
+                    dl.confidence,
+                    attribution.outcome_basis,
+                    TRUE AS is_primary_metric,
                     CASE
-                        WHEN dl.final_score IS NOT NULL AND ABS(dl.final_score) > 0.08
+                        WHEN attribution.outcome_5d IS NULL THEN NULL
+                        ELSE attribution.outcome_5d > 0
+                    END AS was_correct,
+                    attribution.outcome_5d,
+                    attribution.outcome_10d,
+                    attribution.outcome_20d,
+                    attribution.executed_at AS next_executable_at,
+                    attribution.execution_price::float AS next_executable_price,
+                    'followed_execution'::text AS decision_type,
+                    dl.signal_strength,
+                    COALESCE(dl.delta_weight::float, 0.0) AS delta_weight,
+                    dl.layers
+                FROM plan_execution_attributions attribution
+                JOIN decision_log dl
+                  ON dl.id = attribution.representative_decision_log_id
+                WHERE attribution.eligible_for_viability = TRUE
+            ),
+            raw_base AS (
+                SELECT * FROM decision_base
+                UNION ALL
+                SELECT * FROM followed_base
+            ),
+            perf_base AS (
+                SELECT
+                    base.id,
+                    base.effective_at,
+                    base.decided_at,
+                    base.ticker,
+                    base.decision,
+                    base.status,
+                    base.metric_scope,
+                    base.run_intent,
+                    base.source,
+                    base.reason,
+                    base.final_score,
+                    base.confidence,
+                    base.outcome_basis,
+                    base.is_primary_metric,
+                    base.was_correct,
+                    base.outcome_5d,
+                    base.outcome_10d,
+                    base.outcome_20d,
+                    base.next_executable_at,
+                    base.next_executable_price,
+                    base.decision_type,
+                    base.signal_strength,
+                    base.delta_weight,
+                    CASE
+                        WHEN base.final_score IS NOT NULL AND ABS(base.final_score) > 0.08
                             THEN 'SIGNAL_GENUINE'
-                        WHEN COALESCE(dl.layers->>'reason', dl.block_reason, '') ILIKE '%rebalance%'
-                          OR COALESCE(dl.layers->>'reason', dl.block_reason, '') ILIKE '%concentr%'
-                          OR ABS(COALESCE(dl.delta_weight::float, 0.0)) >= 0.05
+                        WHEN base.reason ILIKE '%rebalance%'
+                          OR base.reason ILIKE '%concentr%'
+                          OR ABS(base.delta_weight) >= 0.05
                             THEN 'REBALANCE'
                         ELSE 'WEAK_MECHANICAL'
                     END AS signal_family,
                     CASE
-                        WHEN (dl.layers #>> '{trend_shadow,score}') ~ '^-?[0-9]+([.][0-9]+)?$'
-                            THEN (dl.layers #>> '{trend_shadow,score}')::float
+                        WHEN (base.layers #>> '{trend_shadow,score}') ~ '^-?[0-9]+([.][0-9]+)?$'
+                            THEN (base.layers #>> '{trend_shadow,score}')::float
                         ELSE NULL
                     END AS trend_shadow_score,
-                    dl.layers #>> '{trend_shadow,regime}' AS trend_shadow_regime,
+                    base.layers #>> '{trend_shadow,regime}' AS trend_shadow_regime,
                     ca.conclusion AS causal_conclusion,
                     ca.conclusion_reason AS causal_reason,
                     ca.analyzed_at AS causal_analyzed_at,
                     CASE
-                        WHEN UPPER(dl.decision) <> 'BUY' THEN 'NO_BUY'
+                        WHEN UPPER(base.decision) <> 'BUY' THEN 'NO_BUY'
                         WHEN (
                             CASE
-                                WHEN (dl.layers #>> '{trend_shadow,score}') ~ '^-?[0-9]+([.][0-9]+)?$'
-                                    THEN (dl.layers #>> '{trend_shadow,score}')::float
+                                WHEN (base.layers #>> '{trend_shadow,score}') ~ '^-?[0-9]+([.][0-9]+)?$'
+                                    THEN (base.layers #>> '{trend_shadow,score}')::float
                                 ELSE NULL
                             END
                         ) >= 0.15
@@ -959,29 +1058,28 @@ async def performance_view(request: web.Request) -> web.Response:
                             THEN 'SHADOW_CAUSAL'
                         WHEN (
                             CASE
-                                WHEN (dl.layers #>> '{trend_shadow,score}') ~ '^-?[0-9]+([.][0-9]+)?$'
-                                    THEN (dl.layers #>> '{trend_shadow,score}')::float
+                                WHEN (base.layers #>> '{trend_shadow,score}') ~ '^-?[0-9]+([.][0-9]+)?$'
+                                    THEN (base.layers #>> '{trend_shadow,score}')::float
                                 ELSE NULL
                             END
                         ) >= 0.15
-                          OR dl.layers #>> '{trend_shadow,regime}' = 'STRONG_UPTREND'
+                          OR base.layers #>> '{trend_shadow,regime}' = 'STRONG_UPTREND'
                             THEN 'SHADOW_ONLY'
                         WHEN ca.conclusion = 'FUNDADO'
                             THEN 'CAUSAL_ONLY'
-                        WHEN dl.layers #>> '{trend_shadow,score}' IS NULL AND ca.conclusion IS NULL
+                        WHEN base.layers #>> '{trend_shadow,score}' IS NULL AND ca.conclusion IS NULL
                             THEN 'NO_EVIDENCE'
                         ELSE 'UNCONFIRMED'
                     END AS buy_confirmation
-                FROM decision_log dl
-                LEFT JOIN fill_link fl ON fl.decision_log_id = dl.id
+                FROM raw_base base
                 LEFT JOIN LATERAL (
                     SELECT
                         conclusion,
                         conclusion_reason,
                         analyzed_at
                     FROM shadow_thesis_causal_analysis ca
-                    WHERE UPPER(ca.ticker) = UPPER(dl.ticker)
-                      AND ca.analyzed_at <= COALESCE(fl.fill_executed_at, dl.next_executable_at, dl.decided_at)
+                    WHERE UPPER(ca.ticker) = UPPER(base.ticker)
+                      AND ca.analyzed_at <= base.effective_at
                     ORDER BY ca.analyzed_at DESC
                     LIMIT 1
                 ) ca ON TRUE
@@ -1003,6 +1101,7 @@ async def performance_view(request: web.Request) -> web.Response:
             SELECT
                 COUNT(*) AS closed_5d,
                 AVG(outcome_5d) AS avg_5d,
+                AVG(outcome_5d) AS ev_5d,
                 AVG(outcome_10d) AS avg_10d,
                 AVG(outcome_20d) AS avg_20d,
                 AVG(CASE WHEN outcome_5d > 0 THEN 1.0 ELSE 0.0 END) AS win_rate_5d,
@@ -1086,6 +1185,7 @@ async def performance_view(request: web.Request) -> web.Response:
                 ) AS closed_audit_5d,
                 COUNT(*) FILTER (
                     WHERE outcome_5d IS NULL
+                      AND COALESCE(outcome_basis, '') <> 'legacy_external'
                       AND is_primary_metric = TRUE
                 ) AS pending_primary_5d
             FROM perf_base
@@ -1265,6 +1365,14 @@ async def performance_view(request: web.Request) -> web.Response:
                 ) AS best_5d
             FROM perf_base
             WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+              AND (
+                    is_primary_metric = TRUE
+                 OR (
+                        metric_scope = 'planner_audit'
+                    AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
+                 )
+                 OR metric_scope IN ('blocked_audit', 'radar_audit')
+              )
             GROUP BY source, metric_scope
             HAVING COUNT(*) > 0
             ORDER BY closed_5d DESC, total DESC, source, metric_scope
@@ -1363,13 +1471,6 @@ async def performance_view(request: web.Request) -> web.Response:
         """, days)
 
     summary_dict = _row(summary)
-    if int(summary_dict.get("closed_5d") or 0) > 0:
-        win_rate = summary_dict.get("win_rate_5d") or 0
-        avg_win = summary_dict.get("avg_win_5d") or 0
-        avg_loss = abs(summary_dict.get("avg_loss_5d") or 0)
-        summary_dict["ev_5d"] = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
-    else:
-        summary_dict["ev_5d"] = None
 
     return _json({
         "ok": True,
@@ -1717,6 +1818,16 @@ async def radar_audit(request: web.Request) -> web.Response:
                 r.layers->>'technical_data_source_mode' AS technical_source,
                 (r.layers->'reversion_shadow'->>'score')::float AS reversion_score,
                 r.layers->'reversion_shadow'->'components' AS reversion_components,
+                r.layers->'technical_buy_shadow_v3'->>'version' AS buy_v3_version,
+                r.layers->'technical_buy_shadow_v3'->>'classification' AS buy_v3_classification,
+                r.layers->'technical_buy_shadow_v3'->>'priority_tier' AS buy_v3_tier,
+                COALESCE(
+                    (r.layers->'technical_buy_shadow_v3'->>'eligible_for_buy_research')::boolean,
+                    FALSE
+                ) AS buy_v3_eligible,
+                r.layers->'technical_buy_shadow_v3'->>'regime' AS buy_v3_regime,
+                (r.layers->'technical_buy_shadow_v3'->>'source_score')::float AS buy_v3_source_score,
+                r.layers->'technical_buy_shadow_v3'->'warnings' AS buy_v3_warnings,
                 path.price_2d,
                 path.close_5d,
                 path.close_10d,
@@ -1794,6 +1905,18 @@ async def radar_audit(request: web.Request) -> web.Response:
 
     closed_5d = [item for item in items if item.get("outcome_5d") is not None]
     closed_10d = [item for item in items if item.get("outcome_10d") is not None]
+    closed_20d = [item for item in items if item.get("outcome_20d") is not None]
+    buy_v3_items = [
+        item for item in items
+        if item.get("buy_v3_version") == "technical-buy-shadow-v3"
+    ]
+    buy_v3_primary = [
+        item for item in buy_v3_items
+        if item.get("buy_v3_classification") == "PRIMARY_BUY_CANDIDATE"
+    ]
+    buy_v3_primary_closed_20d = [
+        item for item in buy_v3_primary if item.get("outcome_20d") is not None
+    ]
     high_path_risk = sum(1 for item in items if item.get("path_risk") == "HIGH")
     executable = sum(1 for item in items if str(item.get("status") or "").upper() == "THEORETICAL")
     blocked = sum(1 for item in items if str(item.get("status") or "").upper() == "BLOCKED")
@@ -1810,14 +1933,36 @@ async def radar_audit(request: web.Request) -> web.Response:
             "blocked": blocked,
             "closed_5d": len(closed_5d),
             "closed_10d": len(closed_10d),
+            "closed_20d": len(closed_20d),
             "win_rate_5d": (_wins(closed_5d, "outcome_5d") / len(closed_5d)) if closed_5d else None,
             "win_rate_10d": (_wins(closed_10d, "outcome_10d") / len(closed_10d)) if closed_10d else None,
             "avg_2d": _mean([_float(item.get("outcome_2d")) for item in items if item.get("outcome_2d") is not None]),
             "avg_5d": _mean([_float(item.get("outcome_5d")) for item in closed_5d]),
             "avg_10d": _mean([_float(item.get("outcome_10d")) for item in closed_10d]),
+            "avg_20d": _mean([_float(item.get("outcome_20d")) for item in closed_20d]),
             "avg_mae_10d": _mean([_float(item.get("mae_10d")) for item in items if item.get("mae_10d") is not None]),
             "avg_mfe_10d": _mean([_float(item.get("mfe_10d")) for item in items if item.get("mfe_10d") is not None]),
             "high_path_risk": high_path_risk,
+            "buy_v3": {
+                "captured": len(buy_v3_items),
+                "primary_a": len(buy_v3_primary),
+                "primary_a_closed_20d": len(buy_v3_primary_closed_20d),
+                "primary_a_win_rate_20d": (
+                    _wins(buy_v3_primary_closed_20d, "outcome_20d")
+                    / len(buy_v3_primary_closed_20d)
+                    if buy_v3_primary_closed_20d else None
+                ),
+                "primary_a_gross_ev_20d": _mean([
+                    _float(item.get("outcome_20d"))
+                    for item in buy_v3_primary_closed_20d
+                ]),
+                "primary_a_net_ev_20d": _mean([
+                    _float(item.get("outcome_20d")) - 0.0075
+                    for item in buy_v3_primary_closed_20d
+                ]),
+                "assumed_cost_rate": 0.0075,
+                "promotion_eligible": False,
+            },
         },
         "chart_items": items,
         "recent": items[:40],

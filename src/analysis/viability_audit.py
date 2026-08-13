@@ -160,7 +160,11 @@ async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFr
         if attribution_ready:
             selected_followed = []
             for column in selected:
-                if column == "source":
+                if column == "id":
+                    selected_followed.append("attribution.id AS id")
+                elif column == "decided_at":
+                    selected_followed.append("attribution.executed_at AS decided_at")
+                elif column == "source":
                     selected_followed.append("'plan_execution_attribution'::text AS source")
                 elif column == "status":
                     selected_followed.append("'EXECUTED_FOLLOWED'::text AS status")
@@ -168,6 +172,17 @@ async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFr
                     selected_followed.append("'followed_plan'::text AS metric_scope")
                 elif column == "is_primary_metric":
                     selected_followed.append("TRUE AS is_primary_metric")
+                elif column == "outcome_basis":
+                    selected_followed.append("attribution.outcome_basis AS outcome_basis")
+                elif column in {
+                    "outcome_5d",
+                    "outcome_10d",
+                    "outcome_20d",
+                    "outcome_40d",
+                }:
+                    selected_followed.append(f"attribution.{column} AS {column}")
+                elif column.startswith("executable_outcome_"):
+                    selected_followed.append(f"NULL::float AS {column}")
                 else:
                     selected_followed.append(f"dl.{column}")
             followed_rows = await conn.fetch(
@@ -183,9 +198,9 @@ async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFr
                 FROM plan_execution_attributions attribution
                 JOIN decision_log dl
                   ON dl.id = attribution.representative_decision_log_id
-                WHERE attribution.plan_decided_at >= $1
+                WHERE attribution.executed_at >= $1
                   AND attribution.eligible_for_viability = TRUE
-                ORDER BY attribution.plan_decided_at
+                ORDER BY attribution.executed_at
                 """,
                 cutoff,
             )
@@ -200,10 +215,10 @@ async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFr
                         FROM plan_execution_attribution_plans link
                         JOIN plan_execution_attributions linked
                           ON linked.id = link.attribution_id
-                        WHERE linked.plan_decided_at >= $1
+                        WHERE linked.executed_at >= $1
                     ) AS plan_links
                 FROM plan_execution_attributions
-                WHERE plan_decided_at >= $1
+                WHERE executed_at >= $1
                 """,
                 cutoff,
             )
@@ -222,8 +237,27 @@ async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFr
                       ON attribution.id = link.attribution_id
                     JOIN broker_movements bm
                       ON bm.id = link.broker_movement_id
-                    WHERE attribution.plan_decided_at >= $1
+                    WHERE attribution.executed_at >= $1
                       AND attribution.eligible_for_viability = TRUE
+                    """,
+                    cutoff,
+                )
+            }
+            linked_decision_ids = {
+                int(row["decision_log_id"])
+                for row in await conn.fetch(
+                    """
+                    SELECT DISTINCT bf.decision_log_id
+                    FROM plan_execution_attribution_movements link
+                    JOIN plan_execution_attributions attribution
+                      ON attribution.id = link.attribution_id
+                    JOIN broker_movements movement
+                      ON movement.id = link.broker_movement_id
+                    JOIN broker_fills bf
+                      ON bf.external_fill_id = movement.external_movement_id
+                    WHERE attribution.executed_at >= $1
+                      AND attribution.eligible_for_viability = TRUE
+                      AND bf.decision_log_id IS NOT NULL
                     """,
                     cutoff,
                 )
@@ -261,7 +295,10 @@ async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFr
                 external_ids = {
                     str(value) for value in movement_meta.get("external_fill_ids", []) if value
                 }
-                row["attributed_followed"] = bool(external_ids & linked_external_ids)
+                row["attributed_followed"] = (
+                    int(row.get("id") or 0) in linked_decision_ids
+                    or bool(external_ids & linked_external_ids)
+                )
                 row["duplicate_movement"] = bool(external_ids) and external_ids.issubset(
                     duplicate_synthetic_ids
                 )
@@ -930,7 +967,7 @@ def _prepare_frame(frame: pd.DataFrame, horizons: tuple[str, ...]) -> pd.DataFra
 
     if "outcome_basis" in df.columns:
         basis = df["outcome_basis"].fillna("").astype(str).str.lower()
-        df = df[basis.eq("canonical_cocos") | basis.eq("")].copy()
+        df = df[basis.str.startswith("canonical_cocos") | basis.eq("")].copy()
 
     if "decision" in df.columns:
         df = df[df["decision"].isin(ACTIVE_ACTIONS)].copy()

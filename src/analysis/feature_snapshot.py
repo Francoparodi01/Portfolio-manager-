@@ -8,7 +8,7 @@ import json
 from typing import Any, Mapping
 
 
-FEATURE_SNAPSHOT_SCHEMA_VERSION = "feature_snapshot_v1"
+FEATURE_SNAPSHOT_SCHEMA_VERSION = "feature_snapshot_v2"
 FEATURE_HASH_LENGTH = 16
 
 FEATURE_KEYS = (
@@ -27,6 +27,8 @@ FEATURE_KEYS = (
     "technical_candle_source_counts",
     "trend_shadow",
     "reversion_shadow",
+    "technical_shadow_v2",
+    "technical_buy_shadow_v3",
 )
 
 

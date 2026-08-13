@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from src.analysis.plan_follow_attribution import (
     canonicalize_movements,
+    compute_execution_session_outcomes,
     normalize_plan_execution_attributions,
 )
 
@@ -32,6 +33,8 @@ def _movement(
     precision="date_only",
     external_id=None,
     window_start=None,
+    quantity=1,
+    price=None,
 ):
     return {
         "id": movement_id,
@@ -42,8 +45,8 @@ def _movement(
         "ticker": ticker,
         "movement_type": side,
         "amount": amount,
-        "quantity": 1,
-        "price": amount,
+        "quantity": quantity,
+        "price": amount / quantity if price is None else price,
         "observation_window_start_at": window_start,
     }
 
@@ -101,3 +104,78 @@ def test_same_day_date_only_movement_stays_ambiguous_and_outside_viability():
     assert len(rows) == 1
     assert rows[0]["temporal_quality"] == "AMBIGUOUS_SAME_DAY"
     assert rows[0]["eligible_for_viability"] is False
+
+
+def test_attribution_uses_quantity_weighted_real_execution_price():
+    plan_at = datetime(2026, 8, 10, 14, 0, tzinfo=UTC)
+    movements = [
+        _movement(
+            70,
+            datetime(2026, 8, 10, 15, 0, tzinfo=UTC),
+            amount=20_000,
+            quantity=2,
+            price=10_000,
+            precision="exact",
+        ),
+        _movement(
+            71,
+            datetime(2026, 8, 10, 15, 5, tzinfo=UTC),
+            amount=36_000,
+            quantity=3,
+            price=12_000,
+            precision="exact",
+        ),
+    ]
+
+    rows = normalize_plan_execution_attributions(
+        [_plan(30, plan_at, target=50_000)],
+        movements,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["execution_quantity"] == 5
+    assert rows[0]["execution_notional_ars"] == 56_000
+    assert rows[0]["execution_price"] == 11_200
+
+
+def test_execution_outcome_counts_exact_market_sessions_after_fill():
+    executed_at = datetime(2026, 8, 10, 15, 0, tzinfo=UTC)
+    candles = [
+        {"ts": datetime(2026, 8, day, tzinfo=UTC), "close_price": price, "source": "COCOS"}
+        for day, price in [(11, 101), (12, 102), (13, 103), (14, 104), (18, 110)]
+    ]
+
+    outcomes = compute_execution_session_outcomes(
+        execution_price=100,
+        executed_at=executed_at,
+        side="BUY",
+        candles=candles,
+    )
+
+    assert outcomes["outcome_date_5d"].isoformat() == "2026-08-18"
+    assert outcomes["outcome_5d"] == 0.10
+
+
+def test_execution_outcome_rebases_entry_for_confirmed_corporate_action():
+    executed_at = datetime(2026, 8, 10, 15, 0, tzinfo=UTC)
+    candles = [
+        {"ts": datetime(2026, 8, day, tzinfo=UTC), "close_price": price, "source": "COCOS"}
+        for day, price in [(11, 101), (12, 51), (13, 49), (14, 47), (18, 45)]
+    ]
+    effects = [
+        {
+            "effective_at": datetime(2026, 8, 12, 13, 0, tzinfo=UTC),
+            "lifecycle_status": "CONFIRMED",
+            "price_factor": 0.5,
+        }
+    ]
+
+    outcomes = compute_execution_session_outcomes(
+        execution_price=100,
+        executed_at=executed_at,
+        side="SELL",
+        candles=candles,
+        corporate_effects=effects,
+    )
+
+    assert outcomes["outcome_5d"] == 0.10

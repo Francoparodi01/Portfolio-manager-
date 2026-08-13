@@ -147,6 +147,7 @@ def normalize_positions_with_fresh_market_prices(
     positions: Iterable[Mapping[str, Any]],
     latest_market_rows: Iterable[Mapping[str, Any]],
     *,
+    reference_at: datetime | None = None,
     discrepancy_threshold: float = DEFAULT_PRICE_DISCREPANCY_THRESHOLD,
 ) -> list[dict]:
     """Return positions valued with fresh market_prices when available.
@@ -156,7 +157,11 @@ def normalize_positions_with_fresh_market_prices(
     we keep the raw snapshot fields as metadata, but value the position with the
     fresh market quote when it belongs to the latest market day.
     """
-    enriched = enrich_positions_with_market_metadata(positions, latest_market_rows)
+    enriched = enrich_positions_with_market_metadata(
+        positions,
+        latest_market_rows,
+        reference_at=reference_at,
+    )
 
     normalized: list[dict] = []
     for raw in enriched:

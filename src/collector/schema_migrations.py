@@ -55,10 +55,48 @@ CREATE TABLE IF NOT EXISTS plan_execution_attributions (
     eligible_for_viability      BOOLEAN NOT NULL DEFAULT FALSE,
     match_window_sessions       INTEGER NOT NULL DEFAULT 2,
     matching_version            TEXT NOT NULL,
+    execution_quantity          NUMERIC(20,8),
+    execution_price             NUMERIC(20,4),
+    execution_notional_ars      NUMERIC(20,4),
+    outcome_5d                  FLOAT,
+    outcome_10d                 FLOAT,
+    outcome_20d                 FLOAT,
+    outcome_40d                 FLOAT,
+    outcome_date_5d             DATE,
+    outcome_date_10d            DATE,
+    outcome_date_20d            DATE,
+    outcome_date_40d            DATE,
+    outcome_price_5d            NUMERIC(20,4),
+    outcome_price_10d           NUMERIC(20,4),
+    outcome_price_20d           NUMERIC(20,4),
+    outcome_price_40d           NUMERIC(20,4),
+    outcome_basis               TEXT,
+    outcome_version             TEXT,
+    outcome_filled_at           TIMESTAMPTZ,
     metadata                    JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE plan_execution_attributions
+    ADD COLUMN IF NOT EXISTS execution_quantity     NUMERIC(20,8),
+    ADD COLUMN IF NOT EXISTS execution_price        NUMERIC(20,4),
+    ADD COLUMN IF NOT EXISTS execution_notional_ars NUMERIC(20,4),
+    ADD COLUMN IF NOT EXISTS outcome_5d             FLOAT,
+    ADD COLUMN IF NOT EXISTS outcome_10d            FLOAT,
+    ADD COLUMN IF NOT EXISTS outcome_20d            FLOAT,
+    ADD COLUMN IF NOT EXISTS outcome_40d            FLOAT,
+    ADD COLUMN IF NOT EXISTS outcome_date_5d        DATE,
+    ADD COLUMN IF NOT EXISTS outcome_date_10d       DATE,
+    ADD COLUMN IF NOT EXISTS outcome_date_20d       DATE,
+    ADD COLUMN IF NOT EXISTS outcome_date_40d       DATE,
+    ADD COLUMN IF NOT EXISTS outcome_price_5d       NUMERIC(20,4),
+    ADD COLUMN IF NOT EXISTS outcome_price_10d      NUMERIC(20,4),
+    ADD COLUMN IF NOT EXISTS outcome_price_20d      NUMERIC(20,4),
+    ADD COLUMN IF NOT EXISTS outcome_price_40d      NUMERIC(20,4),
+    ADD COLUMN IF NOT EXISTS outcome_basis          TEXT,
+    ADD COLUMN IF NOT EXISTS outcome_version        TEXT,
+    ADD COLUMN IF NOT EXISTS outcome_filled_at      TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_plan_execution_attributions_plan
     ON plan_execution_attributions(representative_decision_log_id);

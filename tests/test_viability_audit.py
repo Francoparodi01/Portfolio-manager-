@@ -313,3 +313,59 @@ def test_viability_loader_excludes_decisions_backed_only_by_superseded_fills(mon
     decision_query = conn.statements[-1]
     assert "superseded_by_real" in decision_query
     assert "live_bf" in decision_query
+
+
+def test_viability_loader_uses_fill_lineage_to_exclude_followed_manual_rows(monkeypatch):
+    class _Connection:
+        def __init__(self):
+            self.statements = []
+
+        async def fetch(self, statement, *args):
+            self.statements.append(statement)
+            if "information_schema.columns" in statement:
+                return [
+                    {"column_name": name}
+                    for name in [
+                        "id",
+                        "decided_at",
+                        "ticker",
+                        "decision",
+                        "final_score",
+                        "layers",
+                        "source",
+                        "status",
+                        "decision_type",
+                        "metric_scope",
+                        "outcome_basis",
+                        "outcome_5d",
+                    ]
+                ]
+            return []
+
+        async def fetchval(self, statement, *args):
+            return True
+
+        async def fetchrow(self, statement, *args):
+            return None
+
+        async def close(self):
+            return None
+
+    conn = _Connection()
+
+    async def _connect(_dsn):
+        return conn
+
+    monkeypatch.setattr("src.analysis.viability_audit.asyncpg.connect", _connect)
+
+    asyncio.run(
+        load_viability_decision_log(
+            ViabilityAuditConfig(database_url="postgresql://unused", horizons=("5d",))
+        )
+    )
+
+    assert any(
+        "JOIN broker_fills bf" in statement
+        and "bf.external_fill_id = movement.external_movement_id" in statement
+        for statement in conn.statements
+    )
