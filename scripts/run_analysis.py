@@ -125,6 +125,10 @@ from src.analysis.audit_scope import (
 )
 from src.analysis.decision_context import build_decision_run_context
 from src.analysis.feature_snapshot import build_feature_snapshot_from_layers
+from src.analysis.position_hold_audit import (
+    hold_observations_from_plan,
+    persist_position_holds,
+)
 from src.analysis.technical_shadow_v2 import build_technical_shadow_v2
 from src.collector.cocos_history import candles_to_frame
 from src.collector.portfolio_quality import (
@@ -1690,6 +1694,63 @@ async def _save_execution_plan_events(
             _json.dumps(list(getattr(execution_plan, "warnings", []) or [])),
         )
 
+    async def _persist_hold_observations(conn) -> int:
+        layers_by_ticker: dict[str, dict] = {}
+        price_by_ticker = dict(position_price_by_ticker)
+        for ticker, result in result_by_ticker.items():
+            result_price = _price_from_result(result)
+            if result_price is not None and result_price > 0:
+                price_by_ticker[ticker] = result_price
+
+        for decision in (getattr(execution_plan, "decisions", []) or []):
+            action = _action_to_text(getattr(decision, "action", None)).upper()
+            if action != "HOLD":
+                continue
+            ticker = str(getattr(decision, "ticker", "") or "").upper().strip()
+            if not ticker:
+                continue
+            synthetic = SimpleNamespace(
+                side=None,
+                reason=str(getattr(decision, "reason_primary", "") or ""),
+                block_code=None,
+                amount_ars=0.0,
+                theoretical_ars=float(getattr(decision, "theoretical_ars", 0.0) or 0.0),
+            )
+            payload = _layers_for(
+                ticker,
+                result_by_ticker.get(ticker),
+                decision,
+                synthetic,
+                status="OBSERVED",
+                decision_type="hold_observation",
+                decided_at=plan_created_at,
+            )
+            payload.update({
+                "source": "position_analysis",
+                "status": "OBSERVED",
+                "decision_type": "hold_observation",
+                "metric_scope": "hold_audit",
+                "is_primary_metric": False,
+            })
+            layers_by_ticker[ticker] = payload
+
+        observations = hold_observations_from_plan(
+            getattr(execution_plan, "decisions", []) or [],
+            result_by_ticker=result_by_ticker,
+            price_by_ticker=price_by_ticker,
+            regime=str(macro_regime),
+            portfolio_snapshot_id=portfolio_snapshot_id,
+            layers_by_ticker=layers_by_ticker,
+        )
+        return await persist_position_holds(
+            conn,
+            owner_chat_id=owner_chat_id,
+            run_id=run_id_to_db(run_id) or execution_plan_id,
+            execution_plan_id=execution_plan_id,
+            observed_at=plan_created_at,
+            observations=observations,
+        )
+
     async def _persist_order_intent(
         conn,
         *,
@@ -1769,6 +1830,19 @@ async def _save_execution_plan_events(
         await ensure_decision_audit_scope_columns(conn)
         await ensure_execution_plan_persistence(conn)
         await _persist_execution_plan(conn)
+        try:
+            hold_saved = await _persist_hold_observations(conn)
+            logger.info(
+                "Position HOLD audit: %s observaciones guardadas para run_id=%s",
+                hold_saved,
+                run_id or execution_plan_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Position HOLD audit fallo sin afectar el plan operativo: %s",
+                exc,
+                exc_info=True,
+            )
         sequence_no = 0
         for order in (getattr(execution_plan, "sell_orders", []) or []):
             sequence_no += 1
@@ -2184,6 +2258,16 @@ def _analysis_run_policy(
     return bool(no_persist), str(run_intent or "formal_plan"), False
 
 
+def _analysis_report_title(
+    off_market_context: bool,
+    now: datetime | None = None,
+) -> str:
+    current = now or datetime.now(ART_TZ)
+    if off_market_context and current.time() >= time(17, 0):
+        return "CIERRE DE RUEDA"
+    return "ANÁLISIS"
+
+
 def _opportunity_rr(candidate) -> float:
     asymmetry = getattr(candidate, "asymmetry", None)
     try:
@@ -2480,14 +2564,16 @@ def _render_compact_report(
     decision_map = {d.ticker: d for d in (plan.decisions if plan else [])}
     gate = plan.gate if plan else "NORMAL"
     current_w = _current_weights(positions, total_ars)
-    now_txt = datetime.now(ART_TZ).strftime("%d/%m %H:%M")
+    now_art = datetime.now(ART_TZ)
+    now_txt = now_art.strftime("%d/%m %H:%M")
+    report_title = _analysis_report_title(off_market_context, now_art)
     plan_title = (
         "SIMULACIÓN CONTEXTUAL"
         if off_market_context
         else ("PLAN MAÑANA" if timing_ctx["next_session"] else "PLAN AHORA")
     )
     lines: list[str] = [
-        f"🧠 <b>ANÁLISIS — {now_txt} ART</b>",
+        f"🧠 <b>{report_title} — {now_txt} ART</b>",
         f"💼 <b>{_money_ars(total_ars)}</b> | Cash <b>{_money_ars(cash_ars)}</b> | Régimen: <b>{escape(str(gate))}</b>",
     ]
     context_lines = _render_analysis_data_context(portfolio_snapshot, latest_broker_movement)

@@ -9,6 +9,7 @@ Versión ajustada:
 from __future__ import annotations
 
 import logging
+import json
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -183,3 +184,49 @@ class TelegramNotifier:
                 ok = self._send(chunk, parse_mode=None)
             ok_all = ok_all and ok
         return ok_all   
+
+    def send_with_inline_keyboard(
+        self,
+        text: str,
+        keyboard: list[list[dict[str, str]]],
+    ) -> int | None:
+        """Send one auditable message and return its Telegram message id."""
+        if not self._enabled or not text.strip():
+            return None
+        if len(text) > self._max_message_len:
+            logger.warning(
+                "Telegram keyboard message demasiado largo: %s chars",
+                len(text),
+            )
+            return None
+        valid_html, errors = validate_telegram_html(text)
+        if not valid_html:
+            logger.warning("Telegram HTML potencialmente inválido: %s", errors[:3])
+        data = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+            "reply_markup": json.dumps({"inline_keyboard": keyboard}),
+        }
+        try:
+            response = requests.post(
+                f"{self._base}/sendMessage",
+                data=data,
+                timeout=20,
+            )
+            if response.status_code != 200:
+                logger.warning(
+                    "Telegram keyboard error %s: %s",
+                    response.status_code,
+                    response.text,
+                )
+                return None
+            payload = response.json()
+            if not payload.get("ok"):
+                logger.warning("Telegram keyboard rechazado: %s", payload)
+                return None
+            return int(payload["result"]["message_id"])
+        except Exception as exc:
+            logger.warning("Telegram keyboard send error: %s", exc)
+            return None

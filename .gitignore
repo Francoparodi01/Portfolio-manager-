@@ -69,6 +69,10 @@ tests/*
 !tests/test_cocos_movement_poll.py
 !tests/test_learning_shadow.py
 !tests/test_net_decision_report.py
+!tests/test_radar_discovery.py
+!tests/test_radar_setup_shadow.py
+!tests/test_radar_metrics.py
+!tests/test_radar_setup_alerts.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json

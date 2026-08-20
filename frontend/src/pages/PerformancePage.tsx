@@ -15,7 +15,7 @@ import { formatDateTime, formatNumber, formatPercent, formatScore, sampleLabel, 
 import { decisionLabel, scopeLabel, sourceLabel, statusLabel, toneForScope, toneForStatus } from "../utils/labels";
 
 const viewOptions = ["score", "fuentes", "senales", "tickers", "recientes"] as const;
-const scopeOptions = ["todos", "primary", "followed_plan", "planner_audit", "radar_audit", "blocked_audit"] as const;
+const scopeOptions = ["todos", "primary", "followed_plan", "planner_audit", "hold_audit", "radar_audit", "blocked_audit"] as const;
 const actionOptions = ["todas", "BUY", "SELL", "HOLD"] as const;
 const scoreOptions = ["con_score", "score_0", "todos"] as const;
 
@@ -39,7 +39,7 @@ export default function PerformancePage() {
   const sourceRows = asRows(performance.data?.source_breakdown);
   const scorePoints = asRows(performance.data?.score_points);
   const tickerRows = asRows(performance.data?.by_ticker);
-  const recentRows = asRows(performance.data?.bot_prediction_recent);
+  const recentRows = asRows(performance.data?.performance_recent ?? performance.data?.bot_prediction_recent);
   const baseScorePoints = useMemo(
     () => scorePoints.filter((row) => matchesFilters(row, scopeFilter, actionFilter)),
     [actionFilter, scopeFilter, scorePoints],
@@ -59,6 +59,7 @@ export default function PerformancePage() {
   );
   const filteredWinRate = winRate(filteredClosed, "outcome_5d");
   const filteredAverage = average(filteredClosed, "outcome_5d");
+  const isHoldView = actionFilter === "HOLD";
 
   const setFilter = (key: "vista" | "alcance" | "accion" | "score", value: string, defaultValue: string) => {
     const next = new URLSearchParams(searchParams);
@@ -87,10 +88,10 @@ export default function PerformancePage() {
       />
 
       <MetricGroup>
-        <Metric detail={sampleLabel(closed)} label="EV 5D" tone={toneForNumber(getNumber(summary, "ev_5d"))} value={formatPercent(getNumber(summary, "ev_5d"), 1, true)} />
-        <Metric label="Acierto 5D" tone={toneForNumber((getNumber(summary, "win_rate_5d") ?? 0) - 0.5)} value={formatPercent(getNumber(summary, "win_rate_5d"))} />
-        <Metric label="Retorno medio" tone={toneForNumber(getNumber(summary, "avg_5d"))} value={formatPercent(getNumber(summary, "avg_5d"), 1, true)} />
-        <Metric label="Pendiente primaria" tone="pending" value={formatNumber(getNumber(getRecord(performance.data, "window_counts"), "pending_primary_5d"))} />
+        <Metric detail="Outcomes canonicos cerrados" label="Real primaria 5D" value={formatNumber(closed)} />
+        <Metric label="A favor 5D" tone={toneForNumber((getNumber(summary, "win_rate_5d") ?? 0) - 0.5)} value={formatPercent(getNumber(summary, "win_rate_5d"))} />
+        <Metric detail={sampleLabel(closed)} label="Retorno medio 5D" tone={toneForNumber(getNumber(summary, "avg_5d"))} value={formatPercent(getNumber(summary, "avg_5d"), 1, true)} />
+        <Metric label="Real primaria pendiente" tone="pending" value={formatNumber(getNumber(getRecord(performance.data, "window_counts"), "pending_primary_5d"))} />
       </MetricGroup>
 
       {closed < 30 ? (
@@ -140,17 +141,26 @@ export default function PerformancePage() {
           </ControlBlock>
           <div className="intel-stat-strip" aria-label="Resumen de filtros">
             <IntelStat label="Muestra filtrada" value={`${formatNumber(filteredClosed.length)} cerradas`} />
-            <IntelStat label="Win filtrado" value={formatPercent(filteredWinRate)} />
+            <IntelStat label={isHoldView ? "Positivo 5D" : "Win filtrado"} value={formatPercent(filteredWinRate)} />
             <IntelStat tone={toneForNumber(filteredAverage)} label="Avg 5D filtrado" value={formatPercent(filteredAverage, 1, true)} />
             <IntelStat tone="warning" label="Score 0 fuera" value={scoreFilter === "con_score" ? formatNumber(scoreZeroCount) : "-"} />
           </div>
         </div>
       </Panel>
 
+      {isHoldView ? (
+        <div className="inline-alert">
+          <StatusBadge tone="info">Mantener auditado</StatusBadge>
+          <span>HOLD mide el retorno de conservar la posicion. No representa una orden ni una ejecucion.</span>
+        </div>
+      ) : null}
+
       <Panel kicker={viewKicker(selectedView)} title={viewTitle(selectedView)}>
         {selectedView === "score" ? (
           <ScatterChart
-            description="Relacion entre score cuantitativo y resultado posterior a cinco ruedas."
+            description={isHoldView
+              ? "Relacion entre score cuantitativo y retorno de mantener durante cinco ruedas."
+              : "Relacion entre score cuantitativo y resultado posterior a cinco ruedas."}
             labelKey="ticker"
             rows={filteredScorePoints}
             title="Score y outcome 5D"
@@ -358,7 +368,7 @@ const directionColumns: TableColumn<RowRecord>[] = [
   { align: "right", header: "Total", id: "total", render: (row) => formatNumber(getNumber(row, "total")) },
   { align: "right", header: "Cerradas", id: "closed", render: (row) => formatNumber(getNumber(row, "closed_5d")) },
   { align: "right", header: "Pendientes", id: "pending", render: (row) => formatNumber(getNumber(row, "pending_5d")) },
-  { align: "right", header: "Acierto", id: "win", render: (row) => formatPercent(getNumber(row, "win_rate_5d")) },
+  { align: "right", header: "A favor 5D", id: "win", render: (row) => formatPercent(getNumber(row, "win_rate_5d")) },
   { align: "right", header: "Avg 5D", id: "avg", render: (row) => <span className={toneForNumber(getNumber(row, "avg_5d"))}>{formatPercent(getNumber(row, "avg_5d"), 1, true)}</span> },
   { align: "right", header: "Payoff", id: "payoff", render: (row) => formatNumber(getNumber(row, "payoff_ratio")) },
 ];
@@ -368,7 +378,7 @@ const sourceColumns: TableColumn<RowRecord>[] = [
   { header: "Alcance", id: "scope", render: (row) => <StatusBadge tone={toneForScope(getString(row, "metric_scope"))}>{scopeLabel(getString(row, "metric_scope"))}</StatusBadge> },
   { align: "right", header: "Total", id: "total", render: (row) => formatNumber(getNumber(row, "total")) },
   { align: "right", header: "Cerradas", id: "closed", render: (row) => formatNumber(getNumber(row, "closed_5d")) },
-  { align: "right", header: "Acierto", id: "win", render: (row) => formatPercent(getNumber(row, "win_rate_5d")) },
+  { align: "right", header: "A favor 5D", id: "win", render: (row) => formatPercent(getNumber(row, "win_rate_5d")) },
   { align: "right", header: "Avg 5D", id: "avg", render: (row) => <span className={toneForNumber(getNumber(row, "avg_5d"))}>{formatPercent(getNumber(row, "avg_5d"), 1, true)}</span> },
   { align: "right", header: "Peor", id: "worst", render: (row) => <span className={toneForNumber(getNumber(row, "worst_5d"))}>{formatPercent(getNumber(row, "worst_5d"), 1, true)}</span> },
   { align: "right", header: "Mejor", id: "best", render: (row) => <span className={toneForNumber(getNumber(row, "best_5d"))}>{formatPercent(getNumber(row, "best_5d"), 1, true)}</span> },
@@ -386,6 +396,7 @@ const scoreColumns: TableColumn<RowRecord>[] = [
   { align: "right", header: "5D", id: "outcome5", render: (row) => <span className={toneForNumber(getNumber(row, "outcome_5d"))}>{formatPercent(getNumber(row, "outcome_5d"), 1, true)}</span>, sortValue: (row) => getNumber(row, "outcome_5d") },
   { align: "right", header: "10D", id: "outcome10", render: (row) => <span className={toneForNumber(getNumber(row, "outcome_10d"))}>{formatPercent(getNumber(row, "outcome_10d"), 1, true)}</span>, sortValue: (row) => getNumber(row, "outcome_10d") },
   { align: "right", header: "20D", id: "outcome20", render: (row) => <span className={toneForNumber(getNumber(row, "outcome_20d"))}>{formatPercent(getNumber(row, "outcome_20d"), 1, true)}</span>, sortValue: (row) => getNumber(row, "outcome_20d") },
+  { align: "right", header: "40D", id: "outcome40", render: (row) => <span className={toneForNumber(getNumber(row, "outcome_40d"))}>{formatPercent(getNumber(row, "outcome_40d"), 1, true)}</span>, sortValue: (row) => getNumber(row, "outcome_40d") },
 ];
 
 const recentPlanColumns: TableColumn<RowRecord>[] = [

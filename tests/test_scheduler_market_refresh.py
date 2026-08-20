@@ -18,6 +18,7 @@ def test_run_market_refresh_persists_one_combined_batch(monkeypatch):
 
     monkeypatch.setattr(runner, "request_portfolio_refresh", fake_refresh)
     monkeypatch.setattr(runner, "_is_business_day", lambda now: True)
+    monkeypatch.setattr(runner, "RADAR_INTRADAY_SETUP_ALERTS_ENABLED", False)
     monkeypatch.setattr(
         runner,
         "_now_art",

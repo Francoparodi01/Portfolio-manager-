@@ -1101,6 +1101,16 @@ def reconcile_funding(
                 warnings.append(
                     f"{d.ticker}: compra pendiente; falta precio actual para calcular nominales"
                 )
+            elif nominal_qty > 0:
+                d.reason_secondary = (
+                    f"Señal positiva, pero el cash ${available:,.0f} solo permite "
+                    f"{nominal_qty:.0f} nominal(es) por ${executable:,.0f}; queda debajo "
+                    f"del mínimo operativo de ${min_trade_ars:,.0f}"
+                )
+                warnings.append(
+                    f"{d.ticker}: {nominal_qty:.0f} nominal(es) suman ${executable:,.0f}, "
+                    f"debajo del mínimo operativo de ${min_trade_ars:,.0f}"
+                )
             elif available >= ref_price * (1 + cost_rate):
                 d.reason_secondary = (
                     f"Señal positiva, pero el target ${wanted:,.0f} no alcanza un nominal "

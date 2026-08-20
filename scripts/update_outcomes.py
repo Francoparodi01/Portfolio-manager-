@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.core.config import get_config
 from src.core.logger import get_logger
 from src.collector.db import PortfolioDatabase
+from src.analysis.position_hold_audit import resolve_position_hold_outcomes
 
 logger = get_logger(__name__)
 
@@ -110,10 +111,53 @@ async def main(
             lookback_days=lookback_days,
         )
         logger.info(f"{updated} decisiones actualizadas")
+        hold_updated = 0
+        try:
+            pool = await db.get_pool()
+            async with pool.acquire() as conn:
+                hold_updated = await resolve_position_hold_outcomes(
+                    conn,
+                    lookback_days=lookback_days,
+                )
+            logger.info("%s outcomes HOLD actualizados", hold_updated)
+        except Exception as exc:
+            logger.error(
+                "Outcomes HOLD fallaron sin afectar decision_log: %s",
+                exc,
+                exc_info=True,
+            )
+        if os.getenv("RADAR_DISCOVERY_LEDGER_ENABLED", "false").lower() == "true":
+            try:
+                from src.analysis.radar_discovery import RadarDiscoveryStore
+
+                pool = await db.get_pool()
+                discovery_store = RadarDiscoveryStore(pool)
+                discovery_updated = await discovery_store.resolve_pending_outcomes(db)
+                setup_events_updated = await discovery_store.resolve_pending_setup_events(db)
+                setup_outcomes_updated = await discovery_store.resolve_pending_setup_outcomes(db)
+                logger.info("%s outcomes Radar Discovery actualizados", discovery_updated)
+                logger.info(
+                    "%s eventos y %s outcomes Radar Setup actualizados",
+                    setup_events_updated,
+                    setup_outcomes_updated,
+                )
+                print(f"Radar Discovery: {discovery_updated} outcomes por ruedas actualizados")
+                print(
+                    "Radar Setup: "
+                    f"{setup_events_updated} eventos, "
+                    f"{setup_outcomes_updated} outcomes desde trigger actualizados"
+                )
+            except Exception as exc:
+                logger.error(
+                    "Radar Discovery outcomes fallo sin afectar decision_log: %s",
+                    exc,
+                    exc_info=True,
+                )
         print(
             f"✅ {updated} outcomes actualizados "
             "(THEORETICAL / APPROVED / EXECUTED / BLOCKED elegibles)"
         )
+        print(f"HOLD audit: {hold_updated} retornos por ruedas actualizados")
 
         if include_theoretical:
             print(

@@ -94,6 +94,7 @@ export type PerformancePayload = {
   buy_confirmation_breakdown?: RowRecord[];
   evitable_loss?: RowRecord;
   bot_prediction_recent?: RowRecord[];
+  performance_recent?: RowRecord[];
 };
 
 export type OverrideAuditPayload = {

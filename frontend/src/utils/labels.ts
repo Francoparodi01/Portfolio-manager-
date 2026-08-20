@@ -16,6 +16,7 @@ export function sourceLabel(value: unknown): string {
   if (key === "broker_fill") return "Fill broker";
   if (key === "execution_plan") return "Plan de Quantia";
   if (key === "plan_execution_attribution") return "Plan seguido";
+  if (key === "position_analysis") return "Analisis de posicion";
   if (key === "radar") return "Radar teórico";
   if (key === "optimizer") return "Optimizador";
   return String(value || "Sin fuente");
@@ -26,6 +27,7 @@ export function scopeLabel(value: unknown): string {
   if (key === "primary") return "Métrica principal";
   if (key === "planner_audit") return "Auditoría planner";
   if (key === "followed_plan") return "Ejecución seguida";
+  if (key === "hold_audit") return "Mantener auditado";
   if (key === "radar_audit") return "Radar auditado";
   if (key === "blocked_audit") return "Bloqueado auditado";
   if (key === "debug") return "Debug";
@@ -39,6 +41,7 @@ export function statusLabel(value: unknown): string {
   if (key === "EXECUTED_MANUAL") return "Ejecución manual";
   if (key === "BLOCKED") return "Bloqueada";
   if (key === "THEORETICAL") return "Teórica";
+  if (key === "OBSERVED") return "Observada";
   if (key === "FOLLOWED") return "Seguida";
   if (key === "OVERFOLLOWED") return "Seguida por encima";
   if (key === "FOLLOWED_PROVISIONAL") return "Seguida (snapshot)";
@@ -56,6 +59,7 @@ export function toneForScope(value: unknown): Tone {
   if (key === "primary") return "real";
   if (key === "followed_plan") return "real";
   if (key === "planner_audit") return "info";
+  if (key === "hold_audit") return "info";
   if (key === "radar_audit") return "theoretical";
   if (key === "blocked_audit") return "blocked";
   if (key === "debug") return "pending";
@@ -69,6 +73,7 @@ export function toneForStatus(value: unknown): Tone {
   if (key === "APPROVED" || key === "PARTIAL" || key === "PARTIAL_PROVISIONAL") return "info";
   if (key === "BLOCKED" || key === "OPPOSITE" || key === "OPPOSITE_PROVISIONAL") return "blocked";
   if (key === "THEORETICAL") return "theoretical";
+  if (key === "OBSERVED") return "info";
   if (key === "IGNORED") return "warning";
   return "neutral";
 }

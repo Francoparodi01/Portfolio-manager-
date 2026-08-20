@@ -97,6 +97,11 @@ def test_events_command_is_registered_in_telegram_menu():
     assert CALLBACK_ALIASES["upcoming_events"] == "upcoming_events"
 
 
+def test_radar_metrics_command_and_callback_are_registered():
+    assert ("radar_metricas", "Métricas prospectivas Radar") in BOT_COMMAND_SPECS
+    assert CALLBACK_ALIASES["radar_metricas"] == "radar_metrics"
+
+
 def test_upcoming_events_refreshes_sources_before_rendering():
     source = (ROOT / "scripts" / "telegram_bot.py").read_text(encoding="utf-8")
     start = source.index("async def action_upcoming_events")

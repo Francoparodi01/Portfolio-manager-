@@ -38,6 +38,7 @@ from src.analysis.override_classification import (
     override_same_ratio as _override_same_ratio,
 )
 from src.analysis.plan_follow_attribution import ensure_plan_execution_attribution_schema
+from src.analysis.position_hold_audit import ensure_position_hold_audit_schema
 from src.analysis.thesis_shadow_store import MAX_ABS_REALIZED_RETURN_FOR_METRICS
 from src.core.config import get_config
 from src.core.logger import get_logger, redact_secrets
@@ -48,6 +49,7 @@ from src.core.market_calendar import (
     market_session_note,
 )
 from src.core.redis_client import client as redis_client
+from src.collector.schema_migrations import ensure_execution_plan_persistence
 
 
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
@@ -896,6 +898,8 @@ async def performance_view(request: web.Request) -> web.Response:
     async with pool.acquire() as conn:
         await ensure_decision_audit_scope_columns(conn)
         await ensure_plan_execution_attribution_schema(conn)
+        await ensure_execution_plan_persistence(conn)
+        await ensure_position_hold_audit_schema(conn)
         perf_base_cte = """
             WITH fill_link AS (
                 SELECT
@@ -952,6 +956,7 @@ async def performance_view(request: web.Request) -> web.Response:
                     COALESCE(dl.executable_outcome_5d, dl.outcome_5d) AS outcome_5d,
                     COALESCE(dl.executable_outcome_10d, dl.outcome_10d) AS outcome_10d,
                     COALESCE(dl.executable_outcome_20d, dl.outcome_20d) AS outcome_20d,
+                    COALESCE(dl.executable_outcome_40d, dl.outcome_40d) AS outcome_40d,
                     dl.next_executable_at,
                     dl.next_executable_price,
                     dl.decision_type,
@@ -986,6 +991,7 @@ async def performance_view(request: web.Request) -> web.Response:
                     attribution.outcome_5d,
                     attribution.outcome_10d,
                     attribution.outcome_20d,
+                    attribution.outcome_40d,
                     attribution.executed_at AS next_executable_at,
                     attribution.execution_price::float AS next_executable_price,
                     'followed_execution'::text AS decision_type,
@@ -997,10 +1003,55 @@ async def performance_view(request: web.Request) -> web.Response:
                   ON dl.id = attribution.representative_decision_log_id
                 WHERE attribution.eligible_for_viability = TRUE
             ),
+            hold_ranked AS (
+                SELECT
+                    hold.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY COALESCE(hold.owner_chat_id, 0),
+                                     UPPER(hold.ticker), hold.observed_session
+                        ORDER BY hold.observed_at DESC, hold.id DESC
+                    ) AS daily_rank
+                FROM position_hold_observations hold
+            ),
+            hold_base AS (
+                SELECT
+                    (-4000000000000000000::bigint + hold.id) AS id,
+                    hold.observed_at AS effective_at,
+                    hold.observed_at AS decided_at,
+                    hold.ticker,
+                    hold.action AS decision,
+                    hold.status,
+                    hold.metric_scope,
+                    'formal_plan'::text AS run_intent,
+                    hold.source,
+                    COALESCE(hold.reason_primary, '') AS reason,
+                    hold.final_score,
+                    hold.confidence,
+                    hold.outcome_basis,
+                    FALSE AS is_primary_metric,
+                    CASE
+                        WHEN hold.outcome_5d IS NULL THEN NULL
+                        ELSE hold.outcome_5d > 0
+                    END AS was_correct,
+                    hold.outcome_5d,
+                    hold.outcome_10d,
+                    hold.outcome_20d,
+                    hold.outcome_40d,
+                    NULL::timestamptz AS next_executable_at,
+                    hold.reference_price::float AS next_executable_price,
+                    'hold_observation'::text AS decision_type,
+                    NULL::text AS signal_strength,
+                    COALESCE(hold.delta_weight, 0.0) AS delta_weight,
+                    hold.layers
+                FROM hold_ranked hold
+                WHERE hold.daily_rank = 1
+            ),
             raw_base AS (
                 SELECT * FROM decision_base
                 UNION ALL
                 SELECT * FROM followed_base
+                UNION ALL
+                SELECT * FROM hold_base
             ),
             perf_base AS (
                 SELECT
@@ -1022,6 +1073,7 @@ async def performance_view(request: web.Request) -> web.Response:
                     base.outcome_5d,
                     base.outcome_10d,
                     base.outcome_20d,
+                    base.outcome_40d,
                     base.next_executable_at,
                     base.next_executable_price,
                     base.decision_type,
@@ -1142,6 +1194,11 @@ async def performance_view(request: web.Request) -> web.Response:
                 outcome_5d,
                 outcome_10d,
                 outcome_20d,
+                outcome_40d,
+                signal_family,
+                buy_confirmation,
+                trend_shadow_score,
+                trend_shadow_regime,
                 next_executable_at,
                 next_executable_price
             FROM perf_base
@@ -1149,9 +1206,15 @@ async def performance_view(request: web.Request) -> web.Response:
               AND outcome_basis = 'canonical_cocos'
               AND outcome_5d IS NOT NULL
               AND final_score IS NOT NULL
-              AND metric_scope IN ('primary', 'planner_audit')
+              AND metric_scope IN (
+                    'primary',
+                    'followed_plan',
+                    'planner_audit',
+                    'radar_audit',
+                    'blocked_audit',
+                    'hold_audit'
+              )
             ORDER BY effective_at DESC, decided_at DESC
-            LIMIT 160
         """, days)
         status_counts = await conn.fetch(perf_base_cte + """
             SELECT
@@ -1236,9 +1299,18 @@ async def performance_view(request: web.Request) -> web.Response:
                 SELECT *
                 FROM perf_base
                 WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
-                  AND source = 'execution_plan'
-                  AND metric_scope IN ('planner_audit', 'primary')
-                  AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
+                  AND (
+                        (
+                            source = 'execution_plan'
+                            AND metric_scope IN ('planner_audit', 'primary')
+                            AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
+                        )
+                        OR (
+                            source = 'position_analysis'
+                            AND metric_scope = 'hold_audit'
+                            AND status = 'OBSERVED'
+                        )
+                  )
             ),
             agg AS (
                 SELECT
@@ -1372,6 +1444,7 @@ async def performance_view(request: web.Request) -> web.Response:
                     AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
                  )
                  OR metric_scope IN ('blocked_audit', 'radar_audit')
+                 OR metric_scope = 'hold_audit'
               )
             GROUP BY source, metric_scope
             HAVING COUNT(*) > 0
@@ -1469,6 +1542,67 @@ async def performance_view(request: web.Request) -> web.Response:
             ORDER BY effective_at DESC, decided_at DESC
             LIMIT 12
         """, days)
+        performance_recent = await conn.fetch(perf_base_cte + """
+            , ranked_recent AS (
+                SELECT
+                    decided_at,
+                    effective_at,
+                    ticker,
+                    decision,
+                    status,
+                    metric_scope,
+                    source,
+                    signal_family,
+                    buy_confirmation,
+                    trend_shadow_score,
+                    trend_shadow_regime,
+                    causal_conclusion,
+                    final_score,
+                    confidence,
+                    outcome_5d,
+                    outcome_10d,
+                    outcome_20d,
+                    outcome_40d,
+                    outcome_5d AS directional_5d,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY metric_scope
+                        ORDER BY effective_at DESC, decided_at DESC, id DESC
+                    ) AS scope_rank
+                FROM perf_base
+                WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND metric_scope IN (
+                        'primary',
+                        'followed_plan',
+                        'planner_audit',
+                        'radar_audit',
+                        'blocked_audit',
+                        'hold_audit'
+                  )
+            )
+            SELECT
+                decided_at,
+                effective_at,
+                ticker,
+                decision,
+                status,
+                metric_scope,
+                source,
+                signal_family,
+                buy_confirmation,
+                trend_shadow_score,
+                trend_shadow_regime,
+                causal_conclusion,
+                final_score,
+                confidence,
+                outcome_5d,
+                outcome_10d,
+                outcome_20d,
+                outcome_40d,
+                directional_5d
+            FROM ranked_recent
+            WHERE scope_rank <= 50
+            ORDER BY effective_at DESC, decided_at DESC
+        """, days)
 
     summary_dict = _row(summary)
 
@@ -1487,6 +1621,7 @@ async def performance_view(request: web.Request) -> web.Response:
         "buy_confirmation_breakdown": [_row(r) for r in buy_confirmation_breakdown],
         "evitable_loss": _row(evitable_loss),
         "bot_prediction_recent": [_row(r) for r in bot_prediction_recent],
+        "performance_recent": [_row(r) for r in performance_recent],
     })
 
 

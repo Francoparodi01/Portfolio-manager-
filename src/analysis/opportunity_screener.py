@@ -282,6 +282,36 @@ class OpportunityReport:
     en_vigilancia:       list[OpportunityCandidate] = field(default_factory=list)
     no_operables:        list[OpportunityCandidate] = field(default_factory=list)
     externos:            list[OpportunityCandidate] = field(default_factory=list)
+    # Internal evidence for the Discovery Ledger. These fields are populated
+    # only on the parallel audit run and never affect rendering or selection.
+    discovery_screening_results: list[ScreenerMetrics] = field(default_factory=list)
+    discovery_technical_signals: dict[str, object] = field(default_factory=dict)
+    discovery_scored_candidates: list[OpportunityCandidate] = field(default_factory=list)
+    discovery_ranked_candidates: list[OpportunityCandidate] = field(default_factory=list)
+
+
+STATUS_PRIORITY = {
+    CandidateStatus.COMPRABLE_AHORA:   6,
+    CandidateStatus.COMPRA_HABILITADA: 5,
+    CandidateStatus.SWAP_CANDIDATO:    4,
+    CandidateStatus.VIGILANCIA_A:      3,
+    CandidateStatus.VIGILANCIA_B:      2,
+    CandidateStatus.VIGILANCIA_C:      1,
+    CandidateStatus.NO_OPERABLE:       0,
+}
+
+
+def opportunity_rank_score(candidate: OpportunityCandidate) -> float:
+    """Return the exact score used by the production Radar ordering."""
+    asym_bonus = (
+        candidate.asymmetry.asymmetry_ratio / 3.0
+        if (candidate.asymmetry and candidate.asymmetry.rr_valid) else 0.0
+    )
+    edge_raw = candidate.edge.raw if candidate.edge else 0.0
+    priority = STATUS_PRIORITY.get(candidate.status, 0)
+    edge_mult = 0.4 if edge_raw < 0 else (1.0 + min(edge_raw, 0.15) * 2)
+    base_score = candidate.final_score * candidate.conviction * (1 + asym_bonus)
+    return priority * 10 + base_score * edge_mult
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1034,6 +1064,7 @@ def run_opportunity_analysis(
     available_cash_ars:  float = 0.0,
     sentiment_contexts:  Optional[dict[str, object]] = None,
     shadow_contexts:     Optional[dict[str, object]] = None,
+    capture_discovery:   bool = False,
 ) -> OpportunityReport:
     from src.analysis.technical import analyze_portfolio_from_frames
     from src.analysis.macro import score_macro_for_ticker
@@ -1074,6 +1105,8 @@ def run_opportunity_analysis(
     if asset_types is not None:
         screen_kwargs["asset_types"] = asset_types
     screener_results = screen_universe(universe, **screen_kwargs)
+    if capture_discovery:
+        report.discovery_screening_results = list(screener_results)
 
     external_tickers = {
         metric.ticker
@@ -1097,17 +1130,20 @@ def run_opportunity_analysis(
     passed = [m for m in screener_results if m.passes_screen]
     report.screened_count = len(passed)
     logger.info(f"Opportunity: {len(passed)} candidatos pasaron el screener")
-    if not passed:
+    if not passed and not capture_discovery:
         report.candidates = external_candidates
         report.externos = external_candidates
         return report
 
-    passed_tickers = [m.ticker for m in passed]
-    frame_tickers  = [ticker for ticker in passed_tickers if ticker in (history_frames or {})]
+    technical_metrics = screener_results if capture_discovery else passed
+    technical_tickers = [m.ticker for m in technical_metrics]
+    frame_tickers = [ticker for ticker in technical_tickers if ticker in (history_frames or {})]
     tech_signals   = analyze_portfolio_from_frames(
         {ticker: history_frames[ticker] for ticker in frame_tickers}
     )
     tech_map       = {s.ticker: s for s in tech_signals}
+    if capture_discovery:
+        report.discovery_technical_signals = dict(tech_map)
 
     top_tech_tickers = {
         s.ticker for s in sorted(
@@ -1201,7 +1237,7 @@ def run_opportunity_analysis(
             tech_score_raw   = tech_score_raw,
         )
 
-        if status == CandidateStatus.DESCARTAR:
+        if status == CandidateStatus.DESCARTAR and not capture_discovery:
             continue
 
         # ── Flags de calibración fina ─────────────────────────────────────────
@@ -1296,19 +1332,22 @@ def run_opportunity_analysis(
             alerts               = alerts,
         )
 
-        cand = _apply_cash_constraint(cand, report.available_cash_ars)
+        if status != CandidateStatus.DESCARTAR:
+            cand = _apply_cash_constraint(cand, report.available_cash_ars)
 
-        if asym.atr_pct > 0:
-            cand.entry_zone_low  = round(screener_m.price * (1 - asym.atr_pct * 0.5), 2)
-            cand.entry_zone_high = round(screener_m.price * (1 + asym.atr_pct * 0.3), 2)
-        else:
-            cand.entry_zone_low  = round(screener_m.price * 0.98, 2)
-            cand.entry_zone_high = round(screener_m.price * 1.02, 2)
+            if asym.atr_pct > 0:
+                cand.entry_zone_low  = round(screener_m.price * (1 - asym.atr_pct * 0.5), 2)
+                cand.entry_zone_high = round(screener_m.price * (1 + asym.atr_pct * 0.3), 2)
+            else:
+                cand.entry_zone_low  = round(screener_m.price * 0.98, 2)
+                cand.entry_zone_high = round(screener_m.price * 1.02, 2)
 
-        cand.entry_reasons = _build_entry_reasons(cand, screener_m)
-        cand.invalidation  = _build_invalidation(screener_m, cand)
+            cand.entry_reasons = _build_entry_reasons(cand, screener_m)
+            cand.invalidation  = _build_invalidation(screener_m, cand)
+            candidates.append(cand)
 
-        candidates.append(cand)
+        if capture_discovery:
+            report.discovery_scored_candidates.append(cand)
 
     # ── Filtros post-scoring ──────────────────────────────────────────────────
     if min_score > 0:
@@ -1320,34 +1359,14 @@ def run_opportunity_analysis(
         ]
 
     # ── Ranking compuesto ─────────────────────────────────────────────────────
-    STATUS_PRIORITY = {
-        CandidateStatus.COMPRABLE_AHORA:   6,
-        CandidateStatus.COMPRA_HABILITADA: 5,
-        CandidateStatus.SWAP_CANDIDATO:    4,
-        CandidateStatus.VIGILANCIA_A:      3,
-        CandidateStatus.VIGILANCIA_B:      2,
-        CandidateStatus.VIGILANCIA_C:      1,
-        CandidateStatus.NO_OPERABLE:       0,
-    }
-
-    def _rank_key(c: OpportunityCandidate) -> float:
-        asym_bonus = (
-            c.asymmetry.asymmetry_ratio / 3.0
-            if (c.asymmetry and c.asymmetry.rr_valid) else 0.0
-        )
-        edge_raw   = c.edge.raw if c.edge else 0.0
-        priority   = STATUS_PRIORITY.get(c.status, 0)
-
-        # Penalización explícita por edge negativo:
-        # multiplicador 0.4 sobre el score compuesto → cae visiblemente en la lista
-        # pero no sale de su categoría de vigilancia
-        edge_mult  = 0.4 if edge_raw < 0 else (1.0 + min(edge_raw, 0.15) * 2)
-
-        base_score = c.final_score * c.conviction * (1 + asym_bonus)
-        return priority * 10 + base_score * edge_mult
-
-    candidates.sort(key=_rank_key, reverse=True)
+    candidates.sort(key=opportunity_rank_score, reverse=True)
     report.ranked_count = len(candidates)
+    if capture_discovery:
+        report.discovery_ranked_candidates = sorted(
+            report.discovery_scored_candidates,
+            key=opportunity_rank_score,
+            reverse=True,
+        )
     candidates = candidates[:max_candidates]
     report.displayed_count = len(candidates)
 

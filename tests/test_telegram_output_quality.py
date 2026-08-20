@@ -120,6 +120,9 @@ def test_main_menu_adds_settings_only_in_multiuser(monkeypatch):
         "get_config",
         lambda: SimpleNamespace(multiuser_enabled=False),
     )
+    monkeypatch.setattr(telegram_bot, "_is_business_day_now", lambda: True)
+    monkeypatch.setattr(telegram_bot, "_is_market_hours_now", lambda: True)
+    monkeypatch.setattr(telegram_bot, "_market_closed_reason_now", lambda: None)
     disabled_markup = telegram_bot.main_keyboard()
     disabled_labels = [
         button.text
@@ -137,6 +140,9 @@ def test_main_menu_prioritizes_common_actions_and_groups_secondary_views(monkeyp
         "get_config",
         lambda: SimpleNamespace(multiuser_enabled=False),
     )
+    monkeypatch.setattr(telegram_bot, "_is_business_day_now", lambda: True)
+    monkeypatch.setattr(telegram_bot, "_is_market_hours_now", lambda: True)
+    monkeypatch.setattr(telegram_bot, "_market_closed_reason_now", lambda: None)
 
     rows = telegram_bot.main_keyboard().inline_keyboard
     labels = [[button.text for button in row] for row in rows]
@@ -147,6 +153,27 @@ def test_main_menu_prioritizes_common_actions_and_groups_secondary_views(monkeyp
         ["📅 Balances", "📊 Resultados"],
         ["🧪 Auditoría", "🩺 Estado"],
     ]
+
+
+def test_main_menu_exposes_cached_close_analysis_outside_market(monkeypatch):
+    monkeypatch.setattr(telegram_bot, "InlineKeyboardButton", _Button)
+    monkeypatch.setattr(telegram_bot, "InlineKeyboardMarkup", _Markup)
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_config",
+        lambda: SimpleNamespace(multiuser_enabled=False),
+    )
+    monkeypatch.setattr(telegram_bot, "_is_business_day_now", lambda: True)
+    monkeypatch.setattr(telegram_bot, "_is_market_hours_now", lambda: False)
+
+    labels = [
+        button.text
+        for row in telegram_bot.main_keyboard().inline_keyboard
+        for button in row
+    ]
+
+    assert "🧠 Cierre" in labels
+    assert "🧠 Plan" not in labels
 
 
 def test_settings_action_reports_unlinked_account(monkeypatch):

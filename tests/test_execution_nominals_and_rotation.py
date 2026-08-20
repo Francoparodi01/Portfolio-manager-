@@ -83,6 +83,44 @@ def test_sell_and_radar_buy_are_chained_in_whole_nominals():
     validate_execution_plan(plan)
 
 
+def test_buy_below_minimum_trade_reports_cash_limited_nominals():
+    buy = DecisionIntent(
+        ticker="FSLR",
+        action=DecisionType.BUY,
+        reason_primary="Aumentar posicion",
+        reason_secondary="score positivo",
+        current_weight=0.034,
+        target_weight=0.115,
+        delta_weight=0.081,
+        score=0.127,
+        conviction=0.80,
+        theoretical_ars=191_811,
+    )
+    plan = reconcile_funding(
+        decisions=[buy],
+        current_positions={
+            "FSLR": PositionSnapshot(
+                ticker="FSLR",
+                quantity=4,
+                price=19_760,
+                market_value_ars=79_040,
+                current_weight=0.034,
+            )
+        },
+        cash_before=27_931,
+        portfolio_value_ars=2_350_621,
+        gate="NORMAL",
+        min_trade_ars=50_000,
+    )
+
+    reason = plan.decisions[0].reason_secondary or ""
+    assert plan.buy_orders == []
+    assert plan.pending_buys == ["FSLR"]
+    assert "1 nominal(es) por $19,760" in reason
+    assert "mínimo operativo de $50,000" in reason
+    assert "target" not in reason.lower()
+
+
 def test_radar_funding_candidate_survives_cash_only_downgrade():
     candidate = OpportunityCandidate(
         ticker="SNOW",
@@ -446,6 +484,7 @@ def test_radar_audit_capture_persists_without_sending_telegram(monkeypatch):
     )
     monkeypatch.setattr(runner, "_is_business_day", lambda: True)
     monkeypatch.setattr(runner, "get_config", lambda: cfg)
+    monkeypatch.setattr(runner, "RADAR_DISCOVERY_LEDGER_ENABLED", False)
     monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", _create_subprocess_exec)
 
     asyncio.run(runner.run_radar_audit_capture())

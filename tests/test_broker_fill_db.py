@@ -88,13 +88,16 @@ def test_save_broker_fills_upserts_rows():
                     avg_fill_price=100,
                     gross_amount_ars=200,
                 )
-            ]
+            ],
+            owner_chat_id=123,
         )
     )
 
     assert saved == 1
     assert len(conn.executemany_calls) == 1
     assert "INSERT INTO broker_fills" in conn.executemany_calls[0][0]
+    assert "owner_chat_id" in conn.executemany_calls[0][0]
+    assert conn.executemany_calls[0][1][0][12] == 123
 
 
 def test_reconcile_broker_fills_promotes_approved_event_to_executed():

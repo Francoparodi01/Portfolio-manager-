@@ -2693,7 +2693,12 @@ class PortfolioDatabase:
     async def get_pool(self):
         return self._pool
 
-    async def save_broker_fills(self, fills: list[BrokerFill]) -> int:
+    async def save_broker_fills(
+        self,
+        fills: list[BrokerFill],
+        *,
+        owner_chat_id: int | None = None,
+    ) -> int:
         if not self._pool:
             raise RuntimeError("Llamar connect() primero")
         if not fills:
@@ -2715,6 +2720,7 @@ class PortfolioDatabase:
                 else None,
                 float(fill.fees_ars) if fill.fees_ars is not None else None,
                 serialize_raw_payload(fill.raw_payload),
+                owner_chat_id,
             )
             for fill in fills
         ]
@@ -2753,9 +2759,10 @@ class PortfolioDatabase:
                     avg_fill_price,
                     gross_amount_ars,
                     fees_ars,
-                    raw_payload
+                    raw_payload,
+                    owner_chat_id
                 )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)
                 ON CONFLICT (source, external_fill_id) DO UPDATE SET
                     executed_at      = EXCLUDED.executed_at,
                     executed_at_precision = EXCLUDED.executed_at_precision,
@@ -2776,6 +2783,10 @@ class PortfolioDatabase:
                         ELSE EXCLUDED.gross_amount_ars
                     END,
                     fees_ars         = COALESCE(broker_fills.fees_ars, EXCLUDED.fees_ars),
+                    owner_chat_id    = COALESCE(
+                        broker_fills.owner_chat_id,
+                        EXCLUDED.owner_chat_id
+                    ),
                     raw_payload      = CASE
                         WHEN COALESCE(EXCLUDED.raw_payload->>'_price_derived_from_amount', 'false') = 'true'
                              AND broker_fills.avg_fill_price IS NOT NULL

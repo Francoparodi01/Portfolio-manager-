@@ -22,6 +22,8 @@ construir una memoria operacional confiable: datos, decisiones, fills y outcomes
 | [10-learning-shadow.md](10-learning-shadow.md) | aprendizaje audit-only sobre bloqueos, metricas y revision humana |
 | [11-backend-performance-audit-2026-08-08.md](11-backend-performance-audit-2026-08-08.md) | auditoria medida de performance y practicidad del backend |
 | [12-technical-shadow-v2.md](12-technical-shadow-v2.md) | calibracion tecnica por regimen, aislada del analisis y la ejecucion |
+| [13-technical-buy-shadow-v3.md](13-technical-buy-shadow-v3.md) | clasificacion BUY experimental para discovery, sin impacto operativo |
+| [14-radar-discovery-ledger.md](14-radar-discovery-ledger.md) | captura prospectiva del universo Radar, outcomes y comparaciones por version |
 
 ## Documentacion de Evaluacion
 

@@ -322,6 +322,51 @@ CREATE TABLE IF NOT EXISTS order_intents (
     UNIQUE (execution_plan_id, sequence_no)
 );
 
+-- HOLD final del planner por posicion. Es evidencia read-only: no representa
+-- una orden, no entra a decision_log y mide el retorno de conservar el activo.
+CREATE TABLE IF NOT EXISTS position_hold_observations (
+    id                    BIGSERIAL PRIMARY KEY,
+    owner_chat_id         BIGINT REFERENCES bot_users(chat_id) ON DELETE SET NULL,
+    run_id                UUID NOT NULL,
+    execution_plan_id     UUID REFERENCES execution_plans(id) ON DELETE SET NULL,
+    observed_at           TIMESTAMPTZ NOT NULL,
+    observed_session      DATE NOT NULL,
+    ticker                TEXT NOT NULL,
+    action                TEXT NOT NULL DEFAULT 'HOLD' CHECK (action = 'HOLD'),
+    status                TEXT NOT NULL DEFAULT 'OBSERVED',
+    source                TEXT NOT NULL DEFAULT 'position_analysis',
+    metric_scope          TEXT NOT NULL DEFAULT 'hold_audit',
+    final_score           FLOAT,
+    confidence            FLOAT,
+    reference_price       NUMERIC(20,4),
+    current_weight        FLOAT,
+    target_weight         FLOAT,
+    delta_weight          FLOAT,
+    reason_primary        TEXT,
+    reason_secondary      TEXT,
+    regime                TEXT,
+    layers                JSONB NOT NULL DEFAULT '{}'::jsonb,
+    portfolio_snapshot_id TEXT,
+    outcome_5d            FLOAT,
+    outcome_10d           FLOAT,
+    outcome_20d           FLOAT,
+    outcome_40d           FLOAT,
+    outcome_date_5d       DATE,
+    outcome_date_10d      DATE,
+    outcome_date_20d      DATE,
+    outcome_date_40d      DATE,
+    outcome_price_5d      NUMERIC(20,4),
+    outcome_price_10d     NUMERIC(20,4),
+    outcome_price_20d     NUMERIC(20,4),
+    outcome_price_40d     NUMERIC(20,4),
+    outcome_basis         TEXT,
+    outcome_version       TEXT,
+    outcome_filled_at     TIMESTAMPTZ,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (run_id, ticker)
+);
+
 -- ── broker_fills ──────────────────────────────────────────────────────────────
 -- Fills reales confirmados por broker. Hoy entran por import manual; la tabla
 -- queda lista para una fuente automática futura si aparece una API confiable.
@@ -1407,6 +1452,247 @@ WHERE
         ELSE FALSE
     END;
 
+-- Radar Discovery Ledger v2: full-universe, prospective and audit-only.
+-- Kept outside decision_log so discovery evidence cannot alter operational metrics.
+CREATE TABLE IF NOT EXISTS radar_discovery_runs (
+    run_id UUID PRIMARY KEY,
+    owner_chat_id BIGINT NOT NULL DEFAULT 0,
+    captured_at TIMESTAMPTZ NOT NULL,
+    captured_session DATE NOT NULL,
+    scoring_version TEXT NOT NULL,
+    protocol_version TEXT NOT NULL,
+    universe_count INTEGER NOT NULL,
+    control_count INTEGER NOT NULL DEFAULT 0,
+    evaluated_count INTEGER NOT NULL,
+    eligible_count INTEGER NOT NULL,
+    selected_count INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'COMPLETE',
+    parameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (owner_chat_id, captured_session, scoring_version)
+);
+
+ALTER TABLE radar_discovery_runs
+    ADD COLUMN IF NOT EXISTS control_count INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS radar_discovery_snapshots (
+    id BIGSERIAL PRIMARY KEY,
+    run_id UUID NOT NULL REFERENCES radar_discovery_runs(run_id) ON DELETE CASCADE,
+    ticker TEXT NOT NULL,
+    asset_type TEXT NOT NULL DEFAULT 'UNKNOWN',
+    reference_ts TIMESTAMPTZ,
+    reference_price FLOAT,
+    price_quality_flag TEXT NOT NULL,
+    data_source_mode TEXT NOT NULL DEFAULT 'unknown',
+    data_source_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
+    screener_passed BOOLEAN NOT NULL DEFAULT FALSE,
+    radar_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+    acceptance_reason TEXT,
+    rejection_reason TEXT,
+    v2_version TEXT,
+    v2_score FLOAT,
+    v2_bias TEXT,
+    v2_percentile FLOAT,
+    v3_version TEXT,
+    v3_score FLOAT,
+    v3_classification TEXT,
+    v3_tier TEXT,
+    v3_percentile FLOAT,
+    v3_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+    technical_regime TEXT,
+    trend_score FLOAT,
+    reversion_score FLOAT,
+    setup_shadow_version TEXT,
+    trend_component_score FLOAT,
+    relative_strength_component_score FLOAT,
+    compression_component_score FLOAT,
+    setup_component_score FLOAT,
+    discovery_score FLOAT,
+    setup_score FLOAT,
+    composite_shadow_score FLOAT,
+    discovery_percentile FLOAT,
+    setup_percentile FLOAT,
+    composite_shadow_percentile FLOAT,
+    readiness_state TEXT,
+    trigger_price FLOAT,
+    invalidation_price FLOAT,
+    target_price FLOAT,
+    setup_risk_reward FLOAT,
+    trigger_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+    feature_quality_flag TEXT,
+    setup_features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    setup_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    radar_final_score FLOAT,
+    ranking_score FLOAT,
+    rank_position INTEGER,
+    rank_percentile FLOAT,
+    comparison_bucket TEXT NOT NULL,
+    radar_status TEXT,
+    trade_type TEXT,
+    in_portfolio BOOLEAN NOT NULL DEFAULT FALSE,
+    selected_top_n BOOLEAN NOT NULL DEFAULT FALSE,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (run_id, ticker)
+);
+
+ALTER TABLE radar_discovery_snapshots
+    ADD COLUMN IF NOT EXISTS setup_shadow_version TEXT,
+    ADD COLUMN IF NOT EXISTS trend_component_score FLOAT,
+    ADD COLUMN IF NOT EXISTS relative_strength_component_score FLOAT,
+    ADD COLUMN IF NOT EXISTS compression_component_score FLOAT,
+    ADD COLUMN IF NOT EXISTS setup_component_score FLOAT,
+    ADD COLUMN IF NOT EXISTS discovery_score FLOAT,
+    ADD COLUMN IF NOT EXISTS setup_score FLOAT,
+    ADD COLUMN IF NOT EXISTS composite_shadow_score FLOAT,
+    ADD COLUMN IF NOT EXISTS discovery_percentile FLOAT,
+    ADD COLUMN IF NOT EXISTS setup_percentile FLOAT,
+    ADD COLUMN IF NOT EXISTS composite_shadow_percentile FLOAT,
+    ADD COLUMN IF NOT EXISTS readiness_state TEXT,
+    ADD COLUMN IF NOT EXISTS trigger_price FLOAT,
+    ADD COLUMN IF NOT EXISTS invalidation_price FLOAT,
+    ADD COLUMN IF NOT EXISTS target_price FLOAT,
+    ADD COLUMN IF NOT EXISTS setup_risk_reward FLOAT,
+    ADD COLUMN IF NOT EXISTS trigger_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS feature_quality_flag TEXT,
+    ADD COLUMN IF NOT EXISTS setup_features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS setup_warnings JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+CREATE TABLE IF NOT EXISTS radar_discovery_outcomes (
+    snapshot_id BIGINT NOT NULL REFERENCES radar_discovery_snapshots(id) ON DELETE CASCADE,
+    horizon_sessions INTEGER NOT NULL CHECK (horizon_sessions IN (5, 10, 20, 40)),
+    target_session_ts TIMESTAMPTZ NOT NULL,
+    outcome_price FLOAT NOT NULL,
+    forward_return FLOAT NOT NULL,
+    max_drawdown FLOAT,
+    universe_benchmark_return FLOAT,
+    qqq_benchmark_return FLOAT,
+    spy_benchmark_return FLOAT,
+    own_positions_benchmark_return FLOAT,
+    excess_vs_universe FLOAT,
+    excess_vs_qqq FLOAT,
+    excess_vs_spy FLOAT,
+    excess_vs_own_positions FLOAT,
+    universe_sample_count INTEGER,
+    outcome_basis TEXT NOT NULL DEFAULT 'canonical_cocos_sessions_v1',
+    resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    PRIMARY KEY (snapshot_id, horizon_sessions)
+);
+
+CREATE TABLE IF NOT EXISTS radar_setup_events (
+    snapshot_id BIGINT PRIMARY KEY
+        REFERENCES radar_discovery_snapshots(id) ON DELETE CASCADE,
+    setup_shadow_version TEXT NOT NULL,
+    event_status TEXT NOT NULL,
+    event_ts TIMESTAMPTZ,
+    event_session DATE,
+    event_price FLOAT,
+    sessions_from_discovery INTEGER,
+    trigger_price FLOAT,
+    invalidation_price FLOAT,
+    trigger_volume_ratio FLOAT,
+    event_basis TEXT NOT NULL DEFAULT 'canonical_cocos_sessions_v1',
+    resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS radar_setup_outcomes (
+    snapshot_id BIGINT NOT NULL
+        REFERENCES radar_setup_events(snapshot_id) ON DELETE CASCADE,
+    horizon_sessions INTEGER NOT NULL CHECK (horizon_sessions IN (5, 10, 20, 40)),
+    target_session_ts TIMESTAMPTZ NOT NULL,
+    outcome_price FLOAT NOT NULL,
+    forward_return FLOAT NOT NULL,
+    max_drawdown FLOAT,
+    qqq_benchmark_return FLOAT,
+    spy_benchmark_return FLOAT,
+    excess_vs_qqq FLOAT,
+    excess_vs_spy FLOAT,
+    outcome_basis TEXT NOT NULL DEFAULT 'canonical_cocos_trigger_sessions_v1',
+    resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    PRIMARY KEY (snapshot_id, horizon_sessions)
+);
+
+-- Intraday Radar setup alerts. These rows record shadow notifications and
+-- explicit human watch/dismiss actions; they never enter decision_log.
+CREATE TABLE IF NOT EXISTS radar_setup_alerts (
+    id BIGSERIAL PRIMARY KEY,
+    snapshot_id BIGINT NOT NULL
+        REFERENCES radar_discovery_snapshots(id) ON DELETE CASCADE,
+    owner_chat_id BIGINT NOT NULL,
+    ticker TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    scoring_version TEXT NOT NULL,
+    setup_shadow_version TEXT NOT NULL,
+    protocol_version TEXT NOT NULL,
+    alert_type TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    observed_session DATE NOT NULL,
+    market_price_ts TIMESTAMPTZ NOT NULL,
+    observed_price FLOAT NOT NULL,
+    setup_percentile FLOAT NOT NULL,
+    setup_score FLOAT,
+    trigger_price FLOAT NOT NULL,
+    invalidation_price FLOAT NOT NULL,
+    target_price FLOAT,
+    setup_risk_reward FLOAT,
+    feature_quality_flag TEXT NOT NULL,
+    delivery_status TEXT NOT NULL DEFAULT 'PENDING',
+    send_attempts INTEGER NOT NULL DEFAULT 0,
+    telegram_message_id BIGINT,
+    sent_at TIMESTAMPTZ,
+    send_error TEXT,
+    user_action TEXT,
+    user_action_at TIMESTAMPTZ,
+    broker_fill_id BIGINT REFERENCES broker_fills(id) ON DELETE SET NULL,
+    broker_fill_linked_at TIMESTAMPTZ,
+    follow_match_status TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (snapshot_id, alert_type)
+);
+
+ALTER TABLE radar_setup_alerts
+    ADD COLUMN IF NOT EXISTS broker_fill_id BIGINT
+        REFERENCES broker_fills(id) ON DELETE SET NULL;
+ALTER TABLE radar_setup_alerts
+    ADD COLUMN IF NOT EXISTS broker_fill_linked_at TIMESTAMPTZ;
+ALTER TABLE radar_setup_alerts
+    ADD COLUMN IF NOT EXISTS follow_match_status TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_radar_discovery_runs_version_session
+    ON radar_discovery_runs(scoring_version, captured_session DESC);
+CREATE INDEX IF NOT EXISTS idx_radar_discovery_runs_owner_captured
+    ON radar_discovery_runs(owner_chat_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_radar_discovery_snapshots_rank
+    ON radar_discovery_snapshots(run_id, radar_eligible, rank_position);
+CREATE INDEX IF NOT EXISTS idx_radar_discovery_snapshots_v3
+    ON radar_discovery_snapshots(run_id, v3_tier, v3_eligible);
+CREATE INDEX IF NOT EXISTS idx_radar_discovery_snapshots_ticker
+    ON radar_discovery_snapshots(ticker, reference_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_radar_discovery_snapshots_pending
+    ON radar_discovery_snapshots(reference_ts, id)
+    WHERE reference_ts IS NOT NULL AND reference_price > 0;
+CREATE INDEX IF NOT EXISTS idx_radar_discovery_outcomes_horizon
+    ON radar_discovery_outcomes(horizon_sessions, resolved_at DESC);
+CREATE INDEX IF NOT EXISTS idx_radar_setup_events_status_session
+    ON radar_setup_events(event_status, event_session DESC);
+CREATE INDEX IF NOT EXISTS idx_radar_setup_outcomes_horizon
+    ON radar_setup_outcomes(horizon_sessions, resolved_at DESC);
+CREATE INDEX IF NOT EXISTS idx_radar_setup_alerts_owner_recent
+    ON radar_setup_alerts(owner_chat_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_radar_setup_alerts_ticker_recent
+    ON radar_setup_alerts(owner_chat_id, ticker, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_radar_setup_alerts_delivery
+    ON radar_setup_alerts(delivery_status, created_at)
+    WHERE delivery_status IN ('PENDING', 'FAILED');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_radar_setup_alerts_broker_fill
+    ON radar_setup_alerts(broker_fill_id)
+    WHERE broker_fill_id IS NOT NULL;
+
 -- Antes de imponer unicidad diaria, conservar solo la decision mas reciente.
 WITH ranked_daily_decisions AS (
     SELECT
@@ -1505,6 +1791,16 @@ CREATE INDEX IF NOT EXISTS idx_order_intents_decision_log_id
 
 CREATE INDEX IF NOT EXISTS idx_order_intents_ticker_created_at
     ON order_intents(ticker, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_position_hold_owner_observed
+    ON position_hold_observations(owner_chat_id, observed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_position_hold_ticker_observed
+    ON position_hold_observations(ticker, observed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_position_hold_pending
+    ON position_hold_observations(observed_at, id)
+    WHERE reference_price > 0 AND outcome_40d IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_broker_fills_executed_at
     ON broker_fills(executed_at DESC);

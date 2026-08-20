@@ -48,6 +48,16 @@ from src.analysis.opportunity_screener import (
     render_opportunity_report,
     COCOS_UNIVERSE_DEFAULT,
 )
+from src.analysis.radar_discovery import (
+    BENCHMARK_TICKERS,
+    RadarDiscoveryStore,
+    build_discovery_observations,
+    discovery_scoring_version,
+)
+from src.analysis.radar_setup_shadow import (
+    RADAR_SETUP_SHADOW_VERSION,
+    RADAR_SETUP_TRIGGER_WINDOW_SESSIONS,
+)
 from src.analysis.manual_market_events import (
     ManualMarketEvent,
     active_event_risk_by_ticker,
@@ -63,6 +73,9 @@ from src.analysis.audit_scope import (
 
 logger = get_logger(__name__)
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+RADAR_DISCOVERY_LEDGER_ENABLED = os.getenv(
+    "RADAR_DISCOVERY_LEDGER_ENABLED", "false"
+).lower() == "true"
 
 
 def _portfolio_equity_total(
@@ -675,6 +688,189 @@ async def _save_radar_candidates(
     return saved_ids
 
 
+async def _save_radar_discovery_snapshot(
+    cfg,
+    *,
+    run_id: str,
+    owner_chat_id: int | None,
+    report,
+    universe: list[str],
+    history_frames: dict,
+    asset_types: dict[str, str],
+    portfolio_tickers: list[str],
+    selected_tickers: list[str],
+    min_score: float,
+    min_rr: float,
+    top_n: int,
+    period: str,
+    manual_event_risk_by_ticker: dict[str, str] | None = None,
+    no_sentiment: bool = False,
+) -> dict:
+    observations = build_discovery_observations(
+        report,
+        universe=universe,
+        history_frames=history_frames,
+        asset_types=asset_types,
+        portfolio_tickers=portfolio_tickers,
+        selected_tickers=selected_tickers,
+        min_score=min_score,
+        min_rr=min_rr,
+        manual_event_risk_by_ticker=manual_event_risk_by_ticker,
+    )
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        pool = await db.get_pool()
+        store = RadarDiscoveryStore(pool)
+        return await store.save_snapshot(
+            run_id=run_id,
+            owner_chat_id=owner_chat_id,
+            captured_at=report.generated_at,
+            scoring_version=discovery_scoring_version(
+                period=period,
+                min_score=min_score,
+                min_rr=min_rr,
+                operational_top_n=top_n,
+                no_sentiment=no_sentiment,
+            ),
+            observations=observations,
+            parameters={
+                "period": period,
+                "min_score": float(min_score),
+                "min_rr": float(min_rr),
+                "operational_top_n": int(top_n),
+                "no_sentiment": bool(no_sentiment),
+                "ranking_scope": "full_universe_including_portfolio",
+                "outcome_horizons_sessions": [5, 10, 20, 40],
+                "setup_shadow_version": RADAR_SETUP_SHADOW_VERSION,
+                "setup_trigger_window_sessions": RADAR_SETUP_TRIGGER_WINDOW_SESSIONS,
+                "affects_radar_ranking": False,
+                "affects_analysis": False,
+                "affects_execution": False,
+            },
+        )
+    finally:
+        await db.close()
+
+
+async def _capture_radar_discovery(
+    cfg,
+    *,
+    run_id: str,
+    owner_chat_id: int | None,
+    operational_report,
+    discovery_universe: list[str],
+    discovery_assets: list[dict],
+    operational_history_frames: dict,
+    operational_sentiment_contexts: dict,
+    operational_shadow_contexts: dict,
+    portfolio_positions: list[dict],
+    portfolio_tickers: list[str],
+    portfolio_scores: dict[str, float],
+    macro_snap,
+    macro_regime,
+    manual_event_blocklist: dict[str, str],
+    available_cash_ars: float,
+    period: str,
+    no_sentiment: bool,
+    min_score: float,
+    min_rr: float,
+    top_n: int,
+) -> dict:
+    """Run the isolated full-universe capture after operational work finishes."""
+    all_history_frames = dict(operational_history_frames)
+    missing_assets = [
+        asset
+        for asset in discovery_assets
+        if asset["ticker"] not in all_history_frames
+    ]
+    if missing_assets:
+        all_history_frames.update(await _load_cocos_history_frames(cfg, missing_assets))
+    discovery_asset_types = {
+        asset["ticker"]: asset.get("asset_type") or "UNKNOWN"
+        for asset in discovery_assets
+    }
+
+    discovery_sentiment_contexts = dict(operational_sentiment_contexts)
+    try:
+        db_sentiment = PortfolioDatabase(cfg.database.url)
+        await db_sentiment.connect()
+        try:
+            pool = await db_sentiment.get_pool()
+            if pool:
+                async with pool.acquire() as conn:
+                    discovery_sentiment_contexts = await load_sentiment_contexts(
+                        conn,
+                        discovery_universe,
+                    )
+        finally:
+            await db_sentiment.close()
+    except Exception as exc:
+        logger.debug(
+            "Radar Discovery: sentiment completo no disponible; uso contexto operativo: %s",
+            exc,
+        )
+
+    discovery_shadow_contexts = dict(operational_shadow_contexts)
+    try:
+        discovery_shadow_contexts = await _load_latest_shadow_contexts(
+            cfg,
+            discovery_universe,
+            owner_chat_id=owner_chat_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Radar Discovery: shadow completo no disponible; uso contexto operativo: %s",
+            exc,
+        )
+
+    logger.info(
+        "Radar Discovery Ledger: evaluando universo completo=%s con cartera incluida",
+        len(discovery_universe),
+    )
+    discovery_report = run_opportunity_analysis(
+        universe=discovery_universe,
+        portfolio_positions=portfolio_positions,
+        macro_snap=macro_snap,
+        macro_regime=macro_regime,
+        period=period,
+        no_sentiment=no_sentiment,
+        portfolio_scores=portfolio_scores,
+        max_candidates=max(len(discovery_universe), 1),
+        min_score=min_score,
+        min_rr=min_rr,
+        exclude_portfolio=False,
+        history_frames=all_history_frames,
+        asset_types=discovery_asset_types,
+        available_cash_ars=available_cash_ars,
+        sentiment_contexts=discovery_sentiment_contexts,
+        shadow_contexts=discovery_shadow_contexts,
+        capture_discovery=True,
+    )
+    selected_tickers = [
+        str(candidate.ticker).upper()
+        for candidate in (getattr(operational_report, "candidates", []) or [])
+        if candidate.status not in {CandidateStatus.EXTERNO, CandidateStatus.DESCARTAR}
+    ]
+    return await _save_radar_discovery_snapshot(
+        cfg,
+        run_id=run_id,
+        owner_chat_id=owner_chat_id,
+        report=discovery_report,
+        universe=discovery_universe,
+        history_frames=all_history_frames,
+        asset_types=discovery_asset_types,
+        portfolio_tickers=portfolio_tickers,
+        selected_tickers=selected_tickers,
+        min_score=min_score,
+        min_rr=min_rr,
+        top_n=top_n,
+        period=period,
+        manual_event_risk_by_ticker=manual_event_blocklist,
+        no_sentiment=no_sentiment,
+    )
+
+
 async def main(
     universe_override:  list[str],
     period:             str,
@@ -687,6 +883,7 @@ async def main(
     owner_chat_id:      int | None = None,
     run_intent:         str = "scheduled_context",
     persist:            bool = True,
+    capture_discovery:  bool = False,
 ):
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
@@ -726,6 +923,35 @@ async def main(
         universe = [asset["ticker"] for asset in universe_assets] or COCOS_UNIVERSE_DEFAULT
         logger.info(f"Universo Cocos DB: {len(universe)} tickers")
 
+    portfolio_asset_types = {
+        str(position.get("ticker") or "").upper(): (
+            str(position.get("asset_type")).upper()
+            if position.get("asset_type") else None
+        )
+        for position in positions
+        if position.get("ticker")
+    }
+    discovery_universe = list(dict.fromkeys([
+        *universe,
+        *portfolio_tickers,
+        *sorted(BENCHMARK_TICKERS),
+    ]))
+    discovery_assets = [
+        assets_by_ticker.get(ticker, {
+            "ticker": ticker,
+            "asset_type": portfolio_asset_types.get(ticker),
+        })
+        for ticker in discovery_universe
+    ]
+
+    discovery_capture_enabled = (
+        RADAR_DISCOVERY_LEDGER_ENABLED
+        and capture_discovery
+        and persist
+        and run_intent == "scheduled_context"
+        and is_regular_market_session()
+    )
+
     # Excluir lo que ya tenemos en cartera (por defecto siempre, a menos que --include-portfolio)
     if exclude_portfolio:
         universe_filtered = [t for t in universe if t.upper() not in set(portfolio_tickers)]
@@ -758,7 +984,10 @@ async def main(
         pool_sent = await db_sent.get_pool()
         if pool_sent:
             async with pool_sent.acquire() as conn:
-                sentiment_contexts = await load_sentiment_contexts(conn, universe_filtered)
+                sentiment_contexts = await load_sentiment_contexts(
+                    conn,
+                    universe_filtered,
+                )
         await db_sent.close()
         active_contexts = [
             ticker for ticker, ctx in sentiment_contexts.items()
@@ -822,6 +1051,7 @@ async def main(
     logger.info("Radar: devoluciones históricas adjuntadas=%s", attached_outcomes)
 
     manual_market_events: list[ManualMarketEvent] = []
+    manual_event_blocklist: dict[str, str] = {}
     try:
         manual_market_events = await _load_active_manual_market_events(cfg)
         manual_event_blocklist = active_event_risk_by_ticker(manual_market_events)
@@ -874,6 +1104,40 @@ async def main(
     else:
         logger.info("Telegram omitido")
 
+    if discovery_capture_enabled:
+        try:
+            discovery_result = await _capture_radar_discovery(
+                cfg,
+                run_id=radar_run_id,
+                owner_chat_id=owner_chat_id,
+                operational_report=report,
+                discovery_universe=discovery_universe,
+                discovery_assets=discovery_assets,
+                operational_history_frames=history_frames,
+                operational_sentiment_contexts=sentiment_contexts,
+                operational_shadow_contexts=shadow_contexts,
+                portfolio_positions=positions,
+                portfolio_tickers=portfolio_tickers,
+                portfolio_scores=portfolio_scores,
+                macro_snap=macro_snap,
+                macro_regime=macro_regime,
+                manual_event_blocklist=manual_event_blocklist,
+                available_cash_ars=cash_ars,
+                period=period,
+                no_sentiment=no_sentiment,
+                min_score=min_score,
+                min_rr=min_rr,
+                top_n=max_candidates,
+            )
+            logger.info("Radar Discovery Ledger persistido: %s", discovery_result)
+        except Exception as exc:
+            logger.error(
+                "Radar Discovery Ledger fallo sin afectar top %s: %s",
+                max_candidates,
+                exc,
+                exc_info=True,
+            )
+
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Radar de oportunidades — Cocos Copilot")
@@ -908,6 +1172,11 @@ if __name__ == "__main__":
         action="store_true",
         help="No guardar ideas del radar en decision_log",
     )
+    p.add_argument(
+        "--capture-discovery",
+        action="store_true",
+        help="Solicita la captura full-universe; tambien requiere el feature flag activo.",
+    )
     args = p.parse_args()
 
     # --top es alias de --max
@@ -925,4 +1194,5 @@ if __name__ == "__main__":
         owner_chat_id      = args.owner_chat_id,
         run_intent         = args.run_intent,
         persist            = not args.no_persist,
+        capture_discovery  = args.capture_discovery,
     ))

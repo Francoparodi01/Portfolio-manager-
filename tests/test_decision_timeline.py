@@ -263,3 +263,48 @@ def test_monitor_json_responses_negotiate_compression():
     assert "response.enable_compression()" in json_helper
     assert 'getattr(response, "body", None)' in monitor_api
     assert "except web.HTTPException as exc:" in monitor_api
+
+
+def test_performance_score_points_include_every_explorer_scope():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src" / "monitor" / "api.py").read_text(encoding="utf-8")
+    score_query = source.split("score_points = await conn.fetch", 1)[1].split(
+        "status_counts = await conn.fetch", 1
+    )[0]
+
+    for scope in (
+        "primary",
+        "followed_plan",
+        "planner_audit",
+        "radar_audit",
+        "blocked_audit",
+        "hold_audit",
+    ):
+        assert f"'{scope}'" in score_query
+
+    assert "LIMIT 160" not in score_query
+
+
+def test_performance_hold_filter_reads_deduplicated_planner_observations():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src" / "monitor" / "api.py").read_text(encoding="utf-8")
+
+    assert "FROM position_hold_observations hold" in source
+    assert "PARTITION BY COALESCE(hold.owner_chat_id, 0)" in source
+    assert "hold.daily_rank = 1" in source
+    assert "'hold_audit'" in source
+
+
+def test_performance_recent_rows_are_balanced_by_scope_and_used_by_frontend():
+    root = Path(__file__).resolve().parents[1]
+    api_source = (root / "src" / "monitor" / "api.py").read_text(encoding="utf-8")
+    page_source = (root / "frontend" / "src" / "pages" / "PerformancePage.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    assert "PARTITION BY metric_scope" in api_source
+    assert '"performance_recent": [_row(r) for r in performance_recent]' in api_source
+    assert (
+        "performance.data?.performance_recent ?? performance.data?.bot_prediction_recent"
+        in page_source
+    )

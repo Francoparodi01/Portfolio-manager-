@@ -39,6 +39,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from html import escape
+from typing import Any
 from zoneinfo import ZoneInfo
 
 try:
@@ -138,6 +139,33 @@ SENTIMENT_OFFHOURS_ALERT_TTL_SECONDS = int(
 THESIS_SHADOW_ENABLED = os.getenv("THESIS_SHADOW_ENABLED", "true").lower() == "true"
 LEARNING_SHADOW_ENABLED = os.getenv("LEARNING_SHADOW_ENABLED", "true").lower() == "true"
 RADAR_AUDIT_CAPTURE_ENABLED = os.getenv("RADAR_AUDIT_CAPTURE_ENABLED", "true").lower() == "true"
+RADAR_DISCOVERY_LEDGER_ENABLED = os.getenv(
+    "RADAR_DISCOVERY_LEDGER_ENABLED", "false"
+).lower() == "true"
+RADAR_INTRADAY_SETUP_ALERTS_ENABLED = os.getenv(
+    "RADAR_INTRADAY_SETUP_ALERTS_ENABLED", "false"
+).lower() == "true"
+RADAR_INTRADAY_SETUP_MIN_PERCENTILE = float(
+    os.getenv("RADAR_INTRADAY_SETUP_MIN_PERCENTILE", "0.80")
+)
+RADAR_INTRADAY_SETUP_MIN_RR = float(
+    os.getenv("RADAR_INTRADAY_SETUP_MIN_RR", "2.0")
+)
+RADAR_INTRADAY_SETUP_MAX_EXTENSION_PCT = float(
+    os.getenv("RADAR_INTRADAY_SETUP_MAX_EXTENSION_PCT", "0.06")
+)
+RADAR_INTRADAY_SETUP_MAX_PRICE_AGE_SECONDS = int(
+    os.getenv("RADAR_INTRADAY_SETUP_MAX_PRICE_AGE_SECONDS", "900")
+)
+RADAR_INTRADAY_SETUP_MAX_SNAPSHOT_AGE_DAYS = int(
+    os.getenv("RADAR_INTRADAY_SETUP_MAX_SNAPSHOT_AGE_DAYS", "7")
+)
+RADAR_INTRADAY_SETUP_COOLDOWN_DAYS = int(
+    os.getenv("RADAR_INTRADAY_SETUP_COOLDOWN_DAYS", "14")
+)
+RADAR_INTRADAY_SETUP_MAX_ALERTS = int(
+    os.getenv("RADAR_INTRADAY_SETUP_MAX_ALERTS", "3")
+)
 LEARNING_SHADOW_LOOKBACK_DAYS = int(os.getenv("LEARNING_SHADOW_LOOKBACK_DAYS", "365"))
 LEARNING_SHADOW_MATERIAL_RETURN_BPS = int(
     os.getenv("LEARNING_SHADOW_MATERIAL_RETURN_BPS", "75")
@@ -528,10 +556,154 @@ async def run_market_refresh(run_type: str = "SCHEDULED_MARKET") -> dict:
             result["acciones"],
             result["cedears"],
         )
+        if RADAR_INTRADAY_SETUP_ALERTS_ENABLED:
+            try:
+                result["radar_setup_alerts"] = await run_radar_setup_intraday_alerts(
+                    run_type=run_type,
+                    observed_at=_now_art(),
+                )
+            except Exception as alert_exc:
+                result["radar_setup_alerts"] = {
+                    "status": "ERROR",
+                    "error": str(alert_exc),
+                }
+                logger.warning(
+                    "run_market_refresh [%s]: alertas Radar fallaron sin invalidar precios: %s",
+                    run_type,
+                    alert_exc,
+                    exc_info=True,
+                )
     except Exception as exc:
         result["error"] = str(exc)
         logger.error("run_market_refresh [%s] fallo: %s", run_type, exc, exc_info=True)
     return result
+
+
+async def run_radar_setup_intraday_alerts(
+    *,
+    run_type: str = "INTRADAY_MARKET",
+    observed_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Alert price-confirmed CEDEAR setups from the latest frozen Radar run."""
+    if not RADAR_INTRADAY_SETUP_ALERTS_ENABLED:
+        return {"status": "DISABLED", "reserved": 0, "sent": 0, "failed": 0}
+    if not RADAR_DISCOVERY_LEDGER_ENABLED:
+        logger.warning(
+            "radar_setup_alerts omitido: RADAR_DISCOVERY_LEDGER_ENABLED=false"
+        )
+        return {"status": "NO_LEDGER", "reserved": 0, "sent": 0, "failed": 0}
+
+    now = observed_at or _now_art()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=ART_TZ)
+    if not _is_business_day(now):
+        return {"status": "MARKET_CLOSED", "reserved": 0, "sent": 0, "failed": 0}
+
+    from src.analysis.radar_setup_alerts import (
+        RadarSetupAlertStore,
+        radar_setup_alert_keyboard,
+        render_radar_setup_alert,
+    )
+
+    cfg = get_config()
+    owner_chat_id = str(cfg.scraper.telegram_chat_id or "").strip()
+    if not owner_chat_id.isdigit():
+        logger.warning("radar_setup_alerts omitido: TELEGRAM_CHAT_ID no numérico")
+        return {"status": "NO_OWNER", "reserved": 0, "sent": 0, "failed": 0}
+
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    reserved: list[dict[str, Any]] = []
+    sent = 0
+    failed = 0
+    try:
+        pool = await db.get_pool()
+        store = RadarSetupAlertStore(pool)
+        reserved = await store.reserve_trigger_alerts(
+            owner_chat_id=int(owner_chat_id),
+            observed_at=now,
+            run_type=run_type,
+            min_setup_percentile=RADAR_INTRADAY_SETUP_MIN_PERCENTILE,
+            min_risk_reward=RADAR_INTRADAY_SETUP_MIN_RR,
+            max_extension_pct=RADAR_INTRADAY_SETUP_MAX_EXTENSION_PCT,
+            max_price_age_seconds=RADAR_INTRADAY_SETUP_MAX_PRICE_AGE_SECONDS,
+            max_snapshot_age_days=RADAR_INTRADAY_SETUP_MAX_SNAPSHOT_AGE_DAYS,
+            cooldown_days=RADAR_INTRADAY_SETUP_COOLDOWN_DAYS,
+            max_alerts=RADAR_INTRADAY_SETUP_MAX_ALERTS,
+        )
+        pending = await store.pending_deliveries(
+            owner_chat_id=int(owner_chat_id),
+            limit=RADAR_INTRADAY_SETUP_MAX_ALERTS,
+        )
+        notifier = TelegramNotifier(
+            cfg.scraper.telegram_bot_token,
+            cfg.scraper.telegram_chat_id,
+        )
+        for alert in pending:
+            alert_id = int(alert["id"])
+            try:
+                message_id = await asyncio.to_thread(
+                    notifier.send_with_inline_keyboard,
+                    render_radar_setup_alert(alert),
+                    radar_setup_alert_keyboard(alert_id),
+                )
+                if message_id is None:
+                    raise RuntimeError("telegram_send_failed")
+                await store.mark_delivery(alert_id, message_id=message_id)
+                sent += 1
+            except Exception as exc:
+                failed += 1
+                await store.mark_delivery(alert_id, error=str(exc))
+                logger.warning(
+                    "radar_setup_alert id=%s fallo: %s",
+                    alert_id,
+                    exc,
+                )
+    finally:
+        await db.close()
+
+    result = {
+        "status": "OK",
+        "reserved": len(reserved),
+        "sent": sent,
+        "failed": failed,
+    }
+    logger.info("radar_setup_alerts [%s]: %s", run_type, result)
+    return result
+
+
+async def _reconcile_radar_setup_followed_fills(
+    db: PortfolioDatabase,
+    *,
+    owner_chat_id: int | None,
+) -> int:
+    if (
+        not RADAR_INTRADAY_SETUP_ALERTS_ENABLED
+        or not RADAR_DISCOVERY_LEDGER_ENABLED
+        or owner_chat_id is None
+    ):
+        return 0
+    from src.analysis.radar_setup_alerts import RadarSetupAlertStore
+
+    store = RadarSetupAlertStore(await db.get_pool())
+    return await store.reconcile_followed_fills(owner_chat_id=owner_chat_id)
+
+
+async def _registered_fill_owner_chat_id(
+    db: PortfolioDatabase,
+    raw_chat_id: Any,
+) -> int | None:
+    value = str(raw_chat_id or "").strip()
+    if not value.isdigit():
+        return None
+    chat_id = int(value)
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM bot_users WHERE chat_id = $1)",
+            chat_id,
+        )
+    return chat_id if bool(exists) else None
 
 
 async def _scrape_portfolio_with_retries(
@@ -636,9 +808,20 @@ async def run_full(run_type: str = "FULL") -> dict:
                         existing_movement_keys = await db.existing_broker_movement_keys(movements)
                         new_movements = _new_trade_movements(movements, existing_movement_keys)
                         saved_movements = await db.save_broker_movements(movements)
-                        saved_fills = await db.save_broker_fills(fills)
+                        fill_owner_chat_id = await _registered_fill_owner_chat_id(
+                            db,
+                            cfg.scraper.telegram_chat_id,
+                        )
+                        saved_fills = await db.save_broker_fills(
+                            fills,
+                            owner_chat_id=fill_owner_chat_id,
+                        )
                         reconciled_fills = await db.reconcile_broker_fills()
                         manual_fills = await db.materialize_unmatched_broker_fills()
+                        radar_followed_fills = await _reconcile_radar_setup_followed_fills(
+                            db,
+                            owner_chat_id=fill_owner_chat_id,
+                        )
                         if new_movements:
                             try:
                                 attribution_summary = await db.sync_plan_execution_attributions()
@@ -662,13 +845,14 @@ async def run_full(run_type: str = "FULL") -> dict:
                                 )
                             )
                         logger.info(
-                            "run_full: movements=%d/%d fills=%d/%d reconciliados=%d manuales=%d",
+                            "run_full: movements=%d/%d fills=%d/%d reconciliados=%d manuales=%d radar_follow=%d",
                             len(movements),
                             saved_movements,
                             len(fills),
                             saved_fills,
                             reconciled_fills,
                             manual_fills,
+                            radar_followed_fills,
                         )
                     except Exception as e:
                         logger.warning("run_full: sync movements fallo (no critico): %s", e, exc_info=True)
@@ -1083,6 +1267,22 @@ async def run_update_outcomes() -> None:
         await db.connect()
         updated = await db.update_outcomes(lookback_days=180)
         logger.info("update_outcomes: %s decisiones actualizadas", updated)
+        if RADAR_DISCOVERY_LEDGER_ENABLED:
+            try:
+                from src.analysis.radar_discovery import RadarDiscoveryStore
+
+                pool = await db.get_pool()
+                discovery_updated = await RadarDiscoveryStore(pool).resolve_pending_outcomes(db)
+                logger.info(
+                    "radar_discovery_outcomes: %s observaciones actualizadas",
+                    discovery_updated,
+                )
+            except Exception as discovery_exc:
+                logger.error(
+                    "radar_discovery_outcomes fallo sin afectar decision_log: %s",
+                    discovery_exc,
+                    exc_info=True,
+                )
     except Exception as e:
         logger.error("update_outcomes falló: %s", e, exc_info=True)
     finally:
@@ -1431,6 +1631,8 @@ async def run_radar_audit_capture() -> None:
     owner_chat_id = str(cfg.scraper.telegram_chat_id or "").strip()
     if owner_chat_id.isdigit():
         cmd.extend(["--owner-chat-id", owner_chat_id])
+    if RADAR_DISCOVERY_LEDGER_ENABLED:
+        cmd.append("--capture-discovery")
 
     logger.info("radar_audit_capture iniciando: %s", " ".join(cmd))
     try:
@@ -2230,9 +2432,20 @@ class IntradayManager:
                             existing_movement_keys = await db.existing_broker_movement_keys(movements)
                             new_movements = _new_trade_movements(movements, existing_movement_keys)
                             saved_movements = await db.save_broker_movements(movements)
-                            saved_fills = await db.save_broker_fills(fills)
+                            fill_owner_chat_id = await _registered_fill_owner_chat_id(
+                                db,
+                                self.cfg.scraper.telegram_chat_id,
+                            )
+                            saved_fills = await db.save_broker_fills(
+                                fills,
+                                owner_chat_id=fill_owner_chat_id,
+                            )
                             reconciled_fills = await db.reconcile_broker_fills()
                             manual_fills = await db.materialize_unmatched_broker_fills()
+                            radar_followed_fills = await _reconcile_radar_setup_followed_fills(
+                                db,
+                                owner_chat_id=fill_owner_chat_id,
+                            )
 
                             if new_movements and not portfolio_refreshed:
                                 try:
@@ -2278,13 +2491,14 @@ class IntradayManager:
 
                             last_fills_ts = time.monotonic()
                             logger.info(
-                                "Scraper loop: movements=%d/%d fills=%d/%d reconciliados=%d manuales=%d",
+                                "Scraper loop: movements=%d/%d fills=%d/%d reconciliados=%d manuales=%d radar_follow=%d",
                                 len(movements),
                                 saved_movements,
                                 len(fills),
                                 saved_fills,
                                 reconciled_fills,
                                 manual_fills,
+                                radar_followed_fills,
                             )
 
                         acciones_count = 0

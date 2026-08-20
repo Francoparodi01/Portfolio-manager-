@@ -140,6 +140,7 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("events", "Próximos balances"),
     ("ticker", "Análisis por ticker"),
     ("radar", "Radar compacto"),
+    ("radar_metricas", "Métricas prospectivas Radar"),
     ("shadow", "Tesis shadow 5/20/40"),
     ("performance", "Performance operativa"),
     ("neto", "Neto por analisis"),
@@ -712,10 +713,19 @@ async def sync_operational_state(
 
 
 def main_keyboard() -> InlineKeyboardMarkup:
+    analysis_label = (
+        "🧠 Plan"
+        if (
+            _is_business_day_now()
+            and _is_market_hours_now()
+            and _market_closed_reason_now() is None
+        )
+        else "🧠 Cierre"
+    )
     rows = [
         [
             InlineKeyboardButton("💼 Cartera", callback_data="portfolio"),
-            InlineKeyboardButton("🧠 Plan", callback_data="weekly_analysis"),
+            InlineKeyboardButton(analysis_label, callback_data="weekly_analysis"),
         ],
         [
             InlineKeyboardButton("🔎 Ticker", callback_data="ticker_analysis"),
@@ -767,10 +777,13 @@ def audit_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔬 Shadow", callback_data="shadow"),
         ],
         [
+            InlineKeyboardButton("📐 Radar métricas", callback_data="radar_metrics"),
             InlineKeyboardButton("📈 Regresión", callback_data="regression"),
-            InlineKeyboardButton("📒 Decisiones", callback_data="decision_ledger"),
         ],
-        [InlineKeyboardButton("🌳 Flujo operativo", callback_data="policy_tree")],
+        [
+            InlineKeyboardButton("📒 Decisiones", callback_data="decision_ledger"),
+            InlineKeyboardButton("🌳 Flujo", callback_data="policy_tree"),
+        ],
         [InlineKeyboardButton("← Inicio", callback_data="menu_home")],
     ])
 
@@ -794,7 +807,7 @@ def help_text() -> str:
         "<code>/analisis</code>: plan operativo compacto.\n"
         "<code>/events</code>: proximos balances de la cartera.\n"
         "<code>/ticker NVDA</code>: analisis tecnico y grafico por accion.\n"
-        "<code>/radar</code>: oportunidades no ejecutadas.\n"
+        "<code>/radar</code>: oportunidades; <code>/radar_metricas</code>: evidencia prospectiva.\n"
         "<code>/performance</code>: resultado real con fills/movimientos.\n"
         "<code>/neto</code>: neto por corrida y decisión, con CSV completo.\n"
         "<code>/ledger</code>: atribucion economica de decisiones.\n"
@@ -1463,6 +1476,18 @@ async def action_calibration(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
         "--no-telegram",
         *_owner_cli_args(chat_id),
         timeout=240,
+    )
+    await send_text(context, chat_id, report)
+
+
+async def action_radar_metrics(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+) -> None:
+    report = await run_python_script(
+        "scripts/run_radar_metrics.py",
+        *_owner_cli_args(chat_id),
+        timeout=120,
     )
     await send_text(context, chat_id, report)
 
@@ -2363,6 +2388,9 @@ CALLBACK_ALIASES: dict[str, str] = {
     "opportunities":    "radar",
     "opportunity_radar":"radar",
     "oportunidades":    "radar",
+    "radar_metrics":    "radar_metrics",
+    "radar_metricas":   "radar_metrics",
+    "metricas_radar":   "radar_metrics",
     # Tesis shadow
     "shadow":           "shadow",
     "thesis_shadow":    "shadow",
@@ -2399,6 +2427,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "confidence_audit": "🧭 Auditando confianza del sistema...",
     "radar":         "🔭 Generando radar de oportunidades...",
     "radar_full":    "🔭 Generando radar completo...",
+    "radar_metrics": "📐 Leyendo métricas prospectivas del Radar...",
     "shadow":        "🔬 Leyendo la última tesis shadow...",
     "regression_audit": "📈 Ejecutando auditoría de regresión...",
     "status":        "🩺 Verificando estado del sistema...",
@@ -2428,6 +2457,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "calibration":    action_calibration,
         "radar":          action_radar,
         "radar_full": action_radar_full,
+        "radar_metrics": action_radar_metrics,
         "shadow":         action_shadow,
         "regression_audit": action_regression_audit,
         "status":         action_status,
@@ -2581,6 +2611,9 @@ async def calibration_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def radar_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "radar")
+
+async def radar_metrics_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "radar_metrics")
 
 async def shadow_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     args = list(getattr(c, "args", None) or [])
@@ -2742,6 +2775,97 @@ async def admin_refresh_portfolio_handler(update: Update, context: ContextTypes.
     await send_menu(context, chat_id)
 
 
+async def _handle_radar_setup_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    raw_action: str,
+    chat_id: int,
+) -> None:
+    query = update.callback_query
+    if query is None or not get_config or not PortfolioDatabase:
+        return
+    from src.analysis.radar_setup_alerts import (
+        RadarSetupAlertStore,
+        USER_ACTION_DISMISS,
+        USER_ACTION_FOLLOW,
+        parse_radar_setup_callback,
+    )
+
+    parsed = parse_radar_setup_callback(raw_action)
+    if parsed is None:
+        await query.answer("Acción de Radar inválida", show_alert=True)
+        return
+    action, alert_id = parsed
+    await query.answer("Procesando alerta Radar...")
+
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        store = RadarSetupAlertStore(await db.get_pool())
+        if action == "view":
+            alert = await store.get_alert(alert_id, owner_chat_id=chat_id)
+        else:
+            alert = await store.record_user_action(
+                alert_id,
+                owner_chat_id=chat_id,
+                action=(
+                    USER_ACTION_FOLLOW
+                    if action == "follow"
+                    else USER_ACTION_DISMISS
+                ),
+            )
+    finally:
+        await db.close()
+
+    if alert is None:
+        await send_text(
+            context,
+            chat_id,
+            "La alerta no existe o no pertenece a este chat.",
+        )
+        return
+
+    ticker = re.sub(r"[^A-Za-z0-9.\-]", "", str(alert.get("ticker") or "")).upper()
+    if action == "view":
+        await send_text(context, chat_id, f"Analizando <b>{html_text(ticker)}</b>...")
+        await action_ticker_analysis(context, chat_id, ticker)
+        await send_menu(context, chat_id)
+        return
+    if alert.get("action_conflict"):
+        original = str(alert.get("user_action") or "").upper()
+        original_label = "seguir" if original == USER_ACTION_FOLLOW else "descartar"
+        await send_text(
+            context,
+            chat_id,
+            f"<b>{html_text(ticker)}</b>: ya habías elegido {original_label}.\n"
+            "La primera respuesta queda congelada para conservar la auditoría.",
+        )
+        return
+    if not alert.get("action_recorded", True):
+        await send_text(
+            context,
+            chat_id,
+            f"<b>{html_text(ticker)}</b>: esa elección ya estaba registrada.",
+        )
+        return
+    if action == "follow":
+        await send_text(
+            context,
+            chat_id,
+            f"👁 <b>{html_text(ticker)}</b>: seguimiento shadow registrado.\n"
+            "No crea una orden. Si aparece una compra real, se vinculará y auditará por separado.",
+        )
+        return
+    await send_text(
+        context,
+        chat_id,
+        f"<b>{html_text(ticker)}</b>: alerta descartada para tu seguimiento.\n"
+        "El outcome teórico del trigger seguirá midiéndose.",
+    )
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
@@ -2752,6 +2876,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id    = query.message.chat_id if query.message else update.effective_chat.id
 
     if not await ensure_allowed_chat(update, context):
+        return
+
+    if raw_action.startswith("rs:"):
+        try:
+            await _handle_radar_setup_callback(
+                update,
+                context,
+                raw_action=raw_action,
+                chat_id=chat_id,
+            )
+        except Exception as exc:
+            logger.exception("[BOT] callback Radar setup falló: %s", raw_action)
+            await send_text(
+                context,
+                chat_id,
+                f"Error procesando la alerta Radar:\n<code>{html_text(exc)}</code>",
+            )
         return
 
     try:
@@ -2935,6 +3076,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("dcl",              calibration_handler))
     app.add_handler(CommandHandler("radar",            radar_handler))
     app.add_handler(CommandHandler("radar_full", radar_full_handler))
+    app.add_handler(CommandHandler("radar_metricas", radar_metrics_handler))
+    app.add_handler(CommandHandler("radar_metrics", radar_metrics_handler))
     app.add_handler(CommandHandler("shadow",           shadow_handler))
     app.add_handler(CommandHandler("regression", regression_audit_handler))
     app.add_handler(CommandHandler("regression_audit", regression_audit_handler))
