@@ -3,7 +3,10 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from src.collector.cocos_scraper import CocosCapitalScraper
+from src.collector.cocos_scraper import CocosAuthenticationError, PlaywrightTimeout
 from src.core.config import ScraperConfig
 
 
@@ -89,6 +92,7 @@ def test_restore_saved_session_avoids_a_new_credential_login(tmp_path):
     scraper._session_loaded = True
     scraper._raise_if_access_blocked = AsyncMock()
     scraper._resolve_trusted_device_step = AsyncMock(return_value=False)
+    scraper._save_session_state = AsyncMock()
 
     restored = asyncio.run(scraper._restore_saved_session())
 
@@ -99,3 +103,102 @@ def test_restore_saved_session_avoids_a_new_credential_login(tmp_path):
         wait_until="domcontentloaded",
         timeout=60_000,
     )
+
+
+def test_authenticated_home_is_recognized_after_cocos_redirect():
+    scraper = CocosCapitalScraper(ScraperConfig())
+    body = SimpleNamespace(
+        inner_text=AsyncMock(
+            return_value="Inicio Mercado Actividad Portfolio Tu portfolio en AR$ Tu cuenta"
+        )
+    )
+    page = SimpleNamespace(
+        url="https://app.cocos.capital/",
+        locator=lambda selector: body,
+    )
+    scraper._page = page
+
+    authenticated = asyncio.run(scraper._is_authenticated_page())
+
+    assert authenticated is True
+
+
+def test_authenticated_shell_does_not_hide_an_active_mfa_prompt():
+    scraper = CocosCapitalScraper(ScraperConfig())
+    body = SimpleNamespace(
+        inner_text=AsyncMock(
+            return_value=(
+                "Inicio Mercado Actividad Portfolio Tu cuenta Código de 6 dígitos"
+            )
+        )
+    )
+    page = SimpleNamespace(
+        url="https://app.cocos.capital/",
+        locator=lambda selector: body,
+    )
+    scraper._page = page
+
+    authenticated = asyncio.run(scraper._is_authenticated_page())
+
+    assert authenticated is False
+
+
+def test_login_accepts_authenticated_home_before_waiting_for_mfa_inputs(tmp_path):
+    scraper = CocosCapitalScraper(
+        ScraperConfig(
+            username="user@example.com",
+            password="secret",
+            session_file=str(tmp_path / "cocos_session.json"),
+        )
+    )
+    page = AsyncMock()
+    page.url = "https://app.cocos.capital/"
+    page.goto.return_value = SimpleNamespace(status=200)
+    page.query_selector.side_effect = [AsyncMock(), AsyncMock(), AsyncMock()]
+    scraper._page = page
+    scraper._restore_saved_session = AsyncMock(return_value=False)
+    scraper._raise_if_access_blocked = AsyncMock()
+    scraper._is_authenticated_page = AsyncMock(return_value=True)
+    scraper._save_session_state = AsyncMock()
+
+    logged_in = asyncio.run(scraper.login())
+
+    assert logged_in is True
+    assert scraper._is_logged_in is True
+    scraper._save_session_state.assert_awaited_once_with()
+    assert not any(
+        call.args and call.args[0] == "input"
+        for call in page.wait_for_selector.await_args_list
+    )
+
+
+def test_login_without_authenticated_page_or_mfa_inputs_uses_auth_cooldown(tmp_path):
+    scraper = CocosCapitalScraper(
+        ScraperConfig(
+            username="user@example.com",
+            password="secret",
+            session_file=str(tmp_path / "cocos_session.json"),
+        )
+    )
+    page = AsyncMock()
+    page.url = "https://app.cocos.capital/"
+    page.goto.return_value = SimpleNamespace(status=200)
+    page.query_selector.side_effect = [AsyncMock(), AsyncMock(), AsyncMock()]
+    page.wait_for_selector.side_effect = [
+        None,
+        None,
+        PlaywrightTimeout("MFA inputs not found"),
+    ]
+    scraper._page = page
+    scraper._telegram = SimpleNamespace(
+        wait_for_code=AsyncMock(return_value="123456")
+    )
+    scraper._restore_saved_session = AsyncMock(return_value=False)
+    scraper._raise_if_access_blocked = AsyncMock()
+    scraper._accept_authenticated_page = AsyncMock(return_value=False)
+    scraper._screenshot = AsyncMock()
+
+    with pytest.raises(CocosAuthenticationError):
+        asyncio.run(scraper.login())
+
+    scraper._screenshot.assert_awaited_once_with("login_failure")

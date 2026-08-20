@@ -11,7 +11,7 @@ redis_module.asyncio = redis_asyncio_module
 sys.modules.setdefault("redis", redis_module)
 sys.modules.setdefault("redis.asyncio", redis_asyncio_module)
 
-from scripts.run_analysis import ART_TZ, _analysis_run_policy
+from scripts.run_analysis import ART_TZ, _analysis_report_title, _analysis_run_policy
 from src.scheduler import runner
 
 
@@ -47,6 +47,18 @@ def test_business_day_preopen_analysis_is_exploratory_and_never_persists():
         "exploratory",
         True,
     )
+
+
+def test_post_market_report_is_labeled_as_close_of_session():
+    post_close = datetime(2026, 8, 14, 17, 12, tzinfo=ART_TZ)
+
+    assert _analysis_report_title(True, post_close) == "CIERRE DE RUEDA"
+
+
+def test_preopen_report_keeps_generic_analysis_title():
+    preopen = datetime(2026, 8, 14, 9, 0, tzinfo=ART_TZ)
+
+    assert _analysis_report_title(True, preopen) == "ANÁLISIS"
 
 
 def test_sentiment_runs_hourly_offhours_and_keeps_market_interval():

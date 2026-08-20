@@ -483,6 +483,57 @@ class CocosCapitalScraper:
             urlparse(url or "").query
         )
 
+    async def _is_authenticated_page(self) -> bool:
+        """Recognize the authenticated shell even when Cocos redirects to Inicio."""
+        if not self._page:
+            return False
+
+        url = self._page.url or ""
+        normalized_url = url.lower()
+        if (
+            self._is_login_url(url)
+            or "enroll-validate-2fa" in normalized_url
+            or "trusted-device" in normalized_url
+        ):
+            return False
+        if self._is_portfolio_url(url):
+            return True
+
+        try:
+            body_text = await self._page.locator("body").inner_text(timeout=2_000)
+        except Exception:
+            return False
+
+        normalized_text = body_text.lower()
+        if any(
+            marker in normalized_text
+            for marker in (
+                "código de 6 dígitos",
+                "codigo de 6 digitos",
+                "código de seguridad",
+                "codigo de seguridad",
+            )
+        ):
+            return False
+
+        nav_markers = sum(
+            marker in normalized_text
+            for marker in ("inicio", "mercado", "actividad", "portfolio")
+        )
+        account_marker = any(
+            marker in normalized_text
+            for marker in ("tu portfolio", "tu cuenta", "cuenta n°", "cuenta n")
+        )
+        return nav_markers >= 3 and account_marker
+
+    async def _accept_authenticated_page(self, message: str) -> bool:
+        if not await self._is_authenticated_page():
+            return False
+        self._is_logged_in = True
+        logger.info(message)
+        await self._save_session_state()
+        return True
+
     @staticmethod
     def _extract_market_price_from_text(text: str) -> Decimal | None:
         money_match = re.search(
@@ -844,10 +895,9 @@ class CocosCapitalScraper:
             if await self._resolve_trusted_device_step():
                 await self._save_session_state()
 
-            final_url = self._page.url or ""
-            if self._is_portfolio_url(final_url) and not self._is_login_url(final_url):
-                self._is_logged_in = True
-                logger.info("Sesion Playwright guardada validada")
+            if await self._accept_authenticated_page(
+                "Sesion Playwright guardada validada"
+            ):
                 return True
             logger.info("Sesion Playwright vencida; se requiere autenticacion")
         except CocosAccessBlockedError:
@@ -925,12 +975,10 @@ class CocosCapitalScraper:
                 pass
 
             await self._page.wait_for_load_state("domcontentloaded", timeout=60_000)
+            await self._page.wait_for_timeout(1_000)
 
             # ── Login directo sin MFA ────────────
-            if self._is_portfolio_url(self._page.url):
-                self._is_logged_in = True
-                logger.info("Login exitoso sin MFA")
-                await self._save_session_state()
+            if await self._accept_authenticated_page("Login exitoso sin MFA"):
                 return True
 
             # ── MFA requerido ──────────────────────
@@ -970,11 +1018,24 @@ class CocosCapitalScraper:
                 raise RuntimeError("No se recibió código MFA a tiempo")
 
             # ── Ingresar el código MFA ──────────────
-            await self._page.wait_for_selector(
-                "input",
-                state="attached",
-                timeout=15_000,
-            )
+            if await self._accept_authenticated_page(
+                "Login confirmado mientras se preparaba MFA"
+            ):
+                return True
+            try:
+                await self._page.wait_for_selector(
+                    "input",
+                    state="attached",
+                    timeout=15_000,
+                )
+            except PlaywrightTimeout:
+                if await self._accept_authenticated_page(
+                    "Login confirmado sin inputs MFA visibles"
+                ):
+                    return True
+                raise CocosAuthenticationError(
+                    "Cocos no mostró inputs MFA ni una sesión autenticada"
+                )
             await asyncio.sleep(0.3)
 
             all_inputs = await self._page.query_selector_all("input")
