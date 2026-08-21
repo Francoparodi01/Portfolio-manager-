@@ -51,6 +51,7 @@ from scripts.telegram_bot import (
     BOT_COMMAND_SPECS,
     CALLBACK_ALIASES,
     compact_radar_report,
+    help_text,
     main_keyboard,
     split_message,
 )
@@ -100,6 +101,44 @@ def test_events_command_is_registered_in_telegram_menu():
 def test_radar_metrics_command_and_callback_are_registered():
     assert ("radar_metricas", "Métricas prospectivas Radar") in BOT_COMMAND_SPECS
     assert CALLBACK_ALIASES["radar_metricas"] == "radar_metrics"
+
+
+def test_native_command_menu_keeps_only_primary_workflows():
+    visible = {command for command, _description in BOT_COMMAND_SPECS}
+
+    assert {
+        "menu",
+        "help",
+        "portfolio",
+        "analisis",
+        "events",
+        "ticker",
+        "radar",
+        "radar_metricas",
+        "mercado",
+        "performance",
+        "neto",
+        "ledger",
+        "bot_vs_humano",
+        "status",
+    } == visible
+    assert {
+        "analisis_test",
+        "analisis_full",
+        "analisis_debug",
+        "shadow",
+        "viability",
+        "policy",
+        "confianza",
+    }.isdisjoint(visible)
+
+
+def test_help_explains_operational_and_audit_boundaries():
+    rendered = help_text()
+
+    assert "No ejecuta órdenes" in rendered
+    assert "Score: dirección de la señal, no probabilidad" in rendered
+    assert "Radar/shadow/debug: auditoría o exploración" in rendered
 
 
 def test_upcoming_events_refreshes_sources_before_rendering():

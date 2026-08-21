@@ -130,26 +130,19 @@ FAST_ACTIONS = {"status"}
 
 BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("menu", "Abrir panel principal"),
-    ("help", "Cómo leer el bot"),
-    ("portfolio", "Ver cartera actual"),
-    ("analisis", "Plan de cartera"),
-    ("analisis_test", "Probar analisis sin guardar"),
-    ("analisis_full", "Vista completa sin guardar"),
-    ("analisis_debug", "Diagnostico sin guardar"),
-    ("mercado", "Contexto mercado/noticias"),
+    ("help", "Cómo leer Quantia"),
+    ("portfolio", "Cartera actual"),
+    ("analisis", "Plan operativo"),
     ("events", "Próximos balances"),
     ("ticker", "Análisis por ticker"),
-    ("radar", "Radar compacto"),
+    ("radar", "Oportunidades experimentales"),
     ("radar_metricas", "Métricas prospectivas Radar"),
-    ("shadow", "Tesis shadow 5/20/40"),
-    ("performance", "Performance operativa"),
-    ("neto", "Neto por analisis"),
-    ("viability", "Viabilidad del bot"),
+    ("mercado", "Mercado y noticias"),
+    ("performance", "Resultados operativos"),
+    ("neto", "Neto por análisis"),
     ("ledger", "Libro de decisiones"),
-    ("policy", "Flujo operativo"),
-    ("bot_vs_humano", "Bot vs Franco"),
-    ("confianza", "Confianza del sistema"),
-    ("status", "Estado del sistema"),
+    ("bot_vs_humano", "Bot vs decisiones humanas"),
+    ("status", "Salud del sistema"),
 ]
 
 ADMIN_CHAT_IDS: set[int] = {
@@ -800,28 +793,29 @@ def menu_view(action: str) -> tuple[str, InlineKeyboardMarkup] | None:
 
 def help_text() -> str:
     return (
-        "<b>Como leer Quantia</b>\n"
-        "El bot informa y audita. No ejecuta ordenes.\n"
-        "<b>Uso rapido</b>\n"
-        "<code>/portfolio</code>: cartera actual y concentracion.\n"
+        "<b>Cómo leer Quantia</b>\n"
+        "El bot informa y audita. No ejecuta órdenes.\n\n"
+        "<b>Uso rápido</b>\n"
+        "<code>/portfolio</code>: cartera actual y concentración.\n"
         "<code>/analisis</code>: plan operativo compacto.\n"
-        "<code>/events</code>: proximos balances de la cartera.\n"
-        "<code>/ticker NVDA</code>: analisis tecnico y grafico por accion.\n"
+        "<code>/events</code>: próximos balances de la cartera.\n"
+        "<code>/ticker NVDA</code>: análisis técnico y gráfico por acción.\n"
         "<code>/radar</code>: oportunidades; <code>/radar_metricas</code>: evidencia prospectiva.\n"
+        "<code>/mercado</code>: contexto de mercado y noticias.\n"
         "<code>/performance</code>: resultado real con fills/movimientos.\n"
         "<code>/neto</code>: neto por corrida y decisión, con CSV completo.\n"
-        "<code>/ledger</code>: atribucion economica de decisiones.\n"
+        "<code>/ledger</code>: atribución económica de decisiones.\n"
         "<code>/bot_vs_humano</code>: planes vs movimientos reales.\n"
         "<code>/status</code>: salud de DB, mercado y snapshots.\n\n"
         "<b>Lectura</b>\n"
-        "Score: direccion de la senal, no probabilidad.\n"
-        "T/M/S: aporte tecnico, macro y sentiment al score.\n"
-        "IC: calidad historica del ranking; muestra chica pide cautela.\n"
+        "Score: dirección de la señal, no probabilidad.\n"
+        "T/M/S: aporte técnico, macro y sentiment al score.\n"
+        "IC: calidad histórica del ranking; una muestra chica pide cautela.\n"
         "EV: retorno observado neto cuando corresponde.\n\n"
         "<b>Alcance</b>\n"
-        "Ejecucion real: solo fills/movimientos confirmados.\n"
-        "Plan: decision operativa pendiente de validacion.\n"
-        "Radar/shadow/debug: auditoria o exploracion; no contaminan performance."
+        "Ejecución real: solo fills/movimientos confirmados.\n"
+        "Plan: propuesta operativa pendiente de validación.\n"
+        "Radar/shadow/debug: auditoría o exploración; no contaminan performance."
     )
 
 
