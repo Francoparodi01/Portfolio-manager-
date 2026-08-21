@@ -141,6 +141,39 @@ def test_help_explains_operational_and_audit_boundaries():
     assert "Radar/shadow/debug: auditoría o exploración" in rendered
 
 
+def test_help_lists_all_canonical_user_commands():
+    rendered = help_text()
+
+    for command in (
+        "portfolio",
+        "analisis",
+        "analisis_test",
+        "analisis_full",
+        "analisis_debug",
+        "events",
+        "ticker NVDA",
+        "mercado",
+        "radar",
+        "radar_full",
+        "radar_metricas",
+        "shadow AMD",
+        "resumen",
+        "performance",
+        "neto",
+        "ledger",
+        "bot_vs_humano",
+        "viability",
+        "confianza",
+        "calibracion",
+        "regression",
+        "policy",
+        "status",
+        "menu",
+        "configuracion",
+    ):
+        assert f"<code>/{command}</code>" in rendered
+
+
 def test_upcoming_events_refreshes_sources_before_rendering():
     source = (ROOT / "scripts" / "telegram_bot.py").read_text(encoding="utf-8")
     start = source.index("async def action_upcoming_events")
