@@ -20,6 +20,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 from src.collector.data.models import AssetType, Currency, MarketCandle
 from src.collector.db import PortfolioDatabase
+from src.collector.cocos_scraper import _is_market_ticker_candidate
 from src.core.config import get_config
 
 
@@ -190,7 +191,7 @@ async def _targets(
     for item in [*latest, *portfolio]:
         ticker = str(item.get("ticker", "") or "").upper().strip()
         atype = str(item.get("asset_type", "UNKNOWN") or "UNKNOWN").upper()
-        if not ticker:
+        if not _is_market_ticker_candidate(ticker):
             continue
         current = merged.get(ticker)
         current_type = str((current or {}).get("asset_type", "UNKNOWN") or "UNKNOWN").upper()
@@ -235,6 +236,7 @@ async def _main() -> None:
     db = PortfolioDatabase(get_config().database.url)
     await db.connect()
     imported = errors = fetched = 0
+    failed_tickers: list[str] = []
     try:
         targets = await _targets(
             db,
@@ -289,13 +291,18 @@ async def _main() -> None:
                 )
             except Exception as exc:
                 errors += 1
+                failed_tickers.append(target.ticker)
                 print(f"{index}/{len(targets)} {target.asset_type} {target.ticker}: ERROR {exc}")
             if index < len(targets) and args.pause_s > 0:
                 await asyncio.sleep(args.pause_s)
     finally:
         await db.close()
 
-    print(f"done targets={len(targets)} fetched={fetched} imported={imported} errors={errors}")
+    failed_label = ",".join(failed_tickers) if failed_tickers else "none"
+    print(
+        f"done targets={len(targets)} fetched={fetched} imported={imported} "
+        f"errors={errors} failed={failed_label}"
+    )
 
 
 if __name__ == "__main__":

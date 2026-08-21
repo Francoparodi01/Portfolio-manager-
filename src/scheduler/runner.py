@@ -467,6 +467,16 @@ async def _cache_snapshot(snapshot) -> None:
 
 # ─── Jobs programados ──────────────────────────────────────────────────────────
 
+def _assign_configured_snapshot_owner(snapshot, telegram_chat_id: object):
+    """Attach the configured single-account owner before persistence."""
+    if getattr(snapshot, "owner_chat_id", None) is not None:
+        return snapshot
+    raw_owner = str(telegram_chat_id or "").strip()
+    if raw_owner.isdigit():
+        snapshot.owner_chat_id = int(raw_owner)
+    return snapshot
+
+
 async def run_scrape(run_type: str = "SCHEDULED") -> dict:
     """
     Scrape de portfolio.
@@ -498,6 +508,7 @@ async def run_scrape(run_type: str = "SCHEDULED") -> dict:
             async with CocosCapitalScraper(cfg.scraper) as scraper:
                 await scraper.login()
                 snapshot = await scraper.scrape_portfolio()
+                _assign_configured_snapshot_owner(snapshot, cfg.scraper.telegram_chat_id)
                 sid = await db.save_snapshot(snapshot)
                 await _cache_snapshot(snapshot)
 
@@ -804,6 +815,7 @@ async def run_full(run_type: str = "FULL") -> dict:
                 portfolio_error: Exception | None = None
                 try:
                     snapshot = await _scrape_portfolio_with_retries(scraper, run_type, attempts=2)
+                    _assign_configured_snapshot_owner(snapshot, cfg.scraper.telegram_chat_id)
                     await db.save_snapshot(snapshot)
                     await _cache_snapshot(snapshot)
                 except Exception as exc:
@@ -2501,6 +2513,10 @@ class IntradayManager:
                             snapshot = await account_scraper.scrape_portfolio(
                                 force_refresh=refresh_request is not None
                             )
+                            _assign_configured_snapshot_owner(
+                                snapshot,
+                                self.cfg.scraper.telegram_chat_id,
+                            )
                             snapshot_id = await db.save_snapshot(snapshot)
                             await _cache_snapshot(snapshot)
                             last_portfolio_ts = time.monotonic()
@@ -2536,6 +2552,10 @@ class IntradayManager:
                                 try:
                                     snapshot = await account_scraper.scrape_portfolio(
                                         force_refresh=True
+                                    )
+                                    _assign_configured_snapshot_owner(
+                                        snapshot,
+                                        self.cfg.scraper.telegram_chat_id,
                                     )
                                     await db.save_snapshot(snapshot)
                                     await _cache_snapshot(snapshot)

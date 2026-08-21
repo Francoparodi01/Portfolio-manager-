@@ -427,6 +427,10 @@ def test_compact_radar_understands_current_watchlist_format(monkeypatch):
     assert "Radar · próxima apertura" in compact
     assert "250 analizados · 3 ideas detectadas" in compact
     assert "no hay compras habilitadas" in compact
+    assert "Origen: top del ranking operativo vigente" in compact
+    assert "V3 shadow: reordena sólo esta vista" in compact
+    assert "Prioridad técnica V3 dentro del top operativo" in compact
+    assert "Score operativo" in compact
     assert compact.index("<b>LMT</b>") < compact.index("<b>SHOP</b>")
     assert compact.index("<b>SHOP</b>") < compact.index("<b>GLOB</b>")
     assert "<b>No priorizar ahora</b>" in compact

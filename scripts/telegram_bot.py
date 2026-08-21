@@ -1705,9 +1705,11 @@ def compact_radar_report(report: str, max_items: int = 5) -> str:
     else:
         lines.append("<b>Resultado:</b> el Radar detecta; /analisis decide si entra al plan.")
     lines.extend([
+        "<i>Origen: top del ranking operativo vigente.</i>",
+        "<i>Lectura V3 shadow: reordena sólo esta vista; no elige el top ni habilita compras.</i>",
         "<i>V3 A = prioridad técnica. R/R = retorno potencial por unidad de riesgo; no es probabilidad.</i>",
         "",
-        "<b>Qué revisar primero</b>",
+        "<b>Prioridad técnica V3 dentro del top operativo</b>",
     ])
 
     rejected_section_started = False
@@ -1730,7 +1732,7 @@ def compact_radar_report(report: str, max_items: int = 5) -> str:
             else "n/d"
         )
         lines.append(
-            f"   Señal <code>{item['score']}</code> · "
+            f"   Score operativo <code>{item['score']}</code> · "
             f"R/R <code>{rr_display}</code>"
         )
 

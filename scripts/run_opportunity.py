@@ -99,6 +99,19 @@ async def _load_portfolio(cfg, owner_chat_id: int | None = None):
     await db.connect()
     try:
         snap = await db.get_latest_snapshot(owner_chat_id=owner_chat_id)
+        configured_owner = str(cfg.scraper.telegram_chat_id or "").strip()
+        can_use_legacy_snapshot = (
+            owner_chat_id is not None
+            and configured_owner.isdigit()
+            and int(configured_owner) == int(owner_chat_id)
+        )
+        if not snap and can_use_legacy_snapshot:
+            snap = await db.get_latest_snapshot()
+            if snap:
+                logger.warning(
+                    "Portfolio cargado desde snapshot legacy sin owner; "
+                    "los snapshots nuevos quedaran atribuidos al chat configurado"
+                )
         if not snap:
             logger.warning("Sin snapshots en DB — corriendo sin contexto de cartera")
             return [], 0.0, 0.0

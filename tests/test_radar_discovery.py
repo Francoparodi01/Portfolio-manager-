@@ -570,3 +570,103 @@ def test_scheduler_requests_discovery_without_changing_top_six(monkeypatch):
     command = commands[0]
     assert command[command.index("--top") + 1] == "6"
     assert "--capture-discovery" in command
+
+
+def test_load_portfolio_uses_legacy_snapshot_only_for_configured_owner(monkeypatch):
+    from scripts import run_opportunity
+
+    calls = []
+    legacy_snapshot = {
+        "positions": [{"ticker": "MSFT", "market_value": 100.0}],
+        "cash_ars": 10.0,
+        "total_value_ars": 110.0,
+        "scraped_at": datetime(2026, 8, 21, tzinfo=timezone.utc),
+    }
+
+    class _Database:
+        def __init__(self, _url):
+            pass
+
+        async def connect(self):
+            pass
+
+        async def get_latest_snapshot(self, owner_chat_id=None):
+            calls.append(owner_chat_id)
+            return legacy_snapshot if owner_chat_id is None else None
+
+        async def get_latest_market_prices(self):
+            return []
+
+        async def close(self):
+            pass
+
+    cfg = SimpleNamespace(
+        database=SimpleNamespace(url="postgresql://test"),
+        scraper=SimpleNamespace(telegram_chat_id="77"),
+    )
+    monkeypatch.setattr(run_opportunity, "PortfolioDatabase", _Database)
+
+    positions, total, cash = asyncio.run(
+        run_opportunity._load_portfolio(cfg, owner_chat_id=77)
+    )
+
+    assert calls == [77, None]
+    assert [row["ticker"] for row in positions] == ["MSFT"]
+    assert total == 110.0
+    assert cash == 10.0
+
+
+def test_load_portfolio_does_not_expose_legacy_snapshot_to_other_owner(monkeypatch):
+    from scripts import run_opportunity
+
+    calls = []
+
+    class _Database:
+        def __init__(self, _url):
+            pass
+
+        async def connect(self):
+            pass
+
+        async def get_latest_snapshot(self, owner_chat_id=None):
+            calls.append(owner_chat_id)
+            return None
+
+        async def close(self):
+            pass
+
+    cfg = SimpleNamespace(
+        database=SimpleNamespace(url="postgresql://test"),
+        scraper=SimpleNamespace(telegram_chat_id="77"),
+    )
+    monkeypatch.setattr(run_opportunity, "PortfolioDatabase", _Database)
+
+    positions, total, cash = asyncio.run(
+        run_opportunity._load_portfolio(cfg, owner_chat_id=88)
+    )
+
+    assert calls == [88]
+    assert positions == []
+    assert total == 0.0
+    assert cash == 0.0
+
+
+def test_assign_configured_snapshot_owner_fills_legacy_snapshot():
+    from src.scheduler.runner import _assign_configured_snapshot_owner
+
+    snapshot = SimpleNamespace(owner_chat_id=None)
+
+    result = _assign_configured_snapshot_owner(snapshot, "77")
+
+    assert result is snapshot
+    assert snapshot.owner_chat_id == 77
+
+
+def test_assign_configured_snapshot_owner_preserves_explicit_owner():
+    from src.scheduler.runner import _assign_configured_snapshot_owner
+
+    snapshot = SimpleNamespace(owner_chat_id=88)
+
+    _assign_configured_snapshot_owner(snapshot, "77")
+
+    assert snapshot.owner_chat_id == 88

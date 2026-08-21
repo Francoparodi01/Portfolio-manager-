@@ -1579,6 +1579,10 @@ def render_opportunity_report(
     h.append(
         "   Nota: radar detecta ideas teóricas. La aprobación operativa corresponde al plan de cartera."
     )
+    h.append(
+        "   Ranking operativo: define este top con el score vigente. "
+        "V3/Setup son lecturas shadow y no seleccionan ni habilitan compras."
+    )
     h.append("")
 
     if not report.candidates:

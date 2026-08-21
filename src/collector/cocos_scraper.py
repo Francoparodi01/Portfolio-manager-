@@ -71,6 +71,17 @@ SELECTOR_VERSION = "v1"
 SESSION_FILE = "/app/secrets/cocos_session.json"
 
 CEDEAR_SEGMENTS = ("Top", "ETF", "Otros", "Nuevos")
+MARKET_NON_TICKER_LABELS = {
+    "ACCIONES",
+    "CEDEARS",
+    "ESPECIE",
+    "ETF",
+    "NUEVOS",
+    "OTROS",
+    "TICKER",
+    "TOP",
+    "ULTIMO",
+}
 MARKET_PRICE_RE = r"(\d{1,3}(?:\.\d{3})*,\d{1,2})"
 FILL_DISCOVERY_PATHS = (
     "/activity",
@@ -98,6 +109,16 @@ FILL_API_KEYWORDS = (
     "ticker",
 )
 MOVEMENTS_API_KEYWORDS = ("cash_movements", "movements", "movement")
+
+
+def _is_market_ticker_candidate(value: str) -> bool:
+    ticker = str(value or "").upper().strip()
+    return bool(
+        ticker
+        and ticker not in MARKET_NON_TICKER_LABELS
+        and not ticker.endswith(".")
+        and re.fullmatch(r"[A-Z][A-Z0-9.]{1,5}", ticker)
+    )
 MOVEMENTS_PAGE_LIMIT = 30
 MOVEMENTS_MAX_PAGES = 6
 
@@ -1782,12 +1803,10 @@ class CocosCapitalScraper:
                     for line in lines:
                         if ticker is None:
                             word = line.split()[0] if line.split() else ""
-                            if _re.fullmatch(r"[A-Z][A-Z0-9\.]{1,5}", word):
+                            if _is_market_ticker_candidate(word):
                                 ticker = normalize_ticker(word)
 
                     if not ticker or ticker in seen:
-                        continue
-                    if ticker in ("ESPECIE", "TICKER", "ULTIMO"):
                         continue
                     if not price or price <= 0:
                         continue
@@ -1821,7 +1840,7 @@ class CocosCapitalScraper:
             i = 0
             while i < len(lines):
                 line = lines[i]
-                if _re.fullmatch(r"[A-Z][A-Z0-9\.]{1,5}", line):
+                if _is_market_ticker_candidate(line):
                     ticker = normalize_ticker(line)
                     if ticker not in seen:
                         chunk = "\n".join(lines[i : min(i + 12, len(lines))])
