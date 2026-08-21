@@ -104,10 +104,12 @@ def enrich_positions_with_market_metadata(
             enriched.append(pos)
             continue
 
+        market_source = str(row.get("source", "") or "market_prices")
+        pos["market_data_source"] = market_source
         market_asset_type = str(row.get("asset_type", "") or "").upper()
         if market_asset_type:
             pos["asset_type"] = market_asset_type
-            pos["asset_type_source"] = "market_prices"
+            pos["asset_type_source"] = market_source
 
         row_day = _art_date(row.get("ts"))
         row_ts = _coerce_datetime(row.get("ts"))
@@ -187,13 +189,14 @@ def normalize_positions_with_fresh_market_prices(
             pos["snapshot_current_price"] = snapshot_price or None
             pos["snapshot_market_value"] = original_market_value or None
             pos["current_price"] = latest_price
-            pos["price_source"] = "market_prices"
+            price_source = str(pos.get("market_data_source") or "market_prices")
+            pos["price_source"] = price_source
             pos["price_normalized"] = True
 
             if quantity > 0:
                 market_value = quantity * latest_price
                 pos["market_value"] = market_value
-                pos["market_value_source"] = "market_prices"
+                pos["market_value_source"] = price_source
 
                 avg_cost = _safe_float(pos.get("avg_cost"))
                 if avg_cost > 0:

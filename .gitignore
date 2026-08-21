@@ -73,6 +73,7 @@ tests/*
 !tests/test_radar_setup_shadow.py
 !tests/test_radar_metrics.py
 !tests/test_radar_setup_alerts.py
+!tests/test_tradingview_byma_backfill.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json

@@ -3477,6 +3477,74 @@ def _portfolio_market_reference_at(
     return (snapshot or {}).get("scraped_at")
 
 
+def _market_day(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(ART_TZ).date()
+
+
+async def _market_rows_with_candle_fallback(db, positions: list[dict]) -> list[dict]:
+    rows = list(await db.get_latest_market_prices())
+    reference_days = [_market_day(row.get("ts")) for row in rows]
+    reference_days = [day for day in reference_days if day is not None]
+    if not reference_days:
+        return rows
+    reference_day = max(reference_days)
+    by_ticker = {str(row.get("ticker") or "").upper(): dict(row) for row in rows}
+
+    async def _fallback(position: dict):
+        ticker = str(position.get("ticker") or "").upper()
+        current = by_ticker.get(ticker)
+        if current and _market_day(current.get("ts")) == reference_day:
+            return None
+        candles = await db.get_market_candles(
+            ticker,
+            asset_type=position.get("asset_type"),
+            limit=1,
+        )
+        if not candles:
+            return None
+        candle = candles[-1]
+        source = str(candle.get("source") or "")
+        if source not in {"COCOS", "TRADINGVIEW_BYMA"}:
+            return None
+        if _market_day(candle.get("ts")) != reference_day:
+            return None
+        return {
+            "ticker": ticker,
+            "asset_type": candle.get("asset_type") or position.get("asset_type"),
+            "currency": candle.get("currency") or position.get("currency") or "ARS",
+            "last_price": candle.get("close_price"),
+            "change_pct_1d": None,
+            "volume": candle.get("volume"),
+            "ts": candle.get("ts"),
+            "source": source,
+        }
+
+    fallbacks = await asyncio.gather(*(_fallback(position) for position in positions or []))
+    for fallback in fallbacks:
+        if fallback is None:
+            continue
+        ticker = fallback["ticker"]
+        by_ticker[ticker] = fallback
+        logger.info(
+            "Precio portfolio %s respaldado por %s para rueda %s",
+            ticker,
+            fallback["source"],
+            reference_day,
+        )
+    return list(by_ticker.values())
+
+
 async def _load_portfolio(
     cfg,
     owner_chat_id: int | None = None,
@@ -3495,7 +3563,7 @@ async def _load_portfolio(
         try:
             positions = normalize_positions_with_fresh_market_prices(
                 positions,
-                await db.get_latest_market_prices(),
+                await _market_rows_with_candle_fallback(db, positions),
                 reference_at=_portfolio_market_reference_at(
                     snap,
                     off_market_context=off_market_context,

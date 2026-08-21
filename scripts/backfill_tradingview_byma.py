@@ -182,12 +182,24 @@ async def _targets(
     asset_type: str,
     min_rows: int,
     all_assets: bool,
+    portfolio_only: bool = False,
 ) -> list[BackfillTarget]:
-    latest = await db.get_cocos_universe_assets()
+    latest = [] if portfolio_only else await db.get_cocos_universe_assets()
+    portfolio = await db.get_latest_portfolio_instrument_seeds(recent_exit_days=0)
+    merged: dict[str, dict] = {}
+    for item in [*latest, *portfolio]:
+        ticker = str(item.get("ticker", "") or "").upper().strip()
+        atype = str(item.get("asset_type", "UNKNOWN") or "UNKNOWN").upper()
+        if not ticker:
+            continue
+        current = merged.get(ticker)
+        current_type = str((current or {}).get("asset_type", "UNKNOWN") or "UNKNOWN").upper()
+        if current is None or current_type == "UNKNOWN" or atype != "UNKNOWN":
+            merged[ticker] = item
     wanted = {ticker.upper().strip() for ticker in tickers if ticker.strip()}
     assets = [
         item
-        for item in latest
+        for item in merged.values()
         if (asset_type == "ALL" or str(item.get("asset_type", "")).upper() == asset_type)
         and (not wanted or str(item.get("ticker", "")).upper() in wanted)
     ]
@@ -209,6 +221,11 @@ async def _main() -> None:
     parser.add_argument("--bars", type=int, default=DEFAULT_BARS)
     parser.add_argument("--min-rows", type=int, default=DEFAULT_MIN_ROWS)
     parser.add_argument("--all", action="store_true", help="Backfill incluso si ya tiene min-rows")
+    parser.add_argument(
+        "--portfolio-only",
+        action="store_true",
+        help="Limitar el refresh a posiciones actuales del portfolio",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, help="Limitar cantidad de targets")
     parser.add_argument("--pause-s", type=float, default=0.8)
@@ -225,6 +242,7 @@ async def _main() -> None:
             asset_type=args.asset_type,
             min_rows=args.min_rows,
             all_assets=args.all,
+            portfolio_only=args.portfolio_only,
         )
         if args.limit:
             targets = targets[: args.limit]

@@ -1682,7 +1682,7 @@ async def run_radar_audit_capture() -> None:
         logger.error("radar_audit_capture fallo: %s", exc, exc_info=True)
 
 
-async def run_tradingview_byma_refresh() -> dict[str, Any]:
+async def run_tradingview_byma_refresh(*, portfolio_only: bool = False) -> dict[str, Any]:
     """Refresh local BYMA OHLCV for the next Radar shadow capture."""
     result: dict[str, Any] = {"status": "SKIPPED", "enabled": False}
     if not TRADINGVIEW_BYMA_REFRESH_ENABLED:
@@ -1703,7 +1703,9 @@ async def run_tradingview_byma_refresh() -> dict[str, Any]:
         "--output-dir",
         "/tmp/tradingview_byma_daily",
     ]
-    logger.info("tradingview_byma_refresh iniciando")
+    if portfolio_only:
+        cmd.append("--portfolio-only")
+    logger.info("tradingview_byma_refresh iniciando portfolio_only=%s", portfolio_only)
     started = time.perf_counter()
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -3669,6 +3671,16 @@ async def _scheduler_main() -> None:
     if TRADINGVIEW_BYMA_REFRESH_ENABLED:
         scheduler.add_job(
             run_tradingview_byma_refresh,
+            _business_day_cron(hour=17, minute=6),
+            id="tradingview_byma_portfolio_refresh",
+            name="TradingView BYMA portfolio refresh 17:06 ART",
+            kwargs={"portfolio_only": True},
+            misfire_grace_time=900,
+            max_instances=1,
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            run_tradingview_byma_refresh,
             _business_day_cron(hour=18, minute=0),
             id="tradingview_byma_refresh",
             name="TradingView BYMA OHLCV refresh 18:00 ART",
@@ -3731,9 +3743,10 @@ async def _scheduler_main() -> None:
     scheduler.start()
     await start_intraday_loops()
     logger.info(
-        "Scheduler activo: sesion Cocos persistente; 10:31 apertura portfolio; mercado 10:40/12:00/16:40/17:02; 10:45 post-open; 16:15/16:45 preclose alerts; radar audit 16:50=%s; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; TradingView 18:00=%s; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
+        "Scheduler activo: sesion Cocos persistente; 10:31 apertura portfolio; mercado 10:40/12:00/16:40/17:02; 10:45 post-open; 16:15/16:45 preclose alerts; radar audit 16:50=%s; 17:05 candles; TradingView portfolio 17:06=%s; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; TradingView full 18:00=%s; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
         % (
             "on" if RADAR_AUDIT_CAPTURE_ENABLED else "off",
+            "on" if TRADINGVIEW_BYMA_REFRESH_ENABLED else "off",
             "on" if TRADINGVIEW_BYMA_REFRESH_ENABLED else "off",
             "on" if SENTIMENT_PIPELINE_ENABLED else "off",
             "on" if THESIS_SHADOW_ENABLED else "off",

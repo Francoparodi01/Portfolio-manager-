@@ -1,9 +1,11 @@
+import asyncio
 import sys
 import types
 from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts import run_analysis
+from src.collector.portfolio_quality import normalize_positions_with_fresh_market_prices
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,6 +100,76 @@ def test_off_market_analysis_uses_latest_market_day_as_price_reference():
         snapshot,
         off_market_context=False,
     ) == snapshot["scraped_at"]
+
+
+def test_market_rows_use_fresh_tradingview_candle_for_stale_position_price():
+    class FakeDb:
+        async def get_latest_market_prices(self):
+            return [
+                {
+                    "ticker": "NVDA",
+                    "asset_type": "CEDEAR",
+                    "last_price": 14850,
+                    "ts": datetime(2026, 8, 20, 13, 30, tzinfo=timezone.utc),
+                },
+                {
+                    "ticker": "NVS",
+                    "asset_type": "CEDEAR",
+                    "last_price": 63350,
+                    "ts": datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc),
+                },
+            ]
+
+        async def get_market_candles(self, ticker, **kwargs):
+            if ticker != "NVS":
+                return []
+            return [
+                {
+                    "ticker": "NVS",
+                    "asset_type": "CEDEAR",
+                    "currency": "ARS",
+                    "close_price": 61825,
+                    "volume": 337,
+                    "ts": datetime(2026, 8, 20, 13, 30, tzinfo=timezone.utc),
+                    "source": "TRADINGVIEW_BYMA",
+                }
+            ]
+
+    rows = asyncio.run(
+        run_analysis._market_rows_with_candle_fallback(
+            FakeDb(),
+            [{"ticker": "NVS", "asset_type": "CEDEAR"}],
+        )
+    )
+    nvs = next(row for row in rows if row["ticker"] == "NVS")
+
+    assert nvs["last_price"] == 61825
+    assert nvs["source"] == "TRADINGVIEW_BYMA"
+
+
+def test_tradingview_fallback_provenance_is_preserved_in_position_value():
+    positions = [{"ticker": "NVS", "quantity": 4, "current_price": 63350}]
+    market_rows = [
+        {
+            "ticker": "NVS",
+            "asset_type": "CEDEAR",
+            "last_price": 61825,
+            "ts": datetime(2026, 8, 20, 13, 30, tzinfo=timezone.utc),
+            "source": "TRADINGVIEW_BYMA",
+        }
+    ]
+
+    normalized = normalize_positions_with_fresh_market_prices(
+        positions,
+        market_rows,
+        reference_at=datetime(2026, 8, 20, 20, 5, tzinfo=timezone.utc),
+    )
+
+    assert normalized[0]["is_operable"] is True
+    assert normalized[0]["current_price"] == 61825
+    assert normalized[0]["market_value"] == 247300
+    assert normalized[0]["price_source"] == "TRADINGVIEW_BYMA"
+    assert normalized[0]["market_value_source"] == "TRADINGVIEW_BYMA"
 
 
 def test_missing_result_positions_remain_visible_in_compact_analysis():
