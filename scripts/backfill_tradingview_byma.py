@@ -19,8 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
 from src.collector.data.models import AssetType, Currency, MarketCandle
+from src.collector.data.normalizer import is_market_ticker_candidate
 from src.collector.db import PortfolioDatabase
-from src.collector.cocos_scraper import _is_market_ticker_candidate
 from src.core.config import get_config
 
 
@@ -191,7 +191,7 @@ async def _targets(
     for item in [*latest, *portfolio]:
         ticker = str(item.get("ticker", "") or "").upper().strip()
         atype = str(item.get("asset_type", "UNKNOWN") or "UNKNOWN").upper()
-        if not _is_market_ticker_candidate(ticker):
+        if not is_market_ticker_candidate(ticker):
             continue
         current = merged.get(ticker)
         current_type = str((current or {}).get("asset_type", "UNKNOWN") or "UNKNOWN").upper()

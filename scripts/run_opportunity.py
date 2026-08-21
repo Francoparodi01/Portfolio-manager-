@@ -35,6 +35,7 @@ from src.core.config import get_config
 from src.core.logger import get_logger
 from src.core.market_calendar import is_trading_day
 from src.collector.db import PortfolioDatabase
+from src.collector.data.normalizer import is_market_ticker_candidate
 from src.collector.notifier import TelegramNotifier
 from src.collector.cocos_history import candles_to_frame, overlay_compatible_volume
 from src.collector.portfolio_quality import (
@@ -76,6 +77,22 @@ ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 RADAR_DISCOVERY_LEDGER_ENABLED = os.getenv(
     "RADAR_DISCOVERY_LEDGER_ENABLED", "false"
 ).lower() == "true"
+
+
+def _filter_operable_cocos_assets(
+    assets: list[dict],
+) -> tuple[list[dict], list[str]]:
+    valid = [
+        asset
+        for asset in assets
+        if is_market_ticker_candidate(str(asset.get("ticker") or ""))
+    ]
+    invalid = sorted({
+        str(asset.get("ticker") or "").upper()
+        for asset in assets
+        if not is_market_ticker_candidate(str(asset.get("ticker") or ""))
+    })
+    return valid, invalid
 
 
 def _portfolio_equity_total(
@@ -948,7 +965,15 @@ async def main(
         logger.info(f"Scores cargados para {list(portfolio_scores.keys())}")
 
     # ── 2. Universo ────────────────────────────────────────────────────────────
-    cocos_assets = await _load_cocos_universe_assets(cfg)
+    raw_cocos_assets = await _load_cocos_universe_assets(cfg)
+    cocos_assets, invalid_universe_tickers = _filter_operable_cocos_assets(
+        raw_cocos_assets
+    )
+    if invalid_universe_tickers:
+        logger.warning(
+            "Universo Cocos: descartados simbolos no operables: %s",
+            ", ".join(invalid_universe_tickers),
+        )
     assets_by_ticker = {asset["ticker"]: asset for asset in cocos_assets}
 
     if universe_override:

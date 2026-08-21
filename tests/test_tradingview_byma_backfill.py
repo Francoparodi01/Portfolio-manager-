@@ -1,7 +1,7 @@
 import asyncio
 
 from scripts.backfill_tradingview_byma import _targets
-from src.collector.cocos_scraper import _is_market_ticker_candidate
+from src.collector.data.normalizer import is_market_ticker_candidate
 
 
 class _FakeDb:
@@ -50,7 +50,7 @@ def test_portfolio_only_targets_exclude_daily_universe():
 
 
 def test_market_ticker_candidate_rejects_segment_labels_and_truncated_names():
-    assert _is_market_ticker_candidate("NVDA") is True
-    assert _is_market_ticker_candidate("BA.C") is True
-    assert _is_market_ticker_candidate("ETF") is False
-    assert _is_market_ticker_candidate("C.") is False
+    assert is_market_ticker_candidate("NVDA") is True
+    assert is_market_ticker_candidate("BA.C") is True
+    assert is_market_ticker_candidate("ETF") is False
+    assert is_market_ticker_candidate("C.") is False

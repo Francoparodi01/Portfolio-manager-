@@ -6,8 +6,31 @@ from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 
+MARKET_NON_TICKER_LABELS = {
+    "ACCIONES",
+    "CEDEARS",
+    "ESPECIE",
+    "ETF",
+    "NUEVOS",
+    "OTROS",
+    "TICKER",
+    "TOP",
+    "ULTIMO",
+}
+
+
 def normalize_ticker(raw: str) -> str:
     return re.sub(r"[^A-Z0-9\.]", "", raw.strip().upper())[:10]
+
+
+def is_market_ticker_candidate(value: str) -> bool:
+    ticker = str(value or "").upper().strip()
+    return bool(
+        ticker
+        and ticker not in MARKET_NON_TICKER_LABELS
+        and not ticker.endswith(".")
+        and re.fullmatch(r"[A-Z][A-Z0-9.]{1,5}", ticker)
+    )
 
 
 def parse_decimal(s: str) -> Optional[Decimal]:

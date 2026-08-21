@@ -814,7 +814,7 @@ def help_text() -> str:
         "<code>/mercado</code>: contexto de mercado y noticias.\n"
         "\n<b>Radar y shadow</b>\n"
         "<code>/radar</code>: selección compacta de oportunidades experimentales.\n"
-        "<code>/radar_full</code>: radar completo con fuentes y razones.\n"
+        "<code>/radar_full</code>: comparativa legible de todo el top operativo.\n"
         "<code>/radar_metricas</code>: evidencia prospectiva del ranking.\n"
         "<code>/shadow AMD</code>: tesis 5/20/40 por ticker; no ejecuta.\n"
         "\n<b>Resultados</b>\n"
@@ -1578,15 +1578,15 @@ def _radar_report_items(text: str) -> list[dict]:
             "prior_radar": prior_radar.group(1).strip() if prior_radar else "",
             "relative_strength": relative_strength.group(1).strip() if relative_strength else "",
         })
-    if items:
-        return items
-
+    compact_tickers = {item["ticker"] for item in items}
     ticker_blocks = re.split(r"\n(?=━━\s+[A-Z0-9.-]+\s+━━)", text)
     for block in ticker_blocks:
         title = re.search(r"━━\s+([A-Z0-9.-]+)\s+━━\s*(.*)", block)
         if not title:
             continue
         ticker = title.group(1).strip()
+        if ticker in compact_tickers:
+            continue
         title_tail = title.group(2).strip()
         score = re.search(r"Score:\s*([+-]?\d+\.\d+)", block)
         rr = re.search(r"R/R\s*([0-9.]+)x", block)
@@ -1625,7 +1625,12 @@ def _radar_report_items(text: str) -> list[dict]:
     return items
 
 
-def compact_radar_report(report: str, max_items: int = 5) -> str:
+def compact_radar_report(
+    report: str,
+    max_items: int = 5,
+    *,
+    detailed: bool = False,
+) -> str:
     """Resume el reporte técnico sin recalcular ranking ni señales."""
     if not report:
         return "⚠️ Radar sin output."
@@ -1688,7 +1693,12 @@ def compact_radar_report(report: str, max_items: int = 5) -> str:
         if universe_count
         else universe_text
     )
-    title = "🔭 <b>Radar · próxima apertura</b>" if market_closed else "🔭 <b>Radar · ahora</b>"
+    title_mode = "Radar detallado" if detailed else "Radar"
+    title = (
+        f"🔭 <b>{title_mode} · próxima apertura</b>"
+        if market_closed
+        else f"🔭 <b>{title_mode} · ahora</b>"
+    )
     lines: list[str] = []
     if event_prefix:
         lines.extend(event_prefix)
@@ -1758,10 +1768,18 @@ def compact_radar_report(report: str, max_items: int = 5) -> str:
             lines.append(f"   Próximo paso: {item['action']}")
         lines.append("")
 
-    lines.extend([
-        "<i>Seguir registra interés; no compra ni altera las métricas oficiales.</i>",
-        "<i>/radar_full muestra fuentes, histórico y cálculos completos.</i>",
-    ])
+    lines.append(
+        "<i>Seguir registra interés; no compra ni altera las métricas oficiales.</i>"
+    )
+    if detailed:
+        lines.extend([
+            "<i>Para profundizar una idea: /ticker TICKER.</i>",
+            "<i>La evidencia acumulada del ranking está en /radar_metricas.</i>",
+        ])
+    else:
+        lines.append(
+            "<i>/radar_full compara todo el top; /ticker profundiza un activo.</i>"
+        )
     return "\n".join(lines)
 
 
@@ -1986,7 +2004,11 @@ async def action_radar_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
 
-    await send_text(context, chat_id, report)
+    await _send_manual_radar(
+        context,
+        chat_id,
+        compact_radar_report(report, max_items=8, detailed=True),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

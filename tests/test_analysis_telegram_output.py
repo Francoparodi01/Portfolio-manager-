@@ -443,6 +443,45 @@ def test_compact_radar_understands_current_watchlist_format(monkeypatch):
     assert "/radar_full" in compact
 
 
+def test_detailed_radar_combines_operational_cards_and_watchlist(monkeypatch):
+    import scripts.telegram_bot as telegram_bot_module
+
+    monkeypatch.setattr(telegram_bot_module, "_is_business_day_now", lambda: False)
+    monkeypatch.setattr(telegram_bot_module, "_is_market_hours_now", lambda: False)
+    report = """<b>🔭 Radar de oportunidades</b>
+🔍 Universo: 248 tickers → 91 ideas rankeadas → top 2 mostradas
+✅ Estado operativo: <b>NORMAL</b>
+💵 Cash libre: <b>$1.760 ARS</b>
+   Mercado cerrado/sin rueda: ideas para revalidar en la próxima apertura.
+
+<b>━━ AMZN ━━</b>  🔄 SWAP [fuerte]  Edge: 🟢 <code>+0.168</code> (fuerte)
+Score: <code>+0.273</code> | Conv: <b>100%</b> | Precio: <b>$2870.00</b>
+🔬 Shadow: <b>SHADOW DÉBIL</b> — no perseguir sin pullback
+Compra técnica V3: <b>C</b> · esperar setup · 20d · shadow
+🟡 Asimetría MODERADA — upside 8.6% | stop 5% | R/R <b>1.7x</b>
+🎯 <b>Revalidación requerida:</b> Revalidar al abrir: Swap vs META.
+
+<b>👁 En vigilancia (1)</b>
+  <b>SE</b>: score <code>+0.280</code> | conv. 100% | R/R 2.1x | $5875.00 | edge +0.113
+   ↩️ Reversión: <b>sin extremo claro</b> (<code>-0.214</code>)
+   Compra técnica V3: <b>A</b> · compra primaria · 20d · shadow
+   ⏸ Por qué no entra: <i>sin cash ejecutable; requiere funding o swap</i>
+   🎯 Revalidar: Revalidar al abrir: Esperar funding o evaluar swap.
+"""
+
+    detailed = compact_radar_report(report, max_items=8, detailed=True)
+
+    assert "Radar detallado · próxima apertura" in detailed
+    assert "<b>AMZN</b>" in detailed
+    assert "<b>SE</b>" in detailed
+    assert detailed.index("<b>SE</b>") < detailed.index("<b>AMZN</b>")
+    assert "Score operativo" in detailed
+    assert "Por qué entra:" not in detailed
+    assert "/radar_full" not in detailed
+    assert "/ticker TICKER" in detailed
+    assert len(detailed) < 3900
+
+
 def test_exploratory_keyboard_skips_rejected_candidates():
     keyboard = _radar_exploratory_keyboard({
         "candidates": [

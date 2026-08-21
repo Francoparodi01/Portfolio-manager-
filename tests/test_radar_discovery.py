@@ -670,3 +670,17 @@ def test_assign_configured_snapshot_owner_preserves_explicit_owner():
     _assign_configured_snapshot_owner(snapshot, "77")
 
     assert snapshot.owner_chat_id == 88
+
+
+def test_opportunity_universe_excludes_non_ticker_market_labels():
+    from scripts.run_opportunity import _filter_operable_cocos_assets
+
+    valid, invalid = _filter_operable_cocos_assets([
+        {"ticker": "NVDA", "asset_type": "CEDEAR"},
+        {"ticker": "BA.C", "asset_type": "ACCION"},
+        {"ticker": "C.", "asset_type": "ACCION"},
+        {"ticker": "ETF", "asset_type": "CEDEAR"},
+    ])
+
+    assert [row["ticker"] for row in valid] == ["NVDA", "BA.C"]
+    assert invalid == ["C.", "ETF"]
