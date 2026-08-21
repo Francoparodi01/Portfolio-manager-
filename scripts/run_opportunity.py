@@ -36,7 +36,7 @@ from src.core.logger import get_logger
 from src.core.market_calendar import is_trading_day
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
-from src.collector.cocos_history import candles_to_frame
+from src.collector.cocos_history import candles_to_frame, overlay_compatible_volume
 from src.collector.portfolio_quality import (
     normalize_positions_with_fresh_market_prices,
     price_discrepancy_warnings,
@@ -262,7 +262,14 @@ async def _load_cocos_universe_assets(cfg) -> list[dict]:
         await db.close()
 
 
-async def _load_cocos_history_frames(cfg, assets: list[dict], limit: int = 260) -> dict:
+async def _load_cocos_history_frames(
+    cfg,
+    assets: list[dict],
+    limit: int = 260,
+    *,
+    volume_overlay_source: str | None = None,
+    volume_overlay_max_close_difference: float = 0.05,
+) -> dict:
     frames: dict = {}
     db = PortfolioDatabase(cfg.database.url)
     await db.connect()
@@ -277,6 +284,20 @@ async def _load_cocos_history_frames(cfg, assets: list[dict], limit: int = 260) 
                     limit=limit,
                 )
             frame = candles_to_frame(rows)
+            if volume_overlay_source and not frame.empty:
+                async with semaphore:
+                    volume_rows = await db.get_market_candles(
+                        asset["ticker"],
+                        asset_type=asset.get("asset_type"),
+                        source=volume_overlay_source,
+                        limit=limit,
+                    )
+                frame = overlay_compatible_volume(
+                    frame,
+                    candles_to_frame(volume_rows),
+                    source=volume_overlay_source,
+                    max_close_difference=volume_overlay_max_close_difference,
+                )
             return (asset["ticker"], frame) if len(frame) >= 60 else None
 
         loaded = await asyncio.gather(*(_load_one(asset) for asset in assets))
@@ -847,6 +868,13 @@ async def _capture_radar_discovery(
         shadow_contexts=discovery_shadow_contexts,
         capture_discovery=True,
     )
+    shadow_history_frames = await _load_cocos_history_frames(
+        cfg,
+        discovery_assets,
+        limit=260,
+        volume_overlay_source="TRADINGVIEW_BYMA",
+        volume_overlay_max_close_difference=0.05,
+    )
     selected_tickers = [
         str(candidate.ticker).upper()
         for candidate in (getattr(operational_report, "candidates", []) or [])
@@ -858,7 +886,7 @@ async def _capture_radar_discovery(
         owner_chat_id=owner_chat_id,
         report=discovery_report,
         universe=discovery_universe,
-        history_frames=all_history_frames,
+        history_frames=shadow_history_frames,
         asset_types=discovery_asset_types,
         portfolio_tickers=portfolio_tickers,
         selected_tickers=selected_tickers,

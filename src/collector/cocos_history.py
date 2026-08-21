@@ -158,3 +158,69 @@ def candles_to_frame(candles):
     frame.attrs["candle_source_counts"] = source_counts
     frame.attrs["has_reconstructed_candles"] = "internal_snapshot" in sources
     return frame
+
+
+def overlay_compatible_volume(
+    primary_frame,
+    volume_frame,
+    *,
+    source: str = "TRADINGVIEW_BYMA",
+    max_close_difference: float = 0.05,
+):
+    """Fill missing volume without replacing canonical OHLC values.
+
+    The overlay is accepted only for the same local-market session and when the
+    two closes agree within the configured tolerance. This rejects adjusted or
+    mismatched series while preserving an auditable volume-source summary.
+    """
+    if primary_frame is None or primary_frame.empty:
+        return primary_frame
+
+    result = primary_frame.copy()
+    result.attrs = dict(getattr(primary_frame, "attrs", {}) or {})
+    primary_sources = result.get("Source")
+    volume_source_by_day = {
+        index.date(): str(primary_sources.loc[index] if primary_sources is not None else "UNKNOWN")
+        for index in result.index
+    }
+    accepted = 0
+    rejected_price_mismatch = 0
+    rejected_missing_match = 0
+
+    if volume_frame is not None and not volume_frame.empty:
+        volume_by_day = {
+            index.date(): row
+            for index, row in volume_frame.sort_index().iterrows()
+        }
+        for index, row in result.iterrows():
+            current_volume = float(row.get("Volume") or 0.0)
+            if current_volume > 0:
+                continue
+            fallback = volume_by_day.get(index.date())
+            if fallback is None:
+                rejected_missing_match += 1
+                continue
+            fallback_volume = float(fallback.get("Volume") or 0.0)
+            primary_close = float(row.get("Close") or 0.0)
+            fallback_close = float(fallback.get("Close") or 0.0)
+            if fallback_volume <= 0 or primary_close <= 0 or fallback_close <= 0:
+                rejected_missing_match += 1
+                continue
+            close_difference = abs((fallback_close / primary_close) - 1.0)
+            if close_difference > float(max_close_difference):
+                rejected_price_mismatch += 1
+                continue
+            result.at[index, "Volume"] = fallback_volume
+            volume_source_by_day[index.date()] = source
+            accepted += 1
+
+    source_counts: dict[str, int] = {}
+    for value in volume_source_by_day.values():
+        source_counts[value] = source_counts.get(value, 0) + 1
+    result.attrs["volume_source_counts"] = source_counts
+    result.attrs["volume_overlay_source"] = source
+    result.attrs["volume_overlay_rows"] = accepted
+    result.attrs["volume_overlay_max_close_difference"] = float(max_close_difference)
+    result.attrs["volume_overlay_rejected_price_mismatch"] = rejected_price_mismatch
+    result.attrs["volume_overlay_rejected_missing_match"] = rejected_missing_match
+    return result

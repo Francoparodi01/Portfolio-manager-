@@ -30,6 +30,13 @@ Ademas requiere `--capture-discovery`, que agrega el scheduler de 16:50; el
 flag de entorno por si solo no convierte una ejecucion manual comun en evidencia
 prospectiva.
 
+El Ledger puede completar exclusivamente el volumen shadow con
+`TRADINGVIEW_BYMA` cuando la vela canónica no trae volumen. Ese overlay no
+reemplaza OHLC: exige la misma rueda, volumen positivo y una diferencia entre
+cierres no mayor a 5%. El origen y la cantidad de filas completadas quedan
+congelados en `setup_features`; el overlay no se entrega al screener ni al
+ranking operativo.
+
 ## Fuentes reutilizadas
 
 - `market_candles`: fuente canonica para outcomes por ruedas y drawdown.
@@ -126,6 +133,14 @@ confirmacion de volumen. A las 16:40 el texto se presenta como validacion para
 la proxima rueda, no como invitacion a perseguir el cierre.
 La primera accion `Seguir`/`Descartar` queda congelada; un segundo boton no
 reescribe la eleccion original.
+
+`TRADINGVIEW_BYMA_REFRESH_ENABLED=true` agrega un refresco diario fail-soft a
+las 18:00 ART para dejar OHLCV local BYMA disponible para la captura shadow de
+la rueda siguiente. Usa 40 ruedas por defecto y no abre Cocos. En la lectura
+canónica vigente, Cocos conserva prioridad; TradingView tiene prioridad sobre
+velas `internal_snapshot` reconstruidas y por eso también puede mejorar la
+entrada técnica del Radar operativo. Los aliases o instrumentos sin historia
+suficiente continúan marcados `PARTIAL`/`INSUFFICIENT`.
 
 Si despues de `Seguir` aparece un fill real `BUY`, se vincula solo cuando
 coinciden usuario, ticker y secuencia temporal dentro de la ventana. El fill

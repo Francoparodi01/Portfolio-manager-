@@ -86,6 +86,36 @@ def test_missing_volume_never_earns_compression_points():
     assert "volume_contraction_ratio" not in result["MISSING"].features
 
 
+def test_tradingview_volume_overlay_is_explicit_in_shadow_evidence():
+    sessions = 240
+    prices = [100 + index * 0.02 for index in range(sessions)]
+    overlaid = _frame(prices)
+    overlaid.attrs.update({
+        "volume_source_counts": {
+            "COCOS": 220,
+            "TRADINGVIEW_BYMA": 20,
+        },
+        "volume_overlay_rows": 20,
+        "volume_overlay_source": "TRADINGVIEW_BYMA",
+        "volume_overlay_max_close_difference": 0.05,
+    })
+
+    result = build_radar_setup_shadow_universe(
+        tickers=["OVERLAID", "QQQ", "SPY"],
+        history_frames={
+            "OVERLAID": overlaid,
+            "QQQ": _frame(prices),
+            "SPY": _frame(prices),
+        },
+        asset_types={"OVERLAID": "CEDEAR"},
+    )["OVERLAID"]
+
+    assert result.feature_quality_flag == "GOOD"
+    assert "volume_fallback_tradingview_byma" in result.warnings
+    assert result.features["volume_overlay_rows"] == 20
+    assert result.features["volume_source_counts"]["TRADINGVIEW_BYMA"] == 20
+
+
 def test_setup_event_requires_unambiguous_first_touch():
     reference = datetime(2026, 8, 20, tzinfo=timezone.utc)
     candles = [

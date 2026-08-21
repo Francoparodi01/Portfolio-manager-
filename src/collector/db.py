@@ -2125,6 +2125,7 @@ class PortfolioDatabase:
         ticker: str,
         *,
         asset_type: Optional[str] = None,
+        source: Optional[str] = None,
         interval: str = "1d",
         limit: Optional[int] = None,
     ) -> list[dict]:
@@ -2137,6 +2138,10 @@ class PortfolioDatabase:
         if asset_type:
             params.append(asset_type.upper())
             filters.append(f"asset_type = ${len(params)}")
+
+        if source:
+            params.append(source.strip())
+            filters.append(f"source = ${len(params)}")
 
         limit_sql = ""
         if limit is not None:

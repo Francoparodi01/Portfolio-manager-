@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import run_opportunity
+from scripts.backfill_tradingview_byma import _tv_symbol
+from src.collector.cocos_history import candles_to_frame, overlay_compatible_volume
 
 
 def _rows(count: int):
@@ -42,6 +44,19 @@ class _FakeDatabase:
 
     async def get_market_candles(self, ticker, **_kwargs):
         return _rows(60 if ticker == "T" else 20)
+
+
+class _VolumeOverlayDatabase(_FakeDatabase):
+    calls = []
+
+    async def get_market_candles(self, ticker, **kwargs):
+        self.calls.append((ticker, dict(kwargs)))
+        rows = _rows(60)
+        source = kwargs.get("source")
+        for row in rows:
+            row["source"] = source or "internal_snapshot"
+            row["volume"] = 5_000 if source == "TRADINGVIEW_BYMA" else 0
+        return rows
 
 
 class _RadarConn:
@@ -106,6 +121,10 @@ def test_load_cocos_universe_assets_from_db():
     ]
 
 
+def test_tradingview_keeps_dotted_ba_symbol_instead_of_bac_alias():
+    assert _tv_symbol("BA.C") == "BYMA:BA.C"
+
+
 def test_load_cocos_history_frames_for_opportunities_requires_sufficient_history():
     cfg = SimpleNamespace(database=SimpleNamespace(url="postgresql://unused"))
     assets = [
@@ -117,6 +136,84 @@ def test_load_cocos_history_frames_for_opportunities_requires_sufficient_history
         frames = asyncio.run(run_opportunity._load_cocos_history_frames(cfg, assets))
 
     assert list(frames) == ["T"]
+
+
+def test_load_shadow_history_uses_source_scoped_volume_overlay():
+    cfg = SimpleNamespace(database=SimpleNamespace(url="postgresql://unused"))
+    _VolumeOverlayDatabase.calls = []
+
+    with patch("scripts.run_opportunity.PortfolioDatabase", _VolumeOverlayDatabase):
+        frames = asyncio.run(run_opportunity._load_cocos_history_frames(
+            cfg,
+            [{"ticker": "T", "asset_type": "CEDEAR"}],
+            volume_overlay_source="TRADINGVIEW_BYMA",
+        ))
+
+    assert [call[1].get("source") for call in _VolumeOverlayDatabase.calls] == [
+        None,
+        "TRADINGVIEW_BYMA",
+    ]
+    assert frames["T"].tail(20)["Volume"].gt(0).all()
+    assert frames["T"].attrs["volume_overlay_rows"] == 60
+
+
+def test_volume_overlay_preserves_ohlc_and_accepts_compatible_same_day_volume():
+    primary = candles_to_frame([{
+        "ts": datetime(2026, 8, 19, tzinfo=timezone.utc),
+        "open_price": 100,
+        "high_price": 105,
+        "low_price": 98,
+        "close_price": 102,
+        "volume": 0,
+        "source": "internal_snapshot",
+    }])
+    tradingview = candles_to_frame([{
+        "ts": datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc),
+        "open_price": 100.5,
+        "high_price": 105.5,
+        "low_price": 98.5,
+        "close_price": 102.5,
+        "volume": 12_345,
+        "source": "TRADINGVIEW_BYMA",
+    }])
+
+    result = overlay_compatible_volume(primary, tradingview)
+
+    assert result.iloc[0]["Open"] == 100
+    assert result.iloc[0]["High"] == 105
+    assert result.iloc[0]["Low"] == 98
+    assert result.iloc[0]["Close"] == 102
+    assert result.iloc[0]["Volume"] == 12_345
+    assert result.iloc[0]["Source"] == "internal_snapshot"
+    assert result.attrs["volume_overlay_rows"] == 1
+    assert result.attrs["volume_source_counts"] == {"TRADINGVIEW_BYMA": 1}
+
+
+def test_volume_overlay_rejects_adjusted_or_mismatched_price_series():
+    primary = candles_to_frame([{
+        "ts": datetime(2026, 8, 19, tzinfo=timezone.utc),
+        "open_price": 100,
+        "high_price": 105,
+        "low_price": 98,
+        "close_price": 102,
+        "volume": 0,
+        "source": "internal_snapshot",
+    }])
+    adjusted = candles_to_frame([{
+        "ts": datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc),
+        "open_price": 10,
+        "high_price": 10.5,
+        "low_price": 9.8,
+        "close_price": 10.2,
+        "volume": 99_999,
+        "source": "TRADINGVIEW_BYMA",
+    }])
+
+    result = overlay_compatible_volume(primary, adjusted)
+
+    assert result.iloc[0]["Volume"] == 0
+    assert result.attrs["volume_overlay_rows"] == 0
+    assert result.attrs["volume_overlay_rejected_price_mismatch"] == 1
 
 
 def test_intraday_samples_append_provisional_candle_only_on_trading_day():

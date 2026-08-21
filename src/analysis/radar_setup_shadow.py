@@ -257,6 +257,18 @@ def _extract_point_in_time_features(
     low = normalized.get("low")
     volume = normalized.get("volume")
     features["history_sessions"] = len(normalized)
+    frame_attrs = dict(getattr(frame, "attrs", {}) or {})
+    volume_source_counts = dict(frame_attrs.get("volume_source_counts") or {})
+    volume_overlay_rows = int(frame_attrs.get("volume_overlay_rows") or 0)
+    if volume_source_counts:
+        features["volume_source_counts"] = volume_source_counts
+    if volume_overlay_rows > 0:
+        features["volume_overlay_rows"] = volume_overlay_rows
+        features["volume_overlay_source"] = frame_attrs.get("volume_overlay_source")
+        features["volume_overlay_max_close_difference"] = frame_attrs.get(
+            "volume_overlay_max_close_difference"
+        )
+        features["warnings"].append("volume_fallback_tradingview_byma")
     features["close"] = _last(close)
     features["momentum_20"] = _return_over(close, 20)
     features["momentum_60"] = _return_over(close, 60)

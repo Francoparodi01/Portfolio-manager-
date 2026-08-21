@@ -166,6 +166,15 @@ RADAR_INTRADAY_SETUP_COOLDOWN_DAYS = int(
 RADAR_INTRADAY_SETUP_MAX_ALERTS = int(
     os.getenv("RADAR_INTRADAY_SETUP_MAX_ALERTS", "3")
 )
+TRADINGVIEW_BYMA_REFRESH_ENABLED = os.getenv(
+    "TRADINGVIEW_BYMA_REFRESH_ENABLED", "false"
+).lower() == "true"
+TRADINGVIEW_BYMA_REFRESH_BARS = int(
+    os.getenv("TRADINGVIEW_BYMA_REFRESH_BARS", "40")
+)
+TRADINGVIEW_BYMA_REFRESH_PAUSE_SECONDS = float(
+    os.getenv("TRADINGVIEW_BYMA_REFRESH_PAUSE_SECONDS", "0.2")
+)
 LEARNING_SHADOW_LOOKBACK_DAYS = int(os.getenv("LEARNING_SHADOW_LOOKBACK_DAYS", "365"))
 LEARNING_SHADOW_MATERIAL_RETURN_BPS = int(
     os.getenv("LEARNING_SHADOW_MATERIAL_RETURN_BPS", "75")
@@ -1658,6 +1667,67 @@ async def run_radar_audit_capture() -> None:
         logger.error("radar_audit_capture timeout")
     except Exception as exc:
         logger.error("radar_audit_capture fallo: %s", exc, exc_info=True)
+
+
+async def run_tradingview_byma_refresh() -> dict[str, Any]:
+    """Refresh local BYMA OHLCV for the next Radar shadow capture."""
+    result: dict[str, Any] = {"status": "SKIPPED", "enabled": False}
+    if not TRADINGVIEW_BYMA_REFRESH_ENABLED:
+        return result
+    result["enabled"] = True
+    if not _is_business_day():
+        result["reason"] = market_closed_reason() or "mercado cerrado"
+        return result
+
+    cmd = [
+        sys.executable,
+        "scripts/backfill_tradingview_byma.py",
+        "--all",
+        "--bars",
+        str(max(TRADINGVIEW_BYMA_REFRESH_BARS, 20)),
+        "--pause-s",
+        str(max(TRADINGVIEW_BYMA_REFRESH_PAUSE_SECONDS, 0.0)),
+        "--output-dir",
+        "/tmp/tradingview_byma_daily",
+    ]
+    logger.info("tradingview_byma_refresh iniciando")
+    started = time.perf_counter()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1200)
+        output = stdout.decode("utf-8", errors="replace")
+        error_output = stderr.decode("utf-8", errors="replace")
+        summary = (output.strip().splitlines() or [""])[-1]
+        error_match = re.search(r"\berrors=(\d+)\b", summary)
+        symbol_errors = int(error_match.group(1)) if error_match else None
+        status = "OK" if proc.returncode == 0 else "ERROR"
+        if status == "OK" and symbol_errors:
+            status = "PARTIAL"
+        result.update(
+            status=status,
+            returncode=proc.returncode,
+            duration_seconds=round(time.perf_counter() - started, 2),
+            summary=summary,
+            symbol_errors=symbol_errors,
+        )
+        if proc.returncode != 0:
+            result["error"] = error_output[-1200:]
+            logger.error("tradingview_byma_refresh fallo: %s", result)
+        elif status == "PARTIAL":
+            logger.warning("tradingview_byma_refresh parcial: %s", result)
+        else:
+            logger.info("tradingview_byma_refresh OK: %s", result)
+    except asyncio.TimeoutError:
+        result.update(status="ERROR", error="timeout_1200s")
+        logger.error("tradingview_byma_refresh timeout")
+    except Exception as exc:
+        result.update(status="ERROR", error=str(exc))
+        logger.error("tradingview_byma_refresh fallo: %s", exc, exc_info=True)
+    return result
 
 
 def _snapshot_age_seconds(snapshot: dict, now: datetime | None = None) -> float | None:
@@ -3583,6 +3653,16 @@ async def _scheduler_main() -> None:
             max_instances=1,
             replace_existing=True,
         )
+    if TRADINGVIEW_BYMA_REFRESH_ENABLED:
+        scheduler.add_job(
+            run_tradingview_byma_refresh,
+            _business_day_cron(hour=18, minute=0),
+            id="tradingview_byma_refresh",
+            name="TradingView BYMA OHLCV refresh 18:00 ART",
+            misfire_grace_time=1800,
+            max_instances=1,
+            replace_existing=True,
+        )
     scheduler.add_job(
         run_update_outcomes,
         _business_day_cron(hour=21, minute=30),
@@ -3638,9 +3718,10 @@ async def _scheduler_main() -> None:
     scheduler.start()
     await start_intraday_loops()
     logger.info(
-        "Scheduler activo: sesion Cocos persistente; 10:31 apertura portfolio; mercado 10:40/12:00/16:40/17:02; 10:45 post-open; 16:15/16:45 preclose alerts; radar audit 16:50=%s; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
+        "Scheduler activo: sesion Cocos persistente; 10:31 apertura portfolio; mercado 10:40/12:00/16:40/17:02; 10:45 post-open; 16:15/16:45 preclose alerts; radar audit 16:50=%s; 17:05 candles; 17:10 verify; 17:12 analysis; 17:18 thesis shadow; TradingView 18:00=%s; 21:30 outcomes; 21:40 learning shadow; sentiment context=%s; thesis shadow=%s; learning shadow=%s; issuer events=%s"
         % (
             "on" if RADAR_AUDIT_CAPTURE_ENABLED else "off",
+            "on" if TRADINGVIEW_BYMA_REFRESH_ENABLED else "off",
             "on" if SENTIMENT_PIPELINE_ENABLED else "off",
             "on" if THESIS_SHADOW_ENABLED else "off",
             "on" if LEARNING_SHADOW_ENABLED else "off",
