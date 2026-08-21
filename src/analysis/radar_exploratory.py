@@ -86,34 +86,51 @@ class RadarExploratoryCandidate:
 def parse_compact_radar_candidates(report: str) -> list[RadarExploratoryCandidate]:
     """Parse the exact compact report shown to the user."""
     text = str(report or "")
-    item_pattern = re.compile(
+    legacy_pattern = re.compile(
         r"(?m)^(?P<rank>\d+)\.\s+.*?<b>(?P<ticker>[A-Z0-9.\-]+)</b>\s+"
         r"\|\s+score\s+<code>(?P<score>[^<]+)</code>\s+"
         r"\|\s+edge\s+<code>(?P<edge>[^<]+)</code>\s+"
         r"\|\s+R/R\s+(?P<rr>[^\s]+)x\s*$"
     )
-    matches = list(item_pattern.finditer(text))
+    modern_pattern = re.compile(
+        r"(?m)^(?P<rank>\d+)\.\s+.*?<b>(?P<ticker>[A-Z0-9.\-]+)</b>\s+·\s+"
+        r"V3\s+<b>(?P<tier>[^<]+)</b>\s+\((?P<classification>[^)]+)\)\s*$"
+        r"\n\s+Señal\s+<code>(?P<score>[^<]+)</code>\s+·\s+"
+        r"R/R\s+<code>(?P<rr>[^<]+)</code>\s*$"
+    )
+    matches = list(legacy_pattern.finditer(text))
+    modern = False
+    if not matches:
+        matches = list(modern_pattern.finditer(text))
+        modern = True
     candidates: list[RadarExploratoryCandidate] = []
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         block = text[match.start():end]
-        v3_match = re.search(
-            r"Compra V3:\s*<b>([^<]+)</b>\s*·\s*([^·\n]+)",
-            block,
+        v3_match = None if modern else re.search(
+            r"Compra V3:\s*<b>([^<]+)</b>\s*·\s*([^·\n]+)", block
         )
         action_match = re.search(
-            r"(?:Idea radar|Revalidar idea):\s*(.+)",
+            r"(?:Idea radar|Revalidar idea|Próximo paso):\s*(.+)",
             block,
+        )
+        tier = match.group("tier") if modern else (
+            v3_match.group(1) if v3_match else None
+        )
+        if tier and tier.strip().upper() == "RECHAZADA":
+            tier = "REJECTED"
+        classification = match.group("classification") if modern else (
+            v3_match.group(2) if v3_match else None
         )
         candidates.append(
             RadarExploratoryCandidate(
                 ticker=match.group("ticker").upper(),
                 rank_position=int(match.group("rank")),
                 radar_score=_optional_float(match.group("score")),
-                edge=_optional_float(match.group("edge")),
+                edge=(None if modern else _optional_float(match.group("edge"))),
                 risk_reward=_optional_float(match.group("rr")),
-                v3_tier=(v3_match.group(1).strip().upper() if v3_match else None),
-                v3_classification=(v3_match.group(2).strip() if v3_match else None),
+                v3_tier=(tier.strip().upper() if tier else None),
+                v3_classification=(classification.strip() if classification else None),
                 action_text=(action_match.group(1).strip() if action_match else None),
                 evidence={"rendered_block": block.strip()},
             )
@@ -397,7 +414,7 @@ def _aware(value: datetime) -> datetime:
 
 def _optional_float(value: Any) -> float | None:
     try:
-        raw = str(value).strip().replace(",", ".")
+        raw = str(value).strip().replace(",", ".").removesuffix("x")
         if raw in {"", "—", "-", "n/d"}:
             return None
         return float(raw)

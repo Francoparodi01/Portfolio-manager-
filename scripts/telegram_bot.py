@@ -1513,17 +1513,123 @@ async def action_radar_metrics(
     await send_text(context, chat_id, report)
 
 
-def compact_radar_report(report: str, max_items: int = 6) -> str:
-    """
-    Compacta el radar largo para Telegram.
-    No recalcula nada: extrae bloques principales del texto renderizado.
-    """
-    import re
+def _short_radar_reason(value: str) -> str:
+    text = str(value or "").strip().strip(".")
+    text = re.sub(r"^Revalidar al abrir:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\. No ejecutar ahora con mercado cerrado\.?$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    replacements = (
+        (r"convicción (\d+)% < umbral", r"convicción todavía baja (\1%)"),
+        (r"sin cash ejecutable", "no hay efectivo disponible"),
+        (r"requiere funding o swap", "requiere fondeo o swap"),
+        (r"\bfunding\b", "fondeo"),
+        (r"score [+-]?\d+(?:\.\d+)? < umbral operativo", "señal debajo del mínimo operativo"),
+        (r"no supera a cartera actual \(edge [^)]+\)", "no mejora la cartera actual"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text.strip().strip(".")
 
+
+def _radar_report_items(text: str) -> list[dict]:
+    items: list[dict] = []
+    compact_pattern = re.compile(
+        r"(?m)^\s{2}(?P<ticker>[A-Z0-9.\-]+):\s+"
+        r"score\s+(?P<score>[+-]?\d+(?:\.\d+)?)\s+\|\s+"
+        r"conv\.\s+(?P<conviction>\d+)%\s+\|\s+"
+        r"R/R\s+(?P<rr>[0-9.]+x|⚠️)\s+\|\s+"
+        r"\$(?P<price>[0-9.]+)"
+        r"(?:\s+\|\s+edge\s+(?P<edge>[+-]?\d+(?:\.\d+)?))?"
+    )
+    matches = list(compact_pattern.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        block = text[match.start():end]
+        buy_v3 = re.search(
+            r"Compra técnica V3:\s*([^\s·]+)\s*·\s*([^·\n]+)",
+            block,
+        )
+        shadow = re.search(r"🔬 Shadow:\s*([A-ZÁÉÍÓÚÑ ]+)\s*—\s*(.+)", block)
+        reversion = re.search(r"↩️ Reversión:\s*(.+)", block)
+        prior_radar = re.search(r"📊 Última idea radar\s*(.+)", block)
+        why_not = re.search(r"⏸ Por qué no entra:\s*(.+)", block)
+        action = re.search(
+            r"🎯 (?:Lectura radar|Acción|Revalidar|Revalidación requerida):\s*(.+)",
+            block,
+        )
+        relative_strength = re.search(r"└\s*(RS[^\n]+)", block)
+        rr_value = match.group("rr").removesuffix("x")
+        items.append({
+            "ticker": match.group("ticker"),
+            "score": match.group("score"),
+            "rr": rr_value,
+            "edge": match.group("edge") or "—",
+            "conviction": match.group("conviction"),
+            "action": _short_radar_reason(action.group(1)) if action else "Revisar al abrir",
+            "why_not": _short_radar_reason(why_not.group(1)) if why_not else "",
+            "shadow_label": shadow.group(1).strip() if shadow else "",
+            "buy_v3_tier": buy_v3.group(1).strip().upper() if buy_v3 else "-",
+            "buy_v3_classification": buy_v3.group(2).strip() if buy_v3 else "sin clasificación",
+            "reversion": reversion.group(1).strip() if reversion else "",
+            "prior_radar": prior_radar.group(1).strip() if prior_radar else "",
+            "relative_strength": relative_strength.group(1).strip() if relative_strength else "",
+        })
+    if items:
+        return items
+
+    ticker_blocks = re.split(r"\n(?=━━\s+[A-Z0-9.-]+\s+━━)", text)
+    for block in ticker_blocks:
+        title = re.search(r"━━\s+([A-Z0-9.-]+)\s+━━\s*(.*)", block)
+        if not title:
+            continue
+        ticker = title.group(1).strip()
+        title_tail = title.group(2).strip()
+        score = re.search(r"Score:\s*([+-]?\d+\.\d+)", block)
+        rr = re.search(r"R/R\s*([0-9.]+)x", block)
+        edge = re.search(r"Edge:\s*[🟢🟡🟠🔴]?\s*([+-]?\d+\.\d+)", block)
+        shadow = re.search(r"🔬 Shadow:\s*([A-ZÁÉÍÓÚÑ ]+)\s*—\s*(.+)", block)
+        buy_v3 = re.search(
+            r"Compra técnica V3:\s*([^\s·<]+)\s*·\s*([^·\n]+)",
+            block,
+        )
+        reversion = re.search(r"↩️ Reversión:\s*(.+)", block)
+        prior_radar = re.search(r"📊 Última idea radar\s*(.+)", block)
+        action = re.search(
+            r"🎯 (?:Lectura radar|Acción sugerida|Revalidación requerida):\s*(.+)",
+            block,
+        )
+        compete = re.search(r"Compite con:\s*([A-Z0-9.-]+)", block)
+        action_text = _short_radar_reason(action.group(1)) if action else "Revisar setup"
+        if compete and "vs " not in action_text.lower():
+            action_text += f" frente a {compete.group(1)}"
+        classification = "swap" if "SWAP" in title_tail.upper() else "idea técnica"
+        items.append({
+            "ticker": ticker,
+            "score": score.group(1) if score else "—",
+            "rr": rr.group(1) if rr else "—",
+            "edge": edge.group(1) if edge else "—",
+            "conviction": "—",
+            "action": action_text,
+            "why_not": "",
+            "shadow_label": shadow.group(1).strip() if shadow else "",
+            "buy_v3_tier": buy_v3.group(1).strip().upper() if buy_v3 else "-",
+            "buy_v3_classification": buy_v3.group(2).strip() if buy_v3 else classification,
+            "reversion": reversion.group(1).strip() if reversion else "",
+            "prior_radar": prior_radar.group(1).strip() if prior_radar else "",
+            "relative_strength": "",
+        })
+    return items
+
+
+def compact_radar_report(report: str, max_items: int = 5) -> str:
+    """Resume el reporte técnico sin recalcular ranking ni señales."""
     if not report:
         return "⚠️ Radar sin output."
 
-    # Preservar el bloque de catalysts manuales antes de compactar el radar.
     event_prefix: list[str] = []
     raw_lines = report.splitlines()
     for idx, line in enumerate(raw_lines):
@@ -1538,159 +1644,122 @@ def compact_radar_report(report: str, max_items: int = 6) -> str:
                 j += 1
             break
 
-    # Sacar tags HTML simples para parsear más fácil, pero mantener texto legible.
-    text = report
-    text = re.sub(r"</?b>", "", text)
-    text = re.sub(r"</?i>", "", text)
-    text = re.sub(r"</?code>", "", text)
+    text = re.sub(r"</?(?:b|i|code)>", "", report)
     text = text.replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
+    items = _radar_report_items(text)
+    if not items:
+        return report
 
     universe_match = re.search(r"^🔍 Universo:\s*(.+)$", text, re.MULTILINE)
-    gate_match = re.search(r"^(?:✅|⚠️|🔴|⚪)\s*(?:Gate|Estado operativo):\s*(.+)$", text, re.MULTILINE)
-    vix_match = re.search(r"^\s*VIX:\s*([0-9.]+)$", text, re.MULTILINE)
-
-    universe = universe_match.group(1).strip() if universe_match else "—"
+    gate_match = re.search(
+        r"^(?:✅|⚠️|🔴|⚪)\s*(?:Gate|Estado operativo):\s*(.+)$",
+        text,
+        re.MULTILINE,
+    )
+    cash_match = re.search(r"^💵 Cash libre:\s*(.+)$", text, re.MULTILINE)
+    universe_text = universe_match.group(1).strip() if universe_match else "universo disponible"
+    universe_count = re.search(r"(\d+)\s+tickers", universe_text)
     gate = gate_match.group(1).strip() if gate_match else "—"
-    vix = vix_match.group(1).strip() if vix_match else "—"
+    cash = cash_match.group(1).strip() if cash_match else "—"
     market_open_now = (
         _is_business_day_now()
         and _is_market_hours_now()
         and _market_closed_reason_now() is None
     )
-    market_closed = (
-        "Mercado cerrado/sin rueda" in text
-        or "Candidato para próxima rueda" in text
-        or not market_open_now
+    market_closed = "Mercado cerrado/sin rueda" in text or not market_open_now
+    only_watch = (
+        "En vigilancia" in text
+        and "Comprable ahora" not in text
+        and "Compra habilitada" not in text
+        and "Candidato para próxima rueda" not in text
     )
 
-    # Detectar bloques por ticker: líneas tipo "━━ KKR ━━ ..."
-    ticker_blocks = re.split(r"\n(?=━━\s+[A-Z0-9.-]+\s+━━)", text)
+    def _priority(item: dict) -> tuple[int, float]:
+        tier_order = {"A": 0, "B": 1, "C": 2, "-": 3, "REJECTED": 4}
+        try:
+            score_value = float(item["score"])
+        except (TypeError, ValueError):
+            score_value = -999.0
+        return tier_order.get(item["buy_v3_tier"], 3), -score_value
 
-    items = []
-
-    for block in ticker_blocks:
-        title = re.search(r"━━\s+([A-Z0-9.-]+)\s+━━\s*(.*)", block)
-        if not title:
-            continue
-
-        ticker = title.group(1).strip()
-        title_tail = title.group(2).strip()
-
-        score = re.search(r"Score:\s*([+-]?\d+\.\d+)", block)
-        rr = re.search(r"R/R\s*([0-9.]+)x", block)
-        edge = re.search(r"Edge:\s*[🟢🟡🟠🔴]?\s*([+-]?\d+\.\d+)", block)
-        sizing_ars = re.search(r"≈\s*\$([0-9.]+)\s*ARS", block)
-        shadow = re.search(r"🔬 Shadow:\s*([A-ZÁÉÍÓÚÑ ]+)\s*—\s*(.+)", block)
-        buy_v3 = re.search(
-            r"Compra técnica V3:\s*([^\s·<]+)\s*·\s*([^·\n]+)",
-            block,
-        )
-        reversion = re.search(r"↩️ Reversión:\s*(.+)", block)
-        prior_radar = re.search(r"📊 Última idea radar\s*(.+)", block)
-        action = re.search(
-            r"🎯 (?:Lectura radar|Acción sugerida|Revalidación requerida):\s*(.+)",
-            block,
-        )
-        compete = re.search(r"Compite con:\s*([A-Z0-9.-]+)", block)
-
-        tag = "🆕"
-        if "SWAP" in title_tail.upper():
-            tag = "🔄"
-        elif "VIGILANCIA" in title_tail.upper():
-            tag = "👁"
-
-        action_text = action.group(1).strip() if action else "—"
-
-        if compete and "vs " not in action_text.lower():
-            action_text += f" ({compete.group(1)})"
-
-        items.append({
-            "ticker": ticker,
-            "tag": tag,
-            "score": score.group(1) if score else "—",
-            "rr": rr.group(1) if rr else "—",
-            "edge": edge.group(1) if edge else "—",
-            "ars": sizing_ars.group(1) if sizing_ars else "—",
-            "action": action_text,
-            "shadow_label": shadow.group(1).strip() if shadow else "",
-            "shadow_note": shadow.group(2).strip() if shadow else "",
-            "buy_v3_tier": buy_v3.group(1).strip() if buy_v3 else "",
-            "buy_v3_classification": buy_v3.group(2).strip() if buy_v3 else "",
-            "reversion": reversion.group(1).strip() if reversion else "",
-            "prior_radar": prior_radar.group(1).strip() if prior_radar else "",
-        })
-
-    if not items:
-        return report
-
-    top = items[:max_items]
-
-    title = (
-        "🔭 <b>Radar para próxima rueda — compacto</b>"
-        if market_closed
-        else "🔭 <b>Radar de oportunidades — compacto</b>"
+    top = sorted(items, key=_priority)[:max(int(max_items), 1)]
+    universe_label = (
+        f"{universe_count.group(1)} analizados"
+        if universe_count
+        else universe_text
     )
-    top_title = (
-        "<b>Ideas para revalidar al abrir</b>"
-        if market_closed
-        else "<b>Top ideas</b>"
-    )
-
-    lines = []
+    title = "🔭 <b>Radar · próxima apertura</b>" if market_closed else "🔭 <b>Radar · ahora</b>"
+    lines: list[str] = []
     if event_prefix:
         lines.extend(event_prefix)
         lines.append("")
-
-    lines += [
+    lines.extend([
         title,
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"🔍 Universo: {universe}",
-        f"Gate: <b>{gate}</b> | VIX {vix}",
-    ]
-    if market_closed:
-        lines.append("Mercado cerrado/sin rueda: ideas no ejecutables hasta revalidar apertura.")
-    lines += [
-        "Nota: son ideas teóricas; solo /analisis puede convertirlas en un plan de cartera.",
+        f"{universe_label} · {len(items)} ideas detectadas · estado <b>{gate}</b>",
+        f"Cash disponible: <b>{cash}</b>",
+    ])
+    if only_watch:
+        lines.append("<b>Resultado:</b> no hay compras habilitadas; son ideas para seguimiento.")
+    elif market_closed:
+        lines.append("<b>Resultado:</b> revalidar precio y liquidez cuando abra el mercado.")
+    else:
+        lines.append("<b>Resultado:</b> el Radar detecta; /analisis decide si entra al plan.")
+    lines.extend([
+        "<i>V3 A = prioridad técnica. R/R = retorno potencial por unidad de riesgo; no es probabilidad.</i>",
         "",
-        top_title,
-    ]
+        "<b>Qué revisar primero</b>",
+    ])
 
-    for i, item in enumerate(top, start=1):
+    rejected_section_started = False
+    for index, item in enumerate(top, start=1):
+        tier = item["buy_v3_tier"]
+        rejected = tier == "REJECTED"
+        if rejected and not rejected_section_started:
+            lines.extend(["<b>No priorizar ahora</b>", ""])
+            rejected_section_started = True
+        icon = "⛔" if rejected else "🟡" if tier == "A" else "👁"
+        tier_label = "rechazada" if rejected else tier
+        classification = item["buy_v3_classification"]
         lines.append(
-            f"{i}. {item['tag']} <b>{item['ticker']}</b> "
-            f"| score <code>{item['score']}</code> "
-            f"| edge <code>{item['edge']}</code> "
-            f"| R/R {item['rr']}x"
+            f"{index}. {icon} <b>{item['ticker']}</b> · "
+            f"V3 <b>{tier_label}</b> ({classification})"
+        )
+        rr_display = (
+            f"{item['rr']}x"
+            if item["rr"] not in {"—", "⚠️", "n/d"}
+            else "n/d"
+        )
+        lines.append(
+            f"   Señal <code>{item['score']}</code> · "
+            f"R/R <code>{rr_display}</code>"
         )
 
-        if item["ars"] != "—":
-            sizing_label = "Sizing teórico aprox" if market_closed else "Sizing aprox"
-            lines.append(f"   💰 {sizing_label}: <b>${item['ars']} ARS</b>")
+        positives: list[str] = []
+        concerns: list[str] = []
+        if item["relative_strength"]:
+            positives.append(item["relative_strength"])
+        if item["why_not"]:
+            concerns.append(item["why_not"])
+        reversion = item["reversion"]
+        if "rebote alcista" in reversion.lower():
+            positives.append("posible rebote técnico")
+        elif "corrección bajista" in reversion.lower():
+            concerns.append("posible corrección de corto plazo")
+        if item["shadow_label"] and "DÉBIL" in item["shadow_label"].upper():
+            concerns.append("confirmación shadow débil")
+        if positives and not rejected:
+            lines.append(f"   A favor: {' · '.join(positives[:2])}")
+        if concerns:
+            label = "Motivo" if rejected else "Falta"
+            lines.append(f"   {label}: {'; '.join(concerns[:2])}")
+        if not rejected:
+            lines.append(f"   Próximo paso: {item['action']}")
+        lines.append("")
 
-        if item["shadow_label"]:
-            lines.append(f"   🔬 Shadow: <b>{item['shadow_label']}</b> — {item['shadow_note']}")
-
-        if item["buy_v3_tier"]:
-            lines.append(
-                "   Compra V3: "
-                f"<b>{item['buy_v3_tier']}</b> · "
-                f"{item['buy_v3_classification']} · 20d · shadow"
-            )
-
-        if item["reversion"]:
-            lines.append(f"   ↩️ Reversión: {item['reversion']}")
-        if item["prior_radar"]:
-            lines.append(f"   📊 Última idea radar {item['prior_radar']}")
-
-        action_prefix = "Revalidar idea" if market_closed else "Idea radar"
-        lines.append(f"   {action_prefix}: {item['action']}")
-
-    lines += [
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "<i>Usá /radar_full para ver detalle, fuentes y razones.</i>",
-    ]
-
+    lines.extend([
+        "<i>Seguir registra interés; no compra ni altera las métricas oficiales.</i>",
+        "<i>/radar_full muestra fuentes, histórico y cálculos completos.</i>",
+    ])
     return "\n".join(lines)
 
 
@@ -1763,6 +1832,8 @@ def _radar_exploratory_keyboard(saved: dict | None) -> InlineKeyboardMarkup | No
         candidate_id = int(candidate["id"])
         ticker = str(candidate.get("ticker") or "N/D").upper()
         tier = str(candidate.get("v3_tier") or "").upper()
+        if tier == "REJECTED":
+            continue
         label = f"Seguir {ticker}" + (f" · {tier}" if tier else "")
         rows.append([
             InlineKeyboardButton(
@@ -1823,7 +1894,7 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
         logger.info("[BOT][RADAR] cache_schema_miss=reversion_or_buy_v3")
         cached = None
     if cached:
-        report = compact_radar_report(str(cached["report_text"]), max_items=6)
+        report = compact_radar_report(str(cached["report_text"]), max_items=5)
         logger.info(
             "[BOT][RADAR] cache_hit=true total_s=%.2f",
             time.perf_counter() - started,
@@ -1862,7 +1933,7 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
         )
     else:
         await _save_cached_report("radar", chat_id, report)
-        report = compact_radar_report(report, max_items=6)
+        report = compact_radar_report(report, max_items=5)
 
     logger.info(
         "[BOT][RADAR] cache_hit=false total_s=%.2f",

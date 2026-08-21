@@ -18,6 +18,7 @@ if "telegram" not in sys.modules:
     class _TelegramDummy:
         def __init__(self, *args, **kwargs):
             self.inline_keyboard = args[0] if args else kwargs.get("inline_keyboard")
+            self.text = args[0] if args else kwargs.get("text")
             self.callback_data = kwargs.get("callback_data")
 
     class _FilterDummy:
@@ -53,6 +54,7 @@ from scripts.telegram_bot import (
     compact_radar_report,
     help_text,
     main_keyboard,
+    _radar_exploratory_keyboard,
     split_message,
 )
 
@@ -249,6 +251,74 @@ R/R <b>3.3x</b>
 
     compact = compact_radar_report(full_report)
 
-    assert "Idea radar: Abrir posición" in compact
-    assert "solo /analisis puede convertirlas en un plan de cartera" in compact
-    assert "🎯: Abrir posición" not in compact
+    assert "Próximo paso: Abrir posición" in compact
+    assert "el Radar detecta; /analisis decide si entra al plan" in compact
+    assert "Fuente técnica" not in compact
+
+
+def test_compact_radar_understands_current_watchlist_format(monkeypatch):
+    import scripts.telegram_bot as telegram_bot_module
+
+    monkeypatch.setattr(telegram_bot_module, "_is_business_day_now", lambda: False)
+    monkeypatch.setattr(telegram_bot_module, "_is_market_hours_now", lambda: False)
+    full_report = """<b>🔭 Radar de oportunidades</b>
+🔍 Universo: 250 tickers → 128 pasaron screener → 38 ideas rankeadas → top 6 mostradas
+✅ Estado operativo: <b>NORMAL</b>
+💵 Cash libre: <b>$1.755 ARS</b>
+   Mercado cerrado/sin rueda: ideas para revalidar en la próxima apertura.
+
+<b>👁 En vigilancia (3)</b>
+<b>A — Casi operables</b>
+  <b>LMT</b>: score <code>+0.219</code> | conv. 50% | R/R 1.9x | $45400.00 | edge +0.052
+   Fuente técnica: <b>mixed (TRADINGVIEW_BYMA 260)</b>
+   ↩️ Reversión: <b>posible rebote alcista</b> (<code>+0.257</code>) | estocástico
+   🔬 Shadow: <b>SHADOW DÉBIL</b> — no perseguir
+   Compra técnica V3: <b>A</b> · compra primaria · 20d · shadow
+   Gráfico: TradingView/BYMA
+   └ RS fuerte vs SPY (+8.9% en 20d)
+   ⏸ Por qué no entra: <i>convicción 50% &lt; umbral; sin cash ejecutable; requiere funding o swap</i>
+   🎯 Revalidar: Revalidar al abrir: Esperar funding o evaluar swap. No ejecutar ahora con mercado cerrado.
+
+  <b>GLOB</b>: score <code>+0.155</code> | conv. 50% | R/R 2.8x | $3490.00 | edge -0.013
+   ↩️ Reversión: <b>posible corrección bajista</b> (<code>-0.329</code>)
+   Compra técnica V3: <b>REJECTED</b> · no elegible para compra · 20d · shadow
+   ⏸ Por qué no entra: <i>no supera a cartera actual (edge -0.013)</i>
+   🎯 Revalidar: Revalidar al abrir: Esperar confirmación técnica. No ejecutar ahora con mercado cerrado.
+
+  <b>SHOP</b>: score <code>+0.180</code> | conv. 50% | R/R 0.9x | $2190.00 | edge +0.013
+   ↩️ Reversión: <b>posible corrección bajista</b> (<code>-0.471</code>)
+   Compra técnica V3: <b>A</b> · compra primaria · 20d · shadow
+   └ RS fuerte vs SPY (+23.7% en 20d)
+   ⏸ Por qué no entra: <i>R/R 0.9x insuficiente (mín 1.2x)</i>
+   🎯 Revalidar: Revalidar al abrir: Esperar pullback hacia soporte. No ejecutar ahora con mercado cerrado.
+"""
+
+    compact = compact_radar_report(full_report)
+
+    assert "Radar · próxima apertura" in compact
+    assert "250 analizados · 3 ideas detectadas" in compact
+    assert "no hay compras habilitadas" in compact
+    assert compact.index("<b>LMT</b>") < compact.index("<b>SHOP</b>")
+    assert compact.index("<b>SHOP</b>") < compact.index("<b>GLOB</b>")
+    assert "<b>No priorizar ahora</b>" in compact
+    assert "V3 <b>rechazada</b>" in compact
+    assert "convicción todavía baja (50%)" in compact
+    assert "no mejora la cartera actual" in compact
+    assert "Fuente técnica" not in compact
+    assert "Gráfico:" not in compact
+    assert "No ejecutar ahora" not in compact
+    assert "/radar_full" in compact
+
+
+def test_exploratory_keyboard_skips_rejected_candidates():
+    keyboard = _radar_exploratory_keyboard({
+        "candidates": [
+            {"id": 1, "ticker": "LMT", "v3_tier": "A", "user_action": None},
+            {"id": 2, "ticker": "GLOB", "v3_tier": "REJECTED", "user_action": None},
+        ]
+    })
+
+    assert keyboard is not None
+    assert len(keyboard.inline_keyboard) == 1
+    assert keyboard.inline_keyboard[0][0].text == "Seguir LMT · A"
+    assert keyboard.inline_keyboard[0][0].callback_data == "re:follow:1"

@@ -32,6 +32,20 @@ Gate: <b>OPERABLE</b> | VIX 15.0
    Idea radar: esperar confirmación
 """
 
+MODERN_COMPACT_REPORT = """\
+🔭 <b>Radar · próxima apertura</b>
+250 analizados · 2 ideas detectadas · estado <b>NORMAL</b>
+
+1. 🟡 <b>FSLR</b> · V3 <b>A</b> (compra primaria)
+   Señal <code>+0.211</code> · R/R <code>5.7x</code>
+   A favor: RS fuerte vs SPY (+8.9% en 20d)
+   Próximo paso: evaluar entrada
+
+2. ⛔ <b>GLOB</b> · V3 <b>rechazada</b> (no elegible para compra)
+   Señal <code>+0.155</code> · R/R <code>2.8x</code>
+   Motivo: no mejora la cartera actual
+"""
+
 
 class _Acquire:
     def __init__(self, conn):
@@ -64,6 +78,17 @@ def test_compact_report_parser_preserves_visible_v3_evidence():
     assert candidates[0].v3_classification == "compra primaria"
     assert candidates[0].action_text == "evaluar entrada"
     assert "FSLR" in candidates[0].evidence["rendered_block"]
+
+
+def test_modern_compact_report_parser_normalizes_rejected_tier():
+    candidates = parse_compact_radar_candidates(MODERN_COMPACT_REPORT)
+
+    assert [candidate.ticker for candidate in candidates] == ["FSLR", "GLOB"]
+    assert candidates[0].v3_tier == "A"
+    assert candidates[0].risk_reward == pytest.approx(5.7)
+    assert candidates[0].edge is None
+    assert candidates[0].action_text == "evaluar entrada"
+    assert candidates[1].v3_tier == "REJECTED"
 
 
 def test_callbacks_have_a_separate_bounded_namespace():
