@@ -134,6 +134,26 @@ la proxima rueda, no como invitacion a perseguir el cierre.
 La primera accion `Seguir`/`Descartar` queda congelada; un segundo boton no
 reescribe la eleccion original.
 
+## Radar manual exploratorio
+
+`RADAR_MANUAL_EXPLORATORY_ENABLED=true` conserva el reporte compacto que el
+usuario vio al ejecutar `/radar` y sus candidatos en `radar_exploratory_runs` y
+`radar_exploratory_candidates`. El hash del reporte evita duplicar una misma
+respuesta servida desde cache. Cada candidato ofrece `Seguir` y `Descartar`; la
+primera eleccion es inmutable.
+
+Este circuito tiene `metric_scope=exploratory` e `is_primary_metric=false`. No
+escribe `decision_log`, no crea planes u ordenes y no modifica ni alimenta
+`radar_discovery_runs`, `radar_discovery_snapshots` o `/radar_metricas`. La
+captura oficial de las 16:50 sigue siendo la unica cohorte prospectiva primaria.
+
+Una compra posterior puede vincularse al `Seguir` solo si coinciden usuario,
+ticker y secuencia temporal. El reconciliador excluye fills ya atribuidos a una
+alerta intradia de Setup, de modo que una ejecucion no tenga dos explicaciones
+Radar. Si el broker informa solo la fecha, exige una rueda posterior porque no
+puede probar el orden intradiario. No se hace backfill: las elecciones anteriores
+a la activacion quedan como casos historicos no causales.
+
 `TRADINGVIEW_BYMA_REFRESH_ENABLED=true` agrega un refresco diario fail-soft a
 las 18:00 ART para dejar OHLCV local BYMA disponible para la captura shadow de
 la rueda siguiente. Usa 40 ruedas por defecto y no abre Cocos. En la lectura
@@ -151,6 +171,7 @@ Configuracion inicial:
 
 ```dotenv
 RADAR_INTRADAY_SETUP_ALERTS_ENABLED=false
+RADAR_MANUAL_EXPLORATORY_ENABLED=false
 RADAR_INTRADAY_SETUP_MIN_PERCENTILE=0.80
 RADAR_INTRADAY_SETUP_MIN_RR=2.0
 RADAR_INTRADAY_SETUP_MAX_EXTENSION_PCT=0.06

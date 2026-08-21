@@ -145,6 +145,9 @@ RADAR_DISCOVERY_LEDGER_ENABLED = os.getenv(
 RADAR_INTRADAY_SETUP_ALERTS_ENABLED = os.getenv(
     "RADAR_INTRADAY_SETUP_ALERTS_ENABLED", "false"
 ).lower() == "true"
+RADAR_MANUAL_EXPLORATORY_ENABLED = os.getenv(
+    "RADAR_MANUAL_EXPLORATORY_ENABLED", "false"
+).lower() == "true"
 RADAR_INTRADAY_SETUP_MIN_PERCENTILE = float(
     os.getenv("RADAR_INTRADAY_SETUP_MIN_PERCENTILE", "0.80")
 )
@@ -686,16 +689,26 @@ async def _reconcile_radar_setup_followed_fills(
     *,
     owner_chat_id: int | None,
 ) -> int:
-    if (
-        not RADAR_INTRADAY_SETUP_ALERTS_ENABLED
-        or not RADAR_DISCOVERY_LEDGER_ENABLED
-        or owner_chat_id is None
-    ):
+    if owner_chat_id is None:
         return 0
-    from src.analysis.radar_setup_alerts import RadarSetupAlertStore
 
-    store = RadarSetupAlertStore(await db.get_pool())
-    return await store.reconcile_followed_fills(owner_chat_id=owner_chat_id)
+    pool = await db.get_pool()
+    reconciled = 0
+    if RADAR_INTRADAY_SETUP_ALERTS_ENABLED and RADAR_DISCOVERY_LEDGER_ENABLED:
+        from src.analysis.radar_setup_alerts import RadarSetupAlertStore
+
+        setup_store = RadarSetupAlertStore(pool)
+        reconciled += await setup_store.reconcile_followed_fills(
+            owner_chat_id=owner_chat_id
+        )
+    if RADAR_MANUAL_EXPLORATORY_ENABLED:
+        from src.analysis.radar_exploratory import RadarExploratoryStore
+
+        exploratory_store = RadarExploratoryStore(pool)
+        reconciled += await exploratory_store.reconcile_followed_fills(
+            owner_chat_id=owner_chat_id
+        )
+    return reconciled
 
 
 async def _registered_fill_owner_chat_id(

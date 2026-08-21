@@ -114,6 +114,9 @@ OPERATIONAL_SYNC_TTL_SECONDS = max(
     10,
     int(os.getenv("TELEGRAM_OPERATIONAL_SYNC_TTL_SECONDS", "30")),
 )
+RADAR_MANUAL_EXPLORATORY_ENABLED = os.getenv(
+    "RADAR_MANUAL_EXPLORATORY_ENABLED", "false"
+).lower() == "true"
 
 MAX_MESSAGE_LENGTH = 3900
 COMMAND_TIMEOUT_SECONDS = 300
@@ -475,8 +478,11 @@ async def send_text(
     chat_id: int,
     text: str,
     parse_mode: Optional[str] = ParseMode.HTML,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> None:
-    for chunk in split_message(text):
+    chunks = split_message(text)
+    for index, chunk in enumerate(chunks):
+        chunk_markup = reply_markup if index == len(chunks) - 1 else None
         try:
             valid_html, errors = validate_telegram_html(chunk)
             if not valid_html:
@@ -486,6 +492,7 @@ async def send_text(
                 text=chunk,
                 parse_mode=parse_mode,
                 disable_web_page_preview=True,
+                reply_markup=chunk_markup,
             )
         except BadRequest as e:
             logger.warning("[BOT] Parse HTML falló, reintentando texto plano: %s", e)
@@ -494,6 +501,7 @@ async def send_text(
                 text=chunk,
                 parse_mode=None,
                 disable_web_page_preview=True,
+                reply_markup=chunk_markup,
             )
 
 
@@ -1691,6 +1699,119 @@ def _radar_cache_supports_reversion(report: str) -> bool:
     return "↩️ Reversión:" in text and "Compra técnica V3:" in text
 
 
+async def _persist_radar_exploratory(
+    report: str,
+    *,
+    chat_id: int,
+) -> dict | None:
+    if (
+        not RADAR_MANUAL_EXPLORATORY_ENABLED
+        or not get_config
+        or not PortfolioDatabase
+    ):
+        return None
+    from src.analysis.radar_discovery import discovery_scoring_version
+    from src.analysis.radar_exploratory import (
+        RadarExploratoryStore,
+        parse_compact_radar_candidates,
+    )
+
+    candidates = parse_compact_radar_candidates(report)
+    if not candidates:
+        logger.warning("[BOT][RADAR] no pude extraer candidatos para auditoría exploratoria")
+        return None
+
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        store = RadarExploratoryStore(await db.get_pool())
+        return await store.save_report(
+            owner_chat_id=chat_id,
+            report_text=report,
+            scoring_version=discovery_scoring_version(
+                period="1y",
+                min_score=0.10,
+                min_rr=0.0,
+                operational_top_n=6,
+                no_sentiment=False,
+            ),
+            candidates=candidates,
+            metadata={
+                "source": "telegram_manual",
+                "run_intent": "exploratory",
+                "metric_scope": "exploratory",
+                "is_primary_metric": False,
+                "affects_radar_metrics": False,
+                "affects_analysis": False,
+                "affects_execution": False,
+            },
+        )
+    finally:
+        await db.close()
+
+
+def _radar_exploratory_keyboard(saved: dict | None) -> InlineKeyboardMarkup | None:
+    if not saved:
+        return None
+    from src.analysis.radar_exploratory import exploratory_callback
+
+    rows = []
+    for candidate in saved.get("candidates") or []:
+        if candidate.get("user_action"):
+            continue
+        candidate_id = int(candidate["id"])
+        ticker = str(candidate.get("ticker") or "N/D").upper()
+        tier = str(candidate.get("v3_tier") or "").upper()
+        label = f"Seguir {ticker}" + (f" · {tier}" if tier else "")
+        rows.append([
+            InlineKeyboardButton(
+                label,
+                callback_data=exploratory_callback("follow", candidate_id),
+            ),
+            InlineKeyboardButton(
+                "Descartar",
+                callback_data=exploratory_callback("dismiss", candidate_id),
+            ),
+        ])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+async def _send_manual_radar(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    report: str,
+    *,
+    prefix: str = "",
+) -> None:
+    try:
+        saved = await _persist_radar_exploratory(report, chat_id=chat_id)
+    except Exception:
+        saved = None
+        logger.exception(
+            "[BOT][RADAR] falló la persistencia exploratoria; envío el reporte igual"
+        )
+    keyboard = _radar_exploratory_keyboard(saved)
+    audit_note = ""
+    if saved:
+        audit_note = (
+            "\n\n<i>Seguir registra interés exploratorio antes de operar; "
+            "no crea órdenes ni entra en las métricas oficiales del Radar.</i>"
+        )
+        logger.info(
+            "[BOT][RADAR] exploratory_run=%s inserted=%s candidates=%s",
+            saved.get("run_id"),
+            saved.get("inserted"),
+            len(saved.get("candidates") or []),
+        )
+    await send_text(
+        context,
+        chat_id,
+        prefix + report + audit_note,
+        reply_markup=keyboard,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Acción: Radar
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1707,10 +1828,11 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
             "[BOT][RADAR] cache_hit=true total_s=%.2f",
             time.perf_counter() - started,
         )
-        await send_text(
+        await _send_manual_radar(
             context,
             chat_id,
-            _artifact_note(cached, "/radar_full") + report,
+            report,
+            prefix=_artifact_note(cached, "/radar_full"),
         )
         return
 
@@ -1747,7 +1869,7 @@ async def action_radar(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None
         time.perf_counter() - started,
     )
 
-    await send_text(context, chat_id, report)
+    await _send_manual_radar(context, chat_id, report)
 
 
 async def action_shadow(
@@ -2788,6 +2910,89 @@ async def admin_refresh_portfolio_handler(update: Update, context: ContextTypes.
     await send_menu(context, chat_id)
 
 
+async def _handle_radar_exploratory_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    raw_action: str,
+    chat_id: int,
+) -> None:
+    query = update.callback_query
+    if query is None or not get_config or not PortfolioDatabase:
+        return
+    from src.analysis.radar_exploratory import (
+        RadarExploratoryStore,
+        USER_ACTION_DISMISS,
+        USER_ACTION_FOLLOW,
+        parse_exploratory_callback,
+    )
+
+    parsed = parse_exploratory_callback(raw_action)
+    if parsed is None:
+        await query.answer("Acción exploratoria inválida", show_alert=True)
+        return
+    action, candidate_id = parsed
+    await query.answer("Registrando elección...")
+
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        store = RadarExploratoryStore(await db.get_pool())
+        candidate = await store.record_user_action(
+            candidate_id,
+            owner_chat_id=chat_id,
+            action=(
+                USER_ACTION_FOLLOW
+                if action == "follow"
+                else USER_ACTION_DISMISS
+            ),
+        )
+    finally:
+        await db.close()
+
+    if candidate is None:
+        await send_text(context, chat_id, "La idea Radar no existe o no pertenece a este chat.")
+        return
+    ticker = re.sub(
+        r"[^A-Za-z0-9.\-]",
+        "",
+        str(candidate.get("ticker") or ""),
+    ).upper()
+    if candidate.get("action_conflict"):
+        original = str(candidate.get("user_action") or "").upper()
+        original_label = "seguir" if original == USER_ACTION_FOLLOW else "descartar"
+        await send_text(
+            context,
+            chat_id,
+            f"<b>{html_text(ticker)}</b>: ya habías elegido {original_label}.\n"
+            "La primera respuesta queda congelada para conservar la auditoría.",
+        )
+        return
+    if not candidate.get("action_recorded", True):
+        await send_text(
+            context,
+            chat_id,
+            f"<b>{html_text(ticker)}</b>: esa elección ya estaba registrada.",
+        )
+        return
+    if action == "follow":
+        await send_text(
+            context,
+            chat_id,
+            f"👁 <b>{html_text(ticker)}</b>: interés Radar registrado.\n"
+            "No crea una orden. Una compra posterior podrá vincularse como ejecución seguida, "
+            "fuera de las métricas prospectivas oficiales.",
+        )
+        return
+    await send_text(
+        context,
+        chat_id,
+        f"<b>{html_text(ticker)}</b>: idea descartada para tu seguimiento.\n"
+        "El reporte original queda conservado como evidencia exploratoria.",
+    )
+
+
 async def _handle_radar_setup_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2889,6 +3094,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id    = query.message.chat_id if query.message else update.effective_chat.id
 
     if not await ensure_allowed_chat(update, context):
+        return
+
+    if raw_action.startswith("re:"):
+        try:
+            await _handle_radar_exploratory_callback(
+                update,
+                context,
+                raw_action=raw_action,
+                chat_id=chat_id,
+            )
+        except Exception as exc:
+            logger.exception("[BOT] callback Radar exploratorio falló: %s", raw_action)
+            await send_text(
+                context,
+                chat_id,
+                f"Error procesando la idea Radar:\n<code>{html_text(exc)}</code>",
+            )
         return
 
     if raw_action.startswith("rs:"):
