@@ -87,6 +87,63 @@ def test_compact_reason_does_not_replace_optimizer_context_with_generic_label():
     assert "optimizer diverge" not in rendered
 
 
+def test_off_market_analysis_uses_latest_market_day_as_price_reference():
+    snapshot = {"scraped_at": "2026-08-21T04:39:00+00:00"}
+
+    assert run_analysis._portfolio_market_reference_at(
+        snapshot,
+        off_market_context=True,
+    ) is None
+    assert run_analysis._portfolio_market_reference_at(
+        snapshot,
+        off_market_context=False,
+    ) == snapshot["scraped_at"]
+
+
+def test_missing_result_positions_remain_visible_in_compact_analysis():
+    results = [types.SimpleNamespace(ticker="NVDA")]
+    positions = [
+        {"ticker": "NVDA"},
+        {"ticker": "NVS", "market_data_reason": "precio desactualizado: 2026-08-19"},
+    ]
+
+    missing = run_analysis._positions_missing_from_results(results, positions)
+
+    assert [position["ticker"] for position in missing] == ["NVS"]
+
+
+def test_compact_report_does_not_present_missing_technicals_as_hold():
+    macro = types.SimpleNamespace(
+        sp500=7641,
+        sp500_chg=-0.9,
+        vix=16.0,
+        wti=86.5,
+        wti_chg=-1.5,
+        dxy=98.8,
+        tnx=4.70,
+        merval=2875950,
+        ccl=1585,
+        mep=1531,
+        riesgo_pais=517,
+    )
+
+    rendered = run_analysis._render_compact_report(
+        [],
+        macro,
+        2_301_055,
+        1_755,
+        None,
+        [{"ticker": "NVDA", "market_value": 371_250}],
+        off_market_context=True,
+    )
+
+    assert "Sin plan: no se pudo evaluar técnicamente la cartera" in rendered
+    assert "Cartera no evaluable: 1/1 posiciones" in rendered
+    assert "No interpretar esto como una señal HOLD" in rendered
+    assert "Mantener y esperar mejor setup" not in rendered
+    assert "T=técnico" not in rendered
+
+
 def test_split_message_splits_oversized_single_lines():
     chunks = split_message("x" * 250, max_len=80)
 

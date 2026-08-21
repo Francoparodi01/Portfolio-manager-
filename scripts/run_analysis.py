@@ -2503,6 +2503,19 @@ def _compact_reason(text: str, max_len: int = 220) -> str:
     return clean[: max_len - 3].rstrip() + "..."
 
 
+def _positions_missing_from_results(results, positions: list[dict]) -> list[dict]:
+    result_tickers = {
+        str(getattr(result, "ticker", "") or "").upper()
+        for result in (results or [])
+    }
+    return [
+        position
+        for position in (positions or [])
+        if str(position.get("ticker", "") or "").upper()
+        and str(position.get("ticker", "") or "").upper() not in result_tickers
+    ]
+
+
 def _compact_ic_line(ic_metrics: dict | None) -> str:
     ic_data = ic_metrics or {}
     by_h = ic_data.get("by_horizon", {}) or {}
@@ -2639,6 +2652,8 @@ def _render_compact_report(
                 f"Compras: <b>{_money_ars(plan.gross_buy_ars)}</b> | "
                 f"Fees: <b>{_money_ars(fees)}</b> | Cash post: <b>{_money_ars(plan.cash_after)}</b>"
             )
+    elif positions and not results:
+        lines.append("⚠️ Sin plan: no se pudo evaluar técnicamente la cartera.")
     else:
         lines.append("🟡 Sin órdenes ejecutables. Mantener y esperar mejor setup.")
     lines.append("Nota: plan sin fill no entra al EV operativo.")
@@ -2664,6 +2679,20 @@ def _render_compact_report(
             -abs(float(getattr(r, "final_score", 0.0) or 0.0)),
         ),
     )
+    if positions and not sorted_results:
+        lines.append(
+            f"⚠️ Cartera no evaluable: {len(positions)}/{len(positions)} posiciones "
+            "sin historial técnico operativo. No interpretar esto como una señal HOLD."
+        )
+    elif positions:
+        missing_positions = _positions_missing_from_results(sorted_results, positions)
+        if missing_positions:
+            details = ", ".join(
+                f"{escape(str(position.get('ticker') or '').upper())} "
+                f"({escape(str(position.get('market_data_reason') or 'sin historial suficiente'))})"
+                for position in missing_positions[:5]
+            )
+            lines.append(f"⚪ No evaluable: {details}.")
     for r in sorted_results:
         ticker = str(getattr(r, "ticker", "") or "").upper()
         if not ticker:
@@ -2699,7 +2728,8 @@ def _render_compact_report(
             and float(getattr(macro_snap, "vix", 99.0) or 99.0) < 18.0
         ):
             lines.append("⚠️ Divergencia técnico/macro: SELL técnico con contexto risk-on.")
-    lines.append("T=técnico | M=macro | S=sentiment")
+    if sorted_results:
+        lines.append("T=técnico | M=macro | S=sentiment")
     lines.append("")
 
     lines.append("━━━ <b>MACRO</b> ━━━")
@@ -3437,7 +3467,22 @@ def _portfolio_equity_total(
     return max(float(snapshot_total_ars or 0.0), 0.0)
 
 
-async def _load_portfolio(cfg, owner_chat_id: int | None = None):
+def _portfolio_market_reference_at(
+    snapshot: dict | None,
+    *,
+    off_market_context: bool,
+):
+    if off_market_context:
+        return None
+    return (snapshot or {}).get("scraped_at")
+
+
+async def _load_portfolio(
+    cfg,
+    owner_chat_id: int | None = None,
+    *,
+    off_market_context: bool = False,
+):
     db = PortfolioDatabase(cfg.database.url)
     await db.connect()
     try:
@@ -3451,7 +3496,10 @@ async def _load_portfolio(cfg, owner_chat_id: int | None = None):
             positions = normalize_positions_with_fresh_market_prices(
                 positions,
                 await db.get_latest_market_prices(),
-                reference_at=snap.get("scraped_at"),
+                reference_at=_portfolio_market_reference_at(
+                    snap,
+                    off_market_context=off_market_context,
+                ),
             )
             discrepancies = price_discrepancy_warnings(positions)
             if discrepancies:
@@ -3707,6 +3755,7 @@ async def main(
         ) = await _load_portfolio(
             cfg,
             owner_chat_id=owner_chat_id,
+            off_market_context=off_market_context,
         )
         snapshot_stale_reason = _portfolio_snapshot_stale_reason(portfolio_snapshot)
         if snapshot_stale_reason:
