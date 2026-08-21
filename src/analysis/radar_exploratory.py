@@ -322,6 +322,81 @@ class RadarExploratoryStore:
         )
         return result
 
+    async def followed_watchlist(
+        self,
+        *,
+        owner_chat_id: int,
+        max_calendar_days: int = 30,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Return recent explicit FOLLOW actions without changing Radar metrics."""
+        await self.ensure_schema()
+        owner = int(owner_chat_id)
+        days = max(int(max_calendar_days), 1)
+        rows: list[dict[str, Any]] = []
+        async with self.pool.acquire() as conn:
+            exploratory = await conn.fetch(
+                """
+                SELECT ticker, user_action_at, follow_match_status, broker_fill_id,
+                       v3_tier, radar_score, risk_reward
+                FROM radar_exploratory_candidates
+                WHERE owner_chat_id=$1
+                  AND user_action='FOLLOW'
+                  AND user_action_at >= NOW() - ($2::integer * INTERVAL '1 day')
+                ORDER BY user_action_at DESC, id DESC
+                """,
+                owner,
+                days,
+            )
+            rows.extend({
+                **dict(row),
+                "source": "RADAR_MANUAL",
+                "setup_score": None,
+                "setup_percentile": None,
+                "feature_quality_flag": None,
+            } for row in exploratory)
+
+            setup_alerts_exist = bool(
+                await conn.fetchval(
+                    "SELECT to_regclass('public.radar_setup_alerts') IS NOT NULL"
+                )
+            )
+            if setup_alerts_exist:
+                setup_rows = await conn.fetch(
+                    """
+                    SELECT ticker, user_action_at, follow_match_status,
+                           broker_fill_id, setup_score, setup_percentile,
+                           setup_risk_reward AS risk_reward,
+                           feature_quality_flag
+                    FROM radar_setup_alerts
+                    WHERE owner_chat_id=$1
+                      AND user_action='FOLLOW'
+                      AND user_action_at >= NOW() - ($2::integer * INTERVAL '1 day')
+                    ORDER BY user_action_at DESC, id DESC
+                    """,
+                    owner,
+                    days,
+                )
+                rows.extend({
+                    **dict(row),
+                    "source": "SETUP_ALERT",
+                    "v3_tier": None,
+                    "radar_score": None,
+                } for row in setup_rows)
+
+        latest_by_ticker: dict[str, dict[str, Any]] = {}
+        for row in sorted(
+            rows,
+            key=lambda item: item.get("user_action_at") or datetime.min.replace(
+                tzinfo=timezone.utc
+            ),
+            reverse=True,
+        ):
+            ticker = str(row.get("ticker") or "").upper().strip()
+            if ticker and ticker not in latest_by_ticker:
+                latest_by_ticker[ticker] = {**row, "ticker": ticker}
+        return list(latest_by_ticker.values())[:max(int(limit), 1)]
+
     async def reconcile_followed_fills(
         self,
         *,

@@ -469,7 +469,32 @@ Compra técnica V3: <b>C</b> · esperar setup · 20d · shadow
    🎯 Revalidar: Revalidar al abrir: Esperar funding o evaluar swap.
 """
 
-    detailed = compact_radar_report(report, max_items=8, detailed=True)
+    detailed = compact_radar_report(
+        report,
+        max_items=8,
+        detailed=True,
+        followed_watchlist=[
+            {
+                "ticker": "IEMG",
+                "source": "SETUP_ALERT",
+                "setup_score": 40.9,
+                "setup_percentile": 1.0,
+                "feature_quality_flag": "GOOD",
+                "risk_reward": 2.9,
+                "user_action_at": datetime(2026, 8, 21, 20, 3, tzinfo=timezone.utc),
+                "broker_fill_id": None,
+            },
+            {
+                "ticker": "SE",
+                "source": "RADAR_MANUAL",
+                "v3_tier": "A",
+                "radar_score": 0.28,
+                "risk_reward": 2.1,
+                "user_action_at": datetime(2026, 8, 21, 19, 0, tzinfo=timezone.utc),
+                "broker_fill_id": 44,
+            },
+        ],
+    )
 
     assert "Radar detallado · próxima apertura" in detailed
     assert "<b>AMZN</b>" in detailed
@@ -479,6 +504,11 @@ Compra técnica V3: <b>C</b> · esperar setup · 20d · shadow
     assert "Por qué entra:" not in detailed
     assert "/radar_full" not in detailed
     assert "/ticker TICKER" in detailed
+    assert "En seguimiento por vos (2)" in detailed
+    assert "<b>IEMG</b> · setup 40.9/50 · pct 100% · GOOD · R/R 2.9x" in detailed
+    assert "<b>SE</b> · V3 A · score +0.280 · R/R 2.1x · también en top actual" in detailed
+    assert "sin compra confirmada" in detailed
+    assert "compra real vinculada" in detailed
     assert len(detailed) < 3900
 
 

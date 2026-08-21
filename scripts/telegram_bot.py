@@ -1625,11 +1625,65 @@ def _radar_report_items(text: str) -> list[dict]:
     return items
 
 
+def _followed_radar_lines(
+    followed: list[dict],
+    *,
+    current_tickers: set[str],
+) -> list[str]:
+    if not followed:
+        return []
+
+    lines = [
+        "",
+        f"⭐ <b>En seguimiento por vos ({len(followed)})</b>",
+        "<i>Interés explícito; no cambia el ranking ni confirma una compra.</i>",
+    ]
+    for row in followed:
+        ticker = str(row.get("ticker") or "N/D").upper()
+        source = str(row.get("source") or "")
+        details: list[str] = []
+        if source == "SETUP_ALERT":
+            setup_score = row.get("setup_score")
+            percentile = row.get("setup_percentile")
+            quality = str(row.get("feature_quality_flag") or "N/D").upper()
+            if setup_score is not None:
+                details.append(f"setup {float(setup_score):.1f}/50")
+            if percentile is not None:
+                details.append(f"pct {float(percentile):.0%}")
+            details.append(quality)
+        else:
+            tier = str(row.get("v3_tier") or "-").upper()
+            score = row.get("radar_score")
+            details.append(f"V3 {tier}")
+            if score is not None:
+                details.append(f"score {float(score):+.3f}")
+
+        risk_reward = row.get("risk_reward")
+        if risk_reward is not None:
+            details.append(f"R/R {float(risk_reward):.1f}x")
+        if ticker in current_tickers:
+            details.append("también en top actual")
+
+        action_at = row.get("user_action_at")
+        if isinstance(action_at, datetime):
+            if action_at.tzinfo is None:
+                action_at = action_at.replace(tzinfo=timezone.utc)
+            followed_at = action_at.astimezone(TZ).strftime("%d/%m %H:%M")
+        else:
+            followed_at = "fecha n/d"
+        matched = bool(row.get("broker_fill_id"))
+        status = "compra real vinculada" if matched else "sin compra confirmada"
+        lines.append(f"• <b>{ticker}</b> · {' · '.join(details)}")
+        lines.append(f"  Seguido {followed_at} · {status}")
+    return lines
+
+
 def compact_radar_report(
     report: str,
     max_items: int = 5,
     *,
     detailed: bool = False,
+    followed_watchlist: list[dict] | None = None,
 ) -> str:
     """Resume el reporte técnico sin recalcular ranking ni señales."""
     if not report:
@@ -1768,6 +1822,14 @@ def compact_radar_report(
             lines.append(f"   Próximo paso: {item['action']}")
         lines.append("")
 
+    if detailed:
+        lines.extend(
+            _followed_radar_lines(
+                list(followed_watchlist or []),
+                current_tickers={str(item["ticker"]).upper() for item in items},
+            )
+        )
+
     lines.append(
         "<i>Seguir registra interés; no compra ni altera las métricas oficiales.</i>"
     )
@@ -1835,6 +1897,25 @@ async def _persist_radar_exploratory(
                 "affects_analysis": False,
                 "affects_execution": False,
             },
+        )
+    finally:
+        await db.close()
+
+
+async def _load_followed_radar_watchlist(chat_id: int) -> list[dict]:
+    if not get_config or not PortfolioDatabase:
+        return []
+    from src.analysis.radar_exploratory import RadarExploratoryStore
+
+    cfg = get_config()
+    db = PortfolioDatabase(cfg.database.url)
+    await db.connect()
+    try:
+        store = RadarExploratoryStore(await db.get_pool())
+        return await store.followed_watchlist(
+            owner_chat_id=chat_id,
+            max_calendar_days=30,
+            limit=8,
         )
     finally:
         await db.close()
@@ -2004,10 +2085,21 @@ async def action_radar_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
 
+    try:
+        followed_watchlist = await _load_followed_radar_watchlist(chat_id)
+    except Exception:
+        followed_watchlist = []
+        logger.exception("[BOT][RADAR] no pude cargar seguimientos explícitos")
+
     await _send_manual_radar(
         context,
         chat_id,
-        compact_radar_report(report, max_items=8, detailed=True),
+        compact_radar_report(
+            report,
+            max_items=8,
+            detailed=True,
+            followed_watchlist=followed_watchlist,
+        ),
     )
 
 

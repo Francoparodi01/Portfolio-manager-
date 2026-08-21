@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from datetime import datetime, timezone
 
 import pytest
 
@@ -188,6 +189,64 @@ def test_follow_reconciliation_is_strict_and_does_not_double_attribute():
     assert "FROM radar_setup_alerts setup" in statement
     assert "decision_log" not in statement
     assert args == (123, 16)
+
+
+def test_followed_watchlist_combines_sources_and_keeps_latest_per_ticker():
+    older = datetime(2026, 8, 20, 15, 0, tzinfo=timezone.utc)
+    newer = datetime(2026, 8, 21, 15, 0, tzinfo=timezone.utc)
+
+    class _Connection:
+        async def execute(self, *_args):
+            return "OK"
+
+        async def fetchval(self, statement):
+            assert "to_regclass('public.radar_setup_alerts')" in statement
+            return True
+
+        async def fetch(self, statement, *args):
+            assert args == (123, 30)
+            if "FROM radar_exploratory_candidates" in statement:
+                return [{
+                    "ticker": "FSLR",
+                    "user_action_at": older,
+                    "follow_match_status": "AWAITING_BUY_FILL",
+                    "broker_fill_id": None,
+                    "v3_tier": "A",
+                    "radar_score": 0.21,
+                    "risk_reward": 5.7,
+                }]
+            return [
+                {
+                    "ticker": "FSLR",
+                    "user_action_at": newer,
+                    "follow_match_status": "AWAITING_BUY_FILL",
+                    "broker_fill_id": None,
+                    "setup_score": 39.0,
+                    "setup_percentile": 0.95,
+                    "risk_reward": 3.0,
+                    "feature_quality_flag": "GOOD",
+                },
+                {
+                    "ticker": "IEMG",
+                    "user_action_at": older,
+                    "follow_match_status": "MATCHED_OWNER_TICKER_TIME",
+                    "broker_fill_id": 91,
+                    "setup_score": 41.0,
+                    "setup_percentile": 1.0,
+                    "risk_reward": 2.9,
+                    "feature_quality_flag": "GOOD",
+                },
+            ]
+
+    rows = asyncio.run(
+        RadarExploratoryStore(_Pool(_Connection())).followed_watchlist(
+            owner_chat_id=123,
+        )
+    )
+
+    assert [row["ticker"] for row in rows] == ["FSLR", "IEMG"]
+    assert rows[0]["source"] == "SETUP_ALERT"
+    assert rows[1]["broker_fill_id"] == 91
 
 
 def test_scheduler_reconciles_manual_evidence_without_official_radar(monkeypatch):
