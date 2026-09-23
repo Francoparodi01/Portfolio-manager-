@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "mode": "staged_fail_closed",
+  "default_jev_module": "src.agentic.jev",
+  "validation_fraction": 0.2,
+  "promotion_gate": {
+    "min_total_samples": 30,
+    "min_holdout_samples": 10,
+    "min_jev_score_delta": 0.0,
+    "min_net_ev_delta": 0.0,
+    "max_drawdown_increase": 0.0,
+    "max_risk_guard_violations": 0,
+    "min_data_quality_pass_rate": 0.95
+  },
+  "governance": {
+    "auto_train": false,
+    "auto_promote": false,
+    "optimizer_trainable": false,
+    "risk_guards_trainable": false,
+    "planner_guards_trainable": false
+  }
+}
