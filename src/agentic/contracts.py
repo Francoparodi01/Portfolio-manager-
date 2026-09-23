@@ -58,6 +58,7 @@ class AgentDecision:
     answer: str | None = None
     rationale: str = ""
     confidence: float | None = None
+    routing: dict[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "AgentDecision":
@@ -74,9 +75,7 @@ class AgentDecision:
                 confidence = None
 
         if kind == "tool":
-            tool_name = str(
-                value.get("tool") or value.get("tool_name") or ""
-            ).strip()
+            tool_name = str(value.get("tool") or value.get("tool_name") or "").strip()
             arguments = value.get("arguments") or {}
             if not tool_name:
                 raise AgentModelError("tool decision missing tool name")
@@ -143,6 +142,7 @@ class AgentResult:
                         "answer": step.decision.answer,
                         "rationale": step.decision.rationale,
                         "confidence": step.decision.confidence,
+                        "routing": step.decision.routing,
                     },
                     "observation": (
                         {

@@ -18,6 +18,7 @@ from src.agentic import (
     ToolContext,
     build_default_registry,
 )
+from src.agentic.jev import build_routed_agent_model, router_mode_from_env
 from src.agentic.orchestrator import default_max_steps
 from src.core.config import get_config
 
@@ -65,6 +66,7 @@ async def async_main(args: argparse.Namespace) -> int:
     timeout_seconds = float(os.getenv("QUANTIA_AGENT_TOOL_TIMEOUT_SECONDS", "600"))
     output_limit = int(os.getenv("QUANTIA_AGENT_TOOL_OUTPUT_CHARS", "18000"))
     require_audit = _bool_env("QUANTIA_AGENT_REQUIRE_AUDIT", True)
+    router_mode = router_mode_from_env()
 
     context = ToolContext(
         database_url=cfg.database.url,
@@ -74,7 +76,8 @@ async def async_main(args: argparse.Namespace) -> int:
         tool_timeout_seconds=timeout_seconds,
     )
     registry = build_default_registry(context)
-    model = OllamaAgentModel(model=args.model)
+    base_model = OllamaAgentModel(model=args.model)
+    model = build_routed_agent_model(base_model)
     store = AgentRunStore(cfg.database.url) if cfg.database.url else None
     orchestrator = AgentOrchestrator(
         model=model,
@@ -90,8 +93,10 @@ async def async_main(args: argparse.Namespace) -> int:
         owner_chat_id=owner_chat_id,
         metadata={
             "trigger": "cli",
-            "agent_version": "quantia-agent-v1",
+            "agent_version": "quantia-agent-v1-jev-router",
             "read_only": True,
+            "router_mode": router_mode,
+            "jev_model": os.getenv("QUANTIA_JEV_MODEL", "jev-latest") if router_mode != "off" else None,
         },
     )
 
@@ -102,7 +107,7 @@ async def async_main(args: argparse.Namespace) -> int:
         print(
             f"\n[agent run={result.run_id} status={result.status} "
             f"steps={len(result.steps)} stop={result.stop_reason} "
-            f"audit={result.audit_persisted}]"
+            f"router={router_mode} audit={result.audit_persisted}]"
         )
 
     return 0 if result.status in {"COMPLETE", "LIMIT_REACHED"} else 1
