@@ -63,11 +63,7 @@ class AgentOrchestrator:
             payload.append({"decision": decision, "observation": observation})
         return payload
 
-    async def _persist_step(
-        self,
-        run_id: str,
-        step: AgentTraceStep,
-    ) -> bool:
+    async def _persist_step(self, run_id: str, step: AgentTraceStep) -> bool:
         if not self.store:
             return False
         observation = step.observation
@@ -79,6 +75,7 @@ class AgentOrchestrator:
             tool_arguments=step.decision.arguments,
             rationale=step.decision.rationale,
             confidence=step.decision.confidence,
+            routing=step.decision.routing or {},
             observation_ok=observation.ok if observation else None,
             observation=observation.content if observation else None,
             observation_sha256=observation.content_sha256 if observation else None,
@@ -197,11 +194,7 @@ class AgentOrchestrator:
                         )
                     cache[key] = observation
 
-                step = AgentTraceStep(
-                    step_no=step_no,
-                    decision=decision,
-                    observation=observation,
-                )
+                step = AgentTraceStep(step_no=step_no, decision=decision, observation=observation)
                 steps.append(step)
                 try:
                     audit_persisted = (await self._persist_step(run_id, step)) or audit_persisted
@@ -223,10 +216,7 @@ class AgentOrchestrator:
                 answer = final_decision.answer or ""
                 status = "LIMIT_REACHED"
                 stop_reason = "max_steps"
-                final_step = AgentTraceStep(
-                    step_no=self.max_steps + 1,
-                    decision=final_decision,
-                )
+                final_step = AgentTraceStep(step_no=self.max_steps + 1, decision=final_decision)
                 steps.append(final_step)
                 try:
                     audit_persisted = (await self._persist_step(run_id, final_step)) or audit_persisted

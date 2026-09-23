@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS agent_steps (
     tool_arguments      JSONB NOT NULL DEFAULT '{}'::jsonb,
     rationale           TEXT,
     confidence          FLOAT,
+    routing             JSONB NOT NULL DEFAULT '{}'::jsonb,
     observation_ok      BOOLEAN,
     observation         TEXT,
     observation_sha256  TEXT,
@@ -47,6 +48,9 @@ CREATE TABLE IF NOT EXISTS agent_steps (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (run_id, step_no)
 );
+
+ALTER TABLE agent_steps
+    ADD COLUMN IF NOT EXISTS routing JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_agent_steps_run
     ON agent_steps(run_id, step_no);
@@ -115,6 +119,7 @@ class AgentRunStore:
         tool_arguments: dict[str, Any],
         rationale: str,
         confidence: float | None,
+        routing: dict[str, Any],
         observation_ok: bool | None,
         observation: str | None,
         observation_sha256: str | None,
@@ -128,12 +133,12 @@ class AgentRunStore:
                 """
                 INSERT INTO agent_steps (
                     run_id, step_no, decision_kind, tool_name, tool_arguments,
-                    rationale, confidence, observation_ok, observation,
+                    rationale, confidence, routing, observation_ok, observation,
                     observation_sha256, observation_cached, elapsed_ms, error
                 )
                 VALUES (
                     $1::uuid, $2, $3, $4, $5::jsonb,
-                    $6, $7, $8, $9, $10, $11, $12, $13
+                    $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14
                 )
                 ON CONFLICT (run_id, step_no) DO UPDATE SET
                     decision_kind = EXCLUDED.decision_kind,
@@ -141,6 +146,7 @@ class AgentRunStore:
                     tool_arguments = EXCLUDED.tool_arguments,
                     rationale = EXCLUDED.rationale,
                     confidence = EXCLUDED.confidence,
+                    routing = EXCLUDED.routing,
                     observation_ok = EXCLUDED.observation_ok,
                     observation = EXCLUDED.observation,
                     observation_sha256 = EXCLUDED.observation_sha256,
@@ -155,6 +161,7 @@ class AgentRunStore:
                 json.dumps(tool_arguments or {}, ensure_ascii=False),
                 rationale,
                 confidence,
+                json.dumps(routing or {}, ensure_ascii=False),
                 observation_ok,
                 observation,
                 observation_sha256,
