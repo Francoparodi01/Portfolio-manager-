@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import sys
@@ -11,6 +12,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import asyncpg
 
 from src.analysis.macro import fetch_macro, get_macro_regime
 from src.collector.db import PortfolioDatabase
@@ -22,6 +26,7 @@ from .contracts import (
     ToolValidationError,
     canonical_json,
 )
+from .read_only import connect_read_only, guarded_pool
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -35,6 +40,15 @@ class ToolContext:
     repo_root: str | None = None
     output_limit_chars: int = 18000
     tool_timeout_seconds: float = 600.0
+    legacy_single_owner: bool = False
+
+    def __post_init__(self):
+        if not self.owner_chat_id:
+            raise ValueError("an explicit account owner is required")
+        if not 256 <= self.output_limit_chars <= 100000:
+            raise ValueError("output limit must be between 256 and 100000")
+        if not math.isfinite(self.tool_timeout_seconds) or not 0 < self.tool_timeout_seconds <= 600:
+            raise ValueError("tool timeout must be within (0, 600] seconds")
 
     @property
     def root(self) -> Path:
@@ -71,6 +85,28 @@ class ToolRegistry:
         except KeyError as exc:
             raise ToolValidationError(f"unknown tool: {name}") from exc
 
+    def validate(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return _validate_schema(self.get(name).spec.input_schema, arguments)
+
+
+def read_only_dsn(dsn: str) -> str:
+    parts = urlsplit(dsn.replace("postgresql+asyncpg://", "postgresql://"))
+    params = dict(parse_qsl(parts.query))
+    params.update(default_transaction_read_only="on", statement_timeout="60000")
+    return urlunsplit(parts._replace(query=urlencode(params)))
+
+
+async def verify_single_owner(dsn: str, owner_chat_id: int) -> bool:
+    conn = await connect_read_only(read_only_dsn(dsn), command_timeout=60)
+    try:
+        return not await conn.fetchval("""SELECT EXISTS (
+            SELECT 1 FROM portfolio_snapshots WHERE owner_chat_id IS NOT NULL AND owner_chat_id<>$1
+            UNION ALL SELECT 1 FROM decision_log WHERE owner_chat_id IS NOT NULL AND owner_chat_id<>$1
+            UNION ALL SELECT 1 FROM broker_fills WHERE owner_chat_id IS NOT NULL AND owner_chat_id<>$1
+        )""", owner_chat_id)
+    finally:
+        await conn.close()
+
 
 def _clean_text(value: str) -> str:
     unescaped = html.unescape(value or "")
@@ -80,6 +116,8 @@ def _clean_text(value: str) -> str:
 
 
 def _json_safe(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if hasattr(value, "isoformat"):
@@ -114,26 +152,31 @@ def _validate_schema(schema: dict[str, Any], arguments: dict[str, Any]) -> dict[
         rule = properties.get(key) or {}
         expected = rule.get("type")
         if expected == "integer":
-            if isinstance(value, bool):
+            if isinstance(value, bool) or not isinstance(value, int):
                 raise ToolValidationError(f"{key} must be an integer")
-            try:
-                value = int(value)
-            except (TypeError, ValueError) as exc:
-                raise ToolValidationError(f"{key} must be an integer") from exc
             if "minimum" in rule and value < int(rule["minimum"]):
                 raise ToolValidationError(f"{key} below minimum")
             if "maximum" in rule and value > int(rule["maximum"]):
                 raise ToolValidationError(f"{key} above maximum")
         elif expected == "string":
-            value = str(value).strip()
+            if not isinstance(value, str):
+                raise ToolValidationError(f"{key} must be a string")
+            value = value.strip()
             if not value:
                 raise ToolValidationError(f"{key} cannot be empty")
             if "maxLength" in rule and len(value) > int(rule["maxLength"]):
                 raise ToolValidationError(f"{key} too long")
+            if key == "ticker":
+                value = value.upper()
+                if not _TICKER_RE.fullmatch(value):
+                    raise ToolValidationError("invalid ticker format")
         elif expected == "boolean":
             if not isinstance(value, bool):
                 raise ToolValidationError(f"{key} must be boolean")
         clean[key] = value
+    for key, rule in properties.items():
+        if key not in clean and "default" in rule:
+            clean[key] = rule["default"]
     return clean
 
 
@@ -146,12 +189,16 @@ async def _run_subprocess(
     timeout_seconds: float | None = None,
 ) -> ToolObservation:
     started = time.monotonic()
+    child_env = os.environ.copy()
+    child_env["DATABASE_URL"] = read_only_dsn(context.database_url)
+    # Commands are fixed by the registry; no model-supplied shell or environment.
+    child_env["PGOPTIONS"] = "-c default_transaction_read_only=on -c statement_timeout=60000"
     proc = await asyncio.create_subprocess_exec(
-        *command,
+        command[0], "-m", "src.agentic.read_only_runner", *command[1:],
         cwd=str(context.root),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=os.environ.copy(),
+        env=child_env,
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -159,7 +206,8 @@ async def _run_subprocess(
             timeout=timeout_seconds or context.tool_timeout_seconds,
         )
     except asyncio.TimeoutError:
-        proc.kill()
+        if proc.returncode is None:
+            proc.kill()
         await proc.communicate()
         elapsed = int((time.monotonic() - started) * 1000)
         return ToolObservation(
@@ -170,6 +218,11 @@ async def _run_subprocess(
             elapsed_ms=elapsed,
             error=f"tool timeout after {timeout_seconds or context.tool_timeout_seconds:.0f}s",
         )
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise
 
     elapsed = int((time.monotonic() - started) * 1000)
     out = _clean_text(stdout.decode("utf-8", errors="replace"))
@@ -200,10 +253,16 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
 
     async def portfolio_snapshot(arguments: dict[str, Any]) -> ToolObservation:
         started = time.monotonic()
-        db = PortfolioDatabase(context.database_url)
+        db = PortfolioDatabase(read_only_dsn(context.database_url))
         try:
-            await db.connect()
+            db._pool = await guarded_pool(read_only_dsn(context.database_url), min_size=1, max_size=2)
             snapshot = await db.get_latest_snapshot(owner_chat_id=context.owner_chat_id)
+            if not snapshot and context.legacy_single_owner:
+                async with db._pool.acquire() as conn:
+                    row = await conn.fetchrow("""SELECT r.payload FROM raw_snapshots r
+                        JOIN portfolio_snapshots p USING (snapshot_id)
+                        WHERE p.owner_chat_id IS NULL ORDER BY r.scraped_at DESC LIMIT 1""")
+                    snapshot = json.loads(row["payload"]) if row else None
             if not snapshot:
                 content = json.dumps(
                     {"status": "missing", "message": "No portfolio snapshot available."},
@@ -220,16 +279,18 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
                 )
 
             positions = []
-            total = float(snapshot.get("total_value_ars", 0.0) or 0.0)
+            total = snapshot.get("total_value_ars")
+            total = float(total) if total is not None else None
             for raw in snapshot.get("positions") or []:
-                market_value = float(raw.get("market_value", 0.0) or 0.0)
+                market_value = raw.get("market_value")
+                market_value = float(market_value) if market_value is not None else None
                 positions.append(
                     {
                         "ticker": str(raw.get("ticker") or "").upper(),
                         "quantity": raw.get("quantity"),
                         "price": raw.get("price") or raw.get("current_price"),
                         "market_value_ars": market_value,
-                        "weight": (market_value / total) if total > 0 else None,
+                        "weight": (market_value / total) if total and total > 0 and market_value is not None else None,
                         "pnl_pct": raw.get("pnl_pct"),
                     }
                 )
@@ -293,11 +354,16 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
                 payload["regime"] = get_macro_regime(macro)
             except Exception as exc:
                 payload["regime_error"] = f"{type(exc).__name__}: {exc}"
+            fields = ("sp500", "vix", "ccl", "mep", "riesgo_pais", "reservas", "merval", "wti")
+            observed = [key for key in fields if payload.get(key) is not None]
+            payload["observed_indicators"] = observed
+            payload["missing_indicators"] = [key for key in fields if key not in observed]
+            payload["data_status"] = "PARTIAL" if len(observed) < len(fields) else "OBSERVED"
             content = json.dumps(_json_safe(payload), ensure_ascii=False)
             return ToolObservation(
                 tool_name="get_macro_context",
                 arguments=arguments,
-                ok=True,
+                ok=bool(observed),
                 content=content[: context.output_limit_chars],
                 elapsed_ms=int((time.monotonic() - started) * 1000),
                 content_sha256=hashlib.sha256(content.encode()).hexdigest(),
@@ -336,6 +402,8 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
         return ["--owner-chat-id", str(context.owner_chat_id)]
 
     async def analyze_portfolio(arguments: dict[str, Any]) -> ToolObservation:
+        if not context.legacy_single_owner:
+            raise ToolValidationError("legacy analysis requires a verified single-owner database")
         command = [
             sys.executable,
             "scripts/run_analysis.py",
@@ -372,6 +440,8 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
     )
 
     async def analyze_ticker(arguments: dict[str, Any]) -> ToolObservation:
+        if not context.legacy_single_owner:
+            raise ToolValidationError("legacy analysis requires a verified single-owner database")
         ticker = str(arguments["ticker"]).upper().strip()
         if not _TICKER_RE.fullmatch(ticker):
             raise ToolValidationError("invalid ticker format")
@@ -415,6 +485,8 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
     )
 
     async def scan_opportunities(arguments: dict[str, Any]) -> ToolObservation:
+        if not context.legacy_single_owner:
+            raise ToolValidationError("legacy radar requires a verified single-owner database")
         limit = int(arguments.get("limit", 8))
         command = [
             sys.executable,
@@ -443,7 +515,7 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 12, "default": 8},
                 },
                 "additionalProperties": False,
             },
@@ -454,25 +526,41 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
     )
 
     async def performance(arguments: dict[str, Any]) -> ToolObservation:
-        command = [
-            sys.executable,
-            "scripts/run_performance.py",
-            "--no-telegram",
-            *owner_args(),
-        ]
-        return await _run_subprocess(
-            context,
-            tool_name="get_performance",
-            arguments=arguments,
-            command=command,
-        )
+        # run_performance/get_performance_stats_v2 close expired trades and run
+        # migrations. This explicit SELECT must never invoke that write path.
+        conn = await connect_read_only(read_only_dsn(context.database_url), command_timeout=60)
+        try:
+            rows = await conn.fetch("""SELECT source, status, metric_scope, COUNT(*) AS n_raw,
+                COUNT(COALESCE(executable_outcome_5d,outcome_5d)) AS n_recorded_5d,
+                AVG(COALESCE(executable_outcome_5d,outcome_5d)) AS mean_recorded_gross_5d,
+                AVG(COALESCE(executable_outcome_10d,outcome_10d)) AS mean_recorded_gross_10d,
+                AVG(COALESCE(executable_outcome_20d,outcome_20d)) AS mean_recorded_gross_20d
+                FROM decision_log dl
+                WHERE (owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL))
+                  AND decided_at BETWEEN NOW()-INTERVAL '90 days' AND NOW()
+                  AND outcome_basis LIKE 'canonical_cocos%'
+                  AND superseded_by_id IS NULL
+                  AND decision IN ('BUY','SELL','SELL_PARTIAL','SELL_FULL')
+                  AND NOT EXISTS (SELECT 1 FROM broker_fills bf WHERE bf.decision_log_id=dl.id
+                    AND COALESCE(bf.raw_payload,'{}'::jsonb) ? 'superseded_by_real'
+                    AND NOT EXISTS (SELECT 1 FROM broker_fills live WHERE live.decision_log_id=dl.id
+                      AND NOT (COALESCE(live.raw_payload,'{}'::jsonb) ? 'superseded_by_real')))
+                GROUP BY source,status,metric_scope ORDER BY source,status,metric_scope""",
+                context.owner_chat_id, context.legacy_single_owner)
+        finally:
+            await conn.close()
+        content = json.dumps(_json_safe({"lookback_days": 90, "cohorts": [dict(r) for r in rows],
+            "scope": "LEGACY_RECORDED_GROSS_OUTCOMES_NOT_DEDUPLICATED",
+            "limitations": "No es PnL económico, EV neto, comparación pareada ni evidencia de edge. No sumar cohortes."}), ensure_ascii=False)
+        return ToolObservation(tool_name="get_performance", arguments=arguments, ok=bool(rows), content=content[:context.output_limit_chars],
+                               error=None if rows else "no recorded outcomes for this account")
 
     registry.register(
         ToolSpec(
             name="get_performance",
             description=(
-                "Read Quantia's current performance report over already-persisted decisions and "
-                "outcomes. This does not execute trades."
+                "Read account-scoped legacy gross outcomes grouped by source/status/scope. "
+                "Rows are not deduplicated: not economic PnL, net EV or proof of edge. No writes."
             ),
             input_schema={
                 "type": "object",
@@ -497,10 +585,15 @@ async def execute_tool(
     item = registry.get(name)
     clean = _validate_schema(item.spec.input_schema, arguments)
     try:
-        return await asyncio.wait_for(
+        observation = await asyncio.wait_for(
             item.handler(clean),
             timeout=item.spec.timeout_seconds + 5,
         )
+        observation.tool_name = name
+        observation.arguments = clean
+        observation.content = observation.content[:100000]
+        observation.content_sha256 = hashlib.sha256(observation.content.encode("utf-8")).hexdigest()
+        return observation
     except ToolValidationError:
         raise
     except asyncio.TimeoutError:

@@ -64,7 +64,7 @@ class AgentRunStore:
         self.dsn = _dsn_for_asyncpg(dsn)
 
     async def _connect(self):
-        return await asyncpg.connect(self.dsn)
+        return await asyncpg.connect(self.dsn, timeout=15, command_timeout=30)
 
     async def ensure_schema(self) -> None:
         conn = await self._connect()
@@ -135,18 +135,6 @@ class AgentRunStore:
                     $1::uuid, $2, $3, $4, $5::jsonb,
                     $6, $7, $8, $9, $10, $11, $12, $13
                 )
-                ON CONFLICT (run_id, step_no) DO UPDATE SET
-                    decision_kind = EXCLUDED.decision_kind,
-                    tool_name = EXCLUDED.tool_name,
-                    tool_arguments = EXCLUDED.tool_arguments,
-                    rationale = EXCLUDED.rationale,
-                    confidence = EXCLUDED.confidence,
-                    observation_ok = EXCLUDED.observation_ok,
-                    observation = EXCLUDED.observation,
-                    observation_sha256 = EXCLUDED.observation_sha256,
-                    observation_cached = EXCLUDED.observation_cached,
-                    elapsed_ms = EXCLUDED.elapsed_ms,
-                    error = EXCLUDED.error
                 """,
                 run_id,
                 step_no,

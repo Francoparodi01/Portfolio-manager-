@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import asyncio
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -107,6 +109,7 @@ class AgentOrchestrator:
         cache: dict[str, ToolObservation] = {}
         call_counts: dict[str, int] = {}
         audit_persisted = False
+        audit_complete = True
 
         if self.require_audit and not self.store:
             raise RuntimeError("agent audit store is required but not configured")
@@ -125,6 +128,7 @@ class AgentOrchestrator:
                 )
                 audit_persisted = True
             except Exception:
+                audit_complete = False
                 if self.require_audit:
                     raise
 
@@ -144,11 +148,14 @@ class AgentOrchestrator:
                 )
 
                 if decision.kind == "final":
+                    if not any(s.observation and s.observation.ok for s in steps):
+                        raise AgentModelError("no successful tool evidence; cannot substantiate a final answer")
                     step = AgentTraceStep(step_no=step_no, decision=decision)
                     steps.append(step)
                     try:
                         audit_persisted = (await self._persist_step(run_id, step)) or audit_persisted
                     except Exception:
+                        audit_complete = False
                         if self.require_audit:
                             raise
                     answer = decision.answer or ""
@@ -156,6 +163,10 @@ class AgentOrchestrator:
                     stop_reason = "model_final"
                     break
 
+                try:
+                    decision.arguments = self.registry.validate(decision.tool_name or "", decision.arguments)
+                except ToolValidationError:
+                    pass  # execute_tool emits a persisted validation observation.
                 key = tool_call_key(decision.tool_name or "", decision.arguments)
                 call_counts[key] = call_counts.get(key, 0) + 1
 
@@ -197,6 +208,7 @@ class AgentOrchestrator:
                         )
                     cache[key] = observation
 
+                observation.content_sha256 = hashlib.sha256(observation.content.encode("utf-8")).hexdigest()
                 step = AgentTraceStep(
                     step_no=step_no,
                     decision=decision,
@@ -206,6 +218,7 @@ class AgentOrchestrator:
                 try:
                     audit_persisted = (await self._persist_step(run_id, step)) or audit_persisted
                 except Exception:
+                    audit_complete = False
                     if self.require_audit:
                         raise
 
@@ -220,6 +233,8 @@ class AgentOrchestrator:
                 )
                 if final_decision.kind != "final":
                     raise AgentModelError("model refused forced finalization")
+                if not any(s.observation and s.observation.ok for s in steps):
+                    raise AgentModelError("no successful tool evidence at budget exhaustion")
                 answer = final_decision.answer or ""
                 status = "LIMIT_REACHED"
                 stop_reason = "max_steps"
@@ -231,15 +246,19 @@ class AgentOrchestrator:
                 try:
                     audit_persisted = (await self._persist_step(run_id, final_step)) or audit_persisted
                 except Exception:
+                    audit_complete = False
                     if self.require_audit:
                         raise
 
+        except asyncio.CancelledError:
+            status, stop_reason, answer = "CANCELLED", "cancelled", "Run cancelado."
+            raise
         except Exception as exc:
             status = "FAILED"
             stop_reason = f"{type(exc).__name__}"
             answer = (
                 "El loop agéntico se detuvo de forma segura antes de completar el objetivo. "
-                f"Motivo técnico: {type(exc).__name__}: {exc}"
+                f"Motivo técnico: {type(exc).__name__}. Consultá la traza de auditoría."
             )
             if isinstance(exc, AgentModelError):
                 stop_reason = "model_error"
@@ -256,6 +275,7 @@ class AgentOrchestrator:
                         metadata_patch={"steps_used": len(steps)},
                     )
                 except Exception:
+                    audit_complete = False
                     if self.require_audit:
                         raise
 
@@ -269,7 +289,7 @@ class AgentOrchestrator:
             model=self.model.name,
             started_at=started_at,
             finished_at=finished_at,
-            audit_persisted=audit_persisted,
+            audit_persisted=audit_persisted and audit_complete,
         )
 
 

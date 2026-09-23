@@ -74,6 +74,8 @@ tests/*
 !tests/test_radar_metrics.py
 !tests/test_radar_setup_alerts.py
 !tests/test_tradingview_byma_backfill.py
+!tests/test_agentic_loop.py
+!tests/test_agentic_guards.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json

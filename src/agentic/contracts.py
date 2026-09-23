@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Literal
@@ -69,7 +70,8 @@ class AgentDecision:
         confidence = value.get("confidence")
         if confidence is not None:
             try:
-                confidence = max(0.0, min(1.0, float(confidence)))
+                confidence = float(confidence)
+                confidence = max(0.0, min(1.0, confidence)) if math.isfinite(confidence) else None
             except (TypeError, ValueError):
                 confidence = None
 
@@ -77,7 +79,7 @@ class AgentDecision:
             tool_name = str(
                 value.get("tool") or value.get("tool_name") or ""
             ).strip()
-            arguments = value.get("arguments") or {}
+            arguments = value.get("arguments", {})
             if not tool_name:
                 raise AgentModelError("tool decision missing tool name")
             if not isinstance(arguments, dict):
@@ -90,7 +92,7 @@ class AgentDecision:
                 confidence=confidence,
             )
 
-        answer = str(value.get("answer") or "").strip()
+        answer = str(value.get("answer") or "").strip()[:12000]
         if not answer:
             raise AgentModelError("final decision missing answer")
         return cls(
@@ -165,4 +167,4 @@ class AgentResult:
 
 
 def canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)

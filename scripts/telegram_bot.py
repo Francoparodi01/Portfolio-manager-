@@ -132,6 +132,7 @@ NO_AUTO_MENU_ACTIONS = {"settings", "settings_reconfigure"}
 FAST_ACTIONS = {"status"}
 
 BOT_COMMAND_SPECS: list[tuple[str, str]] = [
+    ("agente", "Consultar evidencia con el agente"),
     ("menu", "Abrir panel principal"),
     ("help", "Cómo leer Quantia"),
     ("portfolio", "Cartera actual"),
@@ -773,6 +774,7 @@ def results_keyboard() -> InlineKeyboardMarkup:
 
 def audit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 Agente", callback_data="agent_prompt")],
         [
             InlineKeyboardButton("🧭 Confianza", callback_data="confidence_audit"),
             InlineKeyboardButton("🔬 Shadow", callback_data="shadow"),
@@ -825,6 +827,7 @@ def help_text() -> str:
         "<code>/bot_vs_humano</code>: planes vs movimientos reales.\n"
         "<code>/viability</code>: evidencia y umbrales de viabilidad del bot.\n"
         "\n<b>Auditoría</b>\n"
+        "<code>/agente objetivo</code>: consulta evidencia y entrega una traza auditable.\n"
         "<code>/confianza</code>: cobertura y confiabilidad operativa.\n"
         "<code>/calibracion</code>: calibración entre decisiones y outcomes.\n"
         "<code>/regression</code>: señales y resultados por capa.\n"
@@ -2634,6 +2637,7 @@ async def action_admin_refresh_portfolio(context: ContextTypes.DEFAULT_TYPE, cha
 # ─────────────────────────────────────────────────────────────────────────────
 
 CALLBACK_ALIASES: dict[str, str] = {
+    "agent_prompt":     "agent_prompt",
     # Navegación
     "menu_home":        "menu_home",
     "menu_results":     "menu_results",
@@ -2731,6 +2735,7 @@ CALLBACK_ALIASES: dict[str, str] = {
 }
 
 ACTION_LOADING_TEXT: dict[str, str] = {
+    "agent_prompt":  "Abriendo consulta al agente...",
     "calibration":   "DCL: auditando decisiones y outcomes...",
     "analysis_test": "Probando analisis sin guardar...",
     "analysis_debug": "Generando diagnostico sin guardar...",
@@ -2760,6 +2765,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
 
 async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     dispatch = {
+        "agent_prompt":   action_agent_prompt,
         "portfolio":      action_portfolio,
         "analysis":       action_analysis,
         "analysis_test":  action_analysis_test,
@@ -2906,6 +2912,23 @@ async def performance_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def net_decisions_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "net_decisions")
+
+
+async def action_agent_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    from src.agentic.telegram import PROMPT
+    await send_text(context, chat_id, PROMPT)
+
+
+async def agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not await ensure_allowed_chat(update, context):
+        return
+    from src.agentic.telegram import run_report
+    try:
+        await run_report(context, update.effective_chat.id, " ".join(context.args or []),
+                         run_command=run_cmd, send_text=send_text)
+    except Exception:
+        logger.exception("[BOT][AGENT] Query failed")
+        await send_text(context, update.effective_chat.id, "No pude completar la consulta del agente. Reintentá con /agente.")
 
 
 async def viability_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3479,6 +3502,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("neto",             net_decisions_handler))
     app.add_handler(CommandHandler("resultado_neto",   net_decisions_handler))
     app.add_handler(CommandHandler("viability",        viability_handler))
+    app.add_handler(CommandHandler("agente",           agent_handler))
+    app.add_handler(CommandHandler("agent",            agent_handler))
     app.add_handler(CommandHandler("viabilidad",       viability_handler))
     app.add_handler(CommandHandler("ledger",           decision_ledger_handler))
     app.add_handler(CommandHandler("decision_ledger",  decision_ledger_handler))
