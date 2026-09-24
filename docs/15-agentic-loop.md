@@ -51,6 +51,7 @@ motor cuantitativo y los guards siguen siendo deterministas.
 
 - `src/agentic/contracts.py`: contratos de decisiones, tools, observaciones y resultado.
 - `src/agentic/model.py`: controlador Ollama JSON-only.
+- `src/agentic/answer.py`: cierre determinístico desde valores y extractos observados.
 - `src/agentic/tools.py`: registry + tools read-only.
 - `src/agentic/orchestrator.py`: loop, límites, cache y anti-loop.
 - `src/agentic/persistence.py`: auditoría en `agent_runs` y `agent_steps`.
@@ -290,3 +291,55 @@ Los artefactos completos de smoke quedan locales bajo `tmp/agentic-review/` y
 contienen evidencia privada de la cuenta; no se incorporan al repositorio.
 El modelo puede fallar o llegar al límite de tiempo. En esos casos el comando
 informa el estado y no transforma una respuesta incompleta en evidencia económica.
+
+## Corrección del cierre — 2026-09-23
+
+El run `6174e873-d2d7-461a-85c5-02437bcc3d13` consultó snapshot, macro, cartera
+y NVDA. Al agotar cuatro consultas, el modelo respondió sólo `-0.063`, el score
+de ese ticker. El contrato anterior aceptaba cualquier string no vacío; la
+auditoría estaba completa, pero la respuesta no cumplía el objetivo.
+
+La reproducción con Ollama también mostró errores al redactar libremente:
+mezclaba WATCH/bloqueos con ventas y declaraba ausentes indicadores ya observados.
+Por eso el cierre ahora usa `answer.py`, tanto cuando el modelo decide terminar
+como al agotar consultas. El controlador conserva la elección de herramientas;
+el texto final usa valores identificados y extractos literales, con fechas,
+alcance de cada fuente y limitaciones explícitas. No publica interpretaciones
+financieras libres del modelo ni su autoconfianza como garantía. El origen queda
+registrado como `answer_origin=evidence_renderer_v1` en el JSON y metadata del run.
+
+Este cierre es un informe descriptivo de las consultas realizadas; no promete
+resolver objetivos arbitrarios ni verificar información que las herramientas no
+obtuvieron. Los formatos no reconocidos se muestran como extractos, sin inventar
+campos. Los ceros de un análisis aislado de ticker no se atribuyen a la cuenta.
+
+El controlador solicita contexto de 16.384 tokens (el runtime tenía 4.096),
+limita el historial a 16.000 caracteres y cada observación a 6.000, y retoma el
+objetivo original después de las observaciones. El cierre usa la traza completa
+sin otra generación del LLM. Los límites de herramientas, cuenta y auditoría
+se mantienen. Telegram distingue consultas de cierres y aclara que la traza no
+valida la conclusión. `LIMIT_REACHED` sigue significando presupuesto agotado;
+no se disfraza como `COMPLETE`.
+
+La traza aportada se reprodujo sin ejecutar herramientas ni modificar el run
+original. La regresión cubre el score aislado, todas las fuentes, faltantes,
+WATCH frente a SELL, cierre anticipado/forzado, metadata y presentación Telegram.
+Los artefactos con datos de cuenta permanecen locales, fuera del PR.
+
+Validación de la corrección:
+
+- Suite focalizada del checkout operativo: **140 passed**; rama del PR: **69 passed**.
+- Handler Telegram, CLI, Ollama y PostgreSQL reales con receptor simulado:
+  run `ca85966e-fe9d-4bc7-bf00-3e84d2f24a4f`, respuesta y JSON entregados,
+  owner, metadata del cierre y hashes verificados. No se enviaron mensajes de prueba.
+  El controlador decidió cerrar tras el snapshot: esto valida transporte y auditoría,
+  no una revisión completa de cartera. El informe declara explícitamente que no se
+  verificó el plan cuando falta `analyze_portfolio`.
+- Reproducción de las cuatro observaciones de la traza original: se conservaron
+  snapshot, indicadores macro, propuestas SELL y guards WATCH sin convertirlos
+  en fills ni atribuir a la cuenta el cero de un análisis de ticker aislado.
+- Imagen activada: `sha256:45aa2c41d93ea01049372b3b3fa61b2b0691b6e0b3b02bc3e04b2fd0938916b4`.
+  Sólo se reemplazó `src/agentic` sobre la imagen anterior. Los hashes desplegados
+  coinciden con el checkout, `/agente` y `/analytics` siguen registrados y el
+  scheduler conserva imagen y fecha de inicio. Rollback disponible en
+  `cocos-telegram-before-agent-answer-20260923:local`.

@@ -13,6 +13,7 @@ from .contracts import (
     AgentTraceStep,
     ToolObservation,
     ToolValidationError,
+    validate_answer,
 )
 from .model import AgentModel
 from .persistence import AgentRunStore
@@ -150,6 +151,7 @@ class AgentOrchestrator:
                 if decision.kind == "final":
                     if not any(s.observation and s.observation.ok for s in steps):
                         raise AgentModelError("no successful tool evidence; cannot substantiate a final answer")
+                    decision.answer = validate_answer(decision.answer)
                     step = AgentTraceStep(step_no=step_no, decision=decision)
                     steps.append(step)
                     try:
@@ -227,7 +229,7 @@ class AgentOrchestrator:
                     goal=goal,
                     tools=self.registry.specs(),
                     history=self._history_payload(steps),
-                    step_no=self.max_steps,
+                    step_no=self.max_steps + 1,
                     max_steps=self.max_steps,
                     force_final=True,
                 )
@@ -235,6 +237,7 @@ class AgentOrchestrator:
                     raise AgentModelError("model refused forced finalization")
                 if not any(s.observation and s.observation.ok for s in steps):
                     raise AgentModelError("no successful tool evidence at budget exhaustion")
+                final_decision.answer = validate_answer(final_decision.answer)
                 answer = final_decision.answer or ""
                 status = "LIMIT_REACHED"
                 stop_reason = "max_steps"
@@ -272,7 +275,9 @@ class AgentOrchestrator:
                         stop_reason=stop_reason,
                         final_answer=answer,
                         finished_at=finished_at,
-                        metadata_patch={"steps_used": len(steps)},
+                        metadata_patch={"steps_used": len(steps),
+                                        "answer_origin": (steps[-1].decision.answer_origin
+                                                          if steps and steps[-1].decision.kind == "final" else None)},
                     )
                 except Exception:
                     audit_complete = False

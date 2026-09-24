@@ -190,3 +190,4 @@ def test_max_steps_forces_final_answer():
     assert result.stop_reason == "max_steps"
     assert result.answer == "forced summary"
     assert model.calls[-1]["force_final"] is True
+    assert model.calls[-1]["step_no"] == 2  # one consultation, then the separate close

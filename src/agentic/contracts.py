@@ -19,6 +19,22 @@ class ToolValidationError(AgentError):
     """Raised when a requested tool call does not satisfy its contract."""
 
 
+def validate_answer(answer: Any) -> str:
+    """A scalar/JSON value is never a user-facing analytical explanation."""
+    if not isinstance(answer, str) or not answer.strip():
+        raise AgentModelError("final answer must be explanatory text")
+    answer = answer.strip()
+    try:
+        json.loads(answer)
+    except (ValueError, TypeError):
+        pass
+    else:
+        raise AgentModelError("final answer must explain the goal, not return a scalar or JSON value")
+    if not any(char.isalpha() for char in answer):
+        raise AgentModelError("final answer cannot be only a score or number")
+    return answer[:12000]
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -59,6 +75,7 @@ class AgentDecision:
     answer: str | None = None
     rationale: str = ""
     confidence: float | None = None
+    answer_origin: str = "model"
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "AgentDecision":
@@ -92,9 +109,7 @@ class AgentDecision:
                 confidence=confidence,
             )
 
-        answer = str(value.get("answer") or "").strip()[:12000]
-        if not answer:
-            raise AgentModelError("final decision missing answer")
+        answer = validate_answer(value.get("answer"))
         return cls(
             kind="final",
             answer=answer,
@@ -135,6 +150,8 @@ class AgentResult:
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat(),
             "audit_persisted": self.audit_persisted,
+            "answer_origin": (self.steps[-1].decision.answer_origin
+                              if self.steps and self.steps[-1].decision.kind == "final" else None),
             "steps": [
                 {
                     "step_no": step.step_no,
@@ -145,6 +162,7 @@ class AgentResult:
                         "answer": step.decision.answer,
                         "rationale": step.decision.rationale,
                         "confidence": step.decision.confidence,
+                        "answer_origin": step.decision.answer_origin,
                     },
                     "observation": (
                         {

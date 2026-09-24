@@ -44,9 +44,17 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
             status = str(result.get("status", "FAILED"))
             audit = "completa" if result.get("audit_persisted") else "incompleta"
             answer = str(result.get("answer") or "La consulta terminó sin respuesta.")
+            steps = result.get("steps", [])
+            consultations = sum(step.get("decision", {}).get("kind") == "tool" for step in steps)
+            completions = sum(step.get("decision", {}).get("kind") == "final" for step in steps)
+            limit_note = ("\nLímite de consultas alcanzado: la síntesis puede dejar verificaciones pendientes."
+                          if status == "LIMIT_REACHED" else "")
             await send_text(context, chat_id, "<b>Agente de Quantia</b>\n" + escape(answer)
-                            + f"\n\nEstado: <code>{escape(status)}</code> · Auditoría: {audit}"
-                            + f"\nPasos: {len(result.get('steps', []))} · Run: <code>{escape(str(result.get('run_id', 'N/D')))}</code>")
+                            + limit_note
+                            + f"\n\nEstado: <code>{escape(status)}</code> · Traza: {audit}"
+                            + f"\nConsultas: {consultations} · Cierres: {completions}"
+                            + "\nLa traza registra las consultas; no valida la conclusión."
+                            + f"\nRun: <code>{escape(str(result.get('run_id', 'N/D')))}</code>")
             with artifact.open("rb") as document:
                 await context.bot.send_document(chat_id=chat_id, document=document,
                                                 filename=artifact.name,
