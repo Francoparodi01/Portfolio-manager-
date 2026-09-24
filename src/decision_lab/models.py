@@ -4,6 +4,7 @@ Payloads are canonical JSON strings to avoid shallow-frozen mutable dictionaries
 Decimal quantities/cash retain the evidence's precision; statistical returns are
 converted to finite floats only at the reporting boundary.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -12,14 +13,27 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 def canonical(value: Any) -> str:
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
-                      default=lambda x: x.isoformat() if isinstance(x, datetime) else str(x))
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+        default=lambda x: x.isoformat() if isinstance(x, datetime) else str(x),
+    )
 
 
 def digest(value: Any) -> str:
@@ -35,13 +49,39 @@ class Frozen(BaseModel):
         return value.astimezone(timezone.utc) if isinstance(value, datetime) else value
 
 
-SourceQuality = Literal["POINT_IN_TIME_SAFE", "RECONSTRUCTIBLE", "APPROXIMATE", "CURRENT_STATE_ONLY", "UNSAFE_FOR_REPLAY"]
-ReplayMode = Literal["HISTORICAL_POLICY_REPLAY", "CURRENT_POLICY_ON_HISTORICAL_DATA", "RECORDED_PLAN_EVALUATION"]
+SourceQuality = Literal[
+    "POINT_IN_TIME_SAFE",
+    "RECONSTRUCTIBLE",
+    "APPROXIMATE",
+    "CURRENT_STATE_ONLY",
+    "UNSAFE_FOR_REPLAY",
+]
+ReplayMode = Literal[
+    "HISTORICAL_POLICY_REPLAY",
+    "CURRENT_POLICY_ON_HISTORICAL_DATA",
+    "RECORDED_PLAN_EVALUATION",
+]
 OutcomeStatus = Literal["MATURE", "PENDING", "UNAVAILABLE", "INVALID", "NOT_APPLICABLE"]
 
 
 class Evidence(Frozen):
-    kind: Literal["PORTFOLIO", "BAR", "UNIVERSE", "MACRO", "FX", "SENTIMENT", "NEWS", "EVENT", "CORPORATE_ACTION", "ACTION_COVERAGE", "FEATURES", "PLAN", "CONFIG", "FILL", "HUMAN_COVERAGE"]
+    kind: Literal[
+        "PORTFOLIO",
+        "BAR",
+        "UNIVERSE",
+        "MACRO",
+        "FX",
+        "SENTIMENT",
+        "NEWS",
+        "EVENT",
+        "CORPORATE_ACTION",
+        "ACTION_COVERAGE",
+        "FEATURES",
+        "PLAN",
+        "CONFIG",
+        "FILL",
+        "HUMAN_COVERAGE",
+    ]
     record_id: str = Field(min_length=1)
     effective_at: AwareDatetime
     available_at: AwareDatetime
@@ -54,7 +94,9 @@ class Evidence(Frozen):
     @field_validator("payload_json")
     @classmethod
     def normalized(cls, value):
-        data = json.loads(value, parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
+        data = json.loads(
+            value, parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x))
+        )
         if not isinstance(data, dict):
             raise ValueError("evidence payload must be an object")
         return canonical(data)
@@ -63,15 +105,26 @@ class Evidence(Frozen):
     def no_labels_in_decision_evidence(self):
         if self.kind in {"FILL", "HUMAN_COVERAGE"}:
             return self
+
         def check(value):
             if isinstance(value, dict):
                 for key, item in value.items():
-                    if key.startswith(("outcome_", "executable_outcome_", "forward_return", "future_return")) or key in {"was_correct", "label_timeout", "closed_at"}:
-                        raise ValueError("future outcome labels cannot enter decision evidence")
+                    if key.startswith(
+                        (
+                            "outcome_",
+                            "executable_outcome_",
+                            "forward_return",
+                            "future_return",
+                        )
+                    ) or key in {"was_correct", "label_timeout", "closed_at"}:
+                        raise ValueError(
+                            "future outcome labels cannot enter decision evidence"
+                        )
                     check(item)
             elif isinstance(value, list):
                 for item in value:
                     check(item)
+
         check(self.payload)
         return self
 
@@ -84,7 +137,9 @@ class Evidence(Frozen):
         return digest(self)
 
     def known_at(self, cutoff: datetime) -> bool:
-        return self.available_at <= cutoff and (self.revision_at is None or self.revision_at <= cutoff)
+        return self.available_at <= cutoff and (
+            self.revision_at is None or self.revision_at <= cutoff
+        )
 
 
 class Session(Frozen):
@@ -106,7 +161,9 @@ class Dataset(Frozen):
 
     @model_validator(mode="after")
     def unique(self):
-        keys = [(e.kind, e.record_id, e.available_at, e.revision_at) for e in self.records]
+        keys = [
+            (e.kind, e.record_id, e.available_at, e.revision_at) for e in self.records
+        ]
         if len(set(keys)) != len(keys):
             raise ValueError("duplicate evidence version")
         if len({s.session_id for s in self.sessions}) != len(self.sessions):
@@ -170,8 +227,8 @@ class StrategySpec(Frozen):
 class Order(Frozen):
     ticker: str
     side: Literal["BUY", "SELL"]
-    quantity: Decimal = Field(ge=0)
-    reference_price: Decimal = Field(ge=0)
+    quantity: Decimal | None = Field(default=None, ge=0)
+    reference_price: Decimal | None = Field(default=None, ge=0)
     target_amount_ars: Decimal = Field(ge=0)
     executable: bool
     blocked: bool = False
@@ -185,7 +242,15 @@ class Order(Frozen):
 
     @model_validator(mode="after")
     def executable_price(self):
-        if self.executable and not self.blocked and self.quantity > 0 and self.reference_price <= 0:
+        if (
+            self.executable
+            and not self.blocked
+            and (
+                self.quantity is None
+                or self.reference_price is None
+                or (self.quantity > 0 and self.reference_price <= 0)
+            )
+        ):
             raise ValueError("executable order requires a positive reference price")
         return self
 
@@ -263,17 +328,38 @@ class Experiment(Frozen):
     bootstrap_resamples: int = Field(default=5000, ge=100, le=100000)
     bootstrap_block_sessions: int = Field(default=20, ge=1)
     seed: int = 42
-    confidence: float = Field(default=.95, gt=0, lt=1)
+    confidence: float = Field(default=0.95, gt=0, lt=1)
     minimum_n: int = Field(default=30, ge=2)
     family: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def chronology(self):
-        if not self.horizons or len(set(self.horizons)) != len(self.horizons) or any(h < 1 for h in self.horizons):
+        if (
+            not self.horizons
+            or len(set(self.horizons)) != len(self.horizons)
+            or any(h < 1 for h in self.horizons)
+        ):
             raise ValueError("unique positive horizons required")
-        boundaries = [x for x in (self.train_end, self.validation_end, self.evaluation_start, self.evaluation_end) if x is not None]
+        boundaries = [
+            x
+            for x in (
+                self.train_end,
+                self.validation_end,
+                self.evaluation_start,
+                self.evaluation_end,
+            )
+            if x is not None
+        ]
         if any(a >= b for a, b in zip(boundaries, boundaries[1:])):
-            raise ValueError("training, validation and evaluation windows must be strictly ordered")
-        if self.confirmatory and (not self.family or not self.evaluation_start or self.registered_at >= self.evaluation_start):
-            raise ValueError("confirmation requires a family preregistered before evaluation")
+            raise ValueError(
+                "training, validation and evaluation windows must be strictly ordered"
+            )
+        if self.confirmatory and (
+            not self.family
+            or not self.evaluation_start
+            or self.registered_at >= self.evaluation_start
+        ):
+            raise ValueError(
+                "confirmation requires a family preregistered before evaluation"
+            )
         return self

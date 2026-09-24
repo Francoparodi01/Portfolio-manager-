@@ -110,3 +110,7 @@ backup_*.sql
 *.sqlite
 *.sqlite3
 *.db
+
+# Private Decision Lab evidence / replay artifacts
+/tmp/
+/outputs/decision-lab/

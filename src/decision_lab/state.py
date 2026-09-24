@@ -1,11 +1,20 @@
 """As-of reconstruction. Adapters receive this state, never the outcome dataset."""
+
 from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 
-from .models import Dataset, Evidence, HistoricalState, Position, QualityAssessment, canonical, digest
+from .models import (
+    Dataset,
+    Evidence,
+    HistoricalState,
+    Position,
+    QualityAssessment,
+    canonical,
+    digest,
+)
 
 
 class InsufficientEvidence(ValueError):
@@ -16,6 +25,7 @@ class InsufficientEvidence(ValueError):
 
 class EvidenceIndex:
     """One parse/hash pass per exported dataset; shared by all walk-forward dates."""
+
     def __init__(self, dataset: Dataset):
         self.dataset = dataset
         self.by_kind = defaultdict(list)
@@ -37,13 +47,26 @@ class EvidenceIndex:
         for e in self.by_kind[kind]:
             if e.owner is not None and e.owner != owner:
                 continue
-            if kind in {"PORTFOLIO", "PLAN", "FEATURES", "CONFIG", "FILL", "HUMAN_COVERAGE"} and e.owner != owner:
+            if (
+                kind
+                in {"PORTFOLIO", "PLAN", "FEATURES", "CONFIG", "FILL", "HUMAN_COVERAGE"}
+                and e.owner != owner
+            ):
                 continue
             if not e.known_at(as_of):
                 continue
             # Announced future events are known information. Their effective
             # date is never used to adjust past quantities before effectiveness.
-            if kind not in {"EVENT", "CORPORATE_ACTION", "ACTION_COVERAGE", "HUMAN_COVERAGE"} and e.effective_at > as_of:
+            if (
+                kind
+                not in {
+                    "EVENT",
+                    "CORPORATE_ACTION",
+                    "ACTION_COVERAGE",
+                    "HUMAN_COVERAGE",
+                }
+                and e.effective_at > as_of
+            ):
                 continue
             if kind in {"NEWS", "SENTIMENT"}:
                 published = self.payload(e).get("published_at")
@@ -52,10 +75,29 @@ class EvidenceIndex:
             yield e
 
     def latest(self, kind, as_of, owner, *, record_id=None):
-        rows = [e for e in self.visible(kind, as_of, owner) if record_id is None or e.record_id == record_id]
-        return max(rows, key=lambda e: (e.effective_at, e.revision_at or e.available_at, e.record_id), default=None)
+        rows = [
+            e
+            for e in self.visible(kind, as_of, owner)
+            if record_id is None or e.record_id == record_id
+        ]
+        return max(
+            rows,
+            key=lambda e: (
+                e.effective_at,
+                e.revision_at or e.available_at,
+                e.record_id,
+            ),
+            default=None,
+        )
 
-    def bars(self, cutoff: datetime, tickers: set[str], *, decision_inputs=False, session_ids=None):
+    def bars(
+        self,
+        cutoff: datetime,
+        tickers: set[str],
+        *,
+        decision_inputs=False,
+        session_ids=None,
+    ):
         selected = {}
         for e in self.by_kind["BAR"]:
             p = self.payload(e)
@@ -66,7 +108,10 @@ class EvidenceIndex:
                 continue
             if session_ids is not None and session.session_id not in session_ids:
                 continue
-            if decision_inputs and p.get("price_mode") not in {"RAW_AS_TRADED", "POINT_IN_TIME_ADJUSTED"}:
+            if decision_inputs and p.get("price_mode") not in {
+                "RAW_AS_TRADED",
+                "POINT_IN_TIME_ADJUSTED",
+            }:
                 continue
             if p.get("price_mode") == "POINT_IN_TIME_ADJUSTED":
                 adjustment = p.get("adjustment_as_of")
@@ -85,8 +130,15 @@ class EvidenceIndex:
         return selected
 
 
-def build_state(index: EvidenceIndex, *, as_of: datetime, owner: int, plan_id: str | None = None,
-                portfolio_id: str | None = None, lookback_sessions: int = 260) -> HistoricalState:
+def build_state(
+    index: EvidenceIndex,
+    *,
+    as_of: datetime,
+    owner: int,
+    plan_id: str | None = None,
+    portfolio_id: str | None = None,
+    lookback_sessions: int = 260,
+) -> HistoricalState:
     if not owner or as_of.tzinfo is None:
         raise ValueError("explicit owner and timezone-aware as_of required")
     portfolio = index.latest("PORTFOLIO", as_of, owner, record_id=portfolio_id)
@@ -94,7 +146,12 @@ def build_state(index: EvidenceIndex, *, as_of: datetime, owner: int, plan_id: s
         raise InsufficientEvidence("PORTFOLIO_NOT_KNOWN_AT_T")
     p = index.payload(portfolio)
     try:
-        positions = tuple(sorted((Position.model_validate(r) for r in p["positions"]), key=lambda x: x.ticker))
+        positions = tuple(
+            sorted(
+                (Position.model_validate(r) for r in p["positions"]),
+                key=lambda x: x.ticker,
+            )
+        )
         cash = Decimal(str(p["cash_ars"]))
         capital = cash + sum((r.quantity * r.mark_ars for r in positions), Decimal(0))
     except (KeyError, TypeError, ValueError) as exc:
@@ -104,14 +161,22 @@ def build_state(index: EvidenceIndex, *, as_of: datetime, owner: int, plan_id: s
     selected = [portfolio]
     missing, warnings, assumptions = [], [], list(p.get("assumptions", []))
     universe = index.latest("UNIVERSE", as_of, owner)
-    uq = index.payload(universe).get("universe_quality", "UNKNOWN") if universe else "UNKNOWN"
+    uq = (
+        index.payload(universe).get("universe_quality", "UNKNOWN")
+        if universe
+        else "UNKNOWN"
+    )
     if universe:
         selected.append(universe)
     else:
         missing.append("universe_snapshot")
     tickers = {r.ticker for r in positions}
     if universe:
-        tickers.update(r["ticker"] for r in index.payload(universe).get("instruments", []) if r.get("enabled") and r.get("operable"))
+        tickers.update(
+            r["ticker"]
+            for r in index.payload(universe).get("instruments", [])
+            if r.get("enabled") and r.get("operable")
+        )
     plan = index.latest("PLAN", as_of, owner, record_id=plan_id)
     if plan:
         selected.append(plan)
@@ -142,36 +207,87 @@ def build_state(index: EvidenceIndex, *, as_of: datetime, owner: int, plan_id: s
             if ticker is None or ticker in tickers:
                 selected.append(row)
     session_ids = {s.session_id for s in index.ordered_sessions if s.close_at <= as_of}
-    session_ids = set([s.session_id for s in index.ordered_sessions if s.session_id in session_ids][-lookback_sessions:])
+    session_ids = set(
+        [s.session_id for s in index.ordered_sessions if s.session_id in session_ids][
+            -lookback_sessions:
+        ]
+    )
     bars = index.bars(as_of, tickers, decision_inputs=True, session_ids=session_ids)
     selected.extend(bars[k] for k in sorted(bars))
     if not bars:
         missing.append("admissible_price_history")
-    if p.get("total_value_ars") is not None and abs(Decimal(str(p["total_value_ars"]))-capital) > Decimal("0.05"):
+    if p.get("total_value_ars") is not None and abs(
+        Decimal(str(p["total_value_ars"])) - capital
+    ) > Decimal("0.05"):
         warnings.append("PORTFOLIO_TOTAL_DIFFERS_FROM_POSITIONS_PLUS_CASH")
-    if (as_of-portfolio.effective_at).total_seconds() > 86400:
+    if (as_of - portfolio.effective_at).total_seconds() > 86400:
         warnings.append("PORTFOLIO_OLDER_THAN_24H")
     components = {}
     for row in selected:
         components.setdefault(row.kind, set()).add(row.quality)
-    invalid = any(e.quality in {"UNSAFE_FOR_REPLAY", "CURRENT_STATE_ONLY"} for e in selected if e.kind != "BAR")
-    approximate = any(e.quality == "APPROXIMATE" for e in selected) or uq in {"UNKNOWN", "APPROXIMATE"}
-    level = "INVALID" if invalid else "LOW" if approximate or missing or warnings or assumptions else "MEDIUM" if any(e.quality == "RECONSTRUCTIBLE" for e in selected) else "HIGH"
-    quality = QualityAssessment(level=level, primary_eligible=level == "HIGH",
-        components_json=canonical({k: sorted(v) for k,v in sorted(components.items())}),
-        missing_fields=tuple(sorted(missing)), reconstruction_assumptions=tuple(sorted(set(assumptions))), warnings=tuple(warnings))
-    selected.sort(key=lambda e: (e.kind, e.record_id, e.available_at, e.revision_at or e.available_at))
+    invalid = any(
+        e.quality in {"UNSAFE_FOR_REPLAY", "CURRENT_STATE_ONLY"}
+        for e in selected
+        if e.kind != "BAR"
+    )
+    approximate = any(e.quality == "APPROXIMATE" for e in selected) or uq in {
+        "UNKNOWN",
+        "APPROXIMATE",
+    }
+    level = (
+        "INVALID"
+        if invalid
+        else (
+            "LOW"
+            if approximate or missing or warnings or assumptions
+            else (
+                "MEDIUM"
+                if any(e.quality == "RECONSTRUCTIBLE" for e in selected)
+                else "HIGH"
+            )
+        )
+    )
+    quality = QualityAssessment(
+        level=level,
+        primary_eligible=level == "HIGH",
+        components_json=canonical(
+            {k: sorted(v) for k, v in sorted(components.items())}
+        ),
+        missing_fields=tuple(sorted(missing)),
+        reconstruction_assumptions=tuple(sorted(set(assumptions))),
+        warnings=tuple(warnings),
+    )
+    selected.sort(
+        key=lambda e: (
+            e.kind,
+            e.record_id,
+            e.available_at,
+            e.revision_at or e.available_at,
+        )
+    )
     ih = digest([index.hashes[id(e)] for e in selected])
     state_id = digest([as_of.isoformat(), owner, ih, index.dataset.calendar_version])
     # Opportunity identity excludes strategy/plan and future outcomes. Version
     # comparisons require the entire state_id as well as this common unit.
     opportunity_id = digest([owner, as_of.isoformat(), index.hashes[id(portfolio)]])
     feature_ids = [e.record_id for e in selected if e.kind == "FEATURES"]
-    return HistoricalState(as_of=as_of, owner=owner, state_id=state_id, opportunity_id=opportunity_id,
-        records=tuple(selected), positions=positions, cash_ars=cash, capital_base_ars=capital,
-        portfolio_snapshot_id=portfolio.record_id, market_snapshot_id=digest([index.hashes[id(bars[k])] for k in sorted(bars)]),
+    return HistoricalState(
+        as_of=as_of,
+        owner=owner,
+        state_id=state_id,
+        opportunity_id=opportunity_id,
+        records=tuple(selected),
+        positions=positions,
+        cash_ars=cash,
+        capital_base_ars=capital,
+        portfolio_snapshot_id=portfolio.record_id,
+        market_snapshot_id=digest([index.hashes[id(bars[k])] for k in sorted(bars)]),
         feature_snapshot_id=digest(feature_ids) if feature_ids else None,
-        universe_snapshot_id=universe.record_id if universe else None, universe_quality=uq, input_hash=ih, quality=quality)
+        universe_snapshot_id=universe.record_id if universe else None,
+        universe_quality=uq,
+        input_hash=ih,
+        quality=quality,
+    )
 
 
 def require_kind(state: HistoricalState, kind: str) -> list[Evidence]:
