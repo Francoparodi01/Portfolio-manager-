@@ -1932,6 +1932,18 @@ async def _save_execution_plan_events(
             if row_id:
                 saved_ids.append(row_id)
 
+        # Additive audit capture; cannot alter the emitted operational plan.
+        try:
+            from src.decision_lab.capture import capture_plan
+            capture = await capture_plan(conn, plan_id=execution_plan_id,
+                owner=owner_chat_id, decision_at=plan_created_at, plan=execution_plan,
+                portfolio=portfolio_snapshot, signals=results, macro=macro_snap,
+                events={"manual":manual_market_events,"corporate":corporate_action_effects,"earnings":upcoming_earnings_events})
+            if capture["status"] != "CAPTURED":
+                logger.warning("Decision Lab capture insufficient: %s", capture["reason"])
+        except Exception:
+            logger.warning("Decision Lab immutable capture failed; operational plan unchanged", exc_info=True)
+
     finally:
         await conn.close()
 

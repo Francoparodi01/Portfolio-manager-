@@ -438,7 +438,7 @@ def _write_optimizer_diagnostic(payload: dict, path: str | Path | None = None) -
 
 
 def _optimize_black_litterman(returns, universe, score_map, tau=TAU,
-                               risk_aversion=RISK_AVERSION, w_max_arr=None):
+                               risk_aversion=RISK_AVERSION, w_max_arr=None, write_diagnostics=True):
     lower_bounds = np.full(len(universe), W_MIN)
     upper_bounds = (
         w_max_arr.astype(float)
@@ -527,7 +527,7 @@ def _optimize_black_litterman(returns, universe, score_map, tau=TAU,
             note += f"; cash {cash_weight:.1%} from caps"
         return weights, "BLACK_LITTERMAN", note
     except Exception as e:
-        if type(e).__name__ == "OptimizationError":
+        if write_diagnostics and type(e).__name__ == "OptimizationError":
             payload = _optimizer_diagnostic_payload(
                 universe=universe,
                 score_map=score_map,
@@ -648,6 +648,7 @@ def run_optimizer(
     threshold: float = REBALANCE_THRESH,
     portfolio_drawdown: float = 0.0,
     history_frames: Optional[dict[str, object]] = None,
+    write_diagnostics: bool = True,
 ) -> Optional[RebalanceReport]:
     try:
         import pandas as pd
@@ -733,6 +734,7 @@ def run_optimizer(
             raw_weights, actual_engine, engine_note = _optimize_black_litterman(
                 returns, universe, score_map, tau=tau,
                 risk_aversion=RISK_AVERSION, w_max_arr=w_max_arr,
+                write_diagnostics=write_diagnostics,
             )
         elif method == "MIN_VARIANCE":
             raw_weights = _optimize_min_variance_np(mu_ann, cov, universe, w_max_arr)

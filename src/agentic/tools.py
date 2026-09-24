@@ -625,6 +625,38 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
         performance,
     )
 
+    from src.decision_lab.queries import TOOLS, query_evidence
+
+    def lab_handler(name):
+        async def handler(arguments):
+            payload = await query_evidence(context.database_url, context.owner_chat_id, arguments, view=name)
+            # Valid JSON at the boundary; never truncate through a number/CI.
+            payload["metrics_total"] = len(payload.get("metrics", []))
+            payload["metrics"] = payload.get("metrics", [])[:4]
+            for metric in payload["metrics"]:
+                metric.pop("block_sensitivity", None)
+            content = canonical_json(payload)
+            if len(content) > context.output_limit_chars:
+                payload["episodes"] = []
+                payload["quality"] = payload.get("quality", [])[:1]
+                payload["truncated_details"] = True
+                content = canonical_json(payload)
+            if len(content) > context.output_limit_chars:
+                payload = {"schema_version":"decision-lab-agent-evidence-v1","status":"INSUFFICIENT", "metrics":[],
+                           "reason":"EVIDENCE_EXCEEDS_OUTPUT_BUDGET_USE_NARROWER_QUERY"}
+                content = canonical_json(payload)
+            return ToolObservation(tool_name=name, arguments=arguments, ok=True, content=content)
+        return handler
+
+    for name in TOOLS:
+        registry.register(ToolSpec(name=name,
+            description="Read stored account-scoped Decision Lab counterfactuals, DVA, matched versions and PIT quality. Never runs replay, computes returns, sends orders or changes policies.",
+            input_schema={"type":"object", "properties":{
+                "ticker":{"type":"string","pattern":r"^[A-Z0-9][A-Z0-9.=-]{0,14}$"},
+                "horizon":{"type":"integer","enum":[5,10,20,40]},
+                "run_id":{"type":"string","pattern":r"^[a-f0-9]{64}$"}}, "additionalProperties":False},
+            read_only=True, timeout_seconds=30), lab_handler(name))
+
     return registry
 
 
