@@ -29,7 +29,18 @@ def _plain(text: str) -> str:
 def question_plan(goal: str, context: list[dict] | None = None) -> QuestionPlan:
     text = _plain(goal)
     if any(word in text for word in ("decision lab", "contrafactual", "counterfactual", "dva", "plan vs hold", "plan contra hold", "replay", "versiones", "valor agregado", "hubiera mantenido")):
-        intent, required = "decision_lab", ("get_decision_value_added",)
+        tool = "get_decision_value_added"
+        if "versiones" in text:
+            tool = "compare_strategy_versions"
+        elif any(word in text for word in ("calidad", "confiable", "quality")):
+            tool = "get_replay_evidence_quality"
+        elif any(word in text for word in ("contrafactual", "counterfactual", "alternativas", "partial", "cash")):
+            tool = "get_decision_counterfactuals"
+        elif any(word in text for word in ("similares", "comparables")):
+            tool = "get_similar_historical_episodes"
+        elif any(word in text for word in ("plan vs hold", "plan contra hold")):
+            tool = "compare_plan_vs_hold"
+        intent, required = "decision_lab", (tool,)
     elif any(word in text for word in ("reduc", "vend", "microsoft", "msft")) and any(word in text for word in ("por que", "porque", "explica", "quiere")):
         intent, required = "decision_lab_mechanism", ("get_decision_evidence", "get_decision_value_added")
     elif any(word in text for word in ("cedear", "cdeear")) and any(word in text for word in ("riesgo", "argentin", "wall street")):
@@ -76,9 +87,9 @@ def observed_payloads(history: list[dict]) -> dict[str, dict]:
 def diagnostic_decision(goal: str, history: list[dict], plan: QuestionPlan,
                         context: list[dict] | None = None) -> AgentDecision:
     if plan.intent in {"decision_lab", "decision_lab_mechanism"}:
-        from src.decision_lab.queries import explain_evidence
+        from src.decision_lab.queries import TOOLS, explain_evidence
         payloads = observed_payloads(history)
-        explanation, status = explain_evidence(payloads.get("get_decision_value_added"))
+        explanation, status = explain_evidence(next((payloads[name] for name in plan.required_tools if name in TOOLS and name in payloads), None))
         if plan.intent == "decision_lab_mechanism":
             mechanism = diagnostic_decision(goal, history, QuestionPlan("explain_plan", ("get_decision_evidence",)), context)
             explanation = "Mecanismo actual\n" + mechanism.answer + "\n\n" + explanation

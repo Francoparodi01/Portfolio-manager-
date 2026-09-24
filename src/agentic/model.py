@@ -216,7 +216,7 @@ class OllamaAgentModel:
                 for name in plan.required_tools:
                     if name in available and name not in attempted:
                         return AgentDecision(kind="tool", tool_name=name,
-                                             arguments=decision_lab_arguments(goal) if name=="get_decision_value_added" else {},
+                                             arguments=decision_lab_arguments(goal) if plan.intent.startswith("decision_lab") and name != "get_decision_evidence" else {},
                                              rationale=f"Fuente requerida por la política {plan.intent}.")
             return diagnostic_decision(goal, history, plan, self.conversation_context)
         if force_final:

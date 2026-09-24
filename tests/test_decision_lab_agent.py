@@ -101,3 +101,14 @@ def test_six_tools_read_only_and_account_scope(monkeypatch):
     )
     registry = build_default_registry(ToolContext("dsn", 123))
     assert all(registry.get(name).spec.read_only for name in TOOLS)
+
+def test_specific_lab_queries_route_to_matching_read_only_views():
+    examples = {
+        'PLAN vs HOLD 20D': 'compare_plan_vs_hold',
+        'Decision Lab contrafactuales CASH 10D': 'get_decision_counterfactuals',
+        'Decision Lab episodios similares de MSFT 5D': 'get_similar_historical_episodes',
+        'Compara versiones en Decision Lab': 'compare_strategy_versions',
+        'Calidad del replay 20D': 'get_replay_evidence_quality',
+    }
+    for goal, expected in examples.items():
+        assert question_plan(goal).required_tools == (expected,)

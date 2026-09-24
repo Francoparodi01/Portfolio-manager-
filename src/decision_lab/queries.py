@@ -31,6 +31,7 @@ def select_evidence(summary, config, arguments, view="get_decision_value_added")
     quality = [r for r in summary["quality"] if r["episode_id"] in ids]
     return {
         "schema_version": "decision-lab-agent-evidence-v1",
+        "view": view,
         "status": "AVAILABLE" if metrics else "INSUFFICIENT",
         "replay_run_id": summary["replay_run_id"],
         "evaluated_as_of": config["evaluated_as_of"],
@@ -168,10 +169,29 @@ def explain_evidence(payload):
     lines.append(
         f"Base: {costs.get('return_basis')}; cash {costs.get('cash_convention')}; comisión simulada {costs.get('fee_bps')} bps por lado, más los restantes costos del modelo. No son costos reales observados."
     )
-    for q in payload.get("quality", [])[:2]:
+    quality_seen = set()
+    for q in payload.get("quality", []):
         quality = q["quality"]
+        key = json.dumps(quality, sort_keys=True)
+        if key in quality_seen:
+            continue
+        quality_seen.add(key)
         lines.append(
             f"Calidad {quality['level']}. Faltantes: {', '.join(quality['missing_fields']) or 'ninguno'}. Supuestos: {', '.join(quality['reconstruction_assumptions']) or 'ninguno'}."
+        )
+        if len(quality_seen) == 2:
+            break
+    if payload.get("view") == "get_similar_historical_episodes":
+        lines.append(
+            "Ejemplos de la cohorte filtrada; no son vecinos causales ni equivalentes en todas sus variables:"
+        )
+        for row in payload.get("episodes", []):
+            lines.append(
+                f"{row['as_of']} · {row['status']} · PLAN {pp(row['plan_return'])}% · HOLD {pp(row['hold_return'])}% · DVA {pp(row['dva'])} pp."
+            )
+    for row in payload.get("alternatives", []):
+        lines.append(
+            f"Episodio {row['episode_id'][:12]} · {row['alternative']} · {row['status']} · neto {pp(row['net_return'])}% · {row.get('reason') or 'capital y horizonte comunes'}."
         )
     if not payload.get("strategy_comparisons"):
         lines.append(
@@ -184,5 +204,9 @@ def explain_evidence(payload):
         for metric in comparison["metrics"]:
             lines.append(
                 f"{metric['horizon']}D · {metric['population']} · n={metric['n']} · diferencia {pp(metric['mean'])} pp; {metric['interpretation']}."
+            )
+            ci = metric.get("ci", {})
+            lines.append(
+                f"IC95 diferencia: [{pp(ci.get('lower'))}, {pp(ci.get('upper'))}] pp; {ci.get('reason_code') or 'bootstrap por fechas'}."
             )
     return "\n".join(lines), "PARTIAL"
