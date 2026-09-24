@@ -76,6 +76,7 @@ class AgentDecision:
     rationale: str = ""
     confidence: float | None = None
     answer_origin: str = "model"
+    objective_status: str = "NOT_ASSESSED"
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "AgentDecision":
@@ -138,6 +139,7 @@ class AgentResult:
     started_at: datetime
     finished_at: datetime
     audit_persisted: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -150,6 +152,9 @@ class AgentResult:
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat(),
             "audit_persisted": self.audit_persisted,
+            "metadata": self.metadata,
+            "objective_status": (self.steps[-1].decision.objective_status
+                                 if self.steps and self.steps[-1].decision.kind == "final" else "INSUFFICIENT"),
             "answer_origin": (self.steps[-1].decision.answer_origin
                               if self.steps and self.steps[-1].decision.kind == "final" else None),
             "steps": [
@@ -163,6 +168,7 @@ class AgentResult:
                         "rationale": step.decision.rationale,
                         "confidence": step.decision.confidence,
                         "answer_origin": step.decision.answer_origin,
+                        "objective_status": step.decision.objective_status,
                     },
                     "observation": (
                         {

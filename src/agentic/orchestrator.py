@@ -276,6 +276,8 @@ class AgentOrchestrator:
                         final_answer=answer,
                         finished_at=finished_at,
                         metadata_patch={"steps_used": len(steps),
+                                        "objective_status": (steps[-1].decision.objective_status
+                                                             if steps and steps[-1].decision.kind == "final" else "INSUFFICIENT"),
                                         "answer_origin": (steps[-1].decision.answer_origin
                                                           if steps and steps[-1].decision.kind == "final" else None)},
                     )
@@ -295,6 +297,7 @@ class AgentOrchestrator:
             started_at=started_at,
             finished_at=finished_at,
             audit_persisted=audit_persisted and audit_complete,
+            metadata=metadata or {},
         )
 
 

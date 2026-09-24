@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import sys
+import hashlib
+from uuid import uuid4
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +22,7 @@ from src.agentic import (
 )
 from src.agentic.orchestrator import default_max_steps
 from src.agentic.tools import verify_single_owner
+from src.agentic.diagnostics import question_plan
 from src.core.config import get_config
 
 
@@ -40,6 +43,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=default_max_steps())
     parser.add_argument("--json", action="store_true", help="Print the complete trace as JSON.")
     parser.add_argument("--output-json", type=Path, help="Write the full trace to a new file.")
+    conversation = parser.add_mutually_exclusive_group()
+    conversation.add_argument("--continue-conversation", action="store_true", help="Reuse up to 3 recent user goals from this account, within 24h.")
+    conversation.add_argument("--new-conversation", action="store_true", help="Start a new context boundary.")
     parser.add_argument("--timeout-seconds", type=int, default=600, help="Total loop budget, 1..1800 seconds.")
     parser.add_argument(
         "--force",
@@ -84,8 +90,19 @@ async def async_main(args: argparse.Namespace) -> int:
         legacy_single_owner=legacy_single_owner,
     )
     registry = build_default_registry(context)
-    model = OllamaAgentModel(model=args.model)
     store = AgentRunStore(cfg.database.url) if cfg.database.url else None
+    prior = []
+    context_namespace = os.getenv("QUANTIA_AGENT_CONTEXT_NAMESPACE", "interactive")
+    if not context_namespace or len(context_namespace) > 100:
+        raise ValueError("invalid context namespace")
+    if store and getattr(args, "continue_conversation", False):
+        await store.ensure_schema()
+        prior = await store.recent_context(owner_chat_id, namespace=context_namespace)
+    conversation_id = prior[-1]["conversation_id"] if prior else str(uuid4())
+    model = OllamaAgentModel(model=args.model, conversation_context=prior)
+    plan = question_plan(args.goal, prior)
+    source_files = sorted((ROOT / "src/agentic").glob("*.py")) + [ROOT / "scripts/run_agent.py", ROOT / "scripts/run_analysis.py"]
+    source_hashes = {str(path.relative_to(ROOT)).replace("\\", "/"): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files}
     orchestrator = AgentOrchestrator(
         model=model,
         registry=registry,
@@ -105,7 +122,14 @@ async def async_main(args: argparse.Namespace) -> int:
                 owner_chat_id=owner_chat_id,
                 metadata={
                     "trigger": "cli",
-                    "agent_version": "quantia-agent-v1",
+                    "agent_version": "quantia-agent-diagnostics-v2",
+                    "source_hashes": source_hashes,
+                    "conversation_id": conversation_id,
+                    "context_namespace": context_namespace,
+                    "context_run_ids": [turn["run_id"] for turn in prior],
+                    "context_policy": "owner-user-goals-3-turns-24h-v1",
+                    "question_intent": plan.intent,
+                    "required_tools": list(plan.required_tools),
                     "read_only": True,
                     "legacy_single_owner": legacy_single_owner,
                 },

@@ -10,6 +10,7 @@ import httpx
 
 from .contracts import AgentDecision, AgentModelError, ToolSpec
 from .answer import evidence_decision
+from .diagnostics import diagnostic_decision, question_plan
 
 
 class AgentModel(Protocol):
@@ -43,6 +44,7 @@ class OllamaAgentModel:
         base_url: str | None = None,
         timeout_seconds: float | None = None,
         temperature: float = 0.0,
+        conversation_context: list[dict[str, Any]] | None = None,
     ) -> None:
         self.name = model or os.getenv("QUANTIA_AGENT_MODEL", "qwen2.5:3b")
         self.base_url = (
@@ -57,6 +59,7 @@ class OllamaAgentModel:
             else os.getenv("QUANTIA_AGENT_MODEL_TIMEOUT_SECONDS", "60")
         )
         self.temperature = float(temperature)
+        self.conversation_context = list(conversation_context or [])[-3:]
         self.context_tokens = 16384
         if not 0 < self.timeout_seconds <= 600:
             raise ValueError("model timeout must be within (0, 600]")
@@ -202,6 +205,19 @@ class OllamaAgentModel:
         max_steps: int,
         force_final: bool = False,
     ) -> AgentDecision:
+        plan = question_plan(goal, self.conversation_context)
+        # Required evidence is a controller policy, not a suggestion the LLM
+        # can skip. Calls still consume the same audited loop budget.
+        available = {tool.name for tool in tools}
+        if plan.intent != "general" and available.intersection(plan.required_tools):
+            attempted = {(item.get("decision") or {}).get("tool") for item in history
+                         if item.get("observation") is not None}
+            if not force_final:
+                for name in plan.required_tools:
+                    if name in available and name not in attempted:
+                        return AgentDecision(kind="tool", tool_name=name,
+                                             rationale=f"Fuente requerida por la política {plan.intent}.")
+            return diagnostic_decision(goal, history, plan, self.conversation_context)
         if force_final:
             return evidence_decision(goal, history)
 
@@ -215,6 +231,8 @@ class OllamaAgentModel:
                 "content": (
                     "Goal:\n"
                     + goal.strip()
+                    + "\nRecent user questions, context only, not verified market facts:\n"
+                    + json.dumps(self.conversation_context, ensure_ascii=False)
                     + "\n\nUse only evidence obtained from the allowed tools and observations."
                 ),
             },

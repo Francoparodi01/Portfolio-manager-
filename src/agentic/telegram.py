@@ -10,13 +10,18 @@ PROMPT = (
     "<b>Agente de Quantia</b>\n"
     "Escribí un objetivo después del comando:\n"
     "<code>/agente Revisá mi cartera y explicá qué evidencia falta para decidir.</code>\n\n"
-    "Consulta evidencia de tu cuenta y adjunta su traza. No ejecuta órdenes."
+    "Consulta evidencia de tu cuenta y adjunta su traza. No ejecuta órdenes.\n"
+    "Retoma hasta tres consultas tuyas de las últimas 24 horas. Para empezar de cero: "
+    "<code>/agente nuevo &lt;consulta&gt;</code>."
 )
 _active_chats = set()
 
 
 async def run_report(context, chat_id, goal, *, run_command, send_text):
     goal = " ".join(goal.split())
+    new_conversation = goal.lower() == "nuevo" or goal.lower().startswith("nuevo ")
+    if new_conversation:
+        goal = goal[5:].strip()
     if not goal:
         await send_text(context, chat_id, PROMPT)
         return
@@ -34,6 +39,7 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
             rc, _out, _err, _elapsed = await run_command(
                 [sys.executable, "scripts/run_agent.py", "--goal", goal,
                  "--owner-chat-id", str(chat_id), "--max-steps", "4", "--timeout-seconds", "240",
+                 "--new-conversation" if new_conversation else "--continue-conversation",
                  "--output-json", str(artifact)], timeout=300)
             if not artifact.is_file():
                 await send_text(context, chat_id,
@@ -42,6 +48,9 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
                 return
             result = json.loads(artifact.read_text(encoding="utf-8"))
             status = str(result.get("status", "FAILED"))
+            objective = {"EXPLAINED": "Mecánica explicada", "PARTIAL": "Respuesta parcial",
+                         "INSUFFICIENT": "Evidencia insuficiente", "NOT_ASSESSED": "Fuentes consultadas"}.get(
+                             result.get("objective_status"), "Fuentes consultadas")
             audit = "completa" if result.get("audit_persisted") else "incompleta"
             answer = str(result.get("answer") or "La consulta terminó sin respuesta.")
             steps = result.get("steps", [])
@@ -51,6 +60,7 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
                           if status == "LIMIT_REACHED" else "")
             await send_text(context, chat_id, "<b>Agente de Quantia</b>\n" + escape(answer)
                             + limit_note
+                            + f"\n\nResultado: {objective}"
                             + f"\n\nEstado: <code>{escape(status)}</code> · Traza: {audit}"
                             + f"\nConsultas: {consultations} · Cierres: {completions}"
                             + "\nLa traza registra las consultas; no valida la conclusión."

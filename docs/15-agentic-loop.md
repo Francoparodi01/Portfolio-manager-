@@ -2,24 +2,23 @@
 
 ## Objetivo
 
-Esta capa agrega un agente real y acotado sobre Quantia sin convertir al LLM en
-autoridad financiera. El ciclo es:
+Esta capa consulta evidencia con límites de tiempo, cuenta y herramientas. Las
+preguntas reconocidas de cartera, bloqueos, CEDEAR y tesis de mercado siguen una
+política de fuentes obligatorias y una explicación determinística. Para otros
+objetivos, Ollama selecciona las herramientas y el cierre presenta sus fuentes.
+Ninguna de las dos rutas certifica que una estrategia tenga ventaja económica.
 
-```text
-goal
-  ↓
-LLM controller
-  ↓ elige una tool
-tool read-only
-  ↓
-observation
-  ↓
-LLM controller
-  ├─ necesita más evidencia → otra tool
-  └─ evidencia suficiente → final
+```mermaid
+flowchart TD
+    Q[Consulta + hasta 3 preguntas previas del mismo owner] --> P[Política de pregunta]
+    P -->|cartera / bloqueos / macro / tesis| R[Fuentes obligatorias]
+    P -->|otros objetivos| L[Controller Ollama]
+    R --> T[Herramientas de consulta]
+    L --> T
+    T --> A[Observaciones + hashes + auditoría]
+    A --> D[Explicación estructurada o informe de fuentes]
+    D --> O[Resultado de la pregunta + estado técnico + traza]
 ```
-
-El loop termina por respuesta final del modelo o por `max_steps`.
 
 ## Frontera de autoridad
 
@@ -42,16 +41,18 @@ Los análisis financieros reutilizan pipelines existentes:
 
 - `run_analysis.py` siempre se llama con `--no-persist --no-telegram --no-llm`;
 - `run_opportunity.py` siempre se llama con `--no-persist --no-telegram`;
-- el modelo controlador recibe las observaciones y decide el siguiente paso.
+- el controlador aplica las fuentes obligatorias; fuera de esos casos Ollama decide el siguiente paso.
 
-Esto conserva la regla arquitectónica existente: el LLM orquesta y explica; el
-motor cuantitativo y los guards siguen siendo deterministas.
+El LLM puede seleccionar herramientas para consultas generales. El texto financiero
+publicado se deriva de evidencia, y el motor cuantitativo conserva sus decisiones.
 
 ## Archivos
 
 - `src/agentic/contracts.py`: contratos de decisiones, tools, observaciones y resultado.
 - `src/agentic/model.py`: controlador Ollama JSON-only.
-- `src/agentic/answer.py`: cierre determinístico desde valores y extractos observados.
+- `src/agentic/answer.py`: cierre descriptivo para consultas generales.
+- `src/agentic/diagnostics.py`: fuentes requeridas y explicaciones por tipo de pregunta.
+- `src/agentic/analysis_export.py`: proyección JSON de objetos existentes del planner.
 - `src/agentic/tools.py`: registry + tools read-only.
 - `src/agentic/orchestrator.py`: loop, límites, cache y anti-loop.
 - `src/agentic/persistence.py`: auditoría en `agent_runs` y `agent_steps`.
@@ -65,6 +66,8 @@ motor cuantitativo y los guards siguen siendo deterministas.
 |---|---|---|
 | `get_portfolio_snapshot` | `PortfolioDatabase.get_latest_snapshot()` | ninguno |
 | `get_macro_context` | `fetch_macro()` | ninguno |
+| `get_macro_exposure` | mapa macro y evaluación aislada de la regla Argentina | ninguno |
+| `get_decision_evidence` | `run_analysis.py --agent-json` con guards de consulta | ninguno |
 | `analyze_portfolio` | `run_analysis.py --no-persist` | ninguno |
 | `analyze_ticker` | `run_analysis.py --tickers ... --no-persist` | ninguno |
 | `scan_opportunities` | `run_opportunity.py --no-persist` | ninguno |
@@ -101,7 +104,7 @@ Controles activos:
 1. `QUANTIA_AGENT_MAX_STEPS` (default 8; hard cap 20).
 2. Una misma llamada exacta no puede ejecutarse dos veces.
 3. Tool timeout.
-4. Output truncado por tool.
+4. Salida textual acotada; JSON estructurado inválido o mayor de 100.000 caracteres se rechaza, no se trunca como evidencia válida.
 5. Finalización forzada al agotar el budget.
 6. Tools desconocidas o argumentos fuera de schema se convierten en observaciones
    de error; nunca se ejecutan.
@@ -211,9 +214,9 @@ queda separada y escribe únicamente `agent_runs` / `agent_steps`.
 
 El owner es obligatorio. En multiusuario debe pasarse `--owner-chat-id`; en modo
 single-user se resuelve desde el chat configurado. Nunca se usa owner null como
-comodín global. Las tres herramientas de pipelines legacy requieren comprobar
+comodín global. Las herramientas de pipelines legacy requieren comprobar
 que la DB contiene un único propietario, porque algunos de sus lectores auxiliares
-todavía no están aislados por cuenta. En multiusuario se rechazan esas tres rutas;
+todavía no están aislados por cuenta. En multiusuario se rechazan esas rutas;
 snapshot, macro y outcomes permanecen disponibles con sus contratos propios.
 
 Las llamadas se normalizan antes del anti-loop (ticker mayúscula y defaults),
@@ -246,16 +249,12 @@ traza al transportarla por stdout. El timeout cancela el loop y sus herramientas
 No se agregan jobs automáticos. Ollama debe estar disponible con el modelo
 configurado. Su disponibilidad no se considera una autorización financiera.
 
-## Criterio de aceptación agéntico
+## Alcance del controlador
 
-Este módulo sí cumple la definición estricta:
-
-```text
-percepción → razonamiento → acción(tool) → observación → razonamiento → ...
-```
-
-porque el siguiente tool call no está preprogramado: lo elige el controller en
-función del objetivo y de las observaciones anteriores, con límites explícitos.
+Las consultas soportadas tienen un recorrido de evidencia predefinido. El modelo
+no puede saltárselo ni inventar una conclusión financiera. La selección dinámica
+por Ollama queda disponible para objetivos generales. Este diseño favorece la
+explicación verificable del sistema; no equivale a un analista financiero general.
 
 ## Validación del rollout — 2026-09-23
 
@@ -343,3 +342,77 @@ Validación de la corrección:
   coinciden con el checkout, `/agente` y `/analytics` siguen registrados y el
   scheduler conserva imagen y fecha de inicio. Rollback disponible en
   `cocos-telegram-before-agent-answer-20260923:local`.
+
+## Diagnósticos y continuidad v2 — 2026-09-23
+
+Problema corregido: el agente aceptaba premisas del usuario como hechos, confundía
+scores con rentabilidad, atribuía a riesgo país una etiqueta disparada por CCL y
+respondía cada seguimiento sin contexto. El cierre descriptivo v1 evitó redacción
+inventada, pero podía terminar tras consultar solamente el snapshot.
+
+La nueva ruta consume objetos estructurados del mismo cálculo de Quantia:
+`ExecutionPlan`, `DecisionIntent`, capas del score y constantes actuales de compra.
+No duplica el planner ni recalcula sus decisiones. `--agent-json` exige los flags
+`--no-persist --no-telegram --no-llm`. La tool ejecuta el proceso con conexiones
+protegidas de sólo lectura; la única escritura del agente es su auditoría.
+
+| Consulta | Evidencia obligatoria | Alcance de la respuesta |
+|---|---|---|
+| Revisar cartera | snapshot + plan estructurado | exposición, propuestas, motivos y evidencia económica pendiente |
+| Por qué no comprar / bloqueo | plan estructurado | peso actual/objetivo, guard, capas y motivos del score |
+| Riesgo país y CEDEAR | mapa macro + regla evaluada con cada canal aislado | mecanismo interno; no atribuye automáticamente riesgo soberano al subyacente |
+| Boom / recesión / recuperación | plan estructurado + planteo marcado no verificado | explicación del sistema y fuentes aún necesarias para evaluar la tesis |
+| Otros objetivos | controller + herramientas registradas | informe de fuentes con límites; cobertura no garantizada |
+
+La detección de intención es una heurística versionada y acotada. No realiza
+comprensión semántica universal. Un ticker tiene que existir en `market_prices`
+antes de lanzar el análisis individual: palabras como CDEEAR no crean activos.
+
+El campo `objective_status` distingue `EXPLAINED` (mecánica explicada), `PARTIAL`,
+`INSUFFICIENT` y `NOT_ASSESSED`. Es independiente del estado técnico COMPLETE,
+LIMIT_REACHED o FAILED y nunca significa VIABLE ni autorización de una orden.
+La traza registra `answer_origin=diagnostics_v2` para esta ruta, la intención,
+fuentes requeridas, IDs de contexto, conversación y SHA-256 de los archivos usados.
+La respuesta distingue una evaluación nueva del plan de las decisiones históricas.
+
+Telegram continúa hasta tres preguntas previas del mismo owner y conversación,
+dentro de 24 horas. Sólo reutiliza preguntas del usuario; no recicla conclusiones
+anteriores como evidencia. Cada consulta vuelve a obtener sus fuentes. Los runs
+v1 no se incorporan implícitamente. Ejemplos:
+
+```text
+/agente revisá mi cartera y explicá los bloqueos
+/agente por qué no comprar AMD?
+/agente nuevo el riesgo país afecta mis CEDEAR?
+```
+
+La CLI es aislada por defecto; `--continue-conversation` activa continuidad y
+`--new-conversation` abre una frontera nueva. El namespace de contexto por defecto
+es `interactive`; `QUANTIA_AGENT_CONTEXT_NAMESPACE` permite aislar los smoke tests
+sin mezclarlos con la conversación del usuario. No cambia permisos de cuenta.
+
+Pendiente: contraste fechado comprar/mantener/reducir, históricos de subyacente y
+FX con ventanas/costos comunes, verificación de tesis macroeconómicas, memoria
+semántica más allá de tres preguntas y soporte de pipelines legacy multiusuario.
+Una tesis de mercado no verificada se responde como parcial. Cambiar el modelo o
+agregar más pasos no sustituye esas fuentes.
+
+Validación de diagnósticos v2:
+
+- Rama revisada: **103 passed**, incluyendo los nuevos casos, guards existentes,
+  menú y regresiones de nominales/rotación y venta por tendencia.
+- Checkout operativo: **161 passed** en la integración focalizada con Analytics v2,
+  viability, auditoría decision/market y Telegram. No certifica toda la suite.
+- Cinco consultas por el handler real, con CLI, fuentes y PostgreSQL reales y
+  receptor simulado: cartera, CEDEAR, tesis de mercado, seguimiento y reinicio.
+  Todos terminaron técnicamente COMPLETE; cartera/tesis/seguimiento quedaron
+  PARTIAL, la mecánica macro EXPLAINED. No se enviaron mensajes de prueba.
+- Los contextos observados fueron 0, 1, 2, 3 y 0 preguntas previas. Se verificaron
+  aislamiento por owner, nuevo conversation_id, hashes de pasos, hashes del código,
+  metadata persistida y eliminación de archivos temporales.
+- Runs: `c795685b-e8ca-4146-89e2-6a5b2d641e4a`,
+  `d8a15ffd-7ec8-41f0-a8eb-3bc2f423a341`, `7a58c914-d8f8-4a52-ab11-63a8fb914d97`,
+  `ac4f1d51-45f1-4114-b7f1-6f0c9dfae7a5`, `52b2287c-7681-4910-a012-0efcc77416f5`.
+  Artefactos privados: `tmp/agentic-diagnostics-v2/`, fuera del repositorio.
+- Imagen probada: `sha256:3735744925f3630da51845b2fe1a836041168c6bb5a15606162bfe2f0216d54a`.
+  Rollback: `cocos-telegram-before-diagnostics-v2:local`.

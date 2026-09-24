@@ -9,14 +9,14 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import asyncpg
 
-from src.analysis.macro import fetch_macro, get_macro_regime
+from src.analysis.macro import fetch_macro, get_macro_regime, SECTOR_MACRO_MAP
 from src.collector.db import PortfolioDatabase
 
 from .contracts import (
@@ -187,6 +187,7 @@ async def _run_subprocess(
     arguments: dict[str, Any],
     command: list[str],
     timeout_seconds: float | None = None,
+    structured: bool = False,
 ) -> ToolObservation:
     started = time.monotonic()
     child_env = os.environ.copy()
@@ -225,9 +226,20 @@ async def _run_subprocess(
         raise
 
     elapsed = int((time.monotonic() - started) * 1000)
-    out = _clean_text(stdout.decode("utf-8", errors="replace"))
+    raw = stdout.decode("utf-8", errors="replace").strip()
+    out = raw if structured else _clean_text(raw)
     err = _clean_text(stderr.decode("utf-8", errors="replace"))
-    if len(out) > context.output_limit_chars:
+    if structured and proc.returncode == 0:
+        try:
+            if len(out) > 100000:
+                raise ValueError("structured evidence exceeds output limit")
+            payload = json.loads(out)
+            if not isinstance(payload, dict) or payload.get("schema_version") != "agent-decision-evidence-v1":
+                raise ValueError("structured evidence schema missing")
+        except (ValueError, TypeError) as exc:
+            return ToolObservation(tool_name=tool_name, arguments=arguments, ok=False,
+                                   content="", elapsed_ms=elapsed, error=str(exc))
+    if not structured and len(out) > context.output_limit_chars:
         out = out[: context.output_limit_chars] + "\n[output truncated]"
     if len(err) > 4000:
         err = err[-4000:]
@@ -396,6 +408,27 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
         macro_context,
     )
 
+    async def macro_exposure(arguments: dict[str, Any]) -> ToolObservation:
+        macro = await asyncio.to_thread(fetch_macro)
+        # Probe the actual rule with one input channel at a time. Missing inputs
+        # never become observed zeroes or evidence of an economically safe regime.
+        complete = macro.riesgo_pais is not None and macro.ccl is not None
+        probe = {
+            "observed": get_macro_regime(macro)["argentina"] if complete else "UNAVAILABLE",
+            "country_risk_only": get_macro_regime(replace(macro, ccl=None))["argentina"] if macro.riesgo_pais is not None else "UNAVAILABLE",
+            "ccl_only": get_macro_regime(replace(macro, riesgo_pais=None))["argentina"] if macro.ccl is not None else "UNAVAILABLE",
+        }
+        from src.analysis import macro as module
+        content = json.dumps(_json_safe({"macro": macro.to_dict(),
+            "argentina_label_probe": probe, "direct_macro_rules": SECTOR_MACRO_MAP,
+            "data_status": "OBSERVED" if complete else "PARTIAL",
+            "policy_sha256": hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()}), ensure_ascii=False)
+        return ToolObservation(tool_name="get_macro_exposure", arguments=arguments, ok=True, content=content)
+
+    registry.register(ToolSpec(name="get_macro_exposure",
+        description="Inspect the actual direct macro mapping and probe the Argentina label rule against current inputs. Missing data remains explicit.",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False}, timeout_seconds=90), macro_exposure)
+
     def owner_args() -> list[str]:
         if context.owner_chat_id is None:
             return []
@@ -439,12 +472,31 @@ def build_default_registry(context: ToolContext) -> ToolRegistry:
         analyze_portfolio,
     )
 
+    async def structured_decisions(arguments: dict[str, Any]) -> ToolObservation:
+        if not context.legacy_single_owner:
+            raise ToolValidationError("legacy analysis requires a verified single-owner database")
+        return await _run_subprocess(context, tool_name="get_decision_evidence", arguments=arguments,
+            command=[sys.executable, "scripts/run_analysis.py", "--no-telegram", "--no-llm",
+                     "--skip-radar", "--no-persist", "--agent-json", *owner_args()], structured=True)
+
+    registry.register(ToolSpec(name="get_decision_evidence",
+        description="Compute the current proposed plan read-only, returning structured decision reasons, weights, score layers and actual buy policy. Not fills, historical returns or proof of edge.",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        timeout_seconds=context.tool_timeout_seconds), structured_decisions)
+
     async def analyze_ticker(arguments: dict[str, Any]) -> ToolObservation:
         if not context.legacy_single_owner:
             raise ToolValidationError("legacy analysis requires a verified single-owner database")
         ticker = str(arguments["ticker"]).upper().strip()
         if not _TICKER_RE.fullmatch(ticker):
             raise ToolValidationError("invalid ticker format")
+        conn = await connect_read_only(read_only_dsn(context.database_url), command_timeout=30)
+        try:
+            known = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM market_prices WHERE ticker=$1)", ticker)
+        finally:
+            await conn.close()
+        if not known:
+            raise ToolValidationError("ticker not found in the local market catalog; cannot analyze an invented symbol")
         command = [
             sys.executable,
             "scripts/run_analysis.py",

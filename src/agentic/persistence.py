@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import asyncpg
+from .read_only import connect_read_only
 
 
 AGENT_AUDIT_SQL = """
@@ -70,6 +71,41 @@ class AgentRunStore:
         conn = await self._connect()
         try:
             await conn.execute(AGENT_AUDIT_SQL)
+        finally:
+            await conn.close()
+
+    async def recent_context(self, owner_chat_id: int, *, as_of: datetime | None = None,
+                             namespace: str = "interactive") -> list[dict]:
+        """Up to three user questions in this owner's latest 24h conversation.
+
+        Never reuse assistant conclusions as market evidence. A reset/run in a
+        new conversation is a boundary even when that run subsequently fails.
+        Legacy runs without a conversation ID are deliberately not inherited.
+        """
+        if not owner_chat_id:
+            raise ValueError("context requires an explicit owner")
+        cutoff = as_of or datetime.now(timezone.utc)
+        if cutoff.tzinfo is None:
+            raise ValueError("context cutoff must be timezone aware")
+        conn = await connect_read_only(self.dsn, command_timeout=30)
+        try:
+            rows = await conn.fetch("""
+                WITH latest AS (
+                    SELECT metadata->>'conversation_id' AS conversation_id
+                    FROM agent_runs WHERE owner_chat_id=$1 AND started_at BETWEEN $2 AND $3
+                      AND metadata->>'context_namespace'=$4
+                    ORDER BY started_at DESC, id DESC LIMIT 1
+                )
+                SELECT id, goal, started_at, metadata->>'conversation_id' AS conversation_id
+                FROM agent_runs
+                WHERE owner_chat_id=$1 AND started_at BETWEEN $2 AND $3
+                  AND metadata->>'context_namespace'=$4
+                  AND metadata->>'conversation_id'=(SELECT conversation_id FROM latest)
+                ORDER BY started_at DESC, id DESC LIMIT 3
+                """, owner_chat_id, cutoff - timedelta(hours=24), cutoff, namespace)
+            return [{"run_id": str(row["id"]), "goal": row["goal"],
+                     "started_at": row["started_at"].isoformat(),
+                     "conversation_id": row["conversation_id"]} for row in reversed(rows)]
         finally:
             await conn.close()
 
