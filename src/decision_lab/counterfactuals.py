@@ -95,6 +95,16 @@ def freeze_episode(
     )
     rotations = [o for o in executable if o.side == "BUY" and o.funded_by]
     rotation_tickers = {ticker for o in rotations for ticker in o.funded_by}
+    sold_tickers = {o.ticker for o in executable if o.side == "SELL"}
+    rotation_reason = (
+        "NO_EXPLICIT_FROZEN_ROTATION"
+        if not rotations
+        else (
+            "INCOMPLETE_FROZEN_ROTATION_FUNDING"
+            if not rotation_tickers.issubset(sold_tickers)
+            else None
+        )
+    )
     rotation_orders = [
         o
         for o in executable
@@ -105,7 +115,7 @@ def freeze_episode(
             "name": "ROTATE",
             "orders": _orders_json(rotation_orders),
             "fraction": "1",
-            "reason": None if rotations else "NO_EXPLICIT_FROZEN_ROTATION",
+            "reason": rotation_reason,
         }
     )
     universe = next((e.payload for e in state.records if e.kind == "UNIVERSE"), {})

@@ -199,6 +199,11 @@ def build_state(
         row = index.latest(kind, as_of, owner)
         if row:
             selected.append(row)
+            if kind == "MACRO" and index.payload(row).get("macro_quality") in {
+                "REVISED_HISTORY",
+                "APPROXIMATE",
+            }:
+                warnings.append("MACRO_VINTAGE_NOT_EXACT")
         else:
             missing.append(kind.lower())
     policy = index.latest("POLICY", as_of, owner)

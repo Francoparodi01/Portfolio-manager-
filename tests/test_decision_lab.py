@@ -549,3 +549,40 @@ def test_adjusted_outcome_prices_reject_incompatible_share_basis():
         records.append(record)
     _, rows = run_fixture(data.model_copy(update={"records": tuple(records)}))
     assert next(o for o in rows if o.alternative == "HOLD").status == "UNAVAILABLE"
+
+
+def test_rotation_requires_every_explicit_funding_sell():
+    data = dataset_fixture()
+    original = next(e for e in data.records if e.kind == "PLAN")
+    payload = original.payload
+    payload["orders"].append(
+        {
+            "ticker": "BBB",
+            "side": "BUY",
+            "quantity": 1,
+            "reference_price": 100,
+            "target_amount_ars": 100,
+            "executable": True,
+            "action": "BUY",
+            "funded_by": ["MISSING_SELL"],
+        }
+    )
+    replacement = ev("PLAN", payload, owner=123, rid="plan")
+    updated = data.model_copy(
+        update={
+            "records": tuple(replacement if e is original else e for e in data.records)
+        }
+    )
+    episode, outcomes = run_fixture(updated)
+    rotation = next(o for o in outcomes if o.alternative == "ROTATE")
+    assert rotation.status == "NOT_APPLICABLE"
+    assert rotation.reason == "INCOMPLETE_FROZEN_ROTATION_FUNDING"
+
+
+def test_revised_macro_cannot_be_primary_even_when_source_claims_safe():
+    data = dataset_fixture()
+    macro = ev("MACRO", {"macro_quality": "REVISED_HISTORY", "vix": 20})
+    updated = data.model_copy(update={"records": (*data.records, macro)})
+    state, _ = recorded_plan(updated)
+    assert "MACRO_VINTAGE_NOT_EXACT" in state.quality.warnings
+    assert not state.quality.primary_eligible
