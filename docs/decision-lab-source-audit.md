@@ -53,6 +53,15 @@ no lo asigna automáticamente a estas tablas.
   minuto. Esto no prueba ausencia de mutaciones no versionadas.
 - Los feature snapshots existen anidados en layers; buscar sólo una columna o una
   clave de primer nivel los omite. Se encontraron versiones históricas `unknown`.
+- La validación de enlaces encontró **82 de 112 planes** vinculados a filas de
+  `decision_log` sobrescritas por otro `run_id`, con contexto de cartera posterior.
+  Se rechazan con `MUTATED_CROSS_RUN_DECISION_LINK`; no se usan para reconstruir T.
+  Los 30 restantes permiten evaluar la propuesta registrada como evidencia LOW.
+  En 11 de esos planes, los nominales/precios faltantes pertenecían a órdenes
+  bloqueadas: se conservan nulos y no se ejecutan; no invalidan otras órdenes.
+- `cash_before` del planner se redondea a pesos enteros. El vínculo verifica esa
+  convención declarada y conserva el cash exacto del snapshot para la contabilidad;
+  no amplía una tolerancia arbitraria para aceptar snapshots incompatibles.
 - 62.146 noticias raw y 55.480 scores; una noticia publicada en 2017 e ingerida
   en 2026 no es input admisible de 2017.
 - 2 corporate events, ambos sin source_published_at. No equivalen a un registro
@@ -73,6 +82,10 @@ El calendario existente se reutiliza para sesiones BYMA. El engine de outcomes
 legacy no se reutiliza como procedimiento porque escribe y su grain es diferente;
 se conserva la convención de sesiones con entrada posterior a la decisión, usando
 un evaluador puro de cartera común. Analytics v2 sigue separado.
+
+La captura nueva en `decision_lab_plan_captures` conserva plan, cartera y evidencia
+recibida al persistir planes futuros. No puede reparar los 82 vínculos históricos ni
+crear vintages ausentes. Ver [validación y despliegue](decision-lab-validation.md).
 
 Referencias técnicas: [código oficial yfinance](https://github.com/ranaroussi/yfinance/blob/main/yfinance/scrapers/history.py)
 para ajustes/reparaciones; [bootstrap temporal de arch](https://arch.readthedocs.io/en/stable/bootstrap/timeseries-bootstraps.html)
