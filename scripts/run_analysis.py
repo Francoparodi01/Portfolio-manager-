@@ -3792,7 +3792,10 @@ async def main(
     no_persist:       bool = False,
     owner_chat_id:    int | None = None,
     run_intent:       str = "formal_plan",
+    agent_json:       bool = False,
 ):
+    if agent_json and not (no_persist and no_telegram and no_llm):
+        raise ValueError("--agent-json requires --no-persist --no-telegram --no-llm")
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
     analysis_run_id = str(uuid4())
@@ -4503,7 +4506,13 @@ async def main(
         except PlanValidationError as ve:
             logger.error(f"Inconsistencia reporte/plan: {ve}")
 
-    print(report)
+    if agent_json:
+        from src.agentic.analysis_export import decision_evidence
+        print(_json.dumps(decision_evidence(results=results, execution_plan=execution_plan,
+              macro_snap=macro_snap, portfolio_snapshot=portfolio_snapshot, total_ars=total_ars,
+              cash_ars=cash_ars, analysis_run_id=analysis_run_id), ensure_ascii=False, allow_nan=False))
+    else:
+        print(report)
 
     if not no_telegram and cfg.scraper.telegram_enabled:
         logger.info("Enviando a Telegram...")
@@ -4522,6 +4531,7 @@ if __name__ == "__main__":
     p.add_argument("--no-llm",       action="store_true")
     p.add_argument("--no-sentiment", action="store_true")
     p.add_argument("--no-optimizer", action="store_true")
+    p.add_argument("--agent-json", action="store_true", help="Export read-only structured decision evidence")
     p.add_argument(
         "--no-persist",
         action="store_true",
@@ -4551,4 +4561,5 @@ if __name__ == "__main__":
         no_persist       = args.no_persist,
         owner_chat_id    = args.owner_chat_id,
         run_intent       = args.run_intent,
+        agent_json       = args.agent_json,
     ))
