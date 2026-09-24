@@ -199,10 +199,12 @@ def _price(index, bars, ticker, session, field, warnings, hashes):
     if p.get("price_mode") == "CURRENTLY_ADJUSTED_HISTORY":
         raise InsufficientEvidence("CURRENTLY_ADJUSTED_HISTORY_NOT_SHARE_COMPARABLE")
     if p.get("price_mode") == "POINT_IN_TIME_ADJUSTED":
-        raise InsufficientEvidence("ADJUSTED_PRICE_REQUIRES_EXPLICIT_COMMON_SHARE_BASIS")
+        raise InsufficientEvidence(
+            "ADJUSTED_PRICE_REQUIRES_EXPLICIT_COMMON_SHARE_BASIS"
+        )
     if p.get("price_mode") not in {"RAW_AS_TRADED", "POINT_IN_TIME_ADJUSTED"}:
         warnings.add("UNVERIFIED_PRICE_ADJUSTMENT_BASIS")
-    if record.quality not in {"POINT_IN_TIME_SAFE", "RECONSTRUCTIBLE"}:
+    if record.quality != "POINT_IN_TIME_SAFE":
         warnings.add("APPROXIMATE_OUTCOME_PRICE")
     value = p.get(field)
     if value is None or _d(value) <= 0:
@@ -225,7 +227,7 @@ def evaluate_episode(
     all_tickers = {p.ticker for p in episode.state.positions} | {
         o["ticker"] for a in alternatives for o in a["orders"]
     }
-    bars = index.bars(evaluated_as_of, all_tickers)
+    bars = index.bars(evaluated_as_of, all_tickers, owner=episode.state.owner)
     results = []
     for horizon in horizons:
         window = future[:horizon]
@@ -320,7 +322,7 @@ def _simulate(episode, alt, index, bars, window, evaluated_as_of):
     coverage = [
         e
         for e in index.visible("ACTION_COVERAGE", evaluated_as_of, state.owner)
-        if e.payload.get("complete")
+        if e.payload.get("complete") is True
     ]
     for ticker in tickers:
         covered = next(
@@ -334,6 +336,8 @@ def _simulate(episode, alt, index, bars, window, evaluated_as_of):
             None,
         )
         if covered:
+            if covered.quality != "POINT_IN_TIME_SAFE":
+                warnings.add("CORPORATE_ACTION_COVERAGE_NOT_EXACT")
             hashes.add(index.hashes[id(covered)])
         elif costs.return_basis == "TOTAL_RETURN":
             raise InsufficientEvidence(f"TOTAL_RETURN_ACTION_COVERAGE_MISSING:{ticker}")
@@ -347,6 +351,10 @@ def _simulate(episode, alt, index, bars, window, evaluated_as_of):
         for event in actions:
             if event.record_id in applied or event.effective_at > up_to:
                 continue
+            if event.quality in {"UNSAFE_FOR_REPLAY", "CURRENT_STATE_ONLY"}:
+                raise InsufficientEvidence("UNSAFE_CORPORATE_ACTION")
+            if event.quality != "POINT_IN_TIME_SAFE":
+                warnings.add("CORPORATE_ACTION_NOT_EXACT")
             p = event.payload
             ticker = p["ticker"]
             if p["type"] in {"SPLIT", "RATIO_CHANGE"}:

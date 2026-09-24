@@ -157,6 +157,7 @@ def _core(state):
         MacroSnapshot,
         score_macro_for_ticker,
         get_macro_regime,
+        SECTOR_MACRO_MAP,
     )
     from src.analysis.synthesis import blend_scores
     from src.analysis.optimizer import run_optimizer
@@ -209,6 +210,17 @@ def _core(state):
         or macro.riesgo_pais is None
     ):
         raise InsufficientEvidence("MACRO_GATE_INPUTS_MISSING")
+    required_macro = {"vix", "sp500_trend", "dxy_trend", "wti", "ccl", "riesgo_pais"}
+    for position in state.positions:
+        for indicator, _, _ in SECTOR_MACRO_MAP.get(
+            position.ticker, SECTOR_MACRO_MAP["_default"]
+        ):
+            required_macro.update((indicator, indicator + "_chg"))
+    absent = sorted(name for name in required_macro if macro_data.get(name) is None)
+    if absent:
+        raise InsufficientEvidence("MACRO_REQUIRED_FIELDS:" + ",".join(absent))
+    if len(config["portfolio_history"]) < 2:
+        raise InsufficientEvidence("RISK_NAV_HISTORY_REQUIRED")
     grouped = {p.ticker: [] for p in state.positions}
     for e in state.records:
         if e.kind == "BAR" and e.payload["ticker"] in grouped:

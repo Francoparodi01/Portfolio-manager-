@@ -49,7 +49,15 @@ class EvidenceIndex:
                 continue
             if (
                 kind
-                in {"PORTFOLIO", "PLAN", "FEATURES", "CONFIG", "FILL", "HUMAN_COVERAGE"}
+                in {
+                    "PORTFOLIO",
+                    "PLAN",
+                    "FEATURES",
+                    "CONFIG",
+                    "FILL",
+                    "HUMAN_COVERAGE",
+                    "POLICY",
+                }
                 and e.owner != owner
             ):
                 continue
@@ -64,7 +72,6 @@ class EvidenceIndex:
                     "CORPORATE_ACTION",
                     "ACTION_COVERAGE",
                     "HUMAN_COVERAGE",
-                    "POLICY",
                 }
                 and e.effective_at > as_of
             ):
@@ -98,9 +105,12 @@ class EvidenceIndex:
         *,
         decision_inputs=False,
         session_ids=None,
+        owner=None,
     ):
         selected = {}
         for e in self.by_kind["BAR"]:
+            if e.owner is not None and e.owner != owner:
+                continue
             p = self.payload(e)
             if p.get("ticker") not in tickers or not e.known_at(cutoff):
                 continue
@@ -216,7 +226,9 @@ def build_state(
             -lookback_sessions:
         ]
     )
-    bars = index.bars(as_of, tickers, decision_inputs=True, session_ids=session_ids)
+    bars = index.bars(
+        as_of, tickers, decision_inputs=True, session_ids=session_ids, owner=owner
+    )
     selected.extend(bars[k] for k in sorted(bars))
     if not bars:
         missing.append("admissible_price_history")
@@ -246,7 +258,8 @@ def build_state(
             if approximate or missing or warnings or assumptions
             else (
                 "MEDIUM"
-                if any(e.quality == "RECONSTRUCTIBLE" for e in selected)
+                if uq == "RECONSTRUCTED"
+                or any(e.quality == "RECONSTRUCTIBLE" for e in selected)
                 else "HIGH"
             )
         )

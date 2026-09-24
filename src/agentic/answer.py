@@ -46,6 +46,11 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
     if not isinstance(data, dict):
         data = {}
 
+    if data.get("schema_version") == "decision-lab-agent-evidence-v1":
+        from src.decision_lab.queries import explain_evidence
+        answer, _status = explain_evidence(data)
+        return answer, ["El mecanismo interno no prueba valor económico; la evidencia del Lab conserva su calidad y cohorte."]
+
     if tool == "get_portfolio_snapshot" and data:
         positions = data.get("positions")
         position_count = len(positions) if isinstance(positions, list) else "N/D"

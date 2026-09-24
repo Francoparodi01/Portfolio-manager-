@@ -127,6 +127,18 @@ class Evidence(Frozen):
                     check(item)
 
         check(self.payload)
+        if self.kind == "BAR":
+            for name in ("open", "high", "low", "close", "volume"):
+                value = self.payload.get(name)
+                if value is not None and not Decimal(str(value)).is_finite():
+                    raise ValueError("nonfinite market value")
+        clock_fields = ("published_at", "adjustment_as_of")
+        if self.kind in {"ACTION_COVERAGE", "HUMAN_COVERAGE"}:
+            clock_fields += ("from", "to")
+        for field in clock_fields:
+            value = self.payload.get(field)
+            if value is not None and datetime.fromisoformat(value).tzinfo is None:
+                raise ValueError("evidence payload clock must include timezone")
         return self
 
     @property

@@ -411,7 +411,13 @@ def test_real_core_kernels_offline_deterministic(monkeypatch):
         "scope": "PORTFOLIO_ONLY_NO_RADAR",
         "lookback_sessions": 70,
         "sentiment_enabled": False,
-        "portfolio_history": [{"scraped_at": T.isoformat(), "total_value_ars": 2000}],
+        "portfolio_history": [
+            {
+                "scraped_at": (T - timedelta(days=1)).isoformat(),
+                "total_value_ars": 2500,
+            },
+            {"scraped_at": T.isoformat(), "total_value_ars": 2500},
+        ],
         "events_complete": True,
     }
     records = [e for e in data.records if e.kind != "PLAN"]
@@ -435,7 +441,23 @@ def test_real_core_kernels_offline_deterministic(monkeypatch):
             ),
             ev(
                 "MACRO",
-                {"vix": 17, "sp500_trend": 0.02, "ccl": 1400, "riesgo_pais": 500},
+                {
+                    "vix": 17,
+                    "sp500_trend": 0.02,
+                    "ccl": 1400,
+                    "riesgo_pais": 500,
+                    "dxy_trend": 0,
+                    "wti": 70,
+                    "sp500": 6000,
+                    "sp500_chg": 0.1,
+                    "dow": 40000,
+                    "dow_chg": 0.1,
+                    "vix_chg": 0,
+                    "dxy": 100,
+                    "dxy_chg": 0,
+                    "tnx": 4,
+                    "tnx_chg": 0,
+                },
             ),
         ]
     )

@@ -41,7 +41,10 @@ def replay(
     rows = []
     failures = []
     seen = set()
-    ordered = sorted(requests, key=lambda r: (r["as_of"], r.get("plan_id") or ""))
+    ordered = sorted(
+        {digest(r): r for r in requests}.values(),
+        key=lambda r: (r["as_of"], r.get("plan_id") or ""),
+    )
     for request in ordered:
         key = digest(request)
         if key in seen:
