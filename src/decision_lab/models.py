@@ -59,6 +59,22 @@ class Evidence(Frozen):
             raise ValueError("evidence payload must be an object")
         return canonical(data)
 
+    @model_validator(mode="after")
+    def no_labels_in_decision_evidence(self):
+        if self.kind in {"FILL", "HUMAN_COVERAGE"}:
+            return self
+        def check(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key.startswith(("outcome_", "executable_outcome_", "forward_return", "future_return")) or key in {"was_correct", "label_timeout", "closed_at"}:
+                        raise ValueError("future outcome labels cannot enter decision evidence")
+                    check(item)
+            elif isinstance(value, list):
+                for item in value:
+                    check(item)
+        check(self.payload)
+        return self
+
     @property
     def payload(self) -> dict:
         return json.loads(self.payload_json)
@@ -155,7 +171,7 @@ class Order(Frozen):
     ticker: str
     side: Literal["BUY", "SELL"]
     quantity: Decimal = Field(ge=0)
-    reference_price: Decimal = Field(gt=0)
+    reference_price: Decimal = Field(ge=0)
     target_amount_ars: Decimal = Field(ge=0)
     executable: bool
     blocked: bool = False
@@ -166,6 +182,12 @@ class Order(Frozen):
     restriction: str | None = None
     priority: int = 0
     funded_by: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def executable_price(self):
+        if self.executable and not self.blocked and self.quantity > 0 and self.reference_price <= 0:
+            raise ValueError("executable order requires a positive reference price")
+        return self
 
 
 class FrozenPlan(Frozen):
@@ -201,6 +223,7 @@ class Episode(Frozen):
     experiment_id: str
     split: Literal["TRAIN", "VALIDATION", "HOLDOUT", "EXPLORATORY"]
     quality: QualityAssessment
+    alternatives_json: str
 
 
 class AlternativeOutcome(Frozen):
