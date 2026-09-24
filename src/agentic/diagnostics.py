@@ -28,7 +28,11 @@ def _plain(text: str) -> str:
 
 def question_plan(goal: str, context: list[dict] | None = None) -> QuestionPlan:
     text = _plain(goal)
-    if any(word in text for word in ("cedear", "cdeear")) and any(word in text for word in ("riesgo", "argentin", "wall street")):
+    if any(word in text for word in ("decision lab", "contrafactual", "counterfactual", "dva", "plan vs hold", "plan contra hold", "replay", "versiones", "valor agregado", "hubiera mantenido")):
+        intent, required = "decision_lab", ("get_decision_value_added",)
+    elif any(word in text for word in ("reduc", "vend", "microsoft", "msft")) and any(word in text for word in ("por que", "porque", "explica", "quiere")):
+        intent, required = "decision_lab_mechanism", ("get_decision_evidence", "get_decision_value_added")
+    elif any(word in text for word in ("cedear", "cdeear")) and any(word in text for word in ("riesgo", "argentin", "wall street")):
         intent, required = "cedear_risk", ("get_macro_exposure",)
     elif any(word in text for word in ("recesion", "boom", "tendencia alcista", "compra/hold", "recuperacion")):
         intent, required = "market_thesis", ("get_decision_evidence",)
@@ -71,6 +75,15 @@ def observed_payloads(history: list[dict]) -> dict[str, dict]:
 
 def diagnostic_decision(goal: str, history: list[dict], plan: QuestionPlan,
                         context: list[dict] | None = None) -> AgentDecision:
+    if plan.intent in {"decision_lab", "decision_lab_mechanism"}:
+        from src.decision_lab.queries import explain_evidence
+        payloads = observed_payloads(history)
+        explanation, status = explain_evidence(payloads.get("get_decision_value_added"))
+        if plan.intent == "decision_lab_mechanism":
+            mechanism = diagnostic_decision(goal, history, QuestionPlan("explain_plan", ("get_decision_evidence",)), context)
+            explanation = "Mecanismo actual\n" + mechanism.answer + "\n\n" + explanation
+        return AgentDecision(kind="final", answer=explanation, rationale="Stored quantitative evidence; no LLM return calculation.",
+                             answer_origin="diagnostics_v2", objective_status=status)
     if plan.intent == "general":
         return evidence_decision(goal, history)
     payloads = observed_payloads(history)
@@ -186,3 +199,17 @@ def diagnostic_decision(goal: str, history: list[dict], plan: QuestionPlan,
     answer = "\n\n".join(parts) + "\n\nPendiente:\n- " + "\n- ".join(gaps)
     return AgentDecision(kind="final", answer=answer, rationale="Explicación de fuentes estructuradas bajo política de preguntas v2.",
                          answer_origin="diagnostics_v2", objective_status=status)
+
+
+def decision_lab_arguments(goal):
+    """Conservative routing. Unknown names do not silently select another ticker."""
+    text = _plain(goal)
+    aliases = {"microsoft":"MSFT", "nvidia":"NVDA", "apple":"AAPL", "amazon":"AMZN", "google":"GOOGL", "tesla":"TSLA", "meta":"META"}
+    tickers = {ticker for name,ticker in aliases.items() if re.search(r"\b"+name+r"\b",text)}
+    stop = {"DVA","PLAN","HOLD","CASH","ARS","USD","REDUCE","BUY","SELL","PARTIAL","IC","CI"}
+    tickers.update(t for t in re.findall(r"\b[A-Z][A-Z0-9.=-]{1,9}\b",goal) if t not in stop)
+    args = {}
+    if len(tickers)==1:args["ticker"]=next(iter(tickers))
+    horizons = re.findall(r"\b(5|10|20|40)\s*(?:d|dias|sesiones)\b",text)
+    if horizons:args["horizon"]=int(horizons[0])
+    return args

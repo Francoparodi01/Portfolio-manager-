@@ -11,6 +11,7 @@ PROMPT = (
     "Escribí un objetivo después del comando:\n"
     "<code>/agente Revisá mi cartera y explicá qué evidencia falta para decidir.</code>\n\n"
     "Consulta evidencia de tu cuenta y adjunta su traza. No ejecuta órdenes.\n"
+    "Decision Lab: <code>/agente PLAN vs HOLD 20D</code> o <code>/agente DVA de MSFT 20D</code>.\n"
     "Retoma hasta tres consultas tuyas de las últimas 24 horas. Para empezar de cero: "
     "<code>/agente nuevo &lt;consulta&gt;</code>."
 )
