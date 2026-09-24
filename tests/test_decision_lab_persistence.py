@@ -1,7 +1,7 @@
 import json
 from datetime import timedelta
 import pytest
-from test_decision_lab import T, dataset_fixture, recorded_plan
+from .test_decision_lab import T, dataset_fixture, recorded_plan
 from src.decision_lab.models import Experiment, canonical
 from src.decision_lab.runner import replay
 from src.decision_lab.persistence import write_artifacts, validate_artifacts

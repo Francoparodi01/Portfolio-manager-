@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from test_decision_lab import T, dataset_fixture, recorded_plan
+from .test_decision_lab import T, dataset_fixture, recorded_plan
 from src.decision_lab.models import Experiment, CostModel, digest
 from src.decision_lab.statistics import metrics, summarize, compare_versions
 from src.decision_lab.runner import replay, rolling_windows

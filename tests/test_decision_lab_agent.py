@@ -12,7 +12,7 @@ from src.agentic.model import OllamaAgentModel
 from src.agentic.orchestrator import AgentOrchestrator
 from src.agentic.tools import ToolRegistry, ToolContext, build_default_registry
 from src.decision_lab.queries import TOOLS, explain_evidence, query_evidence
-from test_decision_lab_statistics import rows_fixture, experiment
+from .test_decision_lab_statistics import rows_fixture, experiment
 from src.decision_lab.statistics import metrics
 
 
