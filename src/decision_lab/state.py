@@ -64,6 +64,7 @@ class EvidenceIndex:
                     "CORPORATE_ACTION",
                     "ACTION_COVERAGE",
                     "HUMAN_COVERAGE",
+                    "POLICY",
                 }
                 and e.effective_at > as_of
             ):
@@ -190,6 +191,9 @@ def build_state(
             selected.append(row)
         else:
             missing.append(kind.lower())
+    policy = index.latest("POLICY", as_of, owner)
+    if policy:
+        selected.append(policy)
     # Feature/aggregated-sentiment history is selected per ticker, not by
     # retrospectively using the last available global row.
     for kind in ("FEATURES", "SENTIMENT"):

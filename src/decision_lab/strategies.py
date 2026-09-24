@@ -386,7 +386,7 @@ def freeze_plan(
 ) -> FrozenPlan:
     _check_version(state, strategy, mode)
     if mode == "HISTORICAL_POLICY_REPLAY" and strategy.adapter != "recorded_plan_v1":
-        registration = require_kind(state, "CONFIG")[-1]
+        registration = require_kind(state, "POLICY")[-1]
         if registration.quality != "POINT_IN_TIME_SAFE" or registration.payload.get(
             "registered_strategy_hash"
         ) != digest(strategy):

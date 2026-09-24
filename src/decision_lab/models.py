@@ -81,6 +81,7 @@ class Evidence(Frozen):
         "CONFIG",
         "FILL",
         "HUMAN_COVERAGE",
+        "POLICY",
     ]
     record_id: str = Field(min_length=1)
     effective_at: AwareDatetime
