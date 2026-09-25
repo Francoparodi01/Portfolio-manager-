@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Telegram bot entrypoint with Economic Meta Policy read-only commands."""
+"""Telegram bot entrypoint with Economic Meta Policy shadow automation."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,13 +18,64 @@ from telegram.ext import CommandHandler, ContextTypes
 
 from scripts import telegram_bot as base
 from src.analysis.economic_meta_telegram import render_latest_meta, render_meta_status
+from src.analysis.economic_meta_watcher import run_economic_meta_watcher_loop
 
 logger = logging.getLogger(__name__)
+
+_BASE_POST_INIT = base.post_init
+_BASE_POST_SHUTDOWN = base.post_shutdown
+META_WATCHER_TASK_KEY = "economic_meta_watcher_task"
 
 
 def _register_command_spec() -> None:
     if not any(name == "meta" for name, _ in base.BOT_COMMAND_SPECS):
         base.BOT_COMMAND_SPECS.insert(1, ("meta", "Economic Meta Policy shadow"))
+
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+async def _meta_post_init(app) -> None:
+    await _BASE_POST_INIT(app)
+    if base.get_config is None:
+        logger.warning("[META][WATCHER] config no disponible; watcher deshabilitado")
+        return
+    try:
+        cfg = base.get_config()
+        database_url = str(cfg.database.url)
+        poll_seconds = _env_int("ECONOMIC_META_POLL_SECONDS", 15, 5)
+        settle_seconds = _env_int("ECONOMIC_META_SETTLE_SECONDS", 45, 10)
+        task = asyncio.create_task(
+            run_economic_meta_watcher_loop(
+                database_url,
+                poll_interval_seconds=poll_seconds,
+                settle_seconds=settle_seconds,
+            ),
+            name="economic_meta_watcher",
+        )
+        app.bot_data[META_WATCHER_TASK_KEY] = task
+        logger.info(
+            "[META][WATCHER] iniciado poll=%ss settle=%ss SHADOW_ONLY",
+            poll_seconds,
+            settle_seconds,
+        )
+    except Exception:
+        logger.exception(
+            "[META][WATCHER] no pudo iniciar; Telegram y producción continúan sin cambios"
+        )
+
+
+async def _meta_post_shutdown(app) -> None:
+    task = app.bot_data.get(META_WATCHER_TASK_KEY)
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    await _BASE_POST_SHUTDOWN(app)
 
 
 async def meta_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -53,13 +107,17 @@ async def meta_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def build_app():
     _register_command_spec()
+    # base.build_app resolves these module globals at call time. Wrapping them
+    # here lets us add the watcher without editing the user's telegram_bot.py.
+    base.post_init = _meta_post_init
+    base.post_shutdown = _meta_post_shutdown
     app = base.build_app()
     app.add_handler(CommandHandler("meta", meta_handler))
     return app
 
 
 def main() -> None:
-    logger.info("[BOT] Iniciando Cocos Copilot + Economic Meta Policy read-only")
+    logger.info("[BOT] Iniciando Cocos Copilot + Economic Meta Policy shadow")
     build_app().run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
