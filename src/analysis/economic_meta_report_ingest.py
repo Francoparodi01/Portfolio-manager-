@@ -1,10 +1,9 @@
 """Ingest the latest rendered Quantia analysis into Economic Meta Policy shadow.
 
-This is a presentation-side adapter for analysis runs executed with --no-persist
-(e.g. /analisis_full outside market hours). It parses only the final portfolio
-reading and plan summary already rendered by run_analysis.py, then evaluates the
-same preregistered META-A/B/C challengers. It never writes decision_log, orders,
-portfolio weights or broker state.
+This presentation-side adapter accepts both the detailed /analisis_full report
+and the compact /analisis report. It evaluates the rendered portfolio snapshot
+with the same preregistered META-A/B/C challengers without writing decision_log,
+orders, portfolio weights or broker state.
 """
 from __future__ import annotations
 
@@ -21,19 +20,54 @@ from src.analysis.economic_meta_store import DEFAULT_SHADOW_PATH, EconomicMetaSh
 
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
+# Detailed /analisis_full portfolio line:
+# MU → SELL_PARTIAL → -$348.400 ARS | score -0.110 | ... | peso 12.0% → 0.0%
 _POSITION_RE = re.compile(
     r"^[^A-Z0-9]*(?P<ticker>[A-Z0-9.\-]+)\s*→\s*(?P<action>[A-Z_]+)"
     r"(?:\s*→[^|]*)?\s*\|\s*score\s*(?P<score>[+-]?\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
-_WEIGHT_RE = re.compile(r"peso\s*(?P<current>\d+(?:\.\d+)?)%\s*→\s*(?P<target>\d+(?:\.\d+)?)%", re.IGNORECASE)
+
+# Compact /analisis portfolio line after markdown removal:
+# MU -0.110 T+0.060 ... R=RANGE ... 12.0%→0.0% SELL_PARTIAL
+_COMPACT_POSITION_RE = re.compile(
+    r"^[^A-Z0-9]*(?P<ticker>[A-Z0-9.\-]+)\s+"
+    r"(?P<score>[+-]?\d+(?:\.\d+)?)\b.*?"
+    r"(?P<current>\d+(?:\.\d+)?)%\s*→\s*(?P<target>\d+(?:\.\d+)?)%\s+"
+    r"(?P<action>SELL_PARTIAL|SELL_FULL|SELL|REDUCE|BUY_PARTIAL|BUY_FULL|BUY|WATCH|HOLD)\b",
+    re.IGNORECASE,
+)
+
+_WEIGHT_RE = re.compile(
+    r"peso\s*(?P<current>\d+(?:\.\d+)?)%\s*→\s*(?P<target>\d+(?:\.\d+)?)%",
+    re.IGNORECASE,
+)
 _REGIME_RE = re.compile(r"Régimen técnico:\s*(?P<regime>[A-Z_]+)", re.IGNORECASE)
-_INLINE_REGIME_RE = re.compile(r"\bR=(?P<regime>[A-Z_]+)")
-_TIMESTAMP_RE = re.compile(r"(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<time>\d{2}:\d{2})\s+ART")
-_PORTFOLIO_RE = re.compile(r"(?:Portfolio:\s*|💼\s*)\$(?P<value>[0-9.]+)\s*ARS", re.IGNORECASE)
-_PLAN_SELL_RE = re.compile(r"(?:Plan ventas|Ventas):\s*\$(?P<value>[0-9.]+)\s*ARS", re.IGNORECASE)
-_PLAN_BUY_RE = re.compile(r"(?:Plan compras|Compras):\s*\$(?P<value>[0-9.]+)\s*ARS", re.IGNORECASE)
-_FEES_RE = re.compile(r"(?:Fees estimados|Fees):\s*\$(?P<value>[0-9.]+)\s*ARS", re.IGNORECASE)
+_INLINE_REGIME_RE = re.compile(r"\bR=(?P<regime>[A-Z_]+)", re.IGNORECASE)
+_TIMESTAMP_RE = re.compile(
+    r"(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<time>\d{2}:\d{2})\s+ART",
+    re.IGNORECASE,
+)
+_SHORT_TIMESTAMP_RE = re.compile(
+    r"(?P<date>\d{2}/\d{2})(?!/\d{4})\s+(?P<time>\d{2}:\d{2})\s+ART",
+    re.IGNORECASE,
+)
+_PORTFOLIO_RE = re.compile(
+    r"(?:Portfolio:\s*|💼\s*)\$(?P<value>[0-9.]+)\s*ARS",
+    re.IGNORECASE,
+)
+_PLAN_SELL_RE = re.compile(
+    r"(?:Plan ventas|Ventas):\s*\$(?P<value>[0-9.]+)\s*ARS",
+    re.IGNORECASE,
+)
+_PLAN_BUY_RE = re.compile(
+    r"(?:Plan compras|Compras):\s*\$(?P<value>[0-9.]+)\s*ARS",
+    re.IGNORECASE,
+)
+_FEES_RE = re.compile(
+    r"(?:Fees estimados|Fees):\s*\$(?P<value>[0-9.]+)\s*ARS",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +84,8 @@ class ParsedAnalysisCandidate:
 def _plain(report: str) -> str:
     text = html.unescape(str(report or ""))
     text = re.sub(r"<[^>]+>", "", text)
+    # Telegram markdown is presentation-only and otherwise breaks compact-line parsing.
+    text = text.replace("**", "").replace("`", "")
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -64,16 +100,30 @@ def _money(value: str | None) -> float:
 
 def _timestamp(text: str) -> datetime:
     match = _TIMESTAMP_RE.search(text)
-    if not match:
-        return datetime.now(timezone.utc)
-    try:
-        local = datetime.strptime(
-            f"{match.group('date')} {match.group('time')}",
-            "%d/%m/%Y %H:%M",
-        ).replace(tzinfo=ART_TZ)
-        return local.astimezone(timezone.utc)
-    except ValueError:
-        return datetime.now(timezone.utc)
+    if match:
+        try:
+            local = datetime.strptime(
+                f"{match.group('date')} {match.group('time')}",
+                "%d/%m/%Y %H:%M",
+            ).replace(tzinfo=ART_TZ)
+            return local.astimezone(timezone.utc)
+        except ValueError:
+            pass
+
+    # Compact /analisis uses "CIERRE DE RUEDA — DD/MM HH:MM ART" without year.
+    short = _SHORT_TIMESTAMP_RE.search(text)
+    if short:
+        now_art = datetime.now(ART_TZ)
+        try:
+            local = datetime.strptime(
+                f"{short.group('date')}/{now_art.year} {short.group('time')}",
+                "%d/%m/%Y %H:%M",
+            ).replace(tzinfo=ART_TZ)
+            return local.astimezone(timezone.utc)
+        except ValueError:
+            pass
+
+    return datetime.now(timezone.utc)
 
 
 def _normalize_action(raw_action: str, current: float | None, target: float | None) -> str:
@@ -94,31 +144,41 @@ def _normalize_action(raw_action: str, current: float | None, target: float | No
     return "HOLD" if raw == "HOLD" else raw
 
 
-def parse_analysis_report(report: str) -> tuple[datetime, list[ParsedAnalysisCandidate], dict[str, float]]:
+def parse_analysis_report(
+    report: str,
+) -> tuple[datetime, list[ParsedAnalysisCandidate], dict[str, float]]:
     text = _plain(report)
     lines = [line.strip() for line in text.splitlines()]
     parsed: list[ParsedAnalysisCandidate] = []
 
     for index, line in enumerate(lines):
-        match = _POSITION_RE.match(line)
-        if not match:
+        detailed = _POSITION_RE.match(line)
+        compact = None if detailed else _COMPACT_POSITION_RE.match(line)
+        if not detailed and not compact:
             continue
+
+        match = detailed or compact
+        assert match is not None
         ticker = match.group("ticker").upper()
         raw_action = match.group("action").upper()
         try:
             score = float(match.group("score"))
-        except ValueError:
+        except (TypeError, ValueError):
             continue
 
-        weight_match = _WEIGHT_RE.search(line)
-        current = float(weight_match.group("current")) / 100.0 if weight_match else None
-        target = float(weight_match.group("target")) / 100.0 if weight_match else None
+        if detailed:
+            weight_match = _WEIGHT_RE.search(line)
+            current = float(weight_match.group("current")) / 100.0 if weight_match else None
+            target = float(weight_match.group("target")) / 100.0 if weight_match else None
+        else:
+            current = float(match.group("current")) / 100.0
+            target = float(match.group("target")) / 100.0
 
         regime = "UNKNOWN"
         inline = _INLINE_REGIME_RE.search(line)
         if inline:
             regime = inline.group("regime").upper()
-        else:
+        elif detailed:
             for lookahead in lines[index + 1 : index + 4]:
                 regime_match = _REGIME_RE.search(lookahead)
                 if regime_match:
@@ -146,8 +206,8 @@ def parse_analysis_report(report: str) -> tuple[datetime, list[ParsedAnalysisCan
     gross_buy_ars = _money(buy_match.group("value")) if buy_match else 0.0
     fees_ars = _money(fee_match.group("value")) if fee_match else 0.0
 
-    # Turnover must reflect the actual operable plan, not theoretical optimizer
-    # targets or WATCH/HOLD deltas. Prefer rendered plan notionals when present.
+    # Turnover reflects the actually operable rendered plan. WATCH/HOLD optimizer
+    # deltas are deliberately excluded from the economic gate.
     if portfolio_ars > 0 and (gross_sell_ars > 0 or gross_buy_ars > 0):
         turnover = max(gross_sell_ars, gross_buy_ars) / portfolio_ars
     else:
@@ -159,7 +219,9 @@ def parse_analysis_report(report: str) -> tuple[datetime, list[ParsedAnalysisCan
             delta = item.target_weight - item.current_weight
             if item.raw_action in {"BUY", "BUY_FULL", "BUY_PARTIAL", "ADD"}:
                 buy_delta += max(0.0, delta)
-            elif item.raw_action in {"SELL", "SELL_FULL", "SELL_PARTIAL", "REDUCE", "TRIM", "EXIT", "CLOSE"}:
+            elif item.raw_action in {
+                "SELL", "SELL_FULL", "SELL_PARTIAL", "REDUCE", "TRIM", "EXIT", "CLOSE"
+            }:
                 sell_delta += max(0.0, -delta)
         turnover = max(buy_delta, sell_delta)
 
