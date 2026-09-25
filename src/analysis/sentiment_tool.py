@@ -6,13 +6,14 @@ without granting sentiment any direct execution authority.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from .sentiment_symbols import news_symbol_for_portfolio_ticker
 
-ACTIVE_SCORER = "finbert"
+ACTIVE_SCORER = os.getenv("SENTIMENT_ACTIVE_SCORER", "finbert").strip().lower() or "finbert"
 WINDOWS_HOURS = (6, 24, 72)
 
 
@@ -139,17 +140,23 @@ async def get_sentiment(
 
     rows = await conn.fetch(
         """
-        SELECT ss.ticker, ss.score, ss.confidence, ss.raw_response, ss.model,
-               ss.scorer, sr.source,
-               COALESCE(sr.published_at, sr.fetched_at) AS event_ts
-        FROM sentiment_scored ss
-        JOIN sentiment_raw sr ON sr.id = ss.raw_id
-        WHERE ss.status = 'SCORED'
-          AND ss.scorer = $1
-          AND ss.ticker = ANY($2::text[])
-          AND COALESCE(sr.published_at, sr.fetched_at) <= $3
-          AND COALESCE(sr.published_at, sr.fetched_at) >= $3 - ($4::int * INTERVAL '1 hour')
-        ORDER BY COALESCE(sr.published_at, sr.fetched_at) DESC, ss.scored_at DESC
+        WITH latest AS (
+            SELECT DISTINCT ON (ss.raw_id)
+                ss.raw_id, ss.ticker, ss.score, ss.confidence, ss.raw_response,
+                ss.model, ss.scorer, ss.scored_at, sr.source,
+                COALESCE(sr.published_at, sr.fetched_at) AS event_ts
+            FROM sentiment_scored ss
+            JOIN sentiment_raw sr ON sr.id = ss.raw_id
+            WHERE ss.status = 'SCORED'
+              AND ss.scorer = $1
+              AND ss.ticker = ANY($2::text[])
+              AND COALESCE(sr.published_at, sr.fetched_at) <= $3
+              AND COALESCE(sr.published_at, sr.fetched_at) >= $3 - ($4::int * INTERVAL '1 hour')
+            ORDER BY ss.raw_id, ss.scored_at DESC
+        )
+        SELECT ticker, score, confidence, raw_response, model, scorer, source, event_ts
+        FROM latest
+        ORDER BY event_ts DESC
         """,
         ACTIVE_SCORER,
         lookup,
@@ -165,11 +172,14 @@ async def get_sentiment(
     positive = float(w24["positive"] if int(w24["count"]) else w72["positive"])
     neutral = float(w24["neutral"] if int(w24["count"]) else w72["neutral"])
     negative = float(w24["negative"] if int(w24["count"]) else w72["negative"])
-    confidence = max(positive, neutral, negative)
+    evidence_count = len(data)
+    confidence = max(positive, neutral, negative) if evidence_count else 0.0
     label = "POSITIVE" if positive >= max(neutral, negative) else "NEGATIVE" if negative >= neutral else "NEUTRAL"
     sources = {str(row.get("source") or "unknown") for row in data}
     models = [str(row.get("model") or "") for row in data if row.get("model")]
-    model_version = models[0] if models else "ProsusAI/finbert"
+    default_model = os.getenv("SENTIMENT_FINBERT_MODEL", "ProsusAI/finbert")
+    model_version = models[0] if models else default_model
+    model_name = model_version.split("@", 1)[0] if model_version else default_model
 
     return SentimentToolResult(
         symbol=portfolio_symbol,
@@ -178,7 +188,7 @@ async def get_sentiment(
         sentiment_score=round(score, 6),
         label=label,
         confidence=round(confidence, 6),
-        article_count=len(data),
+        article_count=evidence_count,
         source_count=len(sources),
         positive=round(positive, 6),
         neutral=round(neutral, 6),
@@ -187,7 +197,7 @@ async def get_sentiment(
         sentiment_24h=round(float(w24["score"]), 6),
         sentiment_72h=round(float(w72["score"]), 6),
         trend=_trend(float(w6["score"]), float(w24["score"]), float(w72["score"])),
-        quality=_quality(len(data), len(sources), confidence),
-        model="ProsusAI/finbert",
+        quality=_quality(evidence_count, len(sources), confidence),
+        model=model_name,
         model_version=model_version,
     )
