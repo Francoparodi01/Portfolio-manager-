@@ -178,6 +178,49 @@ class EconomicMetaAnalysisWatcher:
             if run_id not in merged or seen > merged[run_id]:
                 merged[run_id] = seen
 
+        # Bootstrap/backfill exactly the most recent formal analysis candidates from
+        # the last 24h even when they predate watcher activation. This handles the
+        # common deployment case where Telegram is rebuilt after the latest analysis
+        # and /analisis subsequently serves a cached report instead of creating a new
+        # run. Deduplication by opportunity_id+policy keeps this idempotent.
+        latest_rows = await conn.fetch(
+            """
+            SELECT run_id::text AS run_id, MAX(decided_at) AS last_seen
+            FROM decision_log
+            WHERE run_id IS NOT NULL
+              AND decided_at >= NOW() - INTERVAL '24 hours'
+              AND COALESCE(source, layers->>'source') = 'execution_plan'
+            GROUP BY run_id
+            ORDER BY last_seen DESC
+            LIMIT 1
+            """
+        )
+        for row in latest_rows:
+            run_id = str(row["run_id"])
+            seen = _aware(row["last_seen"])
+            if run_id not in merged or seen > merged[run_id]:
+                merged[run_id] = seen
+
+        try:
+            latest_hold_rows = await conn.fetch(
+                """
+                SELECT run_id::text AS run_id, MAX(observed_at) AS last_seen
+                FROM position_hold_observations
+                WHERE observed_at >= NOW() - INTERVAL '24 hours'
+                GROUP BY run_id
+                ORDER BY last_seen DESC
+                LIMIT 1
+                """
+            )
+        except asyncpg.UndefinedTableError:
+            latest_hold_rows = []
+
+        for row in latest_hold_rows:
+            run_id = str(row["run_id"])
+            seen = _aware(row["last_seen"])
+            if run_id not in merged or seen > merged[run_id]:
+                merged[run_id] = seen
+
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.settle_seconds)
         stable = [
             (run_id, last_seen)
