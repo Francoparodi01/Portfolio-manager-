@@ -17,6 +17,7 @@ from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
 from scripts import telegram_bot as base
+from src.analysis.economic_meta_report_ingest import ingest_analysis_report
 from src.analysis.economic_meta_telegram import render_latest_meta, render_meta_status
 from src.analysis.economic_meta_watcher import run_economic_meta_watcher_loop
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _BASE_POST_INIT = base.post_init
 _BASE_POST_SHUTDOWN = base.post_shutdown
+_BASE_RUN_FIRST_EXISTING_SCRIPT = base.run_first_existing_script
 META_WATCHER_TASK_KEY = "economic_meta_watcher_task"
 
 
@@ -48,6 +50,36 @@ def _watcher_state(app) -> str:
     if task.done():
         return "ERROR" if task.exception() else "FINALIZADO"
     return "RUNNING"
+
+
+def _contains_analysis_command(candidates: list[list[str]]) -> bool:
+    for candidate in candidates or []:
+        if not candidate:
+            continue
+        script = str(candidate[0]).replace("\\", "/")
+        if script.endswith("scripts/run_analysis.py"):
+            return True
+    return False
+
+
+async def _meta_run_first_existing_script(
+    candidates: list[list[str]],
+    timeout: int = base.COMMAND_TIMEOUT_SECONDS,
+) -> str:
+    """Mirror rendered analysis output into shadow without changing the command."""
+    report = await _BASE_RUN_FIRST_EXISTING_SCRIPT(candidates, timeout=timeout)
+    if not _contains_analysis_command(candidates):
+        return report
+
+    try:
+        summary = ingest_analysis_report(report)
+        if int(summary.get("candidate_count", 0)) > 0:
+            logger.info("[META][REPORT] %s", summary)
+    except Exception:
+        # Presentation-side shadow ingestion must never break the user-facing
+        # analysis or any production decision path.
+        logger.exception("[META][REPORT] ingest fallo; análisis productivo no afectado")
+    return report
 
 
 async def _meta_post_init(app) -> None:
@@ -119,10 +151,11 @@ async def meta_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def build_app():
     _register_command_spec()
-    # base.build_app resolves these module globals at call time. Wrapping them
-    # here lets us add the watcher without editing the user's telegram_bot.py.
+    # base.build_app and _dispatch_command resolve these module globals at call
+    # time. Wrapping them here keeps the user's telegram_bot.py untouched.
     base.post_init = _meta_post_init
     base.post_shutdown = _meta_post_shutdown
+    base.run_first_existing_script = _meta_run_first_existing_script
     app = base.build_app()
     app.add_handler(CommandHandler("meta", meta_handler))
     return app
