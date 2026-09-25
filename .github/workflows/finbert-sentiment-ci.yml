@@ -10,6 +10,7 @@ on:
       - 'scripts/run_sentiment_pipeline.py'
       - 'tests/test_finbert_sentiment.py'
       - 'requirements.txt'
+      - '.github/workflows/finbert-sentiment-ci.yml'
   push:
     branches:
       - feature/finbert-sentiment-tool
@@ -33,4 +34,19 @@ jobs:
             src/analysis/signal_aggregator.py \
             scripts/run_sentiment_pipeline.py
       - name: Run focused tests
-        run: pytest -q tests/test_finbert_sentiment.py
+        id: focused_pytest
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -vv tests/test_finbert_sentiment.py 2>&1 | tee finbert-test-output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+      - name: Upload focused test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finbert-test-output
+          path: finbert-test-output.txt
+      - name: Enforce focused test result
+        if: steps.focused_pytest.outputs.exit_code != '0'
+        run: exit 1
