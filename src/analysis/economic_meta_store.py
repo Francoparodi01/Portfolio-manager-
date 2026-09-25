@@ -20,16 +20,16 @@ class EconomicMetaShadowStore:
     def append(self, record: MetaDecisionRecord) -> None:
         assert_shadow_only(record)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(
+            record.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n"
+        # One write keeps readers from observing a JSON fragment between the
+        # payload and newline while the Telegram bot and watcher share the file.
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    record.to_dict(),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-            )
-            handle.write("\n")
+            handle.write(line)
 
     def append_many(self, records: Iterable[MetaDecisionRecord]) -> int:
         count = 0
