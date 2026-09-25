@@ -1,9 +1,10 @@
-"""Aggregate scored sentiment into ticker and macro context signals."""
+"""Aggregate active FinBERT sentiment into point-in-time ticker/macro context."""
 from __future__ import annotations
 
 import json
 import logging
 import math
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -32,7 +33,8 @@ SOURCE_WEIGHTS = {
     "custom": 0.50,
 }
 
-AGGREGATION_POLICY = "event_time_v2"
+ACTIVE_SENTIMENT_SCORER = os.getenv("SENTIMENT_ACTIVE_SCORER", "finbert").strip().lower() or "finbert"
+AGGREGATION_POLICY = "event_time_finbert_v1"
 
 IMPACT_WEIGHTS = {
     "low": 0.7,
@@ -69,8 +71,17 @@ class SentimentContext:
             "high_impact_count": self.high_impact_count,
             "top_summary": self.top_summary,
             "sources": self.sources or {},
+            "aggregation_policy": AGGREGATION_POLICY,
+            "scorer": ACTIVE_SENTIMENT_SCORER,
             "reason": "used_as_sentiment_layer",
         }
+
+
+def _as_utc(value: datetime | None) -> datetime:
+    value = value or datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _source_weight(source: str) -> float:
@@ -95,11 +106,8 @@ def _decay(age_hours: float, half_life_hours: float = 8.0) -> float:
 
 
 def _bucket_hour(now: datetime | None = None) -> datetime:
-    now = now or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    now = now.astimezone(timezone.utc)
-    return now.replace(minute=0, second=0, microsecond=0)
+    current = _as_utc(now)
+    return current.replace(minute=0, second=0, microsecond=0)
 
 
 async def aggregate_sentiment(
@@ -108,10 +116,10 @@ async def aggregate_sentiment(
     window_hours: int = 6,
     half_life_hours: float = 8.0,
     now: datetime | None = None,
-) -> dict[str, int]:
-    """Aggregate recent scored rows and upsert sentiment_aggregated."""
-    now = now or datetime.now(timezone.utc)
-    bucket = _bucket_hour(now)
+) -> dict[str, int | str]:
+    """Aggregate active scorer rows using event time <= the requested as-of."""
+    as_of = _as_utc(now)
+    bucket = _bucket_hour(as_of)
     rows = await conn.fetch(
         """
         WITH latest AS (
@@ -129,8 +137,10 @@ async def aggregate_sentiment(
             FROM sentiment_scored ss
             JOIN sentiment_raw sr ON sr.id = ss.raw_id
             WHERE ss.status = 'SCORED'
+              AND ss.scorer = $1
               AND ss.score IS NOT NULL
-              AND COALESCE(sr.published_at, sr.fetched_at) >= NOW() - ($1::int * INTERVAL '1 hour')
+              AND COALESCE(sr.published_at, sr.fetched_at) <= $2
+              AND COALESCE(sr.published_at, sr.fetched_at) >= $2 - ($3::int * INTERVAL '1 hour')
               AND (
                   ss.ticker IS NOT NULL
                   OR ss.asset_scope IN ('macro', 'sector')
@@ -142,6 +152,8 @@ async def aggregate_sentiment(
             scored_at, source, event_ts
         FROM latest
         """,
+        ACTIVE_SENTIMENT_SCORER,
+        as_of,
         int(window_hours),
     )
 
@@ -171,7 +183,7 @@ async def aggregate_sentiment(
                 high_impact_count += 1
             src = str(item.get("source") or "unknown")
             sources[src] = sources.get(src, 0) + 1
-            age = _age_hours(now, item.get("event_ts") or item.get("scored_at") or now)
+            age = _age_hours(as_of, item.get("event_ts") or item.get("scored_at") or as_of)
             weight = (
                 _source_weight(src)
                 * IMPACT_WEIGHTS.get(impact, 0.7)
@@ -194,8 +206,10 @@ async def aggregate_sentiment(
 
         sources_payload: dict[str, Any] = dict(sources)
         sources_payload["_policy"] = AGGREGATION_POLICY
+        sources_payload["_scorer"] = ACTIVE_SENTIMENT_SCORER
         sources_payload["_window_hours"] = int(window_hours)
         sources_payload["_half_life_hours"] = float(half_life_hours)
+        sources_payload["_as_of"] = as_of.isoformat()
 
         await conn.execute(
             """
@@ -225,7 +239,12 @@ async def aggregate_sentiment(
         )
         upserts += 1
 
-    return {"groups": len(grouped), "upserts": upserts}
+    return {
+        "groups": len(grouped),
+        "upserts": upserts,
+        "scorer": ACTIVE_SENTIMENT_SCORER,
+        "policy": AGGREGATION_POLICY,
+    }
 
 
 async def load_sentiment_contexts(
@@ -233,12 +252,14 @@ async def load_sentiment_contexts(
     tickers: list[str],
     *,
     max_age_hours: int = 12,
+    as_of: datetime | None = None,
 ) -> dict[str, SentimentContext]:
-    """Load latest aggregated context for tickers and MACRO."""
+    """Load latest FinBERT aggregate at or before as_of for tickers and MACRO."""
     clean = sorted({str(t or "").upper().strip() for t in tickers if str(t or "").strip()})
     lookup = clean + ["MACRO"]
     if not lookup:
         return {}
+    as_of_utc = _as_utc(as_of)
 
     rows = await conn.fetch(
         """
@@ -247,13 +268,17 @@ async def load_sentiment_contexts(
             high_impact_count, top_summary, sources, bucket_ts
         FROM sentiment_aggregated
         WHERE ticker = ANY($1::text[])
-          AND bucket_ts >= NOW() - ($2::int * INTERVAL '1 hour')
-          AND sources->>'_policy' = $3
+          AND bucket_ts <= $2
+          AND bucket_ts >= $2 - ($3::int * INTERVAL '1 hour')
+          AND sources->>'_policy' = $4
+          AND sources->>'_scorer' = $5
         ORDER BY ticker, bucket_ts DESC
         """,
         lookup,
+        as_of_utc,
         int(max_age_hours),
         AGGREGATION_POLICY,
+        ACTIVE_SENTIMENT_SCORER,
     )
 
     contexts: dict[str, SentimentContext] = {}
@@ -279,8 +304,14 @@ async def load_sentiment_contexts(
     return contexts
 
 
-async def load_top_sentiment_events(conn, *, limit: int = 3) -> list[dict[str, Any]]:
-    """Load the highest-impact scored events from the current ART day."""
+async def load_top_sentiment_events(
+    conn,
+    *,
+    limit: int = 3,
+    as_of: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Load highest-impact active-scorer events available at the as-of timestamp."""
+    as_of_utc = _as_utc(as_of)
     rows = await conn.fetch(
         """
         WITH latest AS (
@@ -298,9 +329,11 @@ async def load_top_sentiment_events(conn, *, limit: int = 3) -> list[dict[str, A
             FROM sentiment_scored ss
             JOIN sentiment_raw sr ON sr.id = ss.raw_id
             WHERE ss.status = 'SCORED'
+              AND ss.scorer = $1
+              AND COALESCE(sr.published_at, sr.fetched_at) <= $2
               AND (COALESCE(sr.published_at, sr.fetched_at)
                    AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
-                  = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+                  = ($2 AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
             ORDER BY ss.raw_id, ss.scored_at DESC
         )
         SELECT summary, impact, confidence, score, ticker, asset_scope,
@@ -313,13 +346,26 @@ async def load_top_sentiment_events(conn, *, limit: int = 3) -> list[dict[str, A
             COALESCE(confidence, 0) DESC,
             ABS(COALESCE(score, 0)) DESC,
             event_ts DESC
-        LIMIT $1
+        LIMIT $3
         """,
+        ACTIVE_SENTIMENT_SCORER,
+        as_of_utc,
         max(1, min(int(limit), 10)),
     )
     return [dict(row) for row in rows]
 
 
-async def composite_sentiment(conn, ticker: str, *, window_hours: int = 12) -> SentimentContext:
-    contexts = await load_sentiment_contexts(conn, [ticker], max_age_hours=window_hours)
+async def composite_sentiment(
+    conn,
+    ticker: str,
+    *,
+    window_hours: int = 12,
+    as_of: datetime | None = None,
+) -> SentimentContext:
+    contexts = await load_sentiment_contexts(
+        conn,
+        [ticker],
+        max_age_hours=window_hours,
+        as_of=as_of,
+    )
     return contexts.get(str(ticker).upper(), SentimentContext(str(ticker).upper(), "ticker"))
