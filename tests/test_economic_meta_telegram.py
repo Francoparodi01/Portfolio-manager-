@@ -71,6 +71,47 @@ def test_render_latest_meta_uses_latest_run_and_is_read_only(tmp_path):
     assert "Vista read-only" in text
 
 
+def test_render_latest_meta_prefers_auto_analysis_over_newer_manual_probe(tmp_path):
+    path = tmp_path / "shadow.jsonl"
+    rows = [
+        {
+            "run_id": "formal-run",
+            "as_of": "2026-09-24T17:00:00+00:00",
+            "ticker": "MU",
+            "candidate_action": "SELL",
+            "candidate_score": -0.11,
+            "policy_name": policy,
+            "decision": "REJECT_TO_HOLD",
+            "rejection_reason": "SCORE_BELOW_PREREGISTERED_GATE",
+            "opportunity_id": "analysis:formal-run:0:MU:decision_log",
+        }
+        for policy in ("META-A", "META-B", "META-C")
+    ]
+    rows.extend(
+        {
+            "run_id": "prueba-telegram",
+            "as_of": "2026-09-24T18:00:00+00:00",
+            "ticker": "NVDA",
+            "candidate_action": "SELL",
+            "candidate_score": -0.14,
+            "policy_name": policy,
+            "decision": "ALLOW_SHADOW",
+            "rejection_reason": None,
+            "opportunity_id": None,
+        }
+        for policy in ("META-A", "META-B", "META-C")
+    )
+    _write_rows(path, rows)
+
+    text = render_latest_meta(path=path)
+
+    assert "formal-run" in text
+    assert "Fuente: análisis automático" in text
+    assert "MU · SELL" in text
+    assert "prueba-telegram" not in text
+    assert "NVDA" not in text
+
+
 def test_render_latest_meta_filters_ticker(tmp_path):
     path = tmp_path / "shadow.jsonl"
     rows = [
@@ -103,6 +144,7 @@ def test_render_meta_status_counts_records(tmp_path):
             "ticker": "NVDA",
             "policy_name": "META-A",
             "decision": "ALLOW_SHADOW",
+            "opportunity_id": "analysis:run-1:0:NVDA:decision_log",
         },
         {
             "run_id": "run-1",
@@ -110,6 +152,7 @@ def test_render_meta_status_counts_records(tmp_path):
             "ticker": "NVDA",
             "policy_name": "META-C",
             "decision": "REJECT_TO_HOLD",
+            "opportunity_id": "analysis:run-1:0:NVDA:decision_log",
         },
     ]
     _write_rows(path, rows)
@@ -117,6 +160,8 @@ def test_render_meta_status_counts_records(tmp_path):
     text = render_meta_status(path=path)
 
     assert "Records: 2 · runs: 1 · tickers: 1" in text
+    assert "Auto análisis: 2 records · 1 runs · 1 tickers" in text
+    assert "Manual/pruebas: 0 records" in text
     assert "META-A: allow=1 · hold=0" in text
     assert "META-C: allow=0 · hold=1" in text
     assert "Capital effect: NO" in text
