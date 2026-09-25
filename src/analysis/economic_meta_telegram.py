@@ -49,6 +49,18 @@ def _reason(value: Any) -> str:
     return ", ".join(labels.get(part, part.lower()) for part in parts)
 
 
+def _is_auto_analysis_row(row: dict) -> bool:
+    return str(row.get("opportunity_id") or "").startswith("analysis:")
+
+
+def _preferred_rows(rows: list[dict]) -> tuple[list[dict], str]:
+    """Prefer automatically ingested analysis evidence over manual probes."""
+    automatic = [row for row in rows if _is_auto_analysis_row(row)]
+    if automatic:
+        return automatic, "AUTO_ANALYSIS"
+    return rows, "SHADOW_MANUAL"
+
+
 def _latest_run(rows: list[dict]) -> tuple[str | None, list[dict]]:
     if not rows:
         return None, []
@@ -77,6 +89,7 @@ def render_latest_meta(
     if ticker_filter:
         rows = [row for row in rows if str(row.get("ticker") or "").upper() == ticker_filter]
 
+    rows, source_mode = _preferred_rows(rows)
     run_id, selected = _latest_run(rows)
     if not selected:
         scope = f" para {ticker_filter}" if ticker_filter else ""
@@ -90,9 +103,11 @@ def render_latest_meta(
     for row in selected:
         by_ticker[str(row.get("ticker") or "?").upper()].append(row)
 
+    source_label = "análisis automático" if source_mode == "AUTO_ANALYSIS" else "registro manual"
     lines = [
         "🧪 Economic Meta Policy v1 · SHADOW_ONLY",
         f"Run: {run_id or '—'}",
+        f"Fuente: {source_label}",
         "Capital effect: NO",
         "",
     ]
@@ -116,10 +131,11 @@ def render_latest_meta(
             parts.append(label)
         lines.append(" · ".join(parts))
 
+    latest_cut = max((str(row.get("as_of") or "") for row in selected), default="")
     lines.extend(
         [
             "",
-            f"Corte: {_fmt_dt(selected[0].get('as_of'))}",
+            f"Corte: {_fmt_dt(latest_cut)}",
             "Primario: 20D · research: 5/10/20/40D",
             "Vista read-only: /meta no crea ni modifica decisiones.",
         ]
@@ -144,17 +160,25 @@ def render_meta_status(path: str | Path = DEFAULT_SHADOW_PATH) -> str:
         lines.append("Records: 0")
         return "\n".join(lines)
 
+    auto_rows = [row for row in rows if _is_auto_analysis_row(row)]
+    manual_rows = [row for row in rows if not _is_auto_analysis_row(row)]
+    preferred = auto_rows or rows
+
     runs = {str(row.get("run_id")) for row in rows if row.get("run_id")}
     tickers = {str(row.get("ticker")) for row in rows if row.get("ticker")}
+    auto_runs = {str(row.get("run_id")) for row in auto_rows if row.get("run_id")}
+    auto_tickers = {str(row.get("ticker")) for row in auto_rows if row.get("ticker")}
     by_policy: dict[str, Counter[str]] = defaultdict(Counter)
-    latest = max((str(row.get("as_of") or "") for row in rows), default="")
-    for row in rows:
+    latest = max((str(row.get("as_of") or "") for row in preferred), default="")
+    for row in preferred:
         by_policy[str(row.get("policy_name") or "UNKNOWN")][str(row.get("decision") or "UNKNOWN")] += 1
 
     lines.extend(
         [
             f"Records: {len(rows)} · runs: {len(runs)} · tickers: {len(tickers)}",
-            f"Último corte: {_fmt_dt(latest)}",
+            f"Auto análisis: {len(auto_rows)} records · {len(auto_runs)} runs · {len(auto_tickers)} tickers",
+            f"Manual/pruebas: {len(manual_rows)} records",
+            f"Último corte análisis: {_fmt_dt(latest)}",
             "",
         ]
     )
