@@ -31,6 +31,7 @@ services:
       - ./logs:/app/logs
       - ./screenshots:/app/screenshots
       - secrets_data:/app/secrets
+      - hf_cache:/app/.cache/huggingface
     command: ["python", "-m", "src.scheduler.runner"]
     environment:
       TZ: America/Argentina/Buenos_Aires
@@ -49,6 +50,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - secrets_data:/app/secrets
+      - hf_cache:/app/.cache/huggingface
     command: ["python", "scripts/telegram_bot.py"]
     environment:
       TZ: America/Argentina/Buenos_Aires
@@ -56,7 +58,7 @@ services:
       resources:
         limits:
           cpus: "1.0"
-          memory: 512M
+          memory: 2G
 
   monitor_api:
     build:
@@ -97,4 +99,4 @@ services:
 volumes:
   postgres_data:
   secrets_data:
-  
+  hf_cache:
