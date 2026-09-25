@@ -13,6 +13,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.analysis.economic_meta_policy import evaluate_all_preregistered
 from src.analysis.economic_meta_store import (
     DEFAULT_SHADOW_PATH,
