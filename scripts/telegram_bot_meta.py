@@ -17,6 +17,7 @@ from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
 from scripts import telegram_bot as base
+from src.analysis.economic_meta_lab import load_decision_lab_context, render_decision_lab_context
 from src.analysis.economic_meta_report_ingest import ingest_analysis_report
 from src.analysis.economic_meta_telegram import render_latest_meta, render_meta_status
 from src.analysis.economic_meta_watcher import run_economic_meta_watcher_loop
@@ -76,21 +77,12 @@ async def _meta_run_first_existing_script(
         if int(summary.get("candidate_count", 0)) > 0:
             logger.info("[META][REPORT] %s", summary)
     except Exception:
-        # Presentation-side shadow ingestion must never break the user-facing
-        # analysis or any production decision path.
         logger.exception("[META][REPORT] ingest fallo; análisis productivo no afectado")
     return report
 
 
 async def _sync_cached_analysis_meta(chat_id: int) -> dict:
-    """Mirror the latest cached /analisis artifact into shadow before /meta renders.
-
-    This closes the cache-hit gap: /analisis may return a previously generated
-    report without invoking run_analysis.py, so the run-script wrapper above is
-    intentionally bypassed. Re-ingestion is safe because the shadow store is
-    idempotent by analysis timestamp+ticker+policy. The timestamp embedded in the
-    report is preserved; the time of the /meta query is never used as decision time.
-    """
+    """Mirror the latest cached /analisis artifact into shadow before /meta renders."""
     loader = getattr(base, "_load_cached_report", None)
     if loader is None:
         return {"status": "CACHE_LOADER_UNAVAILABLE", "records_written": 0}
@@ -114,14 +106,34 @@ async def _sync_cached_analysis_meta(chat_id: int) -> dict:
             logger.info("[META][CACHE] %s", summary)
         return summary
     except Exception as exc:
-        # /meta is read-only and must remain available even if artifact parsing
-        # fails. Existing shadow evidence remains untouched and renderable.
         logger.exception("[META][CACHE] ingest fallo; shadow previo conservado")
         return {
             "status": "CACHE_INGEST_ERROR",
             "records_written": 0,
             "error": type(exc).__name__,
         }
+
+
+async def _decision_lab_context(chat_id: int, ticker: str | None) -> str:
+    """Read PIT Decision Lab context without allowing it to mutate META-C."""
+    if base.get_config is None:
+        return render_decision_lab_context(
+            {"status": "INSUFFICIENT", "reason": "CONFIG_UNAVAILABLE"}
+        )
+    try:
+        cfg = base.get_config()
+        payload = await load_decision_lab_context(
+            str(cfg.database.url),
+            int(chat_id),
+            ticker=ticker,
+            horizon=20,
+        )
+        return render_decision_lab_context(payload)
+    except Exception as exc:
+        logger.exception("[META][LAB] lectura Decision Lab falló; META sigue fail-closed")
+        return render_decision_lab_context(
+            {"status": "INSUFFICIENT", "reason": f"LAB_READ_ERROR_{type(exc).__name__}"}
+        )
 
 
 async def _meta_post_init(app) -> None:
@@ -170,9 +182,6 @@ async def meta_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = int(update.effective_chat.id)
     args = [str(value).strip() for value in (context.args or []) if str(value).strip()]
     try:
-        # Always reconcile the latest visible /analisis artifact first. This is
-        # intentionally shadow-only and idempotent, and fixes /analisis cache hits
-        # that never invoke run_analysis.py.
         await _sync_cached_analysis_meta(chat_id)
 
         if args and args[0].lower() in {"status", "estado"}:
@@ -183,6 +192,7 @@ async def meta_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if args and args[0].lower() not in {"cartera", "portfolio", "all", "todos"}:
                 ticker = args[0].upper()
             text = render_latest_meta(ticker=ticker)
+            text += await _decision_lab_context(chat_id, ticker)
         await base.send_text(context, chat_id, text, parse_mode=None)
     except Exception as exc:
         logger.exception("[META][TELEGRAM] read-only command failed")
@@ -198,8 +208,6 @@ async def meta_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 def build_app():
     _register_command_spec()
-    # base.build_app and _dispatch_command resolve these module globals at call
-    # time. Wrapping them here keeps the user's telegram_bot.py untouched.
     base.post_init = _meta_post_init
     base.post_shutdown = _meta_post_shutdown
     base.run_first_existing_script = _meta_run_first_existing_script
