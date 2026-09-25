@@ -155,3 +155,25 @@ def test_watcher_state_is_shadow_only_and_persistent(tmp_path):
     text = state_path.read_text(encoding="utf-8")
     assert '"mode": "SHADOW_ONLY"' in text
     assert '"capital_effect": false' in text
+
+
+@pytest.mark.asyncio
+async def test_watcher_queries_latest_24h_run_for_bootstrap(tmp_path, monkeypatch):
+    fake = FakeConn()
+
+    async def fake_connect(_dsn):
+        return fake
+
+    monkeypatch.setattr(watcher_module.asyncpg, "connect", fake_connect)
+    watcher = EconomicMetaAnalysisWatcher(
+        "postgresql://example/db",
+        store_path=tmp_path / "shadow.jsonl",
+        state_path=tmp_path / "state.json",
+        settle_seconds=10,
+    )
+
+    await watcher.run_once()
+    bootstrap_queries = [statement for statement in fake.statements if "INTERVAL '24 hours'" in statement]
+    assert len(bootstrap_queries) == 2
+    assert any("FROM decision_log" in statement for statement in bootstrap_queries)
+    assert any("FROM position_hold_observations" in statement for statement in bootstrap_queries)
