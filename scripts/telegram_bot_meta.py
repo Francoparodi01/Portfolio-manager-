@@ -66,13 +66,13 @@ async def _meta_run_first_existing_script(
     candidates: list[list[str]],
     timeout: int = base.COMMAND_TIMEOUT_SECONDS,
 ) -> str:
-    """Mirror rendered analysis output into shadow without changing the command."""
+    """Mirror freshly rendered analysis output into shadow without changing the command."""
     report = await _BASE_RUN_FIRST_EXISTING_SCRIPT(candidates, timeout=timeout)
     if not _contains_analysis_command(candidates):
         return report
 
     try:
-        summary = ingest_analysis_report(report)
+        summary = ingest_analysis_report(report, source="telegram-analysis-fresh")
         if int(summary.get("candidate_count", 0)) > 0:
             logger.info("[META][REPORT] %s", summary)
     except Exception:
@@ -80,6 +80,48 @@ async def _meta_run_first_existing_script(
         # analysis or any production decision path.
         logger.exception("[META][REPORT] ingest fallo; análisis productivo no afectado")
     return report
+
+
+async def _sync_cached_analysis_meta(chat_id: int) -> dict:
+    """Mirror the latest cached /analisis artifact into shadow before /meta renders.
+
+    This closes the cache-hit gap: /analisis may return a previously generated
+    report without invoking run_analysis.py, so the run-script wrapper above is
+    intentionally bypassed. Re-ingestion is safe because the shadow store is
+    idempotent by analysis timestamp+ticker+policy. The timestamp embedded in the
+    report is preserved; the time of the /meta query is never used as decision time.
+    """
+    loader = getattr(base, "_load_cached_report", None)
+    if loader is None:
+        return {"status": "CACHE_LOADER_UNAVAILABLE", "records_written": 0}
+
+    try:
+        cached = await loader("analysis", int(chat_id))
+    except Exception as exc:
+        logger.warning("[META][CACHE] no pude leer artifact analysis: %s", exc)
+        return {"status": "CACHE_READ_ERROR", "records_written": 0}
+
+    if not cached:
+        return {"status": "NO_CACHED_ANALYSIS", "records_written": 0}
+
+    report = str(cached.get("report_text") or "").strip()
+    if not report:
+        return {"status": "EMPTY_CACHED_ANALYSIS", "records_written": 0}
+
+    try:
+        summary = ingest_analysis_report(report, source="telegram-analysis-cache")
+        if int(summary.get("candidate_count", 0)) > 0:
+            logger.info("[META][CACHE] %s", summary)
+        return summary
+    except Exception as exc:
+        # /meta is read-only and must remain available even if artifact parsing
+        # fails. Existing shadow evidence remains untouched and renderable.
+        logger.exception("[META][CACHE] ingest fallo; shadow previo conservado")
+        return {
+            "status": "CACHE_INGEST_ERROR",
+            "records_written": 0,
+            "error": type(exc).__name__,
+        }
 
 
 async def _meta_post_init(app) -> None:
@@ -128,6 +170,11 @@ async def meta_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = int(update.effective_chat.id)
     args = [str(value).strip() for value in (context.args or []) if str(value).strip()]
     try:
+        # Always reconcile the latest visible /analisis artifact first. This is
+        # intentionally shadow-only and idempotent, and fixes /analisis cache hits
+        # that never invoke run_analysis.py.
+        await _sync_cached_analysis_meta(chat_id)
+
         if args and args[0].lower() in {"status", "estado"}:
             text = render_meta_status()
             text += f"\nAuto-ingest análisis: {_watcher_state(context.application)}"
