@@ -39,6 +39,17 @@ def _env_int(name: str, default: int, minimum: int) -> int:
         return default
 
 
+def _watcher_state(app) -> str:
+    task = app.bot_data.get(META_WATCHER_TASK_KEY)
+    if task is None:
+        return "NO_INICIADO"
+    if task.cancelled():
+        return "CANCELADO"
+    if task.done():
+        return "ERROR" if task.exception() else "FINALIZADO"
+    return "RUNNING"
+
+
 async def _meta_post_init(app) -> None:
     await _BASE_POST_INIT(app)
     if base.get_config is None:
@@ -87,6 +98,7 @@ async def meta_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         if args and args[0].lower() in {"status", "estado"}:
             text = render_meta_status()
+            text += f"\nAuto-ingest análisis: {_watcher_state(context.application)}"
         else:
             ticker = None
             if args and args[0].lower() not in {"cartera", "portfolio", "all", "todos"}:
