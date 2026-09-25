@@ -31,21 +31,17 @@ DEFAULT_SCORER = "finbert"
 DEFAULT_MAX_LENGTH = max(32, min(int(os.getenv("SENTIMENT_FINBERT_MAX_LENGTH", "384")), 512))
 DEFAULT_TORCH_THREADS = max(1, int(os.getenv("SENTIMENT_FINBERT_TORCH_THREADS", "2")))
 
-# Kept only so existing CLI imports do not break during rollout. Ollama is no
-# longer used for sentiment scoring.
+# Kept so older scheduler/CLI imports remain compatible during the cutover.
+# Ollama is not used by sentiment scoring anymore.
 DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 HEURISTIC_MODEL = "legacy-disabled"
-
-VALID_IMPACT = {"low", "mid", "high"}
-VALID_SCOPE = {"ticker", "sector", "macro", "unknown"}
-VALID_HORIZON = {"intraday", "2d", "5d", "10d", "20d", "unknown"}
 
 HIGH_IMPACT_TERMS = {
     "earnings", "guidance", "profit warning", "bankruptcy", "default", "merger",
     "acquisition", "fed", "federal reserve", "rate cut", "rate hike", "inflation",
     "tariff", "sanction", "war", "ceasefire", "opec", "sec", "doj", "regulation",
-    "resultados", "guidance", "quiebra", "default", "fusión", "adquisición",
-    "inflación", "tasas", "regulación", "sanción",
+    "resultados", "quiebra", "fusión", "adquisición", "inflación", "tasas",
+    "regulación", "sanción",
 }
 
 EVENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -79,7 +75,7 @@ class FinBertRuntime:
         try:
             import torch
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
-        except Exception as exc:  # pragma: no cover - exercised in deployment diagnostics
+        except Exception as exc:  # pragma: no cover - deployment diagnostic path
             raise RuntimeError(
                 "FinBERT dependencies missing; install torch and transformers"
             ) from exc
@@ -113,10 +109,21 @@ class FinBertRuntime:
 
         labels: dict[str, float] = {"positive": 0.0, "negative": 0.0, "neutral": 0.0}
         id2label = getattr(self.model.config, "id2label", {}) or {}
+        recognized = 0
         for idx, probability in enumerate(probabilities):
             label = str(id2label.get(idx, idx)).lower().strip()
             if label in labels:
                 labels[label] = float(probability)
+                recognized += 1
+
+        # ProsusAI/finbert uses positive/negative/neutral in that order. This
+        # fallback protects against config serialization that exposes LABEL_N.
+        if recognized == 0 and len(probabilities) == 3:
+            labels = {
+                "positive": float(probabilities[0]),
+                "negative": float(probabilities[1]),
+                "neutral": float(probabilities[2]),
+            }
         return labels
 
 
@@ -189,15 +196,25 @@ def score_with_finbert_sync(
     positive = float(probabilities.get("positive", 0.0))
     negative = float(probabilities.get("negative", 0.0))
     neutral = float(probabilities.get("neutral", 0.0))
+    probability_sum = positive + negative + neutral
+    if probability_sum <= 0:
+        raise RuntimeError("FinBERT returned no recognized class probabilities")
+    positive /= probability_sum
+    negative /= probability_sum
+    neutral /= probability_sum
+
     score = max(-1.0, min(1.0, positive - negative))
     confidence = max(positive, negative, neutral)
-    label = max(probabilities, key=probabilities.get) if probabilities else "neutral"
+    label = max(
+        {"positive": positive, "negative": negative, "neutral": neutral},
+        key={"positive": positive, "negative": negative, "neutral": neutral}.get,
+    )
 
     raw_payload = _raw_payload(row)
     ticker_hint = raw_payload.get("ticker_hint")
     ticker = infer_portfolio_ticker(text, ticker_hint=ticker_hint)
-    scope = "ticker" if ticker else "macro" if _event_type(text) in {"macro", "fx", "commodity"} else "unknown"
     event_type = _event_type(text)
+    scope = "ticker" if ticker else "macro" if event_type in {"macro", "fx", "commodity"} else "unknown"
     impact = _impact(text, confidence, score)
     summary = _clean_text(row.get("headline"))[:160] or text[:160]
 
@@ -253,7 +270,7 @@ async def load_pending_raw_items(conn, *, limit: int = 25, max_attempts: int = 3
         LIMIT $2
         """,
         int(max_attempts),
-        int(limit),
+        max(0, int(limit)),
     )
     return [dict(row) for row in rows]
 
@@ -280,7 +297,8 @@ async def save_sentiment_score(
     model: str = DEFAULT_MODEL,
     scorer: str = DEFAULT_SCORER,
 ) -> int | None:
-    model_version = f"{model}@{DEFAULT_MODEL_REVISION}" if scorer == DEFAULT_SCORER else model
+    revision = str(item.raw_response.get("revision") or DEFAULT_MODEL_REVISION)
+    model_version = f"{model}@{revision}" if scorer == DEFAULT_SCORER else model
     row = await conn.fetchrow(
         """
         INSERT INTO sentiment_scored (
@@ -358,7 +376,7 @@ async def score_pending_items(
         except Exception as exc:
             await mark_score_attempt(conn, raw_id, error=str(exc))
             stats["failed"] = int(stats["failed"]) + 1
-            # A missing model/dependency is systemic; do not hammer every row.
+            # Missing runtime/model is systemic; avoid hammering every row.
             if isinstance(exc, (RuntimeError, OSError, ImportError)):
                 break
     return stats
@@ -410,5 +428,16 @@ async def rescore_recent_heuristic_items(
     window_hours: int = 24,
     limit: int = 80,
 ) -> dict[str, int | str]:
-    """Compatibility alias: legacy heuristic rescoring now means FinBERT cutover."""
-    return await rescore_recent_items(conn, window_hours=window_hours, limit=limit)
+    """Deprecated compatibility hook used by run_market_context.
+
+    Historical heuristic rows are deliberately not re-scored on every report.
+    Production cutover uses the explicit rescore_recent_items/--rescore-hours path.
+    """
+    del conn, window_hours, limit
+    return {
+        "candidates": 0,
+        "rescored": 0,
+        "failed": 0,
+        "backend": DEFAULT_SCORER,
+        "compatibility": "noop",
+    }
