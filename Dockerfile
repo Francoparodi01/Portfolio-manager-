@@ -44,7 +44,7 @@ RUN playwright install chromium
 COPY . .
 
 # ── directorios de runtime ─────────────────────
-RUN mkdir -p /app/screenshots /app/logs /app/secrets \
+RUN mkdir -p /app/screenshots /app/logs /app/secrets /app/.cache/huggingface \
     && mkdir -p /tmp/cocos_mfa \
     && chmod 777 /tmp/cocos_mfa \
     && chown -R scraper:scraper /app \
@@ -56,6 +56,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HEADLESS=true \
     SCREENSHOT_DIR=/app/screenshots \
-    LOG_DIR=/app/logs
+    LOG_DIR=/app/logs \
+    HF_HOME=/app/.cache/huggingface
 
 CMD ["python", "-m", "src.scheduler.runner"]
