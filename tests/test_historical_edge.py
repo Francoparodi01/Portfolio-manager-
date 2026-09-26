@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.analysis.economic_meta_policy import evaluate_all_preregistered
 from src.analysis.historical_edge import (
+    MAX_PROFIT_FACTOR,
     build_directional_episodes,
     match_historical_edge,
     score_bucket,
@@ -120,6 +121,52 @@ def test_outcome_not_known_at_candidate_time_is_excluded():
     )
     assert match.n_episodes == 20
     assert match.win_rate_net == 0.75
+
+
+def test_rows_outside_lookback_are_excluded_even_for_pure_matcher():
+    rows = _profitable_history()
+    rows.extend(
+        _row(
+            200 + idx,
+            ticker=f"OLD{idx:02d}",
+            outcome=0.50,
+            days_ago=500,
+        )
+        for idx in range(10)
+    )
+    match = match_historical_edge(
+        rows,
+        candidate_action="SELL",
+        candidate_score=-0.14,
+        candidate_regime="TRANSITIONAL",
+        as_of=AS_OF,
+        lookback_days=365,
+        cost_bps=150,
+    )
+    assert match.n_episodes == 20
+    assert match.win_rate_net == 0.75
+
+
+def test_zero_loss_profit_factor_is_finite_and_json_safe():
+    rows = [
+        _row(
+            idx,
+            ticker=f"W{idx:02d}",
+            outcome=0.05,
+            days_ago=80 + idx,
+        )
+        for idx in range(20)
+    ]
+    match = match_historical_edge(
+        rows,
+        candidate_action="SELL",
+        candidate_score=-0.14,
+        candidate_regime="TRANSITIONAL",
+        as_of=AS_OF,
+        cost_bps=150,
+    )
+    assert match.profit_factor_net == MAX_PROFIT_FACTOR
+    assert match.profit_factor_net < float("inf")
 
 
 def test_meta_d_allows_only_when_historical_profile_clears_gate():
