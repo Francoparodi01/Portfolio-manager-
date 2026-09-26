@@ -88,6 +88,28 @@ def test_verifier_requires_successful_evidence():
     assert "no_successful_evidence" in report.failures
 
 
+def test_verifier_rejects_failed_required_source():
+    evidence = EvidenceObject(
+        source="ledger",
+        tool_name="get_decision_ledger",
+        timestamp=datetime.now(timezone.utc),
+        payload="database unavailable",
+        quality=EvidenceQuality.LOW,
+        mode=EvidenceMode.PRODUCTION,
+        warnings=["tool_error:database unavailable"],
+        ok=False,
+    )
+    report = HarnessVerifier().verify(
+        task=TaskSpec(raw_message="¿Cuánto ganó Quantia?", intent="performance"),
+        answer="No pude determinarlo.",
+        evidence=[evidence],
+        required_tools=["get_decision_ledger"],
+    )
+    assert not report.passed
+    assert "no_successful_evidence" in report.failures
+    assert any(item.startswith("missing_required_tools:") for item in report.failures)
+
+
 def test_verifier_blocks_shadow_as_production():
     evidence = EvidenceObject(
         source="economic_meta_policy",
@@ -125,3 +147,22 @@ def test_verifier_accepts_explicit_shadow_label():
         required_tools=["get_meta_policy"],
     )
     assert report.passed
+
+
+def test_verifier_matches_spanish_and_json_decimal_separators():
+    evidence = EvidenceObject(
+        source="ledger",
+        tool_name="get_decision_ledger",
+        timestamp=datetime.now(timezone.utc),
+        payload={"ev_net": 1.3, "sample": 42},
+        quality=EvidenceQuality.HIGH,
+        mode=EvidenceMode.PRODUCTION,
+        ok=True,
+    )
+    report = HarnessVerifier().verify(
+        task=TaskSpec(raw_message="resultado", intent="performance"),
+        answer="El EV neto observado fue 1,3% sobre una muestra de 42 episodios.",
+        evidence=[evidence],
+        required_tools=["get_decision_ledger"],
+    )
+    assert report.numeric_consistency
