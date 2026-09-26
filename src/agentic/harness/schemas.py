@@ -71,6 +71,9 @@ class ConversationState(StrictModel):
     conversation_subject: str | None = None
     evidence_refs: list[str] = Field(default_factory=list)
     recent_user_messages: list[str] = Field(default_factory=list)
+    # Compact validated semantics of the previous user turn. Follow-ups inherit
+    # from this structure rather than reparsing arbitrary prior prose.
+    last_task: dict[str, Any] | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
