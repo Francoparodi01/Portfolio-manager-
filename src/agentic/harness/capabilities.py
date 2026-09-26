@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -13,6 +14,7 @@ from src.agentic.tools import ToolContext, ToolRegistry, build_default_registry,
 from src.analysis.analytics_v2_live import capture as analytics_capture
 from src.analysis.analytics_v2_live import normalize as analytics_normalize
 from src.analysis.analytics_v2_live import summarize as analytics_summarize
+from src.analysis.economic_meta_store import EconomicMetaShadowStore
 from src.core.redis_client import client as redis_client
 
 from .contracts import Capability, EvidenceMode
@@ -32,7 +34,15 @@ _FORBIDDEN_NAMES = {
 }
 
 
-def _json_observation(name: str, arguments: dict[str, Any], payload: dict[str, Any], started: float, *, ok: bool = True, error: str | None = None) -> ToolObservation:
+def _json_observation(
+    name: str,
+    arguments: dict[str, Any],
+    payload: dict[str, Any],
+    started: float,
+    *,
+    ok: bool = True,
+    error: str | None = None,
+) -> ToolObservation:
     content = json.dumps(analytics_normalize(payload), ensure_ascii=False, separators=(",", ":"))
     return ToolObservation(
         tool_name=name,
@@ -59,8 +69,14 @@ def build_conversational_registry(context: ToolContext) -> tuple[ToolRegistry, d
             "compare_plan_vs_hold", "get_decision_value_added", "get_decision_counterfactuals",
             "get_similar_historical_episodes", "compare_strategy_versions", "get_replay_evidence_quality",
         } else EvidenceMode.OBSERVATION
-        capability = Capability.COMPUTE if spec.name in {"analyze_portfolio", "analyze_ticker", "scan_opportunities", "get_decision_evidence"} else Capability.READ
-        policies[spec.name] = ToolPolicy(capability=capability, mode=mode, material_failure=spec.name in {"get_portfolio_snapshot", "get_decision_evidence"})
+        capability = Capability.COMPUTE if spec.name in {
+            "analyze_portfolio", "analyze_ticker", "scan_opportunities", "get_decision_evidence",
+        } else Capability.READ
+        policies[spec.name] = ToolPolicy(
+            capability=capability,
+            mode=mode,
+            material_failure=spec.name in {"get_portfolio_snapshot", "get_decision_evidence"},
+        )
 
     async def get_analytics_v2(arguments: dict[str, Any]) -> ToolObservation:
         started = time.monotonic()
@@ -76,7 +92,6 @@ def build_conversational_registry(context: ToolContext) -> tuple[ToolRegistry, d
         finally:
             await conn.close()
         package = analytics_summarize(snapshot)
-        # Keep the analytical contract intact while compacting raw episode detail.
         payload = {
             "schema_version": "analytics-v2-agent-summary-v1",
             "source": "analytics_v2_live",
@@ -98,14 +113,23 @@ def build_conversational_registry(context: ToolContext) -> tuple[ToolRegistry, d
     registry.register(
         ToolSpec(
             name="get_analytics_v2",
-            description="Read owner-scoped Analytics v2 observational metrics for 5D/10D/20D/40D. It never mutates data and never upgrades observational evidence into a production gate.",
-            input_schema={"type": "object", "properties": {"days": {"type": "integer", "minimum": 30, "maximum": 365, "default": 180}}, "additionalProperties": False},
+            description=(
+                "Read owner-scoped Analytics v2 observational metrics for 5D/10D/20D/40D. "
+                "It never mutates data and never upgrades observational evidence into a production gate."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"days": {"type": "integer", "minimum": 30, "maximum": 365, "default": 180}},
+                "additionalProperties": False,
+            },
             read_only=True,
             timeout_seconds=90,
         ),
         get_analytics_v2,
     )
-    policies["get_analytics_v2"] = ToolPolicy(Capability.READ, EvidenceMode.OBSERVATION, cache_ttl_seconds=300)
+    policies["get_analytics_v2"] = ToolPolicy(
+        Capability.READ, EvidenceMode.OBSERVATION, cache_ttl_seconds=300
+    )
 
     async def get_ledger_outcomes(arguments: dict[str, Any]) -> ToolObservation:
         started = time.monotonic()
@@ -152,39 +176,144 @@ def build_conversational_registry(context: ToolContext) -> tuple[ToolRegistry, d
             "schema_version": "ledger-agent-evidence-v1",
             "source": "decision_log",
             "mode": "OBSERVATION",
-            "as_of": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "as_of": datetime.now(timezone.utc).isoformat(),
             "days": days,
             "ticker": ticker,
             "metrics": metrics,
             "recent": records[:30],
-            "limitations": "Recorded directional outcomes are not reconciled economic PnL and must not be summed across overlapping decisions.",
+            "limitations": (
+                "Recorded directional outcomes are not reconciled economic PnL and must not be summed "
+                "across overlapping decisions."
+            ),
         }
-        return _json_observation("get_ledger_outcomes", arguments, payload, started, ok=bool(records), error=None if records else "no ledger rows")
+        return _json_observation(
+            "get_ledger_outcomes",
+            arguments,
+            payload,
+            started,
+            ok=bool(records),
+            error=None if records else "no ledger rows",
+        )
 
     registry.register(
         ToolSpec(
             name="get_ledger_outcomes",
-            description="Read account-scoped decision ledger outcomes at 5D/10D/20D/40D. Returns recorded gross directional outcomes, not reconciled economic PnL.",
-            input_schema={"type": "object", "properties": {
-                "days": {"type": "integer", "minimum": 5, "maximum": 365, "default": 90},
-                "ticker": {"type": "string", "maxLength": 15},
-                "horizon": {"type": "integer", "minimum": 5, "maximum": 40},
-            }, "additionalProperties": False},
+            description=(
+                "Read account-scoped decision ledger outcomes at 5D/10D/20D/40D. Returns recorded gross "
+                "directional outcomes, not reconciled economic PnL."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 5, "maximum": 365, "default": 90},
+                    "ticker": {"type": "string", "maxLength": 15},
+                    "horizon": {"type": "integer", "minimum": 5, "maximum": 40},
+                },
+                "additionalProperties": False,
+            },
             read_only=True,
             timeout_seconds=30,
         ),
         get_ledger_outcomes,
     )
-    policies["get_ledger_outcomes"] = ToolPolicy(Capability.READ, EvidenceMode.OBSERVATION, cache_ttl_seconds=60)
+    policies["get_ledger_outcomes"] = ToolPolicy(
+        Capability.READ, EvidenceMode.OBSERVATION, cache_ttl_seconds=60
+    )
+
+    async def get_meta_policy_shadow(arguments: dict[str, Any]) -> ToolObservation:
+        started = time.monotonic()
+        ticker = str(arguments.get("ticker") or "").upper().strip() or None
+        try:
+            rows = EconomicMetaShadowStore().read_all()
+        except Exception as exc:
+            return _json_observation(
+                "get_meta_policy_shadow",
+                arguments,
+                {
+                    "schema_version": "economic-meta-shadow-agent-v1",
+                    "source": "economic_meta_policy_v1",
+                    "mode": "SHADOW",
+                    "status": "UNAVAILABLE",
+                    "records": [],
+                    "warnings": [f"{type(exc).__name__}: {exc}"],
+                },
+                started,
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        if ticker:
+            rows = [row for row in rows if str(row.get("ticker") or "").upper() == ticker]
+        if rows:
+            newest = max(rows, key=lambda row: str(row.get("as_of") or ""))
+            run_id = str(newest.get("run_id") or "")
+            if run_id:
+                rows = [row for row in rows if str(row.get("run_id") or "") == run_id]
+            else:
+                newest_as_of = str(newest.get("as_of") or "")
+                rows = [row for row in rows if str(row.get("as_of") or "") == newest_as_of]
+        payload = {
+            "schema_version": "economic-meta-shadow-agent-v1",
+            "source": "economic_meta_policy_v1",
+            "mode": "SHADOW",
+            "status": "OBSERVED" if rows else "MISSING",
+            "as_of": max((str(row.get("as_of") or "") for row in rows), default=None),
+            "ticker": ticker,
+            "capital_effect": "NO",
+            "primary_horizon_days": 20,
+            "records": rows[:80],
+            "limitations": [
+                "Economic Meta Policy v1 is SHADOW_ONLY and cannot modify production decisions or capital.",
+                "ALLOW_SHADOW means a preregistered experimental gate allowed the candidate in shadow; it is not an order.",
+            ],
+        }
+        return _json_observation(
+            "get_meta_policy_shadow",
+            arguments,
+            payload,
+            started,
+            ok=bool(rows),
+            error=None if rows else "no shadow records",
+        )
+
+    registry.register(
+        ToolSpec(
+            name="get_meta_policy_shadow",
+            description=(
+                "Read the latest Economic Meta Policy v1 shadow-only records, including A/B/C gate outcomes. "
+                "This is experimental evidence with zero capital effect and never modifies production."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"ticker": {"type": "string", "maxLength": 15}},
+                "additionalProperties": False,
+            },
+            read_only=True,
+            timeout_seconds=10,
+        ),
+        get_meta_policy_shadow,
+    )
+    policies["get_meta_policy_shadow"] = ToolPolicy(
+        Capability.READ, EvidenceMode.SHADOW, cache_ttl_seconds=30
+    )
 
     async def get_system_status(arguments: dict[str, Any]) -> ToolObservation:
         started = time.monotonic()
         conn = await _connect(context.database_url)
         try:
             db_now = await conn.fetchval("SELECT CURRENT_TIMESTAMP")
-            snapshot_at = await conn.fetchval("SELECT MAX(scraped_at) FROM portfolio_snapshots WHERE owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL)", context.owner_chat_id, context.legacy_single_owner)
-            decision_at = await conn.fetchval("SELECT MAX(decided_at) FROM decision_log WHERE owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL)", context.owner_chat_id, context.legacy_single_owner)
-            market_at = await conn.fetchval("SELECT MAX(timestamp) FROM market_prices")
+            snapshot_at = await conn.fetchval(
+                "SELECT MAX(scraped_at) FROM portfolio_snapshots "
+                "WHERE owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL)",
+                context.owner_chat_id,
+                context.legacy_single_owner,
+            )
+            decision_at = await conn.fetchval(
+                "SELECT MAX(decided_at) FROM decision_log "
+                "WHERE owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL)",
+                context.owner_chat_id,
+                context.legacy_single_owner,
+            )
+            market_at = await conn.fetchval("SELECT MAX(ts) FROM market_prices")
         finally:
             await conn.close()
         redis_ok = False
@@ -215,7 +344,9 @@ def build_conversational_registry(context: ToolContext) -> tuple[ToolRegistry, d
         ),
         get_system_status,
     )
-    policies["get_system_status"] = ToolPolicy(Capability.READ, EvidenceMode.OBSERVATION, cache_ttl_seconds=15)
+    policies["get_system_status"] = ToolPolicy(
+        Capability.READ, EvidenceMode.OBSERVATION, cache_ttl_seconds=15
+    )
 
     for forbidden in _FORBIDDEN_NAMES:
         policies[forbidden] = ToolPolicy(Capability.FORBIDDEN, EvidenceMode.PRODUCTION)
