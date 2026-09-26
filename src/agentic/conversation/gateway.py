@@ -133,7 +133,8 @@ async def run_message(
     stage_ms: dict[str, int | float | bool | str | None] = {}
 
     stage_started = time.monotonic()
-    session = await ConversationSessionStore(owner_chat_id).load()
+    session_store = ConversationSessionStore(owner_chat_id)
+    session = await session_store.load()
     normalized = " ".join(str(message or "").split()).lower()
     is_reset = normalized in {"nuevo", "nueva conversación", "nueva conversacion"} or normalized.startswith("nuevo ")
     if is_reset:
@@ -207,12 +208,22 @@ async def run_message(
         session_override=None if is_reset else session,
     )
     stage_ms["harness"] = int((time.monotonic() - stage_started) * 1000)
+
+    # Persist validated semantics independently of free-form conversation text.
+    # Load the state saved by the harness first so active symbols/evidence refs
+    # are preserved, then attach the TaskSpec used for this completed answer.
+    stage_started = time.monotonic()
+    completed_session = await session_store.load()
+    completed_session.last_task = result.task.model_dump(mode="json")
+    await session_store.save(completed_session)
+    stage_ms["task_state_persist"] = int((time.monotonic() - stage_started) * 1000)
+
     stage_ms["gateway_total"] = int((time.monotonic() - started) * 1000)
     result.metadata["gateway_stage_ms"] = stage_ms
     logger.info(
         "[CHAT][GATEWAY] intent=%s routing=%s stage_ms=%s",
-        task.intent,
-        task.routing_source,
+        result.task.intent,
+        result.task.routing_source,
         stage_ms,
     )
     if refresh_warning:
