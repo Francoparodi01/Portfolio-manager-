@@ -79,7 +79,10 @@ class HarnessVerifier:
 
     @staticmethod
     def _normalize_number(value: str) -> str:
-        return value.replace("%", "").replace(".", "").replace(",", ".").lstrip("+")
+        # Quantia's structured evidence is JSON and therefore uses `.` for
+        # decimals, while Spanish responses may use `,`. Treat both as the same
+        # decimal separator instead of assuming every dot is a thousands mark.
+        return value.replace("%", "").replace(",", ".").lstrip("+")
 
     def _unmatched_numbers(self, answer: str, evidence_text: str) -> list[str]:
         source = {self._normalize_number(value) for value in _NUMBER_RE.findall(evidence_text)}
