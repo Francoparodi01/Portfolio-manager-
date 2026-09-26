@@ -14,11 +14,25 @@ from src.agentic.harness.task import TaskParser
 QUERY = "cuanto pnl hubiese ganado siguiendo las decisiones del bot los ultimos 25 días"
 
 
+class _SynthesisResponse:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"message": {"content": json.dumps({"answer": "Respuesta natural basada en la evidencia."})}}
+
+
 def _state_after_bot_pnl() -> ConversationState:
     return ConversationState(
         owner_chat_id=123,
         last_intent="bot_follow_pnl",
         recent_user_messages=[QUERY],
+        last_task={
+            "intent": "bot_follow_pnl",
+            "lookback_days": 25,
+            "aggregation": "plan_level",
+            "entities": [],
+        },
     )
 
 
@@ -194,15 +208,24 @@ def test_persisted_portfolio_renderer_separates_current_snapshot_from_old_decisi
     assert "no se recalcularon con ese snapshot nuevo" in decision.answer
 
 
-def test_bot_follow_pnl_bypasses_llm_synthesis(monkeypatch):
+def test_bot_follow_pnl_uses_llm_synthesis_by_default(monkeypatch):
     monkeypatch.delenv("QUANTIA_HARNESS_SYNTHESIS_BYPASS_INTENTS", raising=False)
     synthesizer = GroundedSynthesizer(model="fixture-model")
-    async def should_not_post(*_args, **_kwargs):
-        raise AssertionError("bot_follow_pnl must not call Ollama synthesis")
-    monkeypatch.setattr("httpx.AsyncClient.post", should_not_post)
+    called = 0
+
+    async def fake_post(*_args, **_kwargs):
+        nonlocal called
+        called += 1
+        return _SynthesisResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient.post", fake_post)
     answer = asyncio.run(synthesizer.synthesize(
-        task=TaskSpec(intent="bot_follow_pnl", raw_message=QUERY), evidence=[], fallback="respuesta determinística"))
-    assert answer == "respuesta determinística"
+        task=TaskSpec(intent="bot_follow_pnl", raw_message=QUERY),
+        evidence=[],
+        fallback="respuesta determinística",
+    ))
+    assert called == 1
+    assert answer == "Respuesta natural basada en la evidencia."
 
 
 def test_provenance_bypasses_llm_synthesis(monkeypatch):
