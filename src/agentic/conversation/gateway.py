@@ -10,6 +10,7 @@ from typing import Awaitable, Callable
 
 from src.agentic.conversation.session import ConversationSessionStore
 from src.agentic.harness.runtime import ConversationalHarness
+from src.agentic.harness.semantic_router import SemanticTaskRouter
 from src.agentic.harness.task import TaskParser
 from src.agentic.read_only import connect_read_only
 from src.agentic.tools import read_only_dsn, verify_single_owner
@@ -25,17 +26,7 @@ async def _persisted_snapshot_status(
     owner_chat_id: int,
     legacy_single_owner: bool,
 ) -> tuple[bool, bool, float | None]:
-    """Return (exists, fresh, age_seconds) for the latest persisted snapshot.
-
-    This is intentionally a cheap read-only probe. A snapshot older than the
-    conversational soft TTL can still be used as explicitly timestamped evidence
-    while Cocos is revalidated in the background. Only a missing snapshot or an
-    explicit user refresh request blocks the current turn on the broker channel.
-    """
-    max_age_seconds = max(
-        15,
-        int(os.getenv("QUANTIA_CHAT_SNAPSHOT_FRESH_SECONDS", "120")),
-    )
+    max_age_seconds = max(15, int(os.getenv("QUANTIA_CHAT_SNAPSHOT_FRESH_SECONDS", "120")))
     conn = None
     try:
         conn = await connect_read_only(read_only_dsn(database_url), command_timeout=10)
@@ -55,8 +46,6 @@ async def _persisted_snapshot_status(
         age_seconds = max(0.0, (datetime.now(timezone.utc) - scraped_at).total_seconds())
         return True, age_seconds <= max_age_seconds, age_seconds
     except Exception:
-        # Probe failure must not be mistaken for proof that no snapshot exists.
-        # Fall back to the safe blocking refresh path in this case.
         return False, False, None
     finally:
         if conn is not None:
@@ -69,7 +58,6 @@ async def _persisted_snapshot_is_fresh(
     owner_chat_id: int,
     legacy_single_owner: bool,
 ) -> tuple[bool, float | None]:
-    """Backward-compatible freshness helper retained for callers/tests."""
     _exists, fresh, age_seconds = await _persisted_snapshot_status(
         database_url=database_url,
         owner_chat_id=owner_chat_id,
@@ -83,21 +71,13 @@ def _explicit_refresh_request(message: str) -> bool:
     return any(
         marker in text
         for marker in (
-            "actualizá",
-            "actualiza",
-            "actualizar",
-            "refrescá",
-            "refresca",
-            "refrescar",
-            "ahora mismo",
-            "en vivo",
-            "live",
+            "actualizá", "actualiza", "actualizar", "refrescá", "refresca", "refrescar",
+            "ahora mismo", "en vivo", "live",
         )
     )
 
 
 def _schedule_background_refresh(owner_chat_id: int, refresh_callback: RefreshCallback) -> bool:
-    """Schedule one broker refresh per owner without delaying the chat turn."""
     owner = int(owner_chat_id)
     current = _BACKGROUND_REFRESH_TASKS.get(owner)
     if current is not None and not current.done():
@@ -154,8 +134,19 @@ async def run_message(
 
     stage_started = time.monotonic()
     session = await ConversationSessionStore(owner_chat_id).load()
-    task = TaskParser().parse(message, session)
+    normalized = " ".join(str(message or "").split()).lower()
+    is_reset = normalized in {"nuevo", "nueva conversación", "nueva conversacion"} or normalized.startswith("nuevo ")
+    if is_reset:
+        # Reset semantics are a product command rather than an analytical intent;
+        # the harness owns the actual reset and then opens with portfolio review.
+        task = TaskParser().parse("¿Cómo está mi cartera?", session)
+        task_override = None
+    else:
+        task = await SemanticTaskRouter().route(message, session)
+        task_override = task
     stage_ms["session_and_parse"] = int((time.monotonic() - stage_started) * 1000)
+    stage_ms["routing_source"] = task.routing_source
+    stage_ms["routing_confidence"] = task.routing_confidence
 
     legacy_single_owner = False
     stage_started = time.monotonic()
@@ -189,8 +180,6 @@ async def run_message(
         stage_ms["refresh_skipped_fresh_snapshot"] = fresh
 
         if explicit_refresh or not exists:
-            # No persisted evidence exists (or the user explicitly requested live
-            # refresh), so correctness takes priority over latency for this turn.
             stage_ms["refresh_mode"] = "blocking_explicit" if explicit_refresh else "blocking_missing_snapshot"
             try:
                 refresh_warning = str(await refresh_callback() or "").strip()
@@ -199,8 +188,6 @@ async def run_message(
         elif fresh:
             stage_ms["refresh_mode"] = "fresh_snapshot"
         else:
-            # Stale-while-revalidate: preserve the timestamped persisted snapshot
-            # for the current answer and refresh Cocos once in the background.
             scheduled = _schedule_background_refresh(int(owner_chat_id), refresh_callback)
             stage_ms["refresh_mode"] = "background_revalidate" if scheduled else "background_already_running"
             stage_ms["background_refresh_scheduled"] = scheduled
@@ -214,11 +201,20 @@ async def run_message(
         legacy_single_owner=legacy_single_owner,
     )
     stage_started = time.monotonic()
-    result = await harness.run(message)
+    result = await harness.run(
+        message,
+        task_override=task_override,
+        session_override=None if is_reset else session,
+    )
     stage_ms["harness"] = int((time.monotonic() - stage_started) * 1000)
     stage_ms["gateway_total"] = int((time.monotonic() - started) * 1000)
     result.metadata["gateway_stage_ms"] = stage_ms
-    logger.info("[CHAT][GATEWAY] intent=%s stage_ms=%s", task.intent, stage_ms)
+    logger.info(
+        "[CHAT][GATEWAY] intent=%s routing=%s stage_ms=%s",
+        task.intent,
+        task.routing_source,
+        stage_ms,
+    )
     if refresh_warning:
         result.verification.warnings.append("operational_refresh_warning")
         result.metadata["operational_refresh_warning"] = refresh_warning
