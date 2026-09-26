@@ -35,6 +35,26 @@
       "forbidden_tools": ["get_net_decision_report"]
     },
     {
+      "id": "bot-follow-pnl-provenance-followup",
+      "turns": [
+        "cuanto pnl hubiese ganado siguiendo las decisiones del bot los ultimos 25 días",
+        "que datos usaste?"
+      ],
+      "expected_intents": ["bot_follow_pnl", "bot_follow_pnl"],
+      "must_offer_tools": ["get_bot_follow_pnl"],
+      "forbidden_tools": ["get_system_status", "get_macro_context", "get_portfolio_snapshot"]
+    },
+    {
+      "id": "bot-follow-pnl-normalized-followup",
+      "turns": [
+        "cuanto pnl hubiese ganado siguiendo las decisiones del bot los ultimos 25 días",
+        "¿Cuánto hubiese ganado realmente siguiendo al bot, normalizando decisiones repetidas?"
+      ],
+      "expected_intents": ["bot_follow_pnl", "bot_follow_pnl"],
+      "must_offer_tools": ["get_decision_ledger"],
+      "forbidden_tools": ["get_bot_follow_pnl", "get_net_decision_report"]
+    },
+    {
       "id": "economic-pnl",
       "turns": ["¿Cuánto ganó Quantia?"],
       "expected_intents": ["performance"],
