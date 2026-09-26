@@ -150,7 +150,7 @@ def _portfolio_review_fallback(goal: str, history: list[dict[str, Any]]) -> str 
         return None
 
     tools = _successful_tool_content(history)
-    required = {"get_portfolio_snapshot", "get_decision_evidence", "analyze_portfolio"}
+    required = {"get_portfolio_snapshot", "get_decision_evidence"}
     if not required.issubset(tools):
         return None
 
@@ -188,15 +188,6 @@ def _portfolio_review_fallback(goal: str, history: list[dict[str, Any]]) -> str 
         for item in active[:4]
     ]
 
-    analysis = tools["analyze_portfolio"]
-    revalidations = []
-    for line in analysis.splitlines():
-        if "REVALIDAR " in line:
-            revalidations.append(line[line.find("REVALIDAR "):].strip())
-        if len(revalidations) >= 3:
-            break
-    outside_market = "Fuera de rueda" in analysis or "FUERA DE RUEDA" in analysis.upper()
-
     lines = [
         f"Tu cartera tiene {_number(snapshot.get('total_value_ars'))} ARS, "
         f"{_number(snapshot.get('cash_ars'))} ARS de cash y {len(positions)} posiciones.",
@@ -208,12 +199,13 @@ def _portfolio_review_fallback(goal: str, history: list[dict[str, Any]]) -> str 
         lines.append("Las señales no-HOLD actuales son " + "; ".join(signal_bits) + suffix + ".")
     elif signals:
         lines.append(f"Las {len(signals)} señales actuales están en HOLD.")
-    if revalidations:
-        lines.append("La simulación contextual pide " + "; ".join(revalidations) + ".")
-    if outside_market:
-        lines.append("Está fuera de rueda: esas revalidaciones son contexto para validar en apertura, no fills ni operaciones ejecutadas.")
-    else:
-        lines.append("Las señales y propuestas son evidencia del motor; no son fills ni rentabilidad realizada.")
+
+    evaluated_at = decisions.get("evaluated_at")
+    snapshot_as_of = decisions.get("snapshot_as_of")
+    if evaluated_at:
+        reference = f" sobre snapshot {snapshot_as_of}" if snapshot_as_of else ""
+        lines.append(f"Señales evaluadas {evaluated_at}{reference}.")
+    lines.append("Las señales son una lectura del motor en modo consulta: no son fills, operaciones ejecutadas ni rentabilidad realizada.")
     return "\n".join(lines)
 
 
@@ -223,8 +215,8 @@ def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision
         return AgentDecision(
             kind="final",
             answer=portfolio_answer,
-            rationale="Resumen determinístico de cartera desde snapshot, decisiones y análisis observados.",
-            answer_origin="portfolio_renderer_v2",
+            rationale="Resumen determinístico de cartera desde snapshot y decisiones estructuradas observadas.",
+            answer_origin="portfolio_renderer_v3",
         )
 
     cards, limits = [], []
@@ -246,8 +238,12 @@ def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision
         limits.extend(source_limits)
     if not successful:
         raise AgentModelError("no successful tool evidence for the closing report")
-    if "get_portfolio_snapshot" in observed_tools and "analyze_portfolio" not in observed_tools:
-        limits.insert(0, "En esta corrida no se obtuvo el análisis de cartera: no se verificaron el plan actual ni sus controles.")
+    if (
+        "get_portfolio_snapshot" in observed_tools
+        and "analyze_portfolio" not in observed_tools
+        and "get_decision_evidence" not in observed_tools
+    ):
+        limits.insert(0, "En esta corrida no se obtuvo evidencia de decisiones: no se verificó la lectura actual del motor.")
 
     # Reserve space for all sources and limitations even in a 20-step CLI run.
     card_budget = min(2600, 7600 // len(cards))
