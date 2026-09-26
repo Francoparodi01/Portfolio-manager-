@@ -337,6 +337,7 @@ class EconomicMetaAnalysisWatcher:
         if not rows:
             return {}
         run_as_of = max(_aware(row.get("as_of")) for row in rows)
+        cutoff = run_as_of - timedelta(days=DEFAULT_LOOKBACK_DAYS)
         owners = {
             int(row["owner_chat_id"])
             for row in rows
@@ -345,12 +346,53 @@ class EconomicMetaAnalysisWatcher:
         history: dict[int, list[dict[str, Any]]] = {}
         for owner in owners:
             try:
-                history[owner] = await load_historical_rows(
+                owner_history = await load_historical_rows(
                     conn,
                     owner_chat_id=owner,
                     as_of=run_as_of,
                     lookback_days=DEFAULT_LOOKBACK_DAYS,
                 )
+                # A run with only HOLD observations may have no execution_plan row.
+                # Include HOLDs as chronology/break markers only: historical_edge
+                # never scores them as profitable samples because they are not
+                # formal BUY/SELL candidates.
+                try:
+                    hold_markers = await conn.fetch(
+                        """
+                        SELECT
+                            id,
+                            run_id::text AS run_id,
+                            observed_at AS decided_at,
+                            ticker,
+                            action AS decision,
+                            final_score,
+                            regime,
+                            outcome_20d,
+                            outcome_basis,
+                            outcome_filled_at,
+                            status,
+                            metric_scope,
+                            source
+                        FROM position_hold_observations
+                        WHERE owner_chat_id = $1
+                          AND observed_at >= $2
+                          AND observed_at < $3
+                        ORDER BY observed_at, id
+                        """,
+                        owner,
+                        cutoff,
+                        run_as_of,
+                    )
+                except asyncpg.UndefinedTableError:
+                    hold_markers = []
+                owner_history.extend(dict(row) for row in hold_markers)
+                owner_history.sort(
+                    key=lambda row: (
+                        _aware(row.get("decided_at")),
+                        str(row.get("id") or ""),
+                    )
+                )
+                history[owner] = owner_history
             except Exception:
                 # Historical Edge is an experimental shadow challenger. A schema
                 # or data-quality failure must never break A/B/C or production.
