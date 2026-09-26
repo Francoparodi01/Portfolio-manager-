@@ -193,6 +193,7 @@ def _historical_gate_reasons(item: CandidateDecision, policy: MetaPolicyConfig) 
     n_dates = int(historical.get("n_dates") or 0)
     win_rate = _optional_float(historical.get("win_rate_net"))
     ev_net = _optional_float(historical.get("mean_net_return"))
+    median_net = _optional_float(historical.get("median_net_return"))
     profit_factor = _optional_float(historical.get("profit_factor_net"))
     top1 = _optional_float(historical.get("top1_positive_share"))
     top3 = _optional_float(historical.get("top3_positive_share"))
@@ -205,6 +206,8 @@ def _historical_gate_reasons(item: CandidateDecision, policy: MetaPolicyConfig) 
         reasons.append("HIST_WIN_RATE_LT_55PCT")
     if ev_net is None or ev_net * 10_000.0 < policy.min_historical_ev_net_bps:
         reasons.append("HIST_EV_NET_LT_25BPS")
+    if median_net is None or median_net <= 0:
+        reasons.append("HIST_MEDIAN_NET_NOT_POSITIVE")
     if profit_factor is None or profit_factor < policy.min_historical_profit_factor:
         reasons.append("HIST_PROFIT_FACTOR_LT_1_10")
     if top1 is not None and top1 > policy.max_historical_top1_share:
@@ -404,6 +407,7 @@ def _record(
                 "min_historical_win_rate": policy.min_historical_win_rate,
                 "min_historical_ev_net_bps": policy.min_historical_ev_net_bps,
                 "min_historical_profit_factor": policy.min_historical_profit_factor,
+                "require_historical_positive_median": True,
                 "max_historical_top1_share": policy.max_historical_top1_share,
                 "max_historical_top3_share": policy.max_historical_top3_share,
             },
