@@ -162,8 +162,6 @@ class ConversationalHarness:
 
         deadline = time.monotonic() + plan.max_seconds
         try:
-            # Independent required sources are prefetched concurrently. Optional
-            # tools remain under dynamic planner control.
             prefetched: set[str] = set()
             for group in plan.parallel_groups:
                 runnable = [name for name in group if name in plan.allowed_tools and self._arguments(name, task) is not None]
@@ -188,7 +186,6 @@ class ConversationalHarness:
                     self._mark_state(state, name, observation.ok)
                 break
 
-            # Required sources not covered by the parallel group execute once.
             for name in plan.required_tools:
                 if name in prefetched or state.tool_calls >= plan.max_tool_calls:
                     continue
@@ -254,8 +251,6 @@ class ConversationalHarness:
                 await self._record(store, state.run_id, step_no, name, observation, decision.rationale or "dynamic planner")
                 self._mark_state(state, name, observation.ok)
 
-            # The current model's forced-final path is deterministic and is our
-            # safe fallback if natural synthesis fails verification.
             llm_calls += 1
             try:
                 fallback_decision = await model.decide(
@@ -318,7 +313,9 @@ class ConversationalHarness:
 
             supported_answer_symbols = self._supported_answer_symbols(answer, evidence, task.entities)
             session.last_intent = task.intent
-            if task.entities:
+            if task.inherited_subject and supported_answer_symbols:
+                session.active_symbols = supported_answer_symbols
+            elif task.entities:
                 session.active_symbols = task.entities
             elif supported_answer_symbols:
                 session.active_symbols = supported_answer_symbols
