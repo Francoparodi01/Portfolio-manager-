@@ -4,6 +4,7 @@
 User-facing UX is text-only. Legacy handlers remain importable as internal
 business adapters, but no keyboard/menu/command catalog is exposed here.
 """
+# ruff: noqa: E402
 from __future__ import annotations
 
 import asyncio
