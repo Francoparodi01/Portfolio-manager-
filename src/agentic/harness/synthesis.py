@@ -73,15 +73,14 @@ class GroundedSynthesizer:
         if os.getenv("QUANTIA_HARNESS_SYNTHESIS_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
             return fallback
 
-        # portfolio_review already has a source-bound deterministic renderer.
-        # Sending the same evidence through the local model adds ~15-20s on the
-        # current hardware and can still fall back to the exact same text. Keep
-        # the LLM for intents where it contributes actual language synthesis.
+        # Bounded metric/status intents already have source-bound deterministic
+        # renderers. Sending the same evidence through the local model adds
+        # latency and can only fall back to the same grounded text.
         fast_intents = {
             value.strip()
             for value in os.getenv(
                 "QUANTIA_HARNESS_SYNTHESIS_BYPASS_INTENTS",
-                "portfolio_review",
+                "portfolio_review,bot_follow_pnl",
             ).split(",")
             if value.strip()
         }
