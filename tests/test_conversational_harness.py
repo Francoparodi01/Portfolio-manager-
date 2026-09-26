@@ -55,20 +55,49 @@ def test_why_followup_can_inherit_grounded_subject_from_portfolio_review():
     assert task.intent == "decision_explanation"
 
 
+def test_why_with_multiple_active_symbols_is_explanation_not_comparison():
+    state = ConversationState(
+        owner_chat_id=123,
+        active_symbols=["NVDA", "AMD"],
+        last_intent="portfolio_review",
+        conversation_subject="NVDA vs AMD",
+    )
+    task = TaskParser().parse("¿Por qué?", state)
+    assert task.intent == "decision_explanation"
+    assert task.entities == ["NVDA", "AMD"]
+
+
 def test_comparison_followup_keeps_previous_subject_and_new_symbol():
     state = ConversationState(
         owner_chat_id=123,
-        active_symbols=["GDX"],
-        last_intent="position_analysis",
-        conversation_subject="GDX",
+        active_symbols=["NVDA"],
+        last_intent="decision_explanation",
+        conversation_subject="NVDA",
     )
-    task = TaskParser().parse("comparalo con NVDA", state)
+    task = TaskParser().parse("Comparalo con GDX.", state)
     assert task.intent == "position_comparison"
-    assert task.entities == ["GDX", "NVDA"]
+    assert task.entities == ["NVDA", "GDX"]
+
+
+def test_twenty_day_decision_question_routes_to_history():
+    task = TaskParser().parse("¿Qué pasó con las decisiones a 20 días?")
+    assert task.intent == "decision_history"
 
 
 def test_meta_policy_routes_to_shadow_evidence():
     task = TaskParser().parse("¿Por qué A y B permiten GDX pero C no?")
+    assert task.intent == "meta_policy"
+    assert task.entities == ["GDX"]
+
+
+def test_meta_policy_referential_signal_can_inherit_subject():
+    state = ConversationState(
+        owner_chat_id=123,
+        active_symbols=["GDX"],
+        last_intent="opportunities",
+        conversation_subject="GDX",
+    )
+    task = TaskParser().parse("¿Por qué A y B permiten esta señal pero C no?", state)
     assert task.intent == "meta_policy"
     assert task.entities == ["GDX"]
 
