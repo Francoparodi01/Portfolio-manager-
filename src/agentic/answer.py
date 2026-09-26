@@ -87,6 +87,13 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
         answer, _status = explain_evidence(data)
         return answer, ["El mecanismo interno no prueba valor económico; la evidencia del Lab conserva su calidad y cohorte."]
 
+    if tool == "get_run_evidence_provenance" and data:
+        sources = data.get("sources") if isinstance(data.get("sources"), list) else []
+        return (
+            f"Run referido: {data.get('referenced_run_id') or 'N/D'} · fuentes auditadas: {len(sources)}.",
+            ["La procedencia describe el turno anterior; no vuelve a consultar fuentes de mercado."],
+        )
+
     if tool == "get_bot_follow_pnl" and data:
         rows = [f"Ventana observada: {int(data.get('lookback_days') or 0)} días."]
         for horizon in (5, 10, 20):
@@ -203,13 +210,50 @@ def _successful_tool_content(history: list[dict[str, Any]]) -> dict[str, str]:
     return result
 
 
+def _provenance_fallback(history: list[dict[str, Any]]) -> str | None:
+    raw = _successful_tool_content(history).get("get_run_evidence_provenance")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("schema_version") != "run-evidence-provenance-v1":
+        return None
+    if data.get("status") != "observed":
+        return "No encuentro una respuesta anterior auditada dentro de esta conversación para listar sus fuentes."
+
+    sources = data.get("sources") if isinstance(data.get("sources"), list) else []
+    lines = [
+        "Para la respuesta inmediatamente anterior usé exactamente estas fuentes auditadas:",
+    ]
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        tool = str(source.get("tool") or "fuente")
+        origin = str(source.get("source") or "fuente interna no etiquetada")
+        lookback = source.get("lookback_days")
+        suffix = f" · ventana {int(lookback)} días" if isinstance(lookback, (int, float)) else ""
+        lines.append(f"• {tool}: {origin}{suffix}.")
+        normalized = source.get("normalized_component")
+        if isinstance(normalized, dict):
+            raw_total = int(normalized.get("raw_plans_total") or 0)
+            episodes = int(normalized.get("episodes_total") or 0)
+            removed = int(normalized.get("duplicates_removed") or 0)
+            lines.append(
+                f"  Para el normalizado usé {raw_total} planes formales → {episodes} episodios independientes; {removed} reiteraciones quedaron deduplicadas."
+            )
+    if not sources:
+        lines.append("• El turno anterior no registró una herramienta de evidencia exitosa.")
+    lines.append(f"Run auditado: {data.get('referenced_run_id') or 'N/D'}.")
+    lines.append("No vuelvo a consultar macro, cartera o estado del sistema para contestar esta pregunta de procedencia.")
+    return "\n".join(lines)
+
+
 def _bot_follow_pnl_fallback(goal: str, history: list[dict[str, Any]]) -> str | None:
     tools = _successful_tool_content(history)
     normalized_goal = str(goal or "").lower()
 
-    # A normalized follow-up deliberately uses Decision Ledger instead of the
-    # raw plan-level counterfactual. The current normalized reporting surface is
-    # 5D; do not fabricate 10D/20D normalized values that it does not expose.
     if any(term in normalized_goal for term in ("normaliz", "deduplic", "sin repetir", "repetidas")):
         raw_ledger = tools.get("get_decision_ledger")
         if raw_ledger:
@@ -218,28 +262,32 @@ def _bot_follow_pnl_fallback(goal: str, history: list[dict[str, Any]]) -> str | 
             except (TypeError, ValueError):
                 ledger = None
             if isinstance(ledger, dict):
-                days = int(ledger.get("lookback_days") or 0)
-                report = _strip_html(str(ledger.get("report") or ""))
-                report_lines = [line.strip() for line in report.splitlines() if line.strip()]
-                marker_index = next(
-                    (i for i, line in enumerate(report_lines) if "Planes seguidos" in line and "NORMALIZADO" in line),
-                    None,
-                )
-                if marker_index is not None:
-                    detail = report_lines[marker_index + 1: marker_index + 4]
+                normalized = ledger.get("normalized_bot_counterfactual")
+                if isinstance(normalized, dict) and normalized.get("schema_version") == "bot-follow-pnl-normalized-v1":
+                    days = int(normalized.get("lookback_days") or ledger.get("lookback_days") or 0)
+                    raw_total = int(normalized.get("raw_plans_total") or 0)
+                    episodes_total = int(normalized.get("episodes_total") or 0)
+                    removed = int(normalized.get("duplicates_removed") or 0)
                     lines = [
-                        f"Normalizando decisiones repetidas en los últimos {days} días, uso la atribución NORMALIZADA del Decision Ledger.",
+                        f"Tomando los últimos {days} días y deduplicando recomendaciones repetidas, {raw_total} planes del bot quedan en {episodes_total} episodios independientes ({removed} reiteraciones removidas)."
                     ]
-                    lines.extend(f"• {line}" for line in detail[:2])
+                    mature = 0
+                    for horizon in (5, 10, 20):
+                        n = int(normalized.get(f"episodes_closed_{horizon}d") or 0)
+                        pnl = normalized.get(f"pnl_{horizon}d_ars")
+                        if n and pnl is not None:
+                            mature += 1
+                            lines.append(f"• A {horizon}D: {_signed_money(pnl)} ARS sobre {n} episodios maduros.")
+                    if not mature:
+                        lines.append("Todavía no hay episodios maduros suficientes para estimar ese contrafactual en esta ventana.")
                     lines.append(
-                        "Esta métrica deduplica operaciones atribuibles; no cuenta cada recomendación repetida como una operación nueva."
+                        "Normalización: una misma acción BUY/SELL sobre el mismo ticker en corridas formales consecutivas cuenta una sola vez; un cambio de lado o una corrida intermedia sin esa recomendación abre un episodio nuevo."
                     )
                     lines.append(
-                        "La salida normalizada disponible hoy en el ledger está cerrada a 5D; no invento 10D/20D normalizados."
+                        "Es un PnL contrafactual bruto y deduplicado, no PnL realizado de la cuenta; no descuenta costos ni slippage."
                     )
-                    lines.append(
-                        "Tampoco equivale a simular todos los planes ignorados: describe la atribución normalizada que Quantia puede sostener con evidencia."
-                    )
+                    if mature > 1:
+                        lines.append("5D/10D/20D son escenarios alternativos y no deben sumarse.")
                     return "\n".join(lines)
 
     raw = tools.get("get_bot_follow_pnl")
@@ -254,23 +302,6 @@ def _bot_follow_pnl_fallback(goal: str, history: list[dict[str, Any]]) -> str | 
 
     days = int(data.get("lookback_days") or 0)
     total = int(data.get("plans_total") or 0)
-
-    provenance_question = any(term in normalized_goal for term in (
-        "que datos usaste", "que dato usaste", "que fuentes usaste", "que fuente usaste",
-        "de donde sale", "de donde salio", "que evidencia usaste", "con que datos",
-    ))
-    if provenance_question:
-        source = str(data.get("source") or "decision_log_formal_plans")
-        scope = str(data.get("scope") or "FORMAL_PLAN_DIRECTIONAL_GROSS_PLAN_LEVEL_NOT_DEDUPLICATED")
-        return "\n".join([
-            "Para la respuesta anterior usé una sola fuente de evidencia, no tres:",
-            f"• {source}: planes formales del bot guardados en decision_log, con ventana de {days} días.",
-            f"• Alcance: {scope}.",
-            f"• Filas consideradas: {total} planes ejecutables; para cada horizonte sólo entran los que ya tienen outcome maduro.",
-            "• El cálculo usa el monto objetivo del plan × outcome direccional a 5D/10D/20D.",
-            "No usé snapshot de cartera, contexto macro, estado del sistema ni Redis para calcular ese PnL.",
-        ])
-
     lines = [f"Tomando los últimos {days} días, Quantia registró {total} planes ejecutables del bot."]
     mature = 0
     for horizon in (5, 10, 20):
@@ -377,13 +408,22 @@ def _portfolio_review_fallback(goal: str, history: list[dict[str, Any]]) -> str 
 
 
 def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision:
+    provenance_answer = _provenance_fallback(history)
+    if provenance_answer:
+        return AgentDecision(
+            kind="final",
+            answer=provenance_answer,
+            rationale="Procedencia reconstruida desde la traza auditada del turno anterior.",
+            answer_origin="provenance_renderer_v1",
+        )
+
     bot_pnl_answer = _bot_follow_pnl_fallback(goal, history)
     if bot_pnl_answer:
         return AgentDecision(
             kind="final",
             answer=bot_pnl_answer,
-            rationale="Resumen determinístico del PnL/atribución del bot y su procedencia.",
-            answer_origin="bot_follow_pnl_renderer_v2",
+            rationale="Resumen determinístico del contrafactual del bot desde evidencia persistida.",
+            answer_origin="bot_follow_pnl_renderer_v3",
         )
 
     portfolio_answer = _portfolio_review_fallback(goal, history)
@@ -418,7 +458,6 @@ def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision
     if "get_portfolio_snapshot" in observed_tools and not (decision_sources & observed_tools):
         limits.insert(0, "En esta corrida no se obtuvo evidencia de decisiones: no se verificó la lectura actual del motor.")
 
-    # Reserve space for all sources and limitations even in a 20-step CLI run.
     card_budget = min(2600, 7600 // len(cards))
     cards = [_excerpt(card, card_budget) for card in cards]
     limits = list(dict.fromkeys(limits))
