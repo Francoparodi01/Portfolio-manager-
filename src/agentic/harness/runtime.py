@@ -109,9 +109,9 @@ class ConversationalHarness:
             legacy_single_owner=self.legacy_single_owner,
         )
         registry = register_harness_tools(build_default_registry(tool_context), tool_context)
-        safe_names = self.permissions.filter([spec.name for spec in registry.specs()])
+        safe_names = self.permissions.filter(registry, [spec.name for spec in registry.specs()])
         plan = self.selector.select(task, set(safe_names))
-        plan.allowed_tools = self.permissions.filter(plan.allowed_tools)
+        plan.allowed_tools = self.permissions.filter(registry, plan.allowed_tools)
         plan.required_tools = [name for name in plan.required_tools if name in plan.allowed_tools]
         view = _RegistryView(registry, plan.allowed_tools)
 
@@ -231,7 +231,7 @@ class ConversationalHarness:
                     final_decision = decision
                     break
                 name = str(decision.tool_name or "")
-                if not self.permissions.allow(name) or name not in plan.allowed_tools:
+                if not self.permissions.allow(registry, name) or name not in plan.allowed_tools:
                     state.errors.append(f"permission_denied:{name}")
                     continue
                 try:
@@ -316,10 +316,14 @@ class ConversationalHarness:
                     error=None,
                 )
 
+            supported_answer_symbols = self._supported_answer_symbols(answer, evidence, task.entities)
             session.last_intent = task.intent
-            session.active_symbols = task.entities or session.active_symbols
             if task.entities:
-                session.conversation_subject = " vs ".join(task.entities[:2])
+                session.active_symbols = task.entities
+            elif supported_answer_symbols:
+                session.active_symbols = supported_answer_symbols
+            if session.active_symbols:
+                session.conversation_subject = " vs ".join(session.active_symbols[:2])
             session.evidence_refs = state.evidence_refs[-20:]
             session.recent_user_messages.append(task.raw_message)
             await sessions.save(session)
@@ -444,6 +448,27 @@ class ConversationalHarness:
     def _insufficient_answer(state: HarnessState) -> str:
         failed = ", ".join(state.failed_steps) if state.failed_steps else "evidencia requerida"
         return f"No tengo evidencia suficiente para determinarlo con seguridad. Faltó o falló: {failed}."
+
+    def _supported_answer_symbols(
+        self,
+        answer: str,
+        evidence: list[EvidenceObject],
+        task_entities: list[str],
+    ) -> list[str]:
+        candidates = self.parser.extract_entities(answer)
+        if not candidates:
+            return []
+        evidence_text = "\n".join(
+            json.dumps(item.payload, ensure_ascii=False, default=str)
+            if isinstance(item.payload, dict) else str(item.payload)
+            for item in evidence if item.ok
+        ).upper()
+        task_set = {item.upper() for item in task_entities}
+        supported: list[str] = []
+        for symbol in candidates:
+            if symbol in task_set or re.search(rf"\b{re.escape(symbol)}\b", evidence_text):
+                supported.append(symbol)
+        return list(dict.fromkeys(supported))[:8]
 
     @staticmethod
     def _to_evidence(observation: ToolObservation) -> EvidenceObject:
