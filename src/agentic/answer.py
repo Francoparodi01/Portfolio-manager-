@@ -131,7 +131,102 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
             [f"{tool}: el extracto no agrega validaciones que la propia fuente no haya realizado."])
 
 
+def _successful_tool_content(history: list[dict[str, Any]]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in history:
+        observation = item.get("observation") or {}
+        if not observation.get("ok"):
+            continue
+        decision = item.get("decision") or {}
+        tool = str(observation.get("tool") or observation.get("tool_name") or decision.get("tool") or "")
+        if tool:
+            result[tool] = str(observation.get("content") or "")
+    return result
+
+
+def _portfolio_review_fallback(goal: str, history: list[dict[str, Any]]) -> str | None:
+    normalized_goal = str(goal or "").lower()
+    if "cartera" not in normalized_goal and "portfolio" not in normalized_goal:
+        return None
+
+    tools = _successful_tool_content(history)
+    required = {"get_portfolio_snapshot", "get_decision_evidence", "analyze_portfolio"}
+    if not required.issubset(tools):
+        return None
+
+    try:
+        snapshot = json.loads(tools["get_portfolio_snapshot"])
+        decisions = json.loads(tools["get_decision_evidence"])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(snapshot, dict) or not isinstance(decisions, dict):
+        return None
+
+    positions = snapshot.get("positions")
+    positions = positions if isinstance(positions, list) else []
+    positions = [item for item in positions if isinstance(item, dict)]
+    ranked = sorted(
+        positions,
+        key=lambda item: float(item.get("weight") or 0.0) if not isinstance(item.get("weight"), bool) else 0.0,
+        reverse=True,
+    )
+    holdings = []
+    for position in ranked[:6]:
+        try:
+            weight = float(position.get("weight")) * 100
+        except (TypeError, ValueError):
+            continue
+        holdings.append(f"{position.get('ticker') or 'N/D'} {_number(weight, 1)}%")
+
+    signals = decisions.get("signals")
+    signals = signals if isinstance(signals, list) else []
+    signals = [item for item in signals if isinstance(item, dict)]
+    active = [item for item in signals if str(item.get("decision") or "").upper() != "HOLD"]
+    hold_count = sum(1 for item in signals if str(item.get("decision") or "").upper() == "HOLD")
+    signal_bits = [
+        f"{item.get('ticker') or 'N/D'} {str(item.get('decision') or 'N/D')} (score {_number(item.get('final_score'), 3)})"
+        for item in active[:4]
+    ]
+
+    analysis = tools["analyze_portfolio"]
+    revalidations = []
+    for line in analysis.splitlines():
+        if "REVALIDAR " in line:
+            revalidations.append(line[line.find("REVALIDAR "):].strip())
+        if len(revalidations) >= 3:
+            break
+    outside_market = "Fuera de rueda" in analysis or "FUERA DE RUEDA" in analysis.upper()
+
+    lines = [
+        f"Tu cartera tiene {_number(snapshot.get('total_value_ars'))} ARS, "
+        f"{_number(snapshot.get('cash_ars'))} ARS de cash y {len(positions)} posiciones.",
+    ]
+    if holdings:
+        lines.append("La mayor concentración está en " + ", ".join(holdings) + ".")
+    if signal_bits:
+        suffix = f"; {hold_count} posiciones siguen en HOLD" if hold_count else ""
+        lines.append("Las señales no-HOLD actuales son " + "; ".join(signal_bits) + suffix + ".")
+    elif signals:
+        lines.append(f"Las {len(signals)} señales actuales están en HOLD.")
+    if revalidations:
+        lines.append("La simulación contextual pide " + "; ".join(revalidations) + ".")
+    if outside_market:
+        lines.append("Está fuera de rueda: esas revalidaciones son contexto para validar en apertura, no fills ni operaciones ejecutadas.")
+    else:
+        lines.append("Las señales y propuestas son evidencia del motor; no son fills ni rentabilidad realizada.")
+    return "\n".join(lines)
+
+
 def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision:
+    portfolio_answer = _portfolio_review_fallback(goal, history)
+    if portfolio_answer:
+        return AgentDecision(
+            kind="final",
+            answer=portfolio_answer,
+            rationale="Resumen determinístico de cartera desde snapshot, decisiones y análisis observados.",
+            answer_origin="portfolio_renderer_v2",
+        )
+
     cards, limits = [], []
     observed_tools = set()
     successful = 0
