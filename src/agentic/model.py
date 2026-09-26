@@ -68,7 +68,7 @@ class OllamaAgentModel:
         self.conversation_context = list(conversation_context or [])[-3:]
         self.context_tokens = max(
             2048,
-            min(32768, int(os.getenv("QUANTIA_AGENT_CONTEXT_TOKENS", "8192"))),
+            min(32768, int(os.getenv("QUANTIA_AGENT_CONTEXT_TOKENS", "16384"))),
         )
         self.num_predict = max(
             128,
