@@ -64,7 +64,7 @@ def _timestamp(payload: Any) -> datetime:
     if isinstance(payload, dict):
         for key in (
             "source_timestamp", "evaluated_at", "fetched_at", "scraped_at", "as_of",
-            "cutoff_at", "generated_at", "timestamp",
+            "captured_at", "cutoff_at", "generated_at", "timestamp",
         ):
             value = payload.get(key)
             if not value:
@@ -108,9 +108,12 @@ def observation_to_evidence(observation: ToolObservation, *, max_chars: int = 12
 
     timestamp = _timestamp(payload)
     age = max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
-    excerpt = raw[:max_chars]
+    marker = "\n[compacted by harness]"
     if len(raw) > max_chars:
-        excerpt += "\n[compacted by harness]"
+        keep = max(0, max_chars - len(marker))
+        excerpt = raw[:keep] + marker
+    else:
+        excerpt = raw
 
     source = observation.tool_name
     if isinstance(payload, dict):
@@ -162,6 +165,7 @@ def build_context_pack(
     selected: list[Evidence] = []
     chars = sum(len(item) for item in recent_goals)
     pruned = 0
+    marker = "\n[context pruned]"
 
     for item in ordered:
         remaining = budget.max_context_chars - chars
@@ -170,10 +174,12 @@ def build_context_pack(
             continue
         copy = item.model_copy(deep=True)
         if len(copy.excerpt) > remaining:
-            if remaining < 300:
+            if remaining < max(300, len(marker) + 1):
                 pruned += 1
                 continue
-            copy.excerpt = copy.excerpt[:remaining] + "\n[context pruned]"
+            keep = remaining - len(marker)
+            copy.excerpt = copy.excerpt[:keep] + marker
+            pruned += 1
         selected.append(copy)
         chars += len(copy.excerpt)
 
