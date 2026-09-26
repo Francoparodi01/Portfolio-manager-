@@ -277,7 +277,8 @@ class ConversationalHarness:
                 required_tools=plan.required_tools,
             )
             high_stakes_numeric = task.intent in {
-                "performance", "decision_history", "decision_lab", "position_analysis", "position_comparison"
+                "performance", "bot_follow_pnl", "decision_history", "decision_lab",
+                "position_analysis", "position_comparison"
             }
             if not verification.passed or (high_stakes_numeric and not verification.numeric_consistency):
                 answer = fallback
@@ -429,7 +430,7 @@ class ConversationalHarness:
             return decision_lab_arguments(task.raw_message)
         if name == "scan_opportunities":
             return {"limit": 8}
-        if name in {"get_decision_ledger", "get_bot_follow_pnl"}:
+        if name in {"get_decision_ledger", "get_bot_follow_pnl", "get_normalized_bot_follow_pnl"}:
             match = re.search(r"\b(\d{1,3})\s*(?:dias|días|days)\b", task.raw_message.lower())
             return {"days": max(1, min(365, int(match.group(1))))} if match else {"days": 90}
         return {}
@@ -486,6 +487,10 @@ class ConversationalHarness:
             source, mode, quality = "ledger", EvidenceMode.PRODUCTION, EvidenceQuality.HIGH
         elif name == "get_bot_follow_pnl":
             source, mode, quality = "bot_follow_pnl", EvidenceMode.PRODUCTION, EvidenceQuality.HIGH
+        elif name == "get_normalized_bot_follow_pnl":
+            source, mode, quality = "bot_follow_pnl_normalized", EvidenceMode.PRODUCTION, EvidenceQuality.HIGH
+        elif name == "get_run_evidence_provenance":
+            source, mode, quality = "conversation_audit", EvidenceMode.PRODUCTION, EvidenceQuality.HIGH
         elif name.startswith("get_macro"):
             source, mode, quality = "macro", EvidenceMode.OBSERVATION, EvidenceQuality.MEDIUM
         elif name in {"get_decision_evidence", "analyze_portfolio", "analyze_ticker"}:
