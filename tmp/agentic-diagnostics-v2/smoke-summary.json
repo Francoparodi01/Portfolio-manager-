@@ -1,0 +1,63 @@
+[
+  {
+    "case": 1,
+    "run": "c795685b-e8ca-4146-89e2-6a5b2d641e4a",
+    "status": "COMPLETE",
+    "objective": "PARTIAL",
+    "tools": [
+      "get_portfolio_snapshot",
+      "get_decision_evidence"
+    ],
+    "context_turns": 0,
+    "audit_hashes_verified": true,
+    "message_parts": 3
+  },
+  {
+    "case": 2,
+    "run": "d8a15ffd-7ec8-41f0-a8eb-3bc2f423a341",
+    "status": "COMPLETE",
+    "objective": "EXPLAINED",
+    "tools": [
+      "get_macro_exposure"
+    ],
+    "context_turns": 1,
+    "audit_hashes_verified": true,
+    "message_parts": 2
+  },
+  {
+    "case": 3,
+    "run": "7a58c914-d8f8-4a52-ab11-63a8fb914d97",
+    "status": "COMPLETE",
+    "objective": "PARTIAL",
+    "tools": [
+      "get_decision_evidence"
+    ],
+    "context_turns": 2,
+    "audit_hashes_verified": true,
+    "message_parts": 3
+  },
+  {
+    "case": 4,
+    "run": "ac4f1d51-45f1-4114-b7f1-6f0c9dfae7a5",
+    "status": "COMPLETE",
+    "objective": "PARTIAL",
+    "tools": [
+      "get_decision_evidence"
+    ],
+    "context_turns": 3,
+    "audit_hashes_verified": true,
+    "message_parts": 3
+  },
+  {
+    "case": 5,
+    "run": "52b2287c-7681-4910-a012-0efcc77416f5",
+    "status": "COMPLETE",
+    "objective": "EXPLAINED",
+    "tools": [
+      "get_macro_exposure"
+    ],
+    "context_turns": 0,
+    "audit_hashes_verified": true,
+    "message_parts": 2
+  }
+]

@@ -329,7 +329,12 @@ class RadarExploratoryStore:
         max_calendar_days: int = 30,
         limit: int = 8,
     ) -> list[dict[str, Any]]:
-        """Return recent explicit FOLLOW actions without changing Radar metrics."""
+        """Return recent explicit FOLLOW actions with read-only price progress.
+
+        The comparison is anchored to the last stored market price at or before
+        the explicit FOLLOW action.  It is an observation of a watchlist, not a
+        trade outcome or a new Radar signal.
+        """
         await self.ensure_schema()
         owner = int(owner_chat_id)
         days = max(int(max_calendar_days), 1)
@@ -354,6 +359,11 @@ class RadarExploratoryStore:
                 "setup_score": None,
                 "setup_percentile": None,
                 "feature_quality_flag": None,
+                "observed_price": None,
+                "observed_at": None,
+                "trigger_price": None,
+                "invalidation_price": None,
+                "target_price": None,
             } for row in exploratory)
 
             setup_alerts_exist = bool(
@@ -367,7 +377,8 @@ class RadarExploratoryStore:
                     SELECT ticker, user_action_at, follow_match_status,
                            broker_fill_id, setup_score, setup_percentile,
                            setup_risk_reward AS risk_reward,
-                           feature_quality_flag
+                           feature_quality_flag, observed_price, observed_at,
+                           trigger_price, invalidation_price, target_price
                     FROM radar_setup_alerts
                     WHERE owner_chat_id=$1
                       AND user_action='FOLLOW'
@@ -383,6 +394,69 @@ class RadarExploratoryStore:
                     "v3_tier": None,
                     "radar_score": None,
                 } for row in setup_rows)
+
+            tickers = sorted({
+                str(row.get("ticker") or "").upper().strip()
+                for row in rows
+                if str(row.get("ticker") or "").strip()
+            })
+            if tickers:
+                price_rows = await conn.fetch(
+                    """
+                    WITH wanted AS (
+                        SELECT DISTINCT UPPER(value) AS ticker
+                        FROM unnest($1::text[]) AS value
+                    ), latest AS (
+                        SELECT DISTINCT ON (UPPER(mp.ticker))
+                               UPPER(mp.ticker) AS ticker,
+                               mp.last_price::float AS current_price,
+                               mp.ts AS current_price_at
+                        FROM market_prices mp
+                        JOIN wanted w ON w.ticker = UPPER(mp.ticker)
+                        WHERE mp.last_price IS NOT NULL AND mp.last_price > 0
+                        ORDER BY UPPER(mp.ticker), mp.ts DESC
+                    )
+                    SELECT * FROM latest
+                    """,
+                    tickers,
+                )
+            else:
+                price_rows = []
+
+            latest_prices = {
+                str(row["ticker"]).upper(): dict(row)
+                for row in price_rows
+            }
+            for row in rows:
+                ticker = str(row.get("ticker") or "").upper().strip()
+                latest = latest_prices.get(ticker, {})
+                row["current_price"] = latest.get("current_price")
+                row["current_price_at"] = latest.get("current_price_at")
+
+                base = await conn.fetchrow(
+                    """
+                    SELECT last_price::float AS baseline_price, ts AS baseline_price_at
+                    FROM market_prices
+                    WHERE UPPER(ticker) = $1
+                      AND last_price IS NOT NULL AND last_price > 0
+                      AND ts <= $2
+                    ORDER BY ts DESC
+                    LIMIT 1
+                    """,
+                    ticker,
+                    row.get("user_action_at"),
+                )
+                if base is not None:
+                    row.update(dict(base))
+                    row["baseline_source"] = "market_price_at_follow"
+                elif row.get("observed_price") is not None:
+                    row["baseline_price"] = row["observed_price"]
+                    row["baseline_price_at"] = row.get("observed_at")
+                    row["baseline_source"] = "alert_observed_price"
+                else:
+                    row["baseline_price"] = None
+                    row["baseline_price_at"] = None
+                    row["baseline_source"] = None
 
         latest_by_ticker: dict[str, dict[str, Any]] = {}
         for row in sorted(

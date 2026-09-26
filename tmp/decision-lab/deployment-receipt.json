@@ -1,0 +1,20 @@
+[
+  {
+    "container": "cocos_telegram_bot",
+    "image": "sha256:971de7bc7168b09d47cf5e6332ccf112319f0087d7048926b88fe0bce57c5d43",
+    "running": true,
+    "started_at": "2026-09-24T21:49:08.417869528Z",
+    "restart_count": 0,
+    "import_errors": 0,
+    "log_lines": 5
+  },
+  {
+    "container": "cocos_scheduler",
+    "image": "sha256:ef08d4d72b9e2d733df67edb89999a40c2138ca67bd8c6d6c4a7d09bb0ed59f0",
+    "running": true,
+    "started_at": "2026-09-24T21:49:08.421025267Z",
+    "restart_count": 0,
+    "import_errors": 0,
+    "log_lines": 62
+  }
+]

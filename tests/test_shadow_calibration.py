@@ -13,7 +13,10 @@ from src.analysis.shadow_calibration import (
     walk_forward_metrics,
 )
 from src.analysis.shadow_calibration_store import SHADOW_CALIBRATION_SCHEMA_SQL
-from scripts.run_shadow_calibration import render_report
+from scripts.run_shadow_calibration import (
+    _should_refresh_calibration,
+    render_report,
+)
 from src.scheduler.runner import _render_shadow_calibration_gate_alert
 
 
@@ -99,6 +102,29 @@ def test_gate_rejects_a_calibrator_that_worsens_out_of_sample_metrics():
         "calibrated_mae": 0.06,
         "calibrated_interval_coverage": 0.69,
     }) == "FAILED_WALK_FORWARD"
+
+
+def test_calibration_refresh_requires_new_matured_evidence_unless_forced():
+    readiness = {
+        "last_calibrated_at": datetime(2026, 8, 31, tzinfo=timezone.utc),
+        "new_matured_outcomes": 499,
+        "new_matured_cohorts": 2,
+    }
+    assert not _should_refresh_calibration(
+        readiness,
+        minimum_new_matured_outcomes=500,
+        force=False,
+    )
+    assert _should_refresh_calibration(
+        readiness,
+        minimum_new_matured_outcomes=500,
+        force=True,
+    )
+    assert _should_refresh_calibration(
+        {**readiness, "last_calibrated_at": None, "new_matured_outcomes": 0},
+        minimum_new_matured_outcomes=500,
+        force=False,
+    )
 
 
 def test_v3_schema_and_module_remain_outside_operational_tables():

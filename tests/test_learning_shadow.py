@@ -233,9 +233,9 @@ def test_review_label_requires_clean_path_and_positive_benchmark_alpha():
     assert market.review_label == MARKET_DRIVEN_WIN
 
 
-def test_rule_candidates_are_shadow_only_and_require_a_real_sample():
+def test_rule_candidates_are_shadow_only_and_require_independent_evidence():
     cases = []
-    for index in range(20):
+    for index in range(30):
         cases.append(LearningShadowCase.from_mapping(
             {
                 "owner_chat_id": 0,
@@ -265,6 +265,8 @@ def test_rule_candidates_are_shadow_only_and_require_a_real_sample():
     assert proposed["mode"] == "shadow_only"
     assert proposed["live_threshold_change"] is False
     assert proposed["requires_human_approval"] is True
+    assert candidates[0]["candidate_type"] == "EVIDENCE_REVIEW"
+    assert "INSUFFICIENT_UNIQUE_CONTROLS" in proposed["promotion_blockers"]
 
 
 def test_shadow_match_is_predecision_and_store_cannot_write_operational_tables():

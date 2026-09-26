@@ -1,0 +1,37 @@
+[
+  {
+    "file": "scripts/run_analysis.py",
+    "equals_feature_base": true,
+    "hash": "5d286b939ff654678de4501e2a1bf6e556d842ee3c8057376986b4327c244799"
+  },
+  {
+    "file": "src/analysis/optimizer.py",
+    "equals_feature_base": true,
+    "hash": "55812db83789ce3f1e397d6851ee2dd5bb0b317be2bd816215d3e0e5b49e9c9d"
+  },
+  {
+    "file": "src/agentic/tools.py",
+    "equals_feature_base": true,
+    "hash": "9a8cf7d6a2d6efb8133025214c77f1b3bd4dd70eee9a402582ddf33345a4c063"
+  },
+  {
+    "file": "src/agentic/model.py",
+    "equals_feature_base": true,
+    "hash": "5b4769a437f5dd7fd17f52fe4ac302b08db498e4688d51fa7b0decd2f9695226"
+  },
+  {
+    "file": "src/agentic/diagnostics.py",
+    "equals_feature_base": true,
+    "hash": "bebef0b0ac91e40b0007dcdab9880aa93d1bc782ae4134781a4c941b2278cec7"
+  },
+  {
+    "file": "src/agentic/telegram.py",
+    "equals_feature_base": true,
+    "hash": "5253d3221d4024be8c08a828aa381bf1cef3f9823641ba5675617a09c4802ccb"
+  },
+  {
+    "file": "src/analysis/analytics_v2/bootstrap.py",
+    "equals_feature_base": false,
+    "hash": "48b32a1c393c8e4c0f8a20bb82338f8455364aca253f427f335a77314fe0cd00"
+  }
+]

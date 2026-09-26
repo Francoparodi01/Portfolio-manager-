@@ -1,0 +1,11 @@
+{
+  "state": "deployed_and_import_verified",
+  "base_image": "sha256:beac11ba551c5d3c1e8065f5d6da5811468d2774912f58d666df1bc571fbffec",
+  "tests": "58 passed",
+  "backup_tag": "cocos_copilot-scheduler:before-opening-20260922",
+  "changed_file": "src/scheduler/runner.py",
+  "deployed_image": "sha256:6f32bde1789eb916336473da303c4578489f66c9a97fac64ec2954d57b041ef7",
+  "runner_sha256": "c0a05d33af6c2795e44e270e7fb958e1e208022eed3f5c275799c97eb1199b1f",
+  "verified_at": "2026-09-22T09:04:12.6255404-03:00",
+  "live_opening_validation": "Pending next scheduled opening at 10:31 ART; no manual report sent"
+}

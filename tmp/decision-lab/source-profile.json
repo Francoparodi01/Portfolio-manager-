@@ -1,0 +1,316 @@
+{
+  "portfolio_snapshots": {
+    "n": 1422,
+    "min_scraped_at": "2026-08-21 22:22:42.064086+00:00",
+    "max_scraped_at": "2026-09-24 03:38:54.284775+00:00",
+    "min_created_at": "2026-08-21 22:22:40.527411+00:00",
+    "max_created_at": "2026-09-24 03:38:53.360603+00:00"
+  },
+  "raw_snapshots": {
+    "n": 5244,
+    "min_scraped_at": "2026-04-15 03:40:27.872231+00:00",
+    "max_scraped_at": "2026-09-24 03:38:54.284775+00:00"
+  },
+  "market_prices": {
+    "n": 1639749,
+    "min_ts": "2026-04-27 16:25:18.444807+00:00",
+    "max_ts": "2026-09-23 20:04:19.688903+00:00"
+  },
+  "market_candles": {
+    "n": 247969,
+    "min_ts": "2000-01-03 00:00:00+00:00",
+    "max_ts": "2026-09-23 13:30:00+00:00",
+    "min_scraped_at": "2026-05-16 01:06:05.228615+00:00",
+    "max_scraped_at": "2026-09-23 21:08:08.594392+00:00"
+  },
+  "sentiment_raw": {
+    "n": 62146,
+    "min_fetched_at": "2026-06-06 17:32:28.570841+00:00",
+    "max_fetched_at": "2026-09-24 11:22:40.926582+00:00",
+    "min_published_at": "2017-04-15 22:24:32+00:00",
+    "max_published_at": "2026-09-24 11:17:00+00:00",
+    "min_last_score_attempt_at": "2026-06-06 17:42:42.629771+00:00",
+    "max_last_score_attempt_at": "2026-09-24 11:22:43.865489+00:00",
+    "min_created_at": "2026-06-06 17:32:28.570841+00:00",
+    "max_created_at": "2026-09-24 11:22:40.926582+00:00"
+  },
+  "sentiment_scored": {
+    "n": 55480,
+    "min_scored_at": "2026-06-07 18:06:49.692363+00:00",
+    "max_scored_at": "2026-09-24 11:22:43.824244+00:00"
+  },
+  "sentiment_aggregated": {
+    "n": 8644,
+    "min_bucket_ts": "2026-06-07 18:00:00+00:00",
+    "max_bucket_ts": "2026-09-24 11:00:00+00:00",
+    "min_updated_at": "2026-06-07 18:24:55.780463+00:00",
+    "max_updated_at": "2026-09-24 11:22:46.974587+00:00"
+  },
+  "execution_plans": {
+    "n": 0,
+    "min_created_at": null,
+    "max_created_at": null,
+    "min_updated_at": null,
+    "max_updated_at": null
+  },
+  "order_intents": {
+    "n": 664,
+    "min_created_at": "2026-08-10 13:33:43.289830+00:00",
+    "max_created_at": "2026-09-23 19:47:40.866398+00:00",
+    "min_updated_at": "2026-08-10 13:33:43.289830+00:00",
+    "max_updated_at": "2026-09-23 19:47:40.866398+00:00"
+  },
+  "decision_log": {
+    "n": 167,
+    "min_decided_at": "2026-08-20 19:50:17.028970+00:00",
+    "max_decided_at": "2026-09-23 19:50:19.647213+00:00",
+    "min_outcome_filled_at": "2026-09-10 00:30:03.155526+00:00",
+    "max_outcome_filled_at": "2026-09-24 00:30:07.632292+00:00",
+    "min_closed_at": null,
+    "max_closed_at": null,
+    "min_decision_date": "2026-08-20",
+    "max_decision_date": "2026-09-23"
+  },
+  "corporate_events": {
+    "n": 2,
+    "min_announced_at": null,
+    "max_announced_at": null,
+    "min_effective_at": "2026-08-04 03:00:00+00:00",
+    "max_effective_at": "2026-08-04 03:00:00+00:00",
+    "min_expires_at": null,
+    "max_expires_at": null,
+    "min_source_published_at": null,
+    "max_source_published_at": null
+  },
+  "manual_market_events": {
+    "n": 1,
+    "min_event_date": "2026-06-24",
+    "max_event_date": "2026-06-24",
+    "min_active_from": "2026-06-24 03:00:00+00:00",
+    "max_active_from": "2026-06-24 03:00:00+00:00",
+    "min_active_until": "2026-06-25 15:00:00+00:00",
+    "max_active_until": "2026-06-25 15:00:00+00:00",
+    "min_created_at": "2026-06-24 03:17:11.234218+00:00",
+    "max_created_at": "2026-06-24 03:17:11.234218+00:00"
+  },
+  "issuer_event_observations": {
+    "n": 53,
+    "min_event_date": "2026-07-24",
+    "max_event_date": "2026-11-06",
+    "min_source_published_at": "2026-08-05 23:18:00+00:00",
+    "max_source_published_at": "2026-09-21 12:56:00+00:00",
+    "min_created_at": "2026-08-05 14:50:25.792703+00:00",
+    "max_created_at": "2026-09-23 11:18:03.558741+00:00",
+    "min_updated_at": "2026-08-07 17:28:12.333751+00:00",
+    "max_updated_at": "2026-09-24 11:08:17.953250+00:00"
+  },
+  "radar_discovery_runs": {
+    "n": 24,
+    "min_captured_at": "2026-08-20 19:50:19.948004+00:00",
+    "max_captured_at": "2026-09-23 19:50:27.553727+00:00",
+    "min_captured_session": "2026-08-20",
+    "max_captured_session": "2026-09-23",
+    "min_created_at": "2026-08-20 19:50:23.528364+00:00",
+    "max_created_at": "2026-09-23 19:50:56.444258+00:00"
+  },
+  "radar_exploratory_runs": {
+    "n": 1,
+    "min_generated_at": "2026-08-21 04:38:14.596793+00:00",
+    "max_generated_at": "2026-08-21 04:38:14.596793+00:00",
+    "min_created_at": "2026-08-21 04:38:12.770989+00:00",
+    "max_created_at": "2026-08-21 04:38:12.770989+00:00"
+  },
+  "shadow_thesis_runs": {
+    "n": 0,
+    "min_captured_at": null,
+    "max_captured_at": null,
+    "min_as_of_ts": null,
+    "max_as_of_ts": null
+  },
+  "ml_decision_features": {
+    "n": 0,
+    "min_captured_at": null,
+    "max_captured_at": null,
+    "min_closed_at": null,
+    "max_closed_at": null
+  },
+  "candles_by_source": [
+    {
+      "source": "TRADINGVIEW_BYMA",
+      "interval": "1d",
+      "n": 107166,
+      "first_ts": "2009-11-16 14:00:00+00:00",
+      "last_ts": "2026-09-23 13:30:00+00:00",
+      "first_ingest": "2026-05-25 06:32:33.372952+00:00",
+      "last_ingest": "2026-09-23 21:08:08.594392+00:00"
+    },
+    {
+      "source": "YAHOO_BYMA",
+      "interval": "1d",
+      "n": 84673,
+      "first_ts": "2000-01-03 00:00:00+00:00",
+      "last_ts": "2026-06-26 00:00:00+00:00",
+      "first_ingest": "2026-06-27 16:40:04.196615+00:00",
+      "last_ingest": "2026-06-27 16:40:49.455964+00:00"
+    },
+    {
+      "source": "COCOS",
+      "interval": "1d",
+      "n": 33401,
+      "first_ts": "2022-01-17 00:00:00+00:00",
+      "last_ts": "2026-05-18 00:00:00+00:00",
+      "first_ingest": "2026-05-16 01:06:05.228615+00:00",
+      "last_ingest": "2026-05-25 00:49:07.144454+00:00"
+    },
+    {
+      "source": "internal_snapshot",
+      "interval": "1d",
+      "n": 22729,
+      "first_ts": "2026-05-18 00:00:00+00:00",
+      "last_ts": "2026-09-23 00:00:00+00:00",
+      "first_ingest": "2026-05-18 20:05:00.523920+00:00",
+      "last_ingest": "2026-09-23 20:05:10.051652+00:00"
+    }
+  ],
+  "decision_layers_keys": [
+    {
+      "key": "momentum",
+      "n": 144
+    },
+    {
+      "key": "shadow_alignment",
+      "n": 144
+    },
+    {
+      "key": "sentiment",
+      "n": 144
+    },
+    {
+      "key": "edge",
+      "n": 144
+    },
+    {
+      "key": "technical_buy_shadow_v3_protocol",
+      "n": 144
+    },
+    {
+      "key": "why_not_now",
+      "n": 144
+    },
+    {
+      "key": "final_score",
+      "n": 144
+    },
+    {
+      "key": "trade_type",
+      "n": 144
+    },
+    {
+      "key": "edge_label",
+      "n": 144
+    },
+    {
+      "key": "source",
+      "n": 144
+    },
+    {
+      "key": "reversion_shadow",
+      "n": 144
+    },
+    {
+      "key": "conviction",
+      "n": 144
+    },
+    {
+      "key": "edge_vs",
+      "n": 144
+    },
+    {
+      "key": "technical_buy_shadow_v3",
+      "n": 144
+    },
+    {
+      "key": "shadow_probability_up_20",
+      "n": 144
+    },
+    {
+      "key": "technical_has_reconstructed_candles",
+      "n": 144
+    },
+    {
+      "key": "asymmetry_ratio",
+      "n": 144
+    },
+    {
+      "key": "rr",
+      "n": 144
+    },
+    {
+      "key": "technical",
+      "n": 144
+    },
+    {
+      "key": "alerts",
+      "n": 144
+    },
+    {
+      "key": "technical_candle_source_counts",
+      "n": 144
+    },
+    {
+      "key": "technical_data_source_mode",
+      "n": 144
+    },
+    {
+      "key": "action_concreta",
+      "n": 144
+    },
+    {
+      "key": "technical_shadow_v2",
+      "n": 144
+    },
+    {
+      "key": "shadow_action",
+      "n": 144
+    },
+    {
+      "key": "technical_candle_sources",
+      "n": 144
+    },
+    {
+      "key": "candidate_status",
+      "n": 144
+    },
+    {
+      "key": "stop_loss_pct",
+      "n": 144
+    },
+    {
+      "key": "macro",
+      "n": 144
+    },
+    {
+      "key": "shadow_expected_return_20",
+      "n": 144
+    },
+    {
+      "key": "run_context",
+      "n": 23
+    },
+    {
+      "key": "broker_movement",
+      "n": 23
+    },
+    {
+      "key": "sentiment_context",
+      "n": 17
+    }
+  ],
+  "decision_feature_versions": [
+    {
+      "has_feature_id": false,
+      "has_strategy_version": false,
+      "n": 167
+    }
+  ]
+}

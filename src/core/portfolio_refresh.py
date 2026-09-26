@@ -23,6 +23,7 @@ class PortfolioRefreshRequest:
     owner_chat_id: int | None
     include_fills: bool
     include_market: bool
+    bypass_cooldown: bool
     requested_at: float
 
     @classmethod
@@ -34,6 +35,7 @@ class PortfolioRefreshRequest:
             owner_chat_id=int(owner) if owner is not None else None,
             include_fills=bool(payload.get("include_fills", True)),
             include_market=bool(payload.get("include_market", False)),
+            bypass_cooldown=bool(payload.get("bypass_cooldown", False)),
             requested_at=float(payload.get("requested_at") or time.time()),
         )
 
@@ -44,6 +46,7 @@ class PortfolioRefreshRequest:
             "owner_chat_id": self.owner_chat_id,
             "include_fills": self.include_fills,
             "include_market": self.include_market,
+            "bypass_cooldown": self.bypass_cooldown,
             "requested_at": self.requested_at,
         }
 
@@ -58,6 +61,7 @@ async def request_portfolio_refresh(
     owner_chat_id: int | None = None,
     include_fills: bool = True,
     include_market: bool = False,
+    bypass_cooldown: bool = False,
     timeout_seconds: float = 120.0,
 ) -> dict[str, Any]:
     request = PortfolioRefreshRequest(
@@ -66,6 +70,7 @@ async def request_portfolio_refresh(
         owner_chat_id=owner_chat_id,
         include_fills=include_fills,
         include_market=include_market,
+        bypass_cooldown=bypass_cooldown,
         requested_at=time.time(),
     )
     response_key = portfolio_refresh_response_key(request.request_id)

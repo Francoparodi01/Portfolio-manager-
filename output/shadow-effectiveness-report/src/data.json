@@ -1,0 +1,128 @@
+{
+  "id": "c4a4da07-6583-42ef-b1e2-2b86d48c5f3e",
+  "surface": "report",
+  "title": "Shadows: mucha medición, sin mejora demostrada",
+  "generatedAt": "2026-08-31T21:50:00Z",
+  "status": "reviewed_live_snapshot",
+  "report": { "asOf": "2026-08-31" },
+  "filters": [],
+  "queries": {
+    "status_inventory": {
+      "rows": [
+        {"module":"Tesis de precio V2","status":"MEDIBLE","evidence":"6.113 outcomes a 5r","conclusion":"Sin edge direccional probado"},
+        {"module":"Calibración de precio V3 · 5r","status":"RECHAZADA","evidence":"3.163 predicciones walk-forward","conclusion":"Empeora MAE y Brier"},
+        {"module":"Calibración de precio V3 · 20r","status":"PENDIENTE","evidence":"0 cohortes sin leakage","conclusion":"Sin prueba prospectiva"},
+        {"module":"Technical Shadow V2","status":"NEGATIVA","evidence":"41 episodios maduros a 5d","conclusion":"Menor retorno y acierto que baseline"},
+        {"module":"Technical Buy V3 / Radar","status":"INICIAL","evidence":"1 outcome maduro a 5r","conclusion":"No comparable aún"},
+        {"module":"Learning Shadow","status":"REVISIÓN","evidence":"302 casos bloqueados maduros a 5d","conclusion":"Alpha vs SPY negativo; controles reutilizados"},
+        {"module":"Causal Shadow","status":"SIN MEDIR","evidence":"0 análisis persistidos","conclusion":"Sin outcome para evaluar"}
+      ],
+      "source": {
+        "label": "Síntesis derivada de las consultas auditadas del informe",
+        "tables": ["shadow_thesis_outcomes", "shadow_calibration_models", "decision_log", "radar_discovery_outcomes", "learning_shadow_cases", "shadow_thesis_causal_analysis"],
+        "filters": ["Snapshot vivo al 2026-08-31", "Todos los módulos permanecen fuera de análisis y ejecución"],
+        "metricDefinitions": [
+          {"label":"Estado de evidencia","definition":"Clasificación del módulo por disponibilidad de outcomes y resultado comparativo; no es una señal de trading.","componentIds":["inventory"],"sourceLineage":[{"tables":["shadow_thesis_outcomes", "shadow_calibration_models", "decision_log", "radar_discovery_outcomes", "learning_shadow_cases", "shadow_thesis_causal_analysis"]}]}
+        ]
+      }
+    },
+    "thesis_quality": {
+      "rows": [
+        {"horizon":"5 ruedas","samples":6113,"excluded":13,"accuracy":0.50678881,"neutral":0.5,"mae":0.05044703,"expectedReturn":0.00368756,"realizedReturn":0.00531520},
+        {"horizon":"20 ruedas","samples":5887,"excluded":6,"accuracy":0.50925769,"neutral":0.5,"mae":0.10595590,"expectedReturn":0.01666714,"realizedReturn":0.03677205},
+        {"horizon":"40 ruedas","samples":2350,"excluded":4,"accuracy":0.46553191,"neutral":0.5,"mae":0.17885104,"expectedReturn":0.03333056,"realizedReturn":0.06898552}
+      ],
+      "source": {
+        "label":"Outcomes maduros de la tesis de precio Shadow V2",
+        "tables":["shadow_thesis_forecasts","shadow_thesis_outcomes"],
+        "filters":["Outcomes con retorno absoluto <= 100%", "Horizontes de 5, 20 y 40 ruedas"],
+        "metricDefinitions":[
+          {"label":"Acierto direccional","definition":"Proporción de outcomes maduros con la dirección prevista correcta; 50% es una referencia neutral, no un benchmark de rentabilidad.","componentIds":["thesis-accuracy"],"sourceLineage":[{"tables":["shadow_thesis_forecasts","shadow_thesis_outcomes"]}]},
+          {"label":"MAE","definition":"Error absoluto medio entre retorno esperado y retorno realizado.","componentIds":["thesis-accuracy"],"sourceLineage":[{"tables":["shadow_thesis_forecasts","shadow_thesis_outcomes"]}]}
+        ]
+      }
+    },
+    "calibration_walk_forward": {
+      "rows": [
+        {"metric":"MAE · 5r","series":"V2 crudo","value":0.04612886},
+        {"metric":"MAE · 5r","series":"V3 calibrado","value":0.04854611},
+        {"metric":"Brier · 5r","series":"V2 crudo","value":0.25922794},
+        {"metric":"Brier · 5r","series":"V3 calibrado","value":0.28087353}
+      ],
+      "source": {
+        "label":"Walk-forward sin leakage de calibración de precio V3",
+        "tables":["shadow_calibration_models","shadow_calibrated_forecasts","shadow_thesis_outcomes"],
+        "filters":["5 ruedas: 3.163 predicciones y 13 cohortes", "Train target_session_ts < test as_of_ts", "20 ruedas: sin cohorte usable todavía"],
+        "metricDefinitions":[
+          {"label":"MAE walk-forward","definition":"Error absoluto medio fuera de muestra; menor es mejor.","componentIds":["calibration-walk-forward"],"sourceLineage":[{"tables":["shadow_calibration_models","shadow_calibrated_forecasts","shadow_thesis_outcomes"]}]},
+          {"label":"Brier walk-forward","definition":"Error cuadrático de probabilidades direccionales fuera de muestra; menor es mejor.","componentIds":["calibration-walk-forward"],"sourceLineage":[{"tables":["shadow_calibration_models","shadow_calibrated_forecasts","shadow_thesis_outcomes"]}]}
+        ]
+      }
+    },
+    "technical_comparison": {
+      "rows": [
+        {"horizon":"5 días · n=41","method":"Baseline actual","meanReturn":0.01678881,"winRate":0.65853659},
+        {"horizon":"5 días · n=41","method":"Technical V2","meanReturn":0.00510890,"winRate":0.58536585},
+        {"horizon":"10 días · n=13","method":"Baseline actual","meanReturn":0.04107948,"winRate":0.61538462},
+        {"horizon":"10 días · n=13","method":"Technical V2","meanReturn":0.01842629,"winRate":0.61538462}
+      ],
+      "source": {
+        "label":"Auditoría read-only de Technical Shadow V2 frente a su baseline",
+        "tables":["decision_log"],
+        "filters":["365 días", "outcome_basis = canonical_cocos", "Episodios deduplicados ticker/día", "20d y 40d sin outcomes maduros"],
+        "metricDefinitions":[
+          {"label":"Retorno direccional medio","definition":"Retorno de cada episodio orientado según el signo del score del método; no es PnL ni resultado de una orden.","componentIds":["technical-return"],"sourceLineage":[{"tables":["decision_log"]}]},
+          {"label":"Acierto","definition":"Fracción de retornos direccionales positivos por método y horizonte.","componentIds":["technical-return"],"sourceLineage":[{"tables":["decision_log"]}]}
+        ]
+      }
+    },
+    "learning_quality": {
+      "rows": [
+        {"horizon":"5 días","matured":302,"cleanMissRate":0.40728477,"alphaVsSpy":-0.00863003,"controlReuse":6.71111111},
+        {"horizon":"10 días","matured":288,"cleanMissRate":0.375,"alphaVsSpy":-0.01084563,"controlReuse":6.54545455},
+        {"horizon":"20 días","matured":265,"cleanMissRate":0.31320755,"alphaVsSpy":-0.02564192,"controlReuse":6.30952381},
+        {"horizon":"40 días","matured":178,"cleanMissRate":0.21910112,"alphaVsSpy":-0.06523788,"controlReuse":7.12}
+      ],
+      "source": {
+        "label":"Learning Shadow sobre decisiones bloqueadas por el planner",
+        "tables":["decision_log","market_candles","shadow_thesis_forecasts","shadow_thesis_outcomes"],
+        "filters":["365 días", "Población PLANNER_BLOCKED", "Benchmark SPY", "Sin cambios de guardas ni umbrales"],
+        "metricDefinitions":[
+          {"label":"Alpha vs SPY","definition":"Promedio del retorno contrafactual menos el outcome del benchmark SPY; positivo sería favorable.","componentIds":["learning-alpha"],"sourceLineage":[{"tables":["decision_log","market_candles"]}]},
+          {"label":"Clean miss rate","definition":"Casos bloqueados maduros clasificados como oportunidades limpias dividido por casos maduros; no demuestra que una regla deba cambiar.","componentIds":["learning-alpha"],"sourceLineage":[{"tables":["decision_log","market_candles"]}]}
+        ]
+      }
+    },
+    "radar_maturity": {
+      "rows": [
+        {"horizon":"5 ruedas","matured":1,"netReturn":0.00235989,"excessVsUniverse":0.0},
+        {"horizon":"10 ruedas","matured":0,"netReturn":null,"excessVsUniverse":null},
+        {"horizon":"20 ruedas","matured":0,"netReturn":null,"excessVsUniverse":null},
+        {"horizon":"40 ruedas","matured":0,"netReturn":null,"excessVsUniverse":null}
+      ],
+      "source": {
+        "label":"Ledger prospectivo de Radar y Technical Buy V3",
+        "tables":["radar_discovery_runs","radar_discovery_snapshots","radar_discovery_outcomes"],
+        "filters":["Versión actual: 6 cohortes, 24–31 ago", "Costo teórico 75 bps", "Una observación madura a 5 ruedas"],
+        "metricDefinitions":[
+          {"label":"Outcomes maduros","definition":"Observaciones de Radar con suficiente número de ruedas posteriores para el horizonte indicado.","componentIds":["radar-maturity"],"sourceLineage":[{"tables":["radar_discovery_runs","radar_discovery_snapshots","radar_discovery_outcomes"]}]},
+          {"label":"Retorno neto teórico","definition":"Retorno forward menos 75 bps de costo teórico; no incluye ejecución real, impuestos ni sizing.","componentIds":["radar-maturity"],"sourceLineage":[{"tables":["radar_discovery_outcomes"]}]}
+        ]
+      }
+    },
+    "follow_trace": {
+      "rows": [
+        {"stage":"Ideas seguidas","count":7},
+        {"stage":"Compras reales vinculadas","count":0}
+      ],
+      "source": {
+        "label":"Seguimiento descriptivo de Radar",
+        "tables":["radar_setup_alerts","market_prices","broker_fills"],
+        "filters":["Estado actual de watchlist", "Un fill solo cuenta si es BUY posterior compatible"],
+        "metricDefinitions":[
+          {"label":"Trazabilidad de seguimiento","definition":"Ideas marcadas para observar y compras reales vinculadas; no es una métrica de efectividad del Radar ni retorno realizado.","componentIds":["follow-trace"],"sourceLineage":[{"tables":["radar_setup_alerts","market_prices","broker_fills"]}]}
+        ]
+      }
+    }
+  }
+}

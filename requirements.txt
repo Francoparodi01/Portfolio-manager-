@@ -42,3 +42,6 @@ pytz>=2024.1,<2026.0
 # ── Modelos estadísticos / auditoría ──────────────────────
 statsmodels>=0.14,<1.0
 scikit-learn>=1.4,<2.0
+
+# Decision Lab frozen evidence contracts
+pydantic>=2.10,<3.0

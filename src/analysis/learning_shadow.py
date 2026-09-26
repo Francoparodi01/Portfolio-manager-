@@ -19,7 +19,9 @@ BENCHMARK_TICKER = "SPY"
 MEDIUM_ADVERSE_EXCURSION = -0.06
 HIGH_ADVERSE_EXCURSION = -0.12
 MIN_PATH_SESSIONS = 2
-MIN_RULE_SAMPLE = 20
+MIN_RULE_SAMPLE = 30
+MIN_RULE_UNIQUE_CONTROLS = 30
+MAX_RULE_CONTROL_REUSE_RATIO = 2.0
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
 HORIZON_MAP = {
@@ -546,7 +548,35 @@ def build_rule_candidates(cases: list[LearningShadowCase]) -> list[dict[str, Any
         clean = [case for case in cohort if case.review_label == CLEAN_MISSED_OPPORTUNITY]
         if len(cohort) < MIN_RULE_SAMPLE or len(clean) < 5:
             continue
-        candidate_type = candidate_types.get(category, "EVIDENCE_REVIEW")
+        control_cases = [
+            case for case in cohort if case.control_decision_log_id is not None
+        ]
+        unique_controls = len({
+            case.control_decision_log_id for case in control_cases
+        })
+        control_reuse_ratio = (
+            len(control_cases) / unique_controls if unique_controls else None
+        )
+        mean_alpha = _mean([case.alpha_vs_benchmark for case in cohort])
+        evidence_blockers: list[str] = []
+        if mean_alpha is None or mean_alpha <= 0:
+            evidence_blockers.append("BENCHMARK_ALPHA_NOT_POSITIVE")
+        if unique_controls < MIN_RULE_UNIQUE_CONTROLS:
+            evidence_blockers.append("INSUFFICIENT_UNIQUE_CONTROLS")
+        if (
+            control_reuse_ratio is not None
+            and control_reuse_ratio > MAX_RULE_CONTROL_REUSE_RATIO
+        ):
+            evidence_blockers.append("CONTROL_REUSE_TOO_HIGH")
+
+        requested_type = candidate_types.get(category, "EVIDENCE_REVIEW")
+        candidate_type = requested_type if not evidence_blockers else "EVIDENCE_REVIEW"
+        rationale = (
+            f"{len(clean)} of {len(cohort)} mature blocked cases were clean, "
+            "benchmark-adjusted counterfactual wins. Review in shadow only."
+        )
+        if evidence_blockers:
+            rationale += " Threshold review blocked: " + ", ".join(evidence_blockers) + "."
         rows.append({
             "block_category": category,
             "horizon_days": 5,
@@ -560,22 +590,23 @@ def build_rule_candidates(cases: list[LearningShadowCase]) -> list[dict[str, Any
             "market_driven_count": sum(
                 case.review_label == MARKET_DRIVEN_WIN for case in cohort
             ),
-            "mean_alpha_vs_benchmark": _mean(
-                [case.alpha_vs_benchmark for case in cohort]
-            ),
+            "mean_alpha_vs_benchmark": mean_alpha,
             "evidence_start": min(case.decided_at for case in cohort),
             "evidence_end": max(case.decided_at for case in cohort),
-            "rationale": (
-                f"{len(clean)} of {len(cohort)} mature blocked cases were clean, "
-                "benchmark-adjusted counterfactual wins. Review in shadow only."
-            ),
+            "rationale": rationale,
             "proposed_rule": {
                 "mode": "shadow_only",
                 "action": candidate_type,
                 "block_category": category,
                 "review_after_days": [2, 5],
                 "live_threshold_change": False,
-                "minimum_future_sample": max(30, len(cohort)),
+                "minimum_future_sample": max(MIN_RULE_SAMPLE, len(cohort)),
+                "minimum_unique_controls": MIN_RULE_UNIQUE_CONTROLS,
+                "max_control_reuse_ratio": MAX_RULE_CONTROL_REUSE_RATIO,
+                "unique_control_count": unique_controls,
+                "control_reuse_ratio": control_reuse_ratio,
+                "mean_alpha_vs_benchmark": mean_alpha,
+                "promotion_blockers": evidence_blockers,
                 "requires_human_approval": True,
             },
         })

@@ -1,0 +1,13 @@
+{
+  "experiment_id": "quantia-decision-lab-legacy-v1-20260924",
+  "registered_at": "2026-09-24T16:00:00Z",
+  "split": "EXPLORATORY",
+  "confirmatory": false,
+  "horizons": [5, 10, 20, 40],
+  "bootstrap_resamples": 5000,
+  "bootstrap_block_sessions": 20,
+  "seed": 42,
+  "confidence": 0.95,
+  "minimum_n": 30,
+  "family": []
+}

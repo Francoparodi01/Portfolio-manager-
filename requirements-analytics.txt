@@ -1,0 +1,2 @@
+# Opt-in offline Analytics v2; numerical/plotting dependencies are already in requirements.txt.
+pydantic>=2.10,<3.0
