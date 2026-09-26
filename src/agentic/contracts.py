@@ -35,6 +35,9 @@ def validate_answer(answer: Any) -> str:
     return answer[:12000]
 
 
+ToolCapability = Literal["READ", "COMPUTE", "WRITE", "FORBIDDEN"]
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -42,6 +45,7 @@ class ToolSpec:
     input_schema: dict[str, Any]
     read_only: bool = True
     timeout_seconds: float = 600.0
+    capability: ToolCapability = "READ"
 
     def prompt_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +53,7 @@ class ToolSpec:
             "description": self.description,
             "input_schema": self.input_schema,
             "read_only": self.read_only,
+            "capability": self.capability,
         }
 
 
