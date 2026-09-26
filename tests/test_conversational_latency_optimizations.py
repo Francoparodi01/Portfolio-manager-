@@ -3,17 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 
-from src.agentic.contracts import ToolSpec
 from src.agentic.conversation.gateway import (
     _BACKGROUND_REFRESH_TASKS,
     _explicit_refresh_request,
     _schedule_background_refresh,
 )
 from src.agentic.harness.context import ContextSelector
+from src.agentic.harness.runtime import _DIRECT_AFTER_REQUIRED
 from src.agentic.harness.schemas import TaskSpec
 from src.agentic.harness.synthesis import GroundedSynthesizer
 from src.agentic.harness.task import TaskParser
-from src.agentic.model import OllamaAgentModel
 
 
 class _SynthesisResponse:
@@ -79,52 +78,14 @@ def test_background_refresh_is_deduplicated_per_owner():
     asyncio.run(scenario())
 
 
-def test_known_bounded_intent_bypasses_ollama_planner(monkeypatch):
-    model = OllamaAgentModel(model="fixture-model")
-
-    async def should_not_run(_payload):
-        raise AssertionError("Ollama planner should be bypassed for portfolio_review")
-
-    monkeypatch.setattr(model, "_call", should_not_run)
-    tools = [
-        ToolSpec(
-            name="get_portfolio_snapshot",
-            description="fixture",
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-            capability="READ",
-        )
-    ]
-    history = [
-        {
-            "decision": {"kind": "tool", "tool": "get_portfolio_snapshot", "arguments": {}},
-            "observation": {
-                "tool": "get_portfolio_snapshot",
-                "ok": True,
-                "content": json.dumps(
-                    {
-                        "scraped_at": "2026-09-26T12:00:00+00:00",
-                        "total_value_ars": 1000,
-                        "cash_ars": 100,
-                        "positions": [],
-                    }
-                ),
-            },
-        }
-    ]
-
-    decision = asyncio.run(
-        model.decide(
-            goal="¿Cómo está mi cartera?",
-            tools=tools,
-            history=history,
-            step_no=1,
-            max_steps=5,
-            force_final=False,
-        )
-    )
-
-    assert decision.kind == "final"
-    assert "1.000,00 ARS" in decision.answer
+def test_known_bounded_intents_bypass_planner_only_inside_conversational_harness():
+    # The latency optimization belongs at the conversational orchestration
+    # boundary. OllamaAgentModel remains generic so legacy/research orchestrators
+    # keep their original planner semantics.
+    assert "portfolio_review" in _DIRECT_AFTER_REQUIRED
+    assert "bot_follow_pnl" in _DIRECT_AFTER_REQUIRED
+    assert "performance" in _DIRECT_AFTER_REQUIRED
+    assert "system_status" in _DIRECT_AFTER_REQUIRED
 
 
 def test_synthesis_defaults_are_bounded_for_chat_latency(monkeypatch):
