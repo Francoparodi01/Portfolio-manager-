@@ -38,7 +38,6 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
     """Add read-only capabilities that previously lived behind Telegram commands."""
 
     async def decision_ledger(arguments: dict[str, Any]) -> ToolObservation:
-        from src.analysis.bot_counterfactual import fetch_normalized_bot_counterfactual
         from src.analysis.decision_ledger import fetch_decision_ledger, render_decision_ledger
 
         started = time.monotonic()
@@ -50,12 +49,6 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
                 days=days,
                 match_window_days=2,
                 owner_chat_id=context.owner_chat_id,
-            )
-            normalized_bot = await fetch_normalized_bot_counterfactual(
-                conn,
-                days=days,
-                owner_chat_id=int(context.owner_chat_id or 0),
-                legacy_single_owner=bool(context.legacy_single_owner),
             )
             report = render_decision_ledger(data)
         finally:
@@ -69,7 +62,6 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
                 "mode": "PRODUCTION_OBSERVATION",
                 "as_of": datetime.now(timezone.utc).isoformat(),
                 "lookback_days": days,
-                "normalized_bot_counterfactual": normalized_bot,
                 "report": report,
             },
             limit=context.output_limit_chars,
@@ -80,8 +72,7 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
             name="get_decision_ledger",
             description=(
                 "Read Quantia's account-scoped economic Decision Ledger: real execution PnL, "
-                "bot-vs-human attribution, radar/swap comparisons, pending marks, and a structured "
-                "deduplicated bot counterfactual. Read-only."
+                "bot-vs-human attribution, radar/swap comparisons and pending marks. Read-only."
             ),
             input_schema={
                 "type": "object",
@@ -92,6 +83,66 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
             timeout_seconds=90,
         ),
         decision_ledger,
+    )
+
+    async def normalized_bot_follow_pnl(arguments: dict[str, Any]) -> ToolObservation:
+        """Deduplicated hypothetical PnL of following formal bot plans."""
+        from src.analysis.bot_counterfactual import fetch_normalized_bot_counterfactual
+
+        started = time.monotonic()
+        days = max(1, min(365, int(arguments.get("days", 90))))
+        conn = await connect_read_only(read_only_dsn(context.database_url), command_timeout=30)
+        try:
+            payload = await fetch_normalized_bot_counterfactual(
+                conn,
+                days=days,
+                owner_chat_id=int(context.owner_chat_id or 0),
+                legacy_single_owner=bool(context.legacy_single_owner),
+            )
+            return _observation(
+                tool_name="get_normalized_bot_follow_pnl",
+                arguments={"days": days},
+                started=started,
+                payload=payload,
+                limit=context.output_limit_chars,
+            )
+        except Exception as exc:
+            return _observation(
+                tool_name="get_normalized_bot_follow_pnl",
+                arguments={"days": days},
+                started=started,
+                payload={
+                    "schema_version": "bot-follow-pnl-normalized-v1",
+                    "status": "unavailable",
+                    "lookback_days": days,
+                    "source": "decision_log_formal_plan_episodes",
+                },
+                limit=context.output_limit_chars,
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        finally:
+            await conn.close()
+
+    registry.register(
+        ToolSpec(
+            name="get_normalized_bot_follow_pnl",
+            description=(
+                "Read-only counterfactual PnL of following Quantia formal executable plans while "
+                "deduplicating repeated consecutive recommendations into recommendation episodes. "
+                "Returns separate 5D/10D/20D gross outcomes and never uses actual human fills."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 1, "maximum": 365, "default": 90}
+                },
+                "additionalProperties": False,
+            },
+            read_only=True,
+            timeout_seconds=30,
+        ),
+        normalized_bot_follow_pnl,
     )
 
     async def run_evidence_provenance(arguments: dict[str, Any]) -> ToolObservation:
@@ -151,7 +202,13 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
                         payload = parsed
                 except (TypeError, ValueError):
                     payload = {}
-                normalized = payload.get("normalized_bot_counterfactual")
+
+                normalized = None
+                if payload.get("schema_version") == "bot-follow-pnl-normalized-v1":
+                    normalized = payload
+                elif isinstance(payload.get("normalized_bot_counterfactual"), dict):
+                    normalized = payload.get("normalized_bot_counterfactual")
+
                 source = {
                     "step_no": int(row.get("step_no") or 0),
                     "tool": row.get("tool_name"),
