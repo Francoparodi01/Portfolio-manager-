@@ -10,16 +10,23 @@ from src.analysis.economic_meta_policy import ECONOMIC_META_POLICY_VERSION
 from src.analysis.economic_meta_store import DEFAULT_SHADOW_PATH, EconomicMetaShadowStore
 
 
+def _as_of_dt(value: Any) -> datetime:
+    try:
+        dt = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _fmt_dt(value: Any) -> str:
     if not value:
         return "—"
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
+    dt = _as_of_dt(value)
+    if dt == datetime.min.replace(tzinfo=timezone.utc):
         return str(value)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 
 def _decision_icon(value: str) -> str:
@@ -69,20 +76,31 @@ def _is_db_analysis_row(row: dict) -> bool:
 
 
 def _preferred_rows(rows: list[dict]) -> tuple[list[dict], str]:
-    """Prefer DB watcher evidence because it can attach point-in-time history."""
-    database_rows = [row for row in rows if _is_db_analysis_row(row)]
-    if database_rows:
-        return database_rows, "AUTO_ANALYSIS_DB"
+    """Use the freshest automatic source; prefer DB only when equally fresh.
+
+    The DB watcher can attach point-in-time history, but it must never hide a newer
+    rendered analysis report. This keeps /meta aligned with the latest analysis the
+    user actually saw while still preferring richer DB evidence on timestamp ties.
+    """
     automatic = [row for row in rows if _is_auto_analysis_row(row)]
     if automatic:
-        return automatic, "AUTO_ANALYSIS"
+        newest = max(
+            automatic,
+            key=lambda row: (
+                _as_of_dt(row.get("as_of")),
+                1 if _is_db_analysis_row(row) else 0,
+            ),
+        )
+        if _is_db_analysis_row(newest):
+            return [row for row in automatic if _is_db_analysis_row(row)], "AUTO_ANALYSIS_DB"
+        return [row for row in automatic if not _is_db_analysis_row(row)], "AUTO_ANALYSIS"
     return rows, "SHADOW_MANUAL"
 
 
 def _latest_run(rows: list[dict]) -> tuple[str | None, list[dict]]:
     if not rows:
         return None, []
-    newest = max(rows, key=lambda row: str(row.get("as_of") or ""))
+    newest = max(rows, key=lambda row: _as_of_dt(row.get("as_of")))
     run_id = str(newest.get("run_id") or "") or None
     if run_id:
         selected = [row for row in rows if str(row.get("run_id") or "") == run_id]
@@ -155,9 +173,14 @@ def render_latest_meta(
             "Capital effect: NO"
         )
 
-    by_ticker: dict[str, list[dict]] = defaultdict(list)
+    # JSONL is append-only. If the same run is recalculated with corrected input
+    # semantics, keep the last record for each ticker/policy instead of rendering
+    # duplicate A/B/C/D entries.
+    by_ticker_policy: dict[str, dict[str, dict]] = defaultdict(dict)
     for row in selected:
-        by_ticker[str(row.get("ticker") or "?").upper()].append(row)
+        symbol = str(row.get("ticker") or "?").upper()
+        policy = str(row.get("policy_name") or "META-?")
+        by_ticker_policy[symbol][policy] = row
 
     source_label = (
         "análisis automático DB"
@@ -173,8 +196,11 @@ def render_latest_meta(
         "Capital effect: NO",
         "",
     ]
-    for symbol in sorted(by_ticker):
-        records = sorted(by_ticker[symbol], key=lambda row: str(row.get("policy_name") or ""))
+    for symbol in sorted(by_ticker_policy):
+        records = sorted(
+            by_ticker_policy[symbol].values(),
+            key=lambda row: str(row.get("policy_name") or ""),
+        )
         first = records[0]
         score = first.get("candidate_score")
         try:
