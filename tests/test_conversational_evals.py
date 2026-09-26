@@ -13,12 +13,12 @@ DATASET = ROOT / "evals" / "conversations" / "harness_cases.json"
 
 AVAILABLE_TOOLS = {
     "get_portfolio_snapshot", "get_persisted_decision_evidence", "get_bot_follow_pnl",
-    "get_run_evidence_provenance", "get_decision_evidence", "analyze_portfolio", "analyze_ticker",
-    "get_macro_context", "get_macro_exposure", "scan_opportunities", "get_performance",
-    "get_decision_ledger", "get_net_decision_report", "get_analytics_v2", "get_viability_audit",
-    "get_system_status", "get_meta_policy", "compare_plan_vs_hold", "get_decision_value_added",
-    "get_decision_counterfactuals", "get_similar_historical_episodes",
-    "get_replay_evidence_quality", "compare_strategy_versions",
+    "get_normalized_bot_follow_pnl", "get_run_evidence_provenance", "get_decision_evidence",
+    "analyze_portfolio", "analyze_ticker", "get_macro_context", "get_macro_exposure",
+    "scan_opportunities", "get_performance", "get_decision_ledger", "get_net_decision_report",
+    "get_analytics_v2", "get_viability_audit", "get_system_status", "get_meta_policy",
+    "compare_plan_vs_hold", "get_decision_value_added", "get_decision_counterfactuals",
+    "get_similar_historical_episodes", "get_replay_evidence_quality", "compare_strategy_versions",
 }
 
 
