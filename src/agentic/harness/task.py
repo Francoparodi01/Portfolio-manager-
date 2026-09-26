@@ -36,6 +36,14 @@ def _extract_days(text: str) -> int | None:
 def _previous_days(state: ConversationState | None) -> int | None:
     if state is None:
         return None
+    if isinstance(state.last_task, dict):
+        try:
+            value = state.last_task.get("lookback_days")
+            if value is not None:
+                return max(1, min(730, int(value)))
+        except (TypeError, ValueError):
+            pass
+    # Backward compatibility for sessions persisted before last_task existed.
     for item in reversed(state.recent_user_messages):
         days = _extract_days(item)
         if days is not None:
