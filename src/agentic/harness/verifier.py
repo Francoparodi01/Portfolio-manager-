@@ -9,9 +9,11 @@ from typing import Iterable
 from .schemas import EvidenceMode, EvidenceObject, TaskSpec, VerificationReport
 
 
-# Do not capture the horizon label in `5D`/`10D`, but do capture values such as
-# `25 días`, `16,8%`, `-$115.960` and ordinary JSON numbers.
-_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\$?\d+(?:[.,]\d+)?%?(?![A-Za-z])")
+# Do not capture the horizon label in `5D`/`10D`, but do capture localized
+# values such as `25 días`, `16,8%`, `-$115.960` and `2.895.125,00` as one token.
+_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[-+]?\$?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)%?(?![A-Za-z])"
+)
 _NUMERIC_INTENTS = {
     "portfolio_review",
     "position_analysis",
@@ -107,23 +109,29 @@ class HarnessVerifier:
         if not raw:
             return set()
 
-        candidates: set[str] = {raw.replace(",", ".")}
-        # A single separator followed by exactly three digits is ambiguous in
-        # Spanish output: 115.960 may mean 115960, while 0.168 is a decimal.
-        # Keep both interpretations and let the evidence decide.
-        for sep in (".", ","):
-            if raw.count(sep) == 1:
-                head, tail = raw.split(sep)
-                if len(tail) == 3 and head.lstrip("+-").isdigit() and tail.isdigit():
-                    candidates.add(head + tail)
-        # Mixed separators: interpret the last separator as decimal and the
-        # other as thousands, covering 1.234,56 and 1,234.56.
-        if "." in raw and "," in raw:
-            last_dot, last_comma = raw.rfind("."), raw.rfind(",")
-            if last_comma > last_dot:
+        candidates: set[str] = set()
+        dot_count, comma_count = raw.count("."), raw.count(",")
+
+        if dot_count and comma_count:
+            # Interpret the last separator as decimal and the other as thousands,
+            # covering both 2.895.125,00 and 2,895,125.00.
+            if raw.rfind(",") > raw.rfind("."):
                 candidates.add(raw.replace(".", "").replace(",", "."))
             else:
                 candidates.add(raw.replace(",", ""))
+        elif dot_count > 1:
+            candidates.add(raw.replace(".", ""))
+        elif comma_count > 1:
+            candidates.add(raw.replace(",", ""))
+        else:
+            candidates.add(raw.replace(",", "."))
+            # A single separator followed by exactly three digits is ambiguous:
+            # 115.960 can be 115960 while 0.168 can be a decimal. Keep both.
+            for sep in (".", ","):
+                if raw.count(sep) == 1:
+                    head, tail = raw.split(sep)
+                    if len(tail) == 3 and head.lstrip("+-").isdigit() and tail.isdigit():
+                        candidates.add(head + tail)
 
         values: set[float] = set()
         for candidate in candidates:
@@ -153,8 +161,6 @@ class HarnessVerifier:
             answer_values = self._token_values(token)
             if not answer_values:
                 continue
-            # Ignore tiny discourse ordinals. Horizon labels are excluded by
-            # the regex itself because the number is followed by D/d.
             if answer_values <= {0.0, 1.0, 2.0, 3.0}:
                 continue
             if not any(
