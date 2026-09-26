@@ -29,6 +29,13 @@ from src.analysis.economic_meta_store import (
     DEFAULT_SHADOW_PATH,
     EconomicMetaShadowStore,
 )
+from src.analysis.historical_edge import (
+    DEFAULT_LOOKBACK_DAYS,
+    DEFAULT_RESEARCH_COST_BPS,
+    load_historical_rows,
+    match_historical_edge,
+    normalize_action,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +329,38 @@ class EconomicMetaAnalysisWatcher:
             return 0.0
         return max(0.0, fees / gross * 10_000.0)
 
+    async def _history_by_owner(
+        self,
+        conn: asyncpg.Connection,
+        rows: list[dict[str, Any]],
+    ) -> dict[int, list[dict[str, Any]]]:
+        if not rows:
+            return {}
+        run_as_of = max(_aware(row.get("as_of")) for row in rows)
+        owners = {
+            int(row["owner_chat_id"])
+            for row in rows
+            if row.get("owner_chat_id") is not None
+        }
+        history: dict[int, list[dict[str, Any]]] = {}
+        for owner in owners:
+            try:
+                history[owner] = await load_historical_rows(
+                    conn,
+                    owner_chat_id=owner,
+                    as_of=run_as_of,
+                    lookback_days=DEFAULT_LOOKBACK_DAYS,
+                )
+            except Exception:
+                # Historical Edge is an experimental shadow challenger. A schema
+                # or data-quality failure must never break A/B/C or production.
+                logger.exception(
+                    "[META][HIST] no pude cargar histórico owner=%s; META-D fail-closed",
+                    owner,
+                )
+                history[owner] = []
+        return history
+
     async def run_once(self) -> WatcherRunSummary:
         existing = self._existing_keys()
         runs_seen = 0
@@ -339,6 +378,8 @@ class EconomicMetaAnalysisWatcher:
                 candidates_seen += len(rows)
                 turnover = sum(abs(_float(row.get("delta_weight"))) for row in rows)
                 cost_bps = await self._estimated_cost_bps(conn, run_id)
+                historical_rows = await self._history_by_owner(conn, rows)
+                historical_cost_bps = max(DEFAULT_RESEARCH_COST_BPS, cost_bps)
 
                 for row in rows:
                     ticker = str(row.get("ticker") or "").upper().strip()
@@ -348,16 +389,39 @@ class EconomicMetaAnalysisWatcher:
                         f"analysis:{run_id}:{owner if owner is not None else 0}:"
                         f"{ticker}:{source_kind}"
                     )
+                    candidate_action = _action(row.get("action"))
+                    candidate_as_of = _aware(row.get("as_of"))
+                    historical_edge: dict[str, Any] = {}
+                    normalized_action = normalize_action(candidate_action)
+                    if owner is not None and normalized_action in {"BUY", "SELL"}:
+                        try:
+                            historical_edge = match_historical_edge(
+                                historical_rows.get(int(owner), []),
+                                candidate_action=normalized_action,
+                                candidate_score=_float(row.get("final_score"), 0.0),
+                                candidate_regime=str(row.get("regime") or "UNKNOWN"),
+                                as_of=candidate_as_of,
+                                lookback_days=DEFAULT_LOOKBACK_DAYS,
+                                cost_bps=historical_cost_bps,
+                            ).to_dict()
+                        except Exception:
+                            logger.exception(
+                                "[META][HIST] match falló %s %s; META-D fail-closed",
+                                ticker,
+                                normalized_action,
+                            )
+
                     candidate = {
                         "ticker": ticker,
-                        "candidate_action": _action(row.get("action")),
+                        "candidate_action": candidate_action,
                         "candidate_score": _float(row.get("final_score"), 0.0),
-                        "as_of": _aware(row.get("as_of")),
+                        "as_of": candidate_as_of,
                         "estimated_cost_bps": cost_bps,
                         "portfolio_turnover": turnover,
                         "market_regime": str(row.get("regime") or "UNKNOWN"),
                         "expected_edge_vs_hold_bps": None,
                         "edge_uncertainty_bps": None,
+                        "historical_edge": historical_edge,
                         "opportunity_id": opportunity_id,
                     }
                     records = evaluate_all_preregistered(candidate, run_id=run_id)
