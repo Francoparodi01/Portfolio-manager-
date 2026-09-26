@@ -16,18 +16,24 @@ from src.agentic.harness.task import TaskParser
 from src.agentic.model import OllamaAgentModel
 
 
-def test_portfolio_review_runs_minimum_required_evidence_in_parallel():
+def test_portfolio_review_runs_db_bound_evidence_in_parallel():
     task = TaskParser().parse("¿Cómo está mi cartera?")
     plan = ContextSelector().select(
         task,
-        {"get_portfolio_snapshot", "get_decision_evidence", "analyze_portfolio"},
+        {
+            "get_portfolio_snapshot",
+            "get_persisted_decision_evidence",
+            "get_decision_evidence",
+            "analyze_portfolio",
+        },
     )
 
     assert task.intent == "portfolio_review"
     assert [
         "get_portfolio_snapshot",
-        "get_decision_evidence",
+        "get_persisted_decision_evidence",
     ] in plan.parallel_groups
+    assert "get_decision_evidence" not in plan.allowed_tools
     assert "analyze_portfolio" not in plan.allowed_tools
 
 
