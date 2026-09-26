@@ -1,7 +1,8 @@
 """Point-in-time read tool for Quantia sentiment evidence.
 
-This module is intentionally read-only. It exposes the active FinBERT evidence
-without granting sentiment any direct execution authority.
+This module is intentionally read-only. It exposes active FinBERT evidence
+without granting sentiment any direct execution authority. Ticker evidence is
+accepted only from the active entity-matched retrieval policy.
 """
 from __future__ import annotations
 
@@ -11,9 +12,13 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .news_retrieval_tool import RETRIEVAL_POLICY
 from .sentiment_symbols import news_symbol_for_portfolio_ticker
 
 ACTIVE_SCORER = os.getenv("SENTIMENT_ACTIVE_SCORER", "finbert").strip().lower() or "finbert"
+ACTIVE_TICKER_RETRIEVAL_POLICY = os.getenv(
+    "SENTIMENT_ACTIVE_TICKER_RETRIEVAL_POLICY", RETRIEVAL_POLICY
+).strip() or RETRIEVAL_POLICY
 WINDOWS_HOURS = (6, 24, 72)
 
 
@@ -38,6 +43,7 @@ class SentimentToolResult:
     model: str
     model_version: str
     scorer: str = ACTIVE_SCORER
+    retrieval_policy: str = ACTIVE_TICKER_RETRIEVAL_POLICY
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -84,6 +90,7 @@ def _weighted_window(rows: list[dict[str, Any]], hours: int, as_of: datetime) ->
     total_weight = 0.0
     for row in relevant:
         confidence = max(float(row.get("confidence") or 0.0), 0.05)
+        entity_match_score = max(0.0, min(float(row.get("entity_match_score") or 1.0), 1.0))
         payload = _json_payload(row.get("raw_response"))
         positive = float(payload.get("positive") or 0.0)
         negative = float(payload.get("negative") or 0.0)
@@ -93,12 +100,15 @@ def _weighted_window(rows: list[dict[str, Any]], hours: int, as_of: datetime) ->
             positive, negative, neutral = 0.0, 0.0, 1.0
             total = 1.0
         positive, negative, neutral = positive / total, negative / total, neutral / total
-        weight = confidence
+        weight = confidence * entity_match_score
         weighted_score += float(row.get("score") or 0.0) * weight
         weighted_positive += positive * weight
         weighted_negative += negative * weight
         weighted_neutral += neutral * weight
         total_weight += weight
+
+    if total_weight <= 0:
+        return {"score": 0.0, "positive": 0.0, "neutral": 1.0, "negative": 0.0, "count": 0}
 
     return {
         "score": weighted_score / total_weight,
@@ -132,7 +142,7 @@ async def get_sentiment(
     as_of: datetime | None = None,
     lookback_hours: int = 72,
 ) -> SentimentToolResult:
-    """Return strict point-in-time FinBERT sentiment for one portfolio symbol."""
+    """Return strict PIT FinBERT sentiment for one portfolio symbol."""
     as_of_utc = _aware_utc(as_of)
     portfolio_symbol = str(symbol or "").upper().strip()
     news_symbol = news_symbol_for_portfolio_ticker(portfolio_symbol)
@@ -144,7 +154,8 @@ async def get_sentiment(
             SELECT DISTINCT ON (ss.raw_id)
                 ss.raw_id, ss.ticker, ss.score, ss.confidence, ss.raw_response,
                 ss.model, ss.scorer, ss.scored_at, sr.source,
-                COALESCE(sr.published_at, sr.fetched_at) AS event_ts
+                COALESCE(sr.published_at, sr.fetched_at) AS event_ts,
+                COALESCE((sr.raw_payload->>'entity_match_score')::float, 1.0) AS entity_match_score
             FROM sentiment_scored ss
             JOIN sentiment_raw sr ON sr.id = ss.raw_id
             WHERE ss.status = 'SCORED'
@@ -152,9 +163,11 @@ async def get_sentiment(
               AND ss.ticker = ANY($2::text[])
               AND COALESCE(sr.published_at, sr.fetched_at) <= $3
               AND COALESCE(sr.published_at, sr.fetched_at) >= $3 - ($4::int * INTERVAL '1 hour')
+              AND sr.raw_payload->>'retrieval_policy' = $5
             ORDER BY ss.raw_id, ss.scored_at DESC
         )
-        SELECT ticker, score, confidence, raw_response, model, scorer, source, event_ts
+        SELECT ticker, score, confidence, raw_response, model, scorer, source,
+               event_ts, entity_match_score
         FROM latest
         ORDER BY event_ts DESC
         """,
@@ -162,6 +175,7 @@ async def get_sentiment(
         lookup,
         as_of_utc,
         max(int(lookback_hours), 72),
+        ACTIVE_TICKER_RETRIEVAL_POLICY,
     )
     data = [dict(row) for row in rows]
     w6 = _weighted_window(data, 6, as_of_utc)
