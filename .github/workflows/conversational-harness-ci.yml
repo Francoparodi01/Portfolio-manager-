@@ -1,0 +1,61 @@
+name: Conversational Harness CI
+
+on:
+  push:
+    branches:
+      - feat/conversational-harness
+  pull_request:
+    paths:
+      - "src/agentic/**"
+      - "scripts/telegram_conversational.py"
+      - "scripts/run_conversational_evals.py"
+      - "evals/conversations/**"
+      - "tests/test_conversational_harness.py"
+      - "docker-compose*.yml"
+      - ".github/workflows/conversational-harness-ci.yml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONPATH: .
+      QUANTIA_AGENT_REQUIRE_AUDIT: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project and validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-analytics.txt
+          pip install ruff mypy
+
+      - name: Compile new harness
+        run: |
+          python -m compileall -q src/agentic/harness scripts/telegram_conversational.py scripts/run_conversational_evals.py
+
+      - name: Lint new harness
+        run: |
+          ruff check --select E4,E7,E9,F src/agentic/harness scripts/telegram_conversational.py scripts/run_conversational_evals.py tests/test_conversational_harness.py
+
+      - name: Type check new harness
+        run: |
+          mypy --ignore-missing-imports --follow-imports=skip --allow-untyped-defs src/agentic/harness scripts/telegram_conversational.py scripts/run_conversational_evals.py
+
+      - name: Conversational unit and safety tests
+        run: |
+          pytest -q tests/test_conversational_harness.py
+
+      - name: Conversational evaluation suite
+        run: |
+          python scripts/run_conversational_evals.py
+
+      - name: Existing project test suite
+        run: |
+          pytest -q
