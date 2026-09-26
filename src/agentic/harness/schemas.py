@@ -34,6 +34,15 @@ class TaskSpec(StrictModel):
     inherited_subject: str | None = None
     ambiguity: list[str] = Field(default_factory=list)
     raw_message: str
+    # Structured conversational semantics. These fields are produced by the
+    # semantic router (or conservative fallback parser) and consumed by policy;
+    # they never directly select arbitrary tools or authorize actions.
+    lookback_days: int | None = Field(default=None, ge=1, le=730)
+    horizon_days: int | None = Field(default=None, ge=1, le=365)
+    aggregation: Literal["plan_level", "normalized"] | None = None
+    reference: Literal["current_turn", "previous_turn"] = "current_turn"
+    routing_source: Literal["semantic", "fallback", "precomputed"] = "fallback"
+    routing_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @field_validator("entities")
     @classmethod
