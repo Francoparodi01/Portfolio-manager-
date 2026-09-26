@@ -42,6 +42,7 @@ def test_bot_follow_pnl_preserves_requested_lookback():
         legacy_single_owner=True,
         require_audit=False,
     )
+    assert task.lookback_days == 25
     assert harness._arguments("get_bot_follow_pnl", task) == {"days": 25}
 
 
@@ -115,7 +116,8 @@ def test_normalized_bot_followup_inherits_25d_and_uses_dedicated_tool():
     task = TaskParser().parse(query, state)
     assert task.intent == "bot_follow_pnl"
     assert task.objective == "explain_normalized_follow_pnl"
-    assert "25 días" in task.raw_message
+    assert task.lookback_days == 25
+    assert task.aggregation == "normalized"
 
     plan = ContextSelector().select(task, {
         "get_bot_follow_pnl", "get_normalized_bot_follow_pnl", "get_decision_ledger", "get_net_decision_report"
