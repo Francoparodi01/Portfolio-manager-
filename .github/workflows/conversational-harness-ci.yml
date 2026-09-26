@@ -138,33 +138,27 @@ jobs:
         run: |
           python - <<'PY'
           import asyncio
+          import os
+          import subprocess
           from src.agentic.conversation.session import ConversationSessionStore
           from src.agentic.harness.schemas import ConversationState
           from src.core.redis_client import client as redis_client
 
-          async def before():
+          async def main():
               assert await redis_client.ping()
               store = ConversationSessionStore(424242, ttl_seconds=60)
               state = ConversationState(owner_chat_id=424242, active_symbols=["GDX"], last_intent="position_analysis")
               await store.save(state)
               print("REDIS_BEFORE=OK")
-          asyncio.run(before())
-          PY
-          docker stop "$REDIS_CONTAINER_ID"
-          python - <<'PY'
-          import asyncio
-          from src.agentic.conversation.session import ConversationSessionStore
-
-          async def after():
-              store = ConversationSessionStore(424242, ttl_seconds=60)
-              state = await store.load()
-              assert state.active_symbols == ["GDX"]
-              state.active_symbols = ["NVDA"]
-              await store.save(state)
+              subprocess.run(["docker", "stop", os.environ["REDIS_CONTAINER_ID"]], check=True, capture_output=True, text=True)
               loaded = await store.load()
-              assert loaded.active_symbols == ["NVDA"]
+              assert loaded.active_symbols == ["GDX"]
+              loaded.active_symbols = ["NVDA"]
+              await store.save(loaded)
+              loaded_again = await store.load()
+              assert loaded_again.active_symbols == ["NVDA"]
               print("REDIS_FALLBACK=PASS")
-          asyncio.run(after())
+          asyncio.run(main())
           PY
       - name: Exercise a real financial tool failure and insufficient-evidence path
         run: |
