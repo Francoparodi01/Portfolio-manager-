@@ -62,9 +62,6 @@ class GroundedSynthesizer:
                 if answer:
                     return answer
 
-        # Some small local models ignore JSON-only formatting but still return
-        # a grounded natural-language answer. The verifier remains the final
-        # guard against unsupported numbers or mode confusion.
         if len(clean) >= 20 and not clean.startswith("{"):
             return clean
         return ""
@@ -73,14 +70,11 @@ class GroundedSynthesizer:
         if os.getenv("QUANTIA_HARNESS_SYNTHESIS_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
             return fallback
 
-        # Bounded metric/status intents already have source-bound deterministic
-        # renderers. Sending the same evidence through the local model adds
-        # latency and can only fall back to the same grounded text.
         fast_intents = {
             value.strip()
             for value in os.getenv(
                 "QUANTIA_HARNESS_SYNTHESIS_BYPASS_INTENTS",
-                "portfolio_review,bot_follow_pnl",
+                "portfolio_review,bot_follow_pnl,evidence_provenance",
             ).split(",")
             if value.strip()
         }
