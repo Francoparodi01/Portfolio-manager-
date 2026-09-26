@@ -33,6 +33,16 @@ def _reason(value: Any) -> str:
         "EDGE_EVIDENCE_REQUIRED": "falta edge vs HOLD",
         "EDGE_DOES_NOT_CLEAR_COST_UNCERTAINTY_BUFFER": "edge insuficiente",
         "EDGE_DOES_NOT_CLEAR_COST_UNCERTAINTY": "edge insuficiente",
+        "HISTORICAL_EDGE_REQUIRED": "sin histórico PIT",
+        "HIST_SAMPLE_LT_20_EPISODES": "histórico n<20",
+        "HIST_SAMPLE_LT_8_DATES": "histórico fechas<8",
+        "HIST_WIN_RATE_LT_55PCT": "win histórico <55%",
+        "HIST_EV_NET_LT_25BPS": "EV histórico <+0,25%",
+        "HIST_MEDIAN_NET_NOT_POSITIVE": "mediana histórica <=0",
+        "HIST_PROFIT_FACTOR_LT_1_10": "PF histórico <1,10",
+        "HIST_TOP1_CONCENTRATION_GT_40PCT": "histórico concentrado top1",
+        "HIST_TOP3_CONCENTRATION_GT_75PCT": "histórico concentrado top3",
+        "HIST_DVA_SEMANTICS_UNEXPECTED": "semántica histórica inválida",
         "COST_ABOVE_SHADOW_GATE": "costo alto",
         "TURNOVER_ABOVE_SHADOW_GATE": "turnover alto",
         "REGIME_BLOCKED": "régimen bloqueado",
@@ -53,8 +63,16 @@ def _is_auto_analysis_row(row: dict) -> bool:
     return str(row.get("opportunity_id") or "").startswith("analysis:")
 
 
+def _is_db_analysis_row(row: dict) -> bool:
+    opportunity = str(row.get("opportunity_id") or "")
+    return opportunity.startswith("analysis:") and not opportunity.startswith("analysis:report:")
+
+
 def _preferred_rows(rows: list[dict]) -> tuple[list[dict], str]:
-    """Prefer automatically ingested analysis evidence over manual probes."""
+    """Prefer DB watcher evidence because it can attach point-in-time history."""
+    database_rows = [row for row in rows if _is_db_analysis_row(row)]
+    if database_rows:
+        return database_rows, "AUTO_ANALYSIS_DB"
     automatic = [row for row in rows if _is_auto_analysis_row(row)]
     if automatic:
         return automatic, "AUTO_ANALYSIS"
@@ -72,6 +90,44 @@ def _latest_run(rows: list[dict]) -> tuple[str | None, list[dict]]:
         as_of = str(newest.get("as_of") or "")
         selected = [row for row in rows if str(row.get("as_of") or "") == as_of]
     return run_id, selected
+
+
+def _pct(value: Any, *, signed: bool = False) -> str:
+    try:
+        number = float(value) * 100.0
+    except (TypeError, ValueError):
+        return "N/D"
+    return f"{number:+.1f}%" if signed else f"{number:.1f}%"
+
+
+def _ratio(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/D"
+    if number == float("inf"):
+        return "∞"
+    return f"{number:.2f}"
+
+
+def _historical_line(records: list[dict]) -> str | None:
+    meta_d = next((row for row in records if str(row.get("policy_name") or "") == "META-D"), None)
+    if not meta_d:
+        return None
+    metadata = meta_d.get("metadata") or {}
+    historical = metadata.get("historical_edge") if isinstance(metadata, dict) else None
+    if not isinstance(historical, dict) or not historical:
+        return "Hist20D · evidencia PIT no disponible"
+    specificity = str(historical.get("specificity") or "N/D").replace("_", "/")
+    quality = str(historical.get("quality") or "N/D")
+    return (
+        "Hist20D · "
+        f"{specificity} · n {int(historical.get('n_episodes') or 0)} / "
+        f"{int(historical.get('n_dates') or 0)} fechas · "
+        f"win {_pct(historical.get('win_rate_net'))} · "
+        f"EV net {_pct(historical.get('mean_net_return'), signed=True)} · "
+        f"PF {_ratio(historical.get('profit_factor_net'))} · {quality}"
+    )
 
 
 def render_latest_meta(
@@ -103,7 +159,13 @@ def render_latest_meta(
     for row in selected:
         by_ticker[str(row.get("ticker") or "?").upper()].append(row)
 
-    source_label = "análisis automático" if source_mode == "AUTO_ANALYSIS" else "registro manual"
+    source_label = (
+        "análisis automático DB"
+        if source_mode == "AUTO_ANALYSIS_DB"
+        else "análisis automático"
+        if source_mode == "AUTO_ANALYSIS"
+        else "registro manual"
+    )
     lines = [
         "🧪 Economic Meta Policy v1 · SHADOW_ONLY",
         f"Run: {run_id or '—'}",
@@ -130,6 +192,9 @@ def render_latest_meta(
                 label += f"({reason})"
             parts.append(label)
         lines.append(" · ".join(parts))
+        historical_line = _historical_line(records)
+        if historical_line:
+            lines.append(historical_line)
 
     latest_cut = max((str(row.get("as_of") or "") for row in selected), default="")
     lines.extend(
@@ -137,6 +202,7 @@ def render_latest_meta(
             "",
             f"Corte: {_fmt_dt(latest_cut)}",
             "Primario: 20D · research: 5/10/20/40D",
+            "Hist20D = retorno direccional neto de costo research; no es DVA vs HOLD.",
             "Vista read-only: /meta no crea ni modifica decisiones.",
         ]
     )
@@ -162,7 +228,7 @@ def render_meta_status(path: str | Path = DEFAULT_SHADOW_PATH) -> str:
 
     auto_rows = [row for row in rows if _is_auto_analysis_row(row)]
     manual_rows = [row for row in rows if not _is_auto_analysis_row(row)]
-    preferred = auto_rows or rows
+    preferred, _ = _preferred_rows(rows)
 
     runs = {str(row.get("run_id")) for row in rows if row.get("run_id")}
     tickers = {str(row.get("ticker")) for row in rows if row.get("ticker")}
