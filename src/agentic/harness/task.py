@@ -46,7 +46,13 @@ class TaskParser:
 
         follow_up = self._looks_like_follow_up(text)
         if state and follow_up:
-            if not entities and state.active_symbols:
+            comparison_follow_up = any(term in text for term in ("comparalo", "comparala", "comparar", " vs "))
+            if comparison_follow_up and entities and state.active_symbols:
+                previous = [symbol for symbol in state.active_symbols if symbol not in entities]
+                if previous:
+                    entities = [previous[0], *entities]
+                    inherited_subject = state.conversation_subject or previous[0]
+            elif not entities and state.active_symbols:
                 entities = list(state.active_symbols)
                 inherited_subject = state.conversation_subject or entities[0]
             elif state.conversation_subject:
@@ -75,6 +81,7 @@ class TaskParser:
         markers = (
             "por que", "porque", "y si", "comparalo", "comparala", "y ahora",
             "eso", "esa", "ese", "entonces", "en su lugar", "y cual", "y que",
+            "que te preocupa", "cual te preocupa", "qué te preocupa",
         )
         return short and any(marker in text for marker in markers)
 
