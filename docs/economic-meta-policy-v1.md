@@ -2,7 +2,7 @@
 
 ## Estado
 
-- Base: `feature/decision-lab-pit-replay` @ `2096cdd42e237f90bd93f17cbc1eae288b824c3d`.
+- Base histórica original: `feature/decision-lab-pit-replay` @ `2096cdd42e237f90bd93f17cbc1eae288b824c3d`.
 - Modo: `SHADOW_ONLY`.
 - Efecto sobre capital: **ninguno**.
 - Horizonte económico primario: **20 sesiones**.
@@ -19,7 +19,9 @@ La política v1 **no** reemplaza recomendaciones, no cambia sizing, no crea órd
 
 Analytics v2 observacional sugirió que el edge del BOT no es homogéneo por horizonte ni por dirección y que 20D merece ser el endpoint primario de investigación. Ese hallazgo sirve para formular la hipótesis, no para seleccionar retrospectivamente el mejor threshold.
 
-Decision Lab reciente permite comparar PLAN contra HOLD, pero la reconstrucción histórica todavía tiene cobertura primaria insuficiente y calidad limitada para usarla como calibración confirmatoria. Por eso los thresholds de este preregistro son deliberadamente simples y quedan congelados antes del forward test.
+Decision Lab reciente permite comparar PLAN contra HOLD, pero la reconstrucción histórica todavía tiene cobertura primaria insuficiente y calidad limitada para usarla como calibración confirmatoria. Por eso los thresholds base de A/B/C son deliberadamente simples y quedan congelados antes del forward test.
+
+META-D agrega otra hipótesis en shadow: una señal puede ganar evidencia si pertenece a un patrón histórico point-in-time que ya mostró suficiente muestra, win rate y retorno neto. Los buckets y el orden de backoff de META-D son fijos; no se buscan retrospectivamente combinaciones que maximicen PnL.
 
 ## Challengers congelados
 
@@ -48,6 +50,24 @@ Prueba la hipótesis de que BUY y SELL no deberían compartir el mismo umbral.
 
 META-C es un challenger deliberadamente restrictivo. No constituye recomendación de producción.
 
+### META-D — historical edge
+
+- BUY: `abs(score) >= 0.08`
+- SELL/REDUCE: `abs(score) >= 0.08`
+- Requiere un match histórico point-in-time de 20D.
+- Unidad: episodios direccionales deduplicados, no cada recomendación repetida.
+- Muestra mínima: `20` episodios y `8` fechas.
+- Win rate neto mínimo: `55%`.
+- EV neto mínimo: `+25 bps`.
+- Mediana neta: positiva.
+- Profit factor mínimo: `1.10`.
+- Concentración positiva máxima: Top1 `40%`, Top3 `75%`.
+- Costo histórico: el mayor entre `150 bps` y el costo estimado de la corrida actual.
+
+El matcher usa buckets fijos de `abs(final_score)` (`<0.08`, `0.08–0.12`, `0.12–0.18`, `>=0.18`) y un backoff fijo: acción+score+régimen → acción+score → acción+régimen → acción. No elige el bucket que haya rendido mejor.
+
+`outcome_20d` es retorno **direccional** canónico. No es un contrafactual de cartera HOLD, por lo que META-D no lo presenta como DVA vs HOLD. El detalle metodológico está en `docs/historical-edge-meta-d.md`.
+
 ## Gates comunes
 
 - `max_estimated_cost_bps = 250`
@@ -75,6 +95,7 @@ Cada decisión shadow registra, como mínimo:
 - `expected_edge_vs_hold_bps`
 - `edge_uncertainty_bps`
 - `opportunity_id`
+- para META-D, snapshot de `historical_edge` dentro de metadata
 - flags explícitos de `shadow_only` y `capital_effect=false`
 
 La persistencia de referencia es JSONL append-only en `outputs/economic_meta_policy/shadow_decisions.jsonl`. Está aislada de tablas o rutas de ejecución de producción.
@@ -130,7 +151,7 @@ printf '%s\n' '{"ticker":"NVDA","candidate_action":"SELL","final_score":-0.14,"a
   | python scripts/run_economic_meta_shadow.py --run-id research-20260924
 ```
 
-El runner emite tres registros —META-A, META-B y META-C— y persiste únicamente evidencia shadow. META-C rechazará el ejemplo mientras no exista una estimación explícita de edge vs HOLD.
+El runner emite cuatro registros —META-A, META-B, META-C y META-D— y persiste únicamente evidencia shadow. META-C rechazará el ejemplo mientras no exista una estimación explícita de edge vs HOLD. META-D rechazará una entrada manual que no incluya evidencia histórica estructurada; el watcher automático de base de datos es quien construye ese match point-in-time.
 
 ## No objetivos
 
@@ -147,4 +168,4 @@ Esta versión no:
 - convierte Analytics v2 observacional en evidencia causal;
 - habilita capital por haber pasado tests de software.
 
-El éxito de esta etapa es operacional: empezar a capturar desde ahora una cohorte prospectiva, auditable y comparable entre CURRENT, META-A/B/C y HOLD.
+El éxito de esta etapa es operacional: capturar una cohorte prospectiva, auditable y comparable entre CURRENT, META-A/B/C/D y HOLD.
