@@ -84,7 +84,8 @@ class GroundedSynthesizer:
             return {key: payload.get(key) for key in keys if key in payload}
         if schema == "bot-follow-pnl-normalized-v1":
             keys = (
-                "schema_version", "source", "mode", "as_of", "lookback_days", "raw_plans_total",
+                "schema_version", "source", "mode", "as_of", "lookback_days",
+                "candidate_plans_total", "raw_plans_total", "excluded_missing_notional",
                 "episodes_total", "duplicates_removed", "episodes_closed_5d", "episodes_closed_10d",
                 "episodes_closed_20d", "pnl_5d_ars", "pnl_10d_ars", "pnl_20d_ars", "scope",
                 "episode_definition", "limitations",
@@ -205,6 +206,7 @@ class GroundedSynthesizer:
             "Los hechos financieros salen EXCLUSIVAMENTE de evidence; no calcules números nuevos ni completes datos faltantes. "
             "Podés reformatear un número observado, pero no cambiar su valor ni sumar horizontes alternativos. "
             "Diferenciá siempre plan hipotético, episodio normalizado, fill real, PnL bruto y PnL neto. "
+            "Si evidence informa planes excluidos por falta de notional, mencioná esa cobertura sólo cuando sea material. "
             "Un score no es retorno. Una señal no es una operación ejecutada. SHADOW/RESEARCH no es producción. "
             "Mencioná la limitación material más importante sin recitar advertencias innecesarias. "
             "No muestres JSON, nombres internos de tools ni trazas salvo que el usuario pregunte explícitamente por fuentes. "
