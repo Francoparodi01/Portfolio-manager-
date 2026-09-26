@@ -105,6 +105,28 @@ def test_same_signal_after_intervening_run_is_new_episode():
     assert [episode["recommendation_count"] for episode in nvda] == [1, 1]
 
 
+def test_all_hold_run_breaks_episode_even_without_nvda_row():
+    rows = [
+        _row(1, ticker="NVDA", outcome=0.04, days_ago=90, run_id="r1"),
+        {
+            **_row(
+                2,
+                ticker="AMD",
+                outcome=0.0,
+                days_ago=89,
+                run_id="r2",
+                metric_scope="hold_audit",
+            ),
+            "decision": "HOLD",
+            "status": "OBSERVED",
+        },
+        _row(3, ticker="NVDA", outcome=0.05, days_ago=88, run_id="r3"),
+    ]
+    episodes = build_directional_episodes(rows)
+    nvda = [episode for episode in episodes if episode["ticker"] == "NVDA"]
+    assert len(nvda) == 2
+
+
 def test_blocked_audit_is_not_learned_as_formal_winner():
     rows = _profitable_history()
     rows.append(
