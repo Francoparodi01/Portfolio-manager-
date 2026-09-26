@@ -40,6 +40,7 @@ from src.analysis.historical_edge import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_STATE_PATH = Path("outputs/economic_meta_policy/watcher_state.json")
+DB_INPUT_VERSION = "meta-db-input-v2"
 
 
 def _dsn(value: str) -> str:
@@ -69,12 +70,34 @@ def _float(value: Any, default: float = 0.0) -> float:
 
 
 def _action(value: Any) -> str:
+    """Normalize DB actions with the same semantics as report ingestion."""
     raw = str(value or "").upper().strip()
-    if raw in {"SELL_FULL", "SELL_PARTIAL", "EXIT", "CLOSE"}:
+    if raw in {"SELL_PARTIAL", "REDUCE", "TRIM"}:
+        return "REDUCE"
+    if raw in {"SELL", "SELL_FULL", "EXIT", "CLOSE"}:
         return "SELL"
-    if raw in {"BUY_FULL", "BUY_PARTIAL", "ADD"}:
+    if raw in {"BUY", "BUY_FULL", "BUY_PARTIAL", "ADD"}:
         return "BUY"
     return raw
+
+
+def _portfolio_turnover(rows: list[dict[str, Any]]) -> float:
+    """Mirror the legacy report-ingest turnover definition.
+
+    Only executable directional deltas count. HOLD/WATCH rows are excluded and
+    opposite sides are not added together; turnover is the larger of aggregate
+    buys and aggregate sells, exactly like ``economic_meta_report_ingest``.
+    """
+    buy_delta = 0.0
+    sell_delta = 0.0
+    for row in rows:
+        action = _action(row.get("action"))
+        delta = _float(row.get("delta_weight"), 0.0)
+        if action == "BUY":
+            buy_delta += max(0.0, delta)
+        elif action in {"SELL", "REDUCE"}:
+            sell_delta += max(0.0, -delta)
+    return max(0.0, min(max(buy_delta, sell_delta), 1.0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,7 +441,7 @@ class EconomicMetaAnalysisWatcher:
                     continue
                 runs_seen += 1
                 candidates_seen += len(rows)
-                turnover = sum(abs(_float(row.get("delta_weight"))) for row in rows)
+                turnover = _portfolio_turnover(rows)
                 cost_bps = await self._estimated_cost_bps(conn, run_id)
                 historical_rows = await self._history_by_owner(conn, rows)
                 historical_cost_bps = max(DEFAULT_RESEARCH_COST_BPS, cost_bps)
@@ -428,8 +451,8 @@ class EconomicMetaAnalysisWatcher:
                     owner = row.get("owner_chat_id")
                     source_kind = str(row.get("source_kind") or "analysis")
                     opportunity_id = (
-                        f"analysis:{run_id}:{owner if owner is not None else 0}:"
-                        f"{ticker}:{source_kind}"
+                        f"analysis:{DB_INPUT_VERSION}:{run_id}:"
+                        f"{owner if owner is not None else 0}:{ticker}:{source_kind}"
                     )
                     candidate_action = _action(row.get("action"))
                     candidate_as_of = _aware(row.get("as_of"))
@@ -518,6 +541,7 @@ async def run_economic_meta_watcher_loop(
 
 
 __all__ = [
+    "DB_INPUT_VERSION",
     "DEFAULT_STATE_PATH",
     "EconomicMetaAnalysisWatcher",
     "WatcherRunSummary",
