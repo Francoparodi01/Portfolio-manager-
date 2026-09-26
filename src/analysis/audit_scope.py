@@ -35,6 +35,14 @@ VALID_METRIC_SCOPES = {
 }
 
 _MIGRATION_DONE = False
+_AUDIT_SCOPE_COLUMNS = {
+    "run_id",
+    "run_intent",
+    "decision_stage",
+    "metric_scope",
+    "is_primary_metric",
+    "superseded_by_id",
+}
 
 
 DECISION_AUDIT_SCOPE_MIGRATION_SQL = """
@@ -230,9 +238,42 @@ def classify_decision_audit_scope(
 
 
 async def ensure_decision_audit_scope_columns(conn) -> None:
+    """Ensure audit columns without violating read-only callers.
+
+    Conversational/reporting tools deliberately connect with
+    default_transaction_read_only=on. In that mode the schema must already be
+    deployed: validate it and continue, but never run ALTER/UPDATE/CREATE INDEX.
+    Writable scheduler/migration paths retain the historical self-healing behavior.
+    """
     global _MIGRATION_DONE
     if _MIGRATION_DONE:
         return
+
+    try:
+        read_only = str(await conn.fetchval("SHOW transaction_read_only") or "").lower() == "on"
+    except Exception:
+        read_only = False
+
+    if read_only:
+        rows = await conn.fetch(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema='public'
+              AND table_name='decision_log'
+              AND column_name = ANY($1::text[])
+            """,
+            sorted(_AUDIT_SCOPE_COLUMNS),
+        )
+        present = {str(row["column_name"]) for row in rows}
+        missing = sorted(_AUDIT_SCOPE_COLUMNS - present)
+        if missing:
+            raise RuntimeError(
+                "decision_log audit scope schema is not deployed; missing: " + ", ".join(missing)
+            )
+        _MIGRATION_DONE = True
+        return
+
     await conn.execute(DECISION_AUDIT_SCOPE_MIGRATION_SQL)
     _MIGRATION_DONE = True
 
