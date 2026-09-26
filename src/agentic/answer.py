@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .contracts import AgentDecision, AgentModelError
+
+
+_ART = ZoneInfo("America/Argentina/Buenos_Aires")
 
 
 def _number(value: Any, digits: int = 2) -> str:
@@ -23,6 +28,31 @@ def _number(value: Any, digits: int = 2) -> str:
     if not math.isfinite(number):
         return "N/D"
     return f"{number:,.{digits}f}".translate(str.maketrans({",": ".", ".": ","}))
+
+
+def _signed_money(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        return "N/D"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "N/D"
+    if not math.isfinite(number):
+        return "N/D"
+    sign = "+" if number > 0 else "-" if number < 0 else ""
+    return f"{sign}${_number(abs(number), 0)}"
+
+
+def _fmt_art(value: Any) -> str:
+    if not value:
+        return "fecha no informada"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.strftime("%d/%m %H:%M")
+        return parsed.astimezone(_ART).strftime("%d/%m %H:%M ART")
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _section(content: str, label: str) -> str:
@@ -51,13 +81,28 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
         answer, _status = explain_evidence(data)
         return answer, ["El mecanismo interno no prueba valor económico; la evidencia del Lab conserva su calidad y cohorte."]
 
+    if tool == "get_bot_follow_pnl" and data:
+        rows = [f"Ventana observada: {int(data.get('lookback_days') or 0)} días."]
+        for horizon in (5, 10, 20):
+            n = int(data.get(f"plans_closed_{horizon}d") or 0)
+            pnl = data.get(f"bot_pnl_{horizon}d_ars")
+            if n and pnl is not None:
+                rows.append(f"{horizon}D: {_signed_money(pnl)} ARS · {n} planes maduros.")
+        if len(rows) == 1:
+            rows.append("No hay outcomes maduros suficientes en esa ventana.")
+        return "\n".join(rows), [
+            "PnL hipotético del bot, no PnL realizado de la cuenta.",
+            "Resultado direccional bruto antes de fees/slippage y plan-level no deduplicado.",
+            "5D/10D/20D son cortes alternativos: no se suman entre sí.",
+        ]
+
     if tool == "get_portfolio_snapshot" and data:
         positions = data.get("positions")
         position_count = len(positions) if isinstance(positions, list) else "N/D"
         positions = positions if isinstance(positions, list) else []
         positions = [p for p in positions if isinstance(p, dict)]
         rows = [
-            f"Snapshot de cuenta: {data.get('scraped_at') or 'fecha no informada'}.",
+            f"Snapshot de cuenta: {_fmt_art(data.get('scraped_at'))}.",
             f"Valor informado: {_number(data.get('total_value_ars'))} ARS; "
             f"cash: {_number(data.get('cash_ars'))} ARS; posiciones informadas: {position_count}.",
         ]
@@ -83,8 +128,8 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
         signals = signals if isinstance(signals, list) else []
         signals = [item for item in signals if isinstance(item, dict)]
         rows = [
-            f"Decisiones evaluadas: {data.get('evaluated_at') or 'fecha no informada'}.",
-            f"Snapshot de referencia: {data.get('snapshot_as_of') or 'fecha no informada'}.",
+            f"Decisiones evaluadas: {_fmt_art(data.get('evaluated_at'))}.",
+            f"Snapshot usado por esa corrida: {_fmt_art(data.get('snapshot_as_of'))}.",
         ]
         if data.get("analysis_run_id"):
             rows.append(f"Run de análisis: {data.get('analysis_run_id')}.")
@@ -92,10 +137,16 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
         for signal in signals[:12]:
             ticker = str(signal.get("ticker") or "N/D")
             decision = str(signal.get("decision") or "N/D")
+            status = str(signal.get("status") or "").upper()
             score = _number(signal.get("final_score"), 3)
-            compact.append(f"{ticker} {decision} (score {score})")
+            status_suffix = ""
+            if status in {"BLOCKED", "REJECTED"}:
+                status_suffix = " · bloqueada"
+            elif status and status not in {"OBSERVED", "APPROVED", "EXECUTED"}:
+                status_suffix = f" · {status.lower()}"
+            compact.append(f"{ticker} {decision} (score {score}){status_suffix}")
         if compact:
-            rows.append("Señales actuales: " + "; ".join(compact) + ".")
+            rows.append("Señales observadas: " + "; ".join(compact) + ".")
         if len(signals) > 12:
             rows.append("Primeras 12 señales; resto en la traza.")
         limits = [
@@ -146,6 +197,38 @@ def _successful_tool_content(history: list[dict[str, Any]]) -> dict[str, str]:
     return result
 
 
+def _bot_follow_pnl_fallback(goal: str, history: list[dict[str, Any]]) -> str | None:
+    tools = _successful_tool_content(history)
+    raw = tools.get("get_bot_follow_pnl")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("schema_version") != "bot-follow-pnl-v1":
+        return None
+
+    days = int(data.get("lookback_days") or 0)
+    total = int(data.get("plans_total") or 0)
+    lines = [f"Tomando los últimos {days} días, Quantia registró {total} planes ejecutables del bot."]
+    mature = 0
+    for horizon in (5, 10, 20):
+        n = int(data.get(f"plans_closed_{horizon}d") or 0)
+        pnl = data.get(f"bot_pnl_{horizon}d_ars")
+        if n and pnl is not None:
+            mature += 1
+            lines.append(f"• A {horizon}D: {_signed_money(pnl)} ARS sobre {n} planes maduros.")
+    if not mature:
+        lines.append("Todavía no hay outcomes maduros suficientes para estimar ese PnL en esta ventana.")
+    lines.append(
+        "Es PnL direccional bruto hipotético a nivel plan: no es PnL realizado, no descuenta costos y puede repetir recomendaciones entre corridas."
+    )
+    if mature > 1:
+        lines.append("Los horizontes 5D/10D/20D son escenarios alternativos y no deben sumarse.")
+    return "\n".join(lines)
+
+
 def _portfolio_review_fallback(goal: str, history: list[dict[str, Any]]) -> str | None:
     normalized_goal = str(goal or "").lower()
     if "cartera" not in normalized_goal and "portfolio" not in normalized_goal:
@@ -193,10 +276,14 @@ def _portfolio_review_fallback(goal: str, history: list[dict[str, Any]]) -> str 
     signals = [item for item in signals if isinstance(item, dict)]
     active = [item for item in signals if str(item.get("decision") or "").upper() != "HOLD"]
     hold_count = sum(1 for item in signals if str(item.get("decision") or "").upper() == "HOLD")
-    signal_bits = [
-        f"{item.get('ticker') or 'N/D'} {str(item.get('decision') or 'N/D')} (score {_number(item.get('final_score'), 3)})"
-        for item in active[:4]
-    ]
+    signal_bits = []
+    for item in active[:4]:
+        ticker = item.get("ticker") or "N/D"
+        decision = str(item.get("decision") or "N/D")
+        score = _number(item.get("final_score"), 3)
+        status = str(item.get("status") or "").upper()
+        suffix = " · bloqueada" if status in {"BLOCKED", "REJECTED"} else ""
+        signal_bits.append(f"{ticker} {decision} (score {score}){suffix}")
 
     lines = [
         f"Tu cartera tiene {_number(snapshot.get('total_value_ars'))} ARS, "
@@ -206,18 +293,23 @@ def _portfolio_review_fallback(goal: str, history: list[dict[str, Any]]) -> str 
         lines.append("La mayor concentración está en " + ", ".join(holdings) + ".")
     if signal_bits:
         suffix = f"; {hold_count} posiciones siguen en HOLD" if hold_count else ""
-        lines.append("Las señales no-HOLD observadas son " + "; ".join(signal_bits) + suffix + ".")
+        lines.append("Las señales no-HOLD del último análisis son " + "; ".join(signal_bits) + suffix + ".")
     elif signals:
-        lines.append(f"Las {len(signals)} señales observadas están en HOLD.")
+        lines.append(f"Las {len(signals)} señales del último análisis están en HOLD.")
     else:
         lines.append("No hay una corrida formal de decisiones persistida con señales disponibles para mostrar.")
 
     evaluated_at = decisions.get("evaluated_at")
-    snapshot_as_of = decisions.get("snapshot_as_of")
+    decision_snapshot_as_of = decisions.get("snapshot_as_of")
+    current_snapshot_as_of = snapshot.get("scraped_at")
     if evaluated_at:
-        reference = f" sobre snapshot {snapshot_as_of}" if snapshot_as_of else ""
-        prefix = "Última corrida persistida" if decision_tool == "get_persisted_decision_evidence" else "Señales evaluadas"
-        lines.append(f"{prefix}: {evaluated_at}{reference}.")
+        reference = f", sobre snapshot {_fmt_art(decision_snapshot_as_of)}" if decision_snapshot_as_of else ""
+        prefix = "Último análisis formal" if decision_tool == "get_persisted_decision_evidence" else "Señales evaluadas"
+        lines.append(f"{prefix}: {_fmt_art(evaluated_at)}{reference}.")
+    if current_snapshot_as_of and decision_snapshot_as_of and str(current_snapshot_as_of) != str(decision_snapshot_as_of):
+        lines.append(
+            f"La cartera actual fue refrescada {_fmt_art(current_snapshot_as_of)}; las señales anteriores no se recalcularon con ese snapshot nuevo."
+        )
     if decision_tool == "get_persisted_decision_evidence":
         lines.append("Respuesta rápida: usa la última corrida formal guardada; no volvió a ejecutar el análisis completo en este turno.")
     lines.append("Las señales son evidencia del motor: no son fills, operaciones ejecutadas ni rentabilidad realizada.")
@@ -225,13 +317,22 @@ def _portfolio_review_fallback(goal: str, history: list[dict[str, Any]]) -> str 
 
 
 def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision:
+    bot_pnl_answer = _bot_follow_pnl_fallback(goal, history)
+    if bot_pnl_answer:
+        return AgentDecision(
+            kind="final",
+            answer=bot_pnl_answer,
+            rationale="Resumen determinístico del PnL hipotético de planes formales del bot.",
+            answer_origin="bot_follow_pnl_renderer_v1",
+        )
+
     portfolio_answer = _portfolio_review_fallback(goal, history)
     if portfolio_answer:
         return AgentDecision(
             kind="final",
             answer=portfolio_answer,
             rationale="Resumen determinístico de cartera desde snapshot y decisiones observadas.",
-            answer_origin="portfolio_renderer_v4",
+            answer_origin="portfolio_renderer_v5",
         )
 
     cards, limits = [], []
