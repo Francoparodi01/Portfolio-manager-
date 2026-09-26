@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+
+import src.analysis.economic_meta_watcher as meta_watcher
 from src.analysis.economic_meta_telegram import _latest_run, _preferred_rows
 from src.analysis.economic_meta_watcher import _action, _portfolio_turnover
 
@@ -18,7 +21,7 @@ def test_newer_report_is_not_hidden_by_older_db_watcher_run():
         _row(
             run_id="db-old",
             as_of="2026-09-25T18:16:00+00:00",
-            opportunity_id="analysis:meta-db-input-v2:db-old:1:NVDA:decision_log",
+            opportunity_id="analysis:meta-db-input-v3:db-old:1:NVDA:decision_log",
         ),
         _row(
             run_id="analysis-report-20260925T201200Z",
@@ -45,7 +48,7 @@ def test_db_wins_timestamp_tie_because_it_has_richer_pit_evidence():
         _row(
             run_id="db-same-time",
             as_of="2026-09-25T20:12:00+00:00",
-            opportunity_id="analysis:meta-db-input-v2:db-same-time:1:NVDA:decision_log",
+            opportunity_id="analysis:meta-db-input-v3:db-same-time:1:NVDA:decision_log",
         ),
     ]
 
@@ -86,3 +89,26 @@ def test_db_turnover_uses_larger_operable_side_like_report_ingest():
 
     # Legacy report semantics use max(buy_delta, sell_delta), not their sum.
     assert _portfolio_turnover(rows) == 0.30
+
+
+def test_legacy_null_owner_is_available_only_for_configured_single_user(monkeypatch):
+    cfg = SimpleNamespace(
+        multiuser_enabled=False,
+        scraper=SimpleNamespace(telegram_chat_id="123456"),
+    )
+    monkeypatch.setattr(meta_watcher, "get_config", lambda: cfg)
+
+    assert meta_watcher._legacy_single_owner_chat_id() == 123456
+
+    cfg.multiuser_enabled = True
+    assert meta_watcher._legacy_single_owner_chat_id() is None
+
+
+def test_legacy_null_owner_fails_closed_without_numeric_configured_owner(monkeypatch):
+    cfg = SimpleNamespace(
+        multiuser_enabled=False,
+        scraper=SimpleNamespace(telegram_chat_id="not-a-chat-id"),
+    )
+    monkeypatch.setattr(meta_watcher, "get_config", lambda: cfg)
+
+    assert meta_watcher._legacy_single_owner_chat_id() is None
