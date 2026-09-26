@@ -50,7 +50,7 @@ _INTENT_TOOLS = {
 }
 
 _REQUIRED = {
-    "portfolio_review": ["get_portfolio_snapshot", "get_decision_evidence"],
+    "portfolio_review": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_portfolio"],
     "position_analysis": ["get_portfolio_snapshot", "get_decision_evidence"],
     "decision_explanation": ["get_decision_evidence"],
     "position_comparison": ["get_portfolio_snapshot", "get_decision_evidence"],
