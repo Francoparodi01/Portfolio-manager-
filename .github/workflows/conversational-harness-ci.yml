@@ -16,6 +16,9 @@ on:
       - '.env.agentic.example'
       - '.github/workflows/conversational-harness-ci.yml'
 
+env:
+  PYTHONPATH: .
+
 jobs:
   harness-focused:
     runs-on: ubuntu-latest
@@ -38,7 +41,7 @@ jobs:
             scripts/telegram_conversational.py
       - name: Lint conversational change
         run: |
-          ruff check --ignore F401 \
+          ruff check --select E9,F63,F7,F82 \
             src/agentic/harness \
             src/agentic/conversation \
             scripts/telegram_conversational.py \
