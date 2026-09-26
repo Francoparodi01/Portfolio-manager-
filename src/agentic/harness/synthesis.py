@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 
 import httpx
 
@@ -25,7 +26,16 @@ class GroundedSynthesizer:
             or "http://host.docker.internal:11434"
         ).rstrip("/")
         self.timeout_seconds = float(os.getenv("QUANTIA_HARNESS_SYNTHESIS_TIMEOUT_SECONDS", str(timeout_seconds)))
-        self.max_chars = int(os.getenv("QUANTIA_HARNESS_SYNTHESIS_EVIDENCE_CHARS", "16000"))
+        self.max_chars = int(os.getenv("QUANTIA_HARNESS_SYNTHESIS_EVIDENCE_CHARS", "8000"))
+        self.context_tokens = max(
+            2048,
+            min(32768, int(os.getenv("QUANTIA_SYNTHESIS_CONTEXT_TOKENS", "8192"))),
+        )
+        self.num_predict = max(
+            128,
+            min(1200, int(os.getenv("QUANTIA_SYNTHESIS_NUM_PREDICT", "400"))),
+        )
+        self.keep_alive = os.getenv("QUANTIA_OLLAMA_KEEP_ALIVE", "30m")
 
     @staticmethod
     def _extract_answer(content: str) -> str:
@@ -99,8 +109,14 @@ class GroundedSynthesizer:
             ],
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.0, "num_predict": 700, "num_ctx": 16384},
+            "keep_alive": self.keep_alive,
+            "options": {
+                "temperature": 0.0,
+                "num_predict": self.num_predict,
+                "num_ctx": self.context_tokens,
+            },
         }
+        started = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await asyncio.wait_for(
@@ -108,6 +124,13 @@ class GroundedSynthesizer:
                     timeout=self.timeout_seconds,
                 )
             response.raise_for_status()
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            logger.info(
+                "[CHAT][SYNTHESIS] model=%s elapsed_ms=%s evidence_chars=%s",
+                self.model,
+                elapsed_ms,
+                used,
+            )
             data = response.json()
             content = str((data.get("message") or {}).get("content") or "")
             answer = self._extract_answer(content)
@@ -116,9 +139,11 @@ class GroundedSynthesizer:
             logger.warning("[CHAT][SYNTHESIS] fallback model=%s error=EmptyOrInvalidAnswer", self.model)
             return fallback
         except Exception as exc:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
             logger.warning(
-                "[CHAT][SYNTHESIS] fallback model=%s error=%s detail=%s",
+                "[CHAT][SYNTHESIS] fallback model=%s elapsed_ms=%s error=%s detail=%s",
                 self.model,
+                elapsed_ms,
                 type(exc).__name__,
                 str(exc)[:300],
             )
