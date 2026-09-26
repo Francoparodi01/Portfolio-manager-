@@ -17,19 +17,19 @@ on:
       - '.github/workflows/conversational-harness-ci.yml'
 
 jobs:
-  validate:
+  harness-focused:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
-      - name: Install project and validation dependencies
+      - name: Install focused validation dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest ruff mypy
+          python -m pip install pytest ruff mypy 'pydantic>=2.10,<3.0'
       - name: Compile conversational modules
         run: |
           python -m compileall -q \
@@ -60,5 +60,19 @@ jobs:
             tests/test_conversational_harness.py \
             tests/test_conversational_evals.py \
             tests/test_conversational_telegram_surface.py
+
+  project-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
       - name: Run existing project suite
         run: pytest -q
