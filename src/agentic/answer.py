@@ -109,6 +109,21 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
             "5D/10D/20D son cortes alternativos: no se suman entre sí.",
         ]
 
+    if tool == "get_normalized_bot_follow_pnl" and data:
+        rows = [
+            f"Ventana observada: {int(data.get('lookback_days') or 0)} días; "
+            f"{int(data.get('raw_plans_total') or 0)} planes → {int(data.get('episodes_total') or 0)} episodios."
+        ]
+        for horizon in (5, 10, 20):
+            n = int(data.get(f"episodes_closed_{horizon}d") or 0)
+            pnl = data.get(f"pnl_{horizon}d_ars")
+            if n and pnl is not None:
+                rows.append(f"{horizon}D: {_signed_money(pnl)} ARS · {n} episodios maduros.")
+        return "\n".join(rows), [
+            "Contrafactual deduplicado por episodio de recomendación; no representa fills humanos.",
+            "Resultado bruto antes de fees/slippage; 5D/10D/20D no se suman.",
+        ]
+
     if tool == "get_portfolio_snapshot" and data:
         positions = data.get("positions")
         position_count = len(positions) if isinstance(positions, list) else "N/D"
@@ -224,9 +239,7 @@ def _provenance_fallback(history: list[dict[str, Any]]) -> str | None:
         return "No encuentro una respuesta anterior auditada dentro de esta conversación para listar sus fuentes."
 
     sources = data.get("sources") if isinstance(data.get("sources"), list) else []
-    lines = [
-        "Para la respuesta inmediatamente anterior usé exactamente estas fuentes auditadas:",
-    ]
+    lines = ["Para la respuesta inmediatamente anterior usé exactamente estas fuentes auditadas:"]
     for source in sources:
         if not isinstance(source, dict):
             continue
@@ -250,46 +263,51 @@ def _provenance_fallback(history: list[dict[str, Any]]) -> str | None:
     return "\n".join(lines)
 
 
+def _normalized_bot_pnl_fallback(history: list[dict[str, Any]]) -> str | None:
+    raw = _successful_tool_content(history).get("get_normalized_bot_follow_pnl")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("schema_version") != "bot-follow-pnl-normalized-v1":
+        return None
+    if data.get("status") == "unavailable":
+        return (
+            f"No pude calcular el contrafactual normalizado de los últimos {int(data.get('lookback_days') or 0)} días "
+            "con evidencia suficiente. No reemplazo ese dato con el plan-level ni con operaciones realmente seguidas."
+        )
+
+    days = int(data.get("lookback_days") or 0)
+    raw_total = int(data.get("raw_plans_total") or 0)
+    episodes_total = int(data.get("episodes_total") or 0)
+    removed = int(data.get("duplicates_removed") or 0)
+    lines = [
+        f"Tomando los últimos {days} días y deduplicando recomendaciones repetidas, {raw_total} planes del bot quedan en {episodes_total} episodios independientes ({removed} reiteraciones removidas)."
+    ]
+    mature = 0
+    for horizon in (5, 10, 20):
+        n = int(data.get(f"episodes_closed_{horizon}d") or 0)
+        pnl = data.get(f"pnl_{horizon}d_ars")
+        if n and pnl is not None:
+            mature += 1
+            lines.append(f"• A {horizon}D: {_signed_money(pnl)} ARS sobre {n} episodios maduros.")
+    if not mature:
+        lines.append("Todavía no hay episodios maduros suficientes para estimar ese contrafactual en esta ventana.")
+    lines.append(
+        "Normalización: una misma acción BUY/SELL sobre el mismo ticker en corridas formales consecutivas cuenta una sola vez; un cambio de lado o una corrida intermedia sin esa recomendación abre un episodio nuevo."
+    )
+    lines.append(
+        "Es un PnL contrafactual bruto y deduplicado, no PnL realizado de la cuenta; no descuenta costos ni slippage."
+    )
+    if mature > 1:
+        lines.append("5D/10D/20D son escenarios alternativos y no deben sumarse.")
+    return "\n".join(lines)
+
+
 def _bot_follow_pnl_fallback(goal: str, history: list[dict[str, Any]]) -> str | None:
     tools = _successful_tool_content(history)
-    normalized_goal = str(goal or "").lower()
-
-    if any(term in normalized_goal for term in ("normaliz", "deduplic", "sin repetir", "repetidas")):
-        raw_ledger = tools.get("get_decision_ledger")
-        if raw_ledger:
-            try:
-                ledger = json.loads(raw_ledger)
-            except (TypeError, ValueError):
-                ledger = None
-            if isinstance(ledger, dict):
-                normalized = ledger.get("normalized_bot_counterfactual")
-                if isinstance(normalized, dict) and normalized.get("schema_version") == "bot-follow-pnl-normalized-v1":
-                    days = int(normalized.get("lookback_days") or ledger.get("lookback_days") or 0)
-                    raw_total = int(normalized.get("raw_plans_total") or 0)
-                    episodes_total = int(normalized.get("episodes_total") or 0)
-                    removed = int(normalized.get("duplicates_removed") or 0)
-                    lines = [
-                        f"Tomando los últimos {days} días y deduplicando recomendaciones repetidas, {raw_total} planes del bot quedan en {episodes_total} episodios independientes ({removed} reiteraciones removidas)."
-                    ]
-                    mature = 0
-                    for horizon in (5, 10, 20):
-                        n = int(normalized.get(f"episodes_closed_{horizon}d") or 0)
-                        pnl = normalized.get(f"pnl_{horizon}d_ars")
-                        if n and pnl is not None:
-                            mature += 1
-                            lines.append(f"• A {horizon}D: {_signed_money(pnl)} ARS sobre {n} episodios maduros.")
-                    if not mature:
-                        lines.append("Todavía no hay episodios maduros suficientes para estimar ese contrafactual en esta ventana.")
-                    lines.append(
-                        "Normalización: una misma acción BUY/SELL sobre el mismo ticker en corridas formales consecutivas cuenta una sola vez; un cambio de lado o una corrida intermedia sin esa recomendación abre un episodio nuevo."
-                    )
-                    lines.append(
-                        "Es un PnL contrafactual bruto y deduplicado, no PnL realizado de la cuenta; no descuenta costos ni slippage."
-                    )
-                    if mature > 1:
-                        lines.append("5D/10D/20D son escenarios alternativos y no deben sumarse.")
-                    return "\n".join(lines)
-
     raw = tools.get("get_bot_follow_pnl")
     if not raw:
         return None
@@ -417,12 +435,21 @@ def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision
             answer_origin="provenance_renderer_v1",
         )
 
+    normalized_bot_answer = _normalized_bot_pnl_fallback(history)
+    if normalized_bot_answer:
+        return AgentDecision(
+            kind="final",
+            answer=normalized_bot_answer,
+            rationale="Contrafactual del bot deduplicado por episodios de recomendación.",
+            answer_origin="bot_follow_pnl_normalized_renderer_v1",
+        )
+
     bot_pnl_answer = _bot_follow_pnl_fallback(goal, history)
     if bot_pnl_answer:
         return AgentDecision(
             kind="final",
             answer=bot_pnl_answer,
-            rationale="Resumen determinístico del contrafactual del bot desde evidencia persistida.",
+            rationale="Resumen determinístico del contrafactual plan-level del bot desde evidencia persistida.",
             answer_origin="bot_follow_pnl_renderer_v3",
         )
 
