@@ -1,0 +1,64 @@
+name: Conversational harness CI
+
+on:
+  push:
+    branches:
+      - feature/conversational-harness
+  pull_request:
+    paths:
+      - 'src/agentic/harness/**'
+      - 'src/agentic/conversation/**'
+      - 'scripts/telegram_conversational.py'
+      - 'tests/test_conversational_*.py'
+      - 'evals/conversations/**'
+      - 'docs/architecture/conversational-harness.md'
+      - 'docker-compose.yml'
+      - '.env.agentic.example'
+      - '.github/workflows/conversational-harness-ci.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install project and validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest ruff mypy
+      - name: Compile conversational modules
+        run: |
+          python -m compileall -q \
+            src/agentic/harness \
+            src/agentic/conversation \
+            scripts/telegram_conversational.py
+      - name: Lint conversational change
+        run: |
+          ruff check \
+            src/agentic/harness \
+            src/agentic/conversation \
+            scripts/telegram_conversational.py \
+            tests/test_conversational_harness.py \
+            tests/test_conversational_evals.py \
+            tests/test_conversational_telegram_surface.py
+      - name: Type check harness contracts and routing
+        run: |
+          mypy --ignore-missing-imports --follow-imports=skip \
+            src/agentic/harness/schemas.py \
+            src/agentic/harness/task.py \
+            src/agentic/harness/context.py \
+            src/agentic/harness/permissions.py \
+            src/agentic/harness/verifier.py \
+            src/agentic/harness/models.py
+      - name: Run conversational tests and evals
+        run: |
+          pytest -q \
+            tests/test_conversational_harness.py \
+            tests/test_conversational_evals.py \
+            tests/test_conversational_telegram_surface.py
+      - name: Run existing project suite
+        run: pytest -q
