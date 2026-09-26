@@ -117,7 +117,10 @@ def normalize_regime(value: Any) -> str:
 def _is_formal_candidate(row: Mapping[str, Any]) -> bool:
     action = normalize_action(row.get("decision") or row.get("action"))
     status = str(row.get("status") or "").upper().strip()
+    scope = str(row.get("metric_scope") or "planner_audit").lower().strip()
     if action not in {"BUY", "SELL"}:
+        return False
+    if scope not in {"primary", "planner_audit"}:
         return False
     # Historical Edge learns from formal executable proposals only. Blocked
     # decisions remain available to the separate learning-shadow audit.
@@ -140,14 +143,25 @@ def _eligible_anchor(row: Mapping[str, Any], *, as_of: datetime) -> bool:
     return decided_at is not None and decided_at < as_of
 
 
+def _run_key(row: Mapping[str, Any]) -> str:
+    run_id = str(row.get("run_id") or "").strip()
+    if run_id:
+        return f"run:{run_id}"
+    decided_at = _aware(row.get("decided_at") or row.get("as_of"))
+    if decided_at is not None:
+        return f"time:{decided_at.isoformat()}"
+    return f"row:{row.get('id', id(row))}"
+
+
 def build_directional_episodes(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Conservatively deduplicate repeated formal signals.
+    """Conservatively deduplicate same-direction signals across consecutive runs.
 
     For each ticker, the first executable BUY/SELL starts an episode. Repeating
-    the same direction does not create a new sample. A recorded HOLD/non-formal
-    row or a direction change closes/restarts the episode. This intentionally
-    under-counts rather than treating correlated repeated recommendations as
-    independent wins.
+    the same direction in the same or immediately following formal analysis run
+    stays in that episode. A direction change, a non-formal row for the ticker,
+    or absence from one or more intervening runs starts a new episode when the
+    signal reappears. This prevents widely separated recommendations from being
+    collapsed into one historical sample.
     """
     ordered = sorted(
         (dict(row) for row in rows),
@@ -157,6 +171,23 @@ def build_directional_episodes(rows: Sequence[Mapping[str, Any]]) -> list[dict[s
             str(row.get("id") or ""),
         ),
     )
+    run_first_seen: dict[str, datetime] = {}
+    for row in ordered:
+        key = _run_key(row)
+        decided_at = (
+            _aware(row.get("decided_at") or row.get("as_of"))
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        previous = run_first_seen.get(key)
+        if previous is None or decided_at < previous:
+            run_first_seen[key] = decided_at
+    run_order = {
+        key: index
+        for index, (key, _) in enumerate(
+            sorted(run_first_seen.items(), key=lambda item: (item[1], item[0]))
+        )
+    }
+
     active: dict[str, dict[str, Any]] = {}
     episodes: list[dict[str, Any]] = []
 
@@ -165,14 +196,21 @@ def build_directional_episodes(rows: Sequence[Mapping[str, Any]]) -> list[dict[s
         if not ticker:
             continue
         action = normalize_action(row.get("decision") or row.get("action"))
+        current_run_index = run_order[_run_key(row)]
         if action not in {"BUY", "SELL"} or not _is_formal_candidate(row):
             active.pop(ticker, None)
             continue
 
         previous = active.get(ticker)
-        if previous is not None and previous["action"] == action:
+        is_consecutive_repeat = (
+            previous is not None
+            and previous["action"] == action
+            and current_run_index <= int(previous["last_run_index"]) + 1
+        )
+        if is_consecutive_repeat:
             previous["recommendation_count"] += 1
             previous["last_seen_at"] = row.get("decided_at") or row.get("as_of")
+            previous["last_run_index"] = current_run_index
             continue
 
         episode = {
@@ -182,6 +220,7 @@ def build_directional_episodes(rows: Sequence[Mapping[str, Any]]) -> list[dict[s
             "recommendation_count": 1,
             "started_at": row.get("decided_at") or row.get("as_of"),
             "last_seen_at": row.get("decided_at") or row.get("as_of"),
+            "last_run_index": current_run_index,
         }
         episodes.append(episode)
         active[ticker] = episode
