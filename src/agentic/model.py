@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+import time
 from typing import Any, Protocol
 
 import httpx
@@ -11,6 +13,8 @@ import httpx
 from .contracts import AgentDecision, AgentModelError, ToolSpec
 from .answer import evidence_decision
 from .diagnostics import diagnostic_decision, question_plan, decision_lab_arguments
+
+logger = logging.getLogger(__name__)
 
 
 class AgentModel(Protocol):
@@ -37,6 +41,19 @@ class OllamaAgentModel:
     has enough evidence to stop.
     """
 
+    _DETERMINISTIC_INTENTS = {
+        "portfolio_review",
+        "opportunities",
+        "performance",
+        "net_performance",
+        "analytics_v2",
+        "viability",
+        "regression_audit",
+        "calibration_audit",
+        "market_context",
+        "system_status",
+    }
+
     def __init__(
         self,
         *,
@@ -60,7 +77,15 @@ class OllamaAgentModel:
         )
         self.temperature = float(temperature)
         self.conversation_context = list(conversation_context or [])[-3:]
-        self.context_tokens = 16384
+        self.context_tokens = max(
+            2048,
+            min(32768, int(os.getenv("QUANTIA_AGENT_CONTEXT_TOKENS", "8192"))),
+        )
+        self.num_predict = max(
+            128,
+            min(2048, int(os.getenv("QUANTIA_AGENT_NUM_PREDICT", "512"))),
+        )
+        self.keep_alive = os.getenv("QUANTIA_OLLAMA_KEEP_ALIVE", "30m")
         if not 0 < self.timeout_seconds <= 600:
             raise ValueError("model timeout must be within (0, 600]")
 
@@ -114,9 +139,9 @@ class OllamaAgentModel:
     @staticmethod
     def _history_messages(history: list[dict[str, Any]]) -> list[dict[str, str]]:
         # Keep the controller context bounded even when analysis/radar reports are long.
-        max_total_chars = max(0, min(16000, int(os.getenv("QUANTIA_AGENT_MODEL_HISTORY_CHARS", "16000"))))
-        max_observation_chars = max(0, min(6000, int(
-            os.getenv("QUANTIA_AGENT_MODEL_OBSERVATION_CHARS", "6000")
+        max_total_chars = max(0, min(12000, int(os.getenv("QUANTIA_AGENT_MODEL_HISTORY_CHARS", "8000"))))
+        max_observation_chars = max(0, min(4000, int(
+            os.getenv("QUANTIA_AGENT_MODEL_OBSERVATION_CHARS", "3000")
         )))
         chunks: list[tuple[dict[str, str], dict[str, str] | None, int]] = []
 
@@ -162,9 +187,12 @@ class OllamaAgentModel:
         return messages
 
     async def _call(self, payload: dict[str, Any]) -> str:
+        started = time.monotonic()
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
         response.raise_for_status()
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.info("[CHAT][MODEL] model=%s elapsed_ms=%s", self.name, elapsed_ms)
         data = response.json()
         message = data.get("message") or {}
         return str(message.get("content") or "")
@@ -222,6 +250,21 @@ class OllamaAgentModel:
         if force_final:
             return evidence_decision(goal, history)
 
+        # The conversational TaskParser already routed several bounded intents
+        # deterministically. Once their required evidence exists, asking the LLM
+        # planner again adds latency without adding a new source. Keep the LLM
+        # planner for genuinely open-ended/dynamic intents only.
+        if history:
+            try:
+                from src.agentic.harness.task import TaskParser
+
+                routed_intent = TaskParser().parse(goal).intent
+                if routed_intent in self._DETERMINISTIC_INTENTS:
+                    logger.info("[CHAT][MODEL] planner_bypass intent=%s", routed_intent)
+                    return evidence_decision(goal, history)
+            except Exception:
+                pass
+
         messages = [
             {
                 "role": "system",
@@ -251,7 +294,12 @@ class OllamaAgentModel:
             "messages": messages,
             "stream": False,
             "format": "json",
-            "options": {"temperature": self.temperature, "num_predict": 2048, "num_ctx": self.context_tokens},
+            "keep_alive": self.keep_alive,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.num_predict,
+                "num_ctx": self.context_tokens,
+            },
         }
 
         last_error: Exception | None = None
