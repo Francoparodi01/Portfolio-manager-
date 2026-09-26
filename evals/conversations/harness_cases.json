@@ -35,6 +35,24 @@
       "forbidden_claims": ["EV es PnL", "retorno teórico es fill"]
     },
     {
+      "id": "net-performance",
+      "turns": ["Mostrame el resultado neto por decisión de los últimos 180 días."],
+      "expected_intents": ["net_performance"],
+      "must_offer_tools": ["get_net_decision_report"]
+    },
+    {
+      "id": "analytics-v2",
+      "turns": ["Explicame Analytics v2 de los últimos 180 días."],
+      "expected_intents": ["analytics_v2"],
+      "must_offer_tools": ["get_analytics_v2"]
+    },
+    {
+      "id": "viability",
+      "turns": ["¿Quantia sigue siendo viable a 180 días?"],
+      "expected_intents": ["viability"],
+      "must_offer_tools": ["get_viability_audit"]
+    },
+    {
       "id": "decision-history-20d",
       "turns": ["¿Qué pasó con las decisiones que tomaste hace 20 días?"],
       "expected_intents": ["decision_history"],
