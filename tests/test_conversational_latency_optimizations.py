@@ -4,7 +4,11 @@ import asyncio
 import json
 
 from src.agentic.contracts import ToolSpec
-from src.agentic.conversation.gateway import _explicit_refresh_request
+from src.agentic.conversation.gateway import (
+    _BACKGROUND_REFRESH_TASKS,
+    _explicit_refresh_request,
+    _schedule_background_refresh,
+)
 from src.agentic.harness.context import ContextSelector
 from src.agentic.harness.synthesis import GroundedSynthesizer
 from src.agentic.harness.task import TaskParser
@@ -30,6 +34,34 @@ def test_explicit_refresh_language_bypasses_snapshot_fast_path():
     assert _explicit_refresh_request("Actualizá mi cartera ahora mismo")
     assert _explicit_refresh_request("Refresca los datos")
     assert not _explicit_refresh_request("¿Cómo está mi cartera?")
+
+
+def test_background_refresh_is_deduplicated_per_owner():
+    async def scenario():
+        _BACKGROUND_REFRESH_TASKS.clear()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def refresh() -> str:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+            return ""
+
+        assert _schedule_background_refresh(123, refresh)
+        await entered.wait()
+        assert not _schedule_background_refresh(123, refresh)
+        assert calls == 1
+
+        task = _BACKGROUND_REFRESH_TASKS[123]
+        release.set()
+        await task
+        await asyncio.sleep(0)
+        assert 123 not in _BACKGROUND_REFRESH_TASKS
+
+    asyncio.run(scenario())
 
 
 def test_known_bounded_intent_bypasses_ollama_planner(monkeypatch):
