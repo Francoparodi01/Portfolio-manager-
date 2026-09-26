@@ -22,7 +22,7 @@ env:
 jobs:
   harness-focused:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,7 +32,7 @@ jobs:
       - name: Install focused validation dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest ruff mypy 'pydantic>=2.10,<3.0'
+          python -m pip install -r requirements.txt pytest ruff mypy 'pydantic>=2.10,<3.0'
       - name: Compile conversational modules
         run: |
           python -m compileall -q \
