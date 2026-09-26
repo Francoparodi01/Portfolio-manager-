@@ -232,10 +232,14 @@ class SemanticTaskRouter:
         if intent == "position_comparison" and len(entities) < 2:
             ambiguity.append("comparison_target_missing")
 
-        try:
-            confidence = max(0.0, min(1.0, float(value.get("confidence"))))
-        except (TypeError, ValueError):
+        confidence_raw = value.get("confidence")
+        if isinstance(confidence_raw, bool) or not isinstance(confidence_raw, (int, float, str)):
             confidence = None
+        else:
+            try:
+                confidence = max(0.0, min(1.0, float(confidence_raw)))
+            except ValueError:
+                confidence = None
 
         return TaskSpec(
             intent=intent,
