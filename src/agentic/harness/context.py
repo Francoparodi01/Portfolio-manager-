@@ -9,6 +9,7 @@ _BASE_TOOLS = {
     "get_portfolio_snapshot",
     "get_persisted_decision_evidence",
     "get_bot_follow_pnl",
+    "get_run_evidence_provenance",
     "get_decision_evidence",
     "analyze_portfolio",
     "analyze_ticker",
@@ -33,17 +34,13 @@ _BASE_TOOLS = {
 }
 
 _INTENT_TOOLS = {
-    # A broad status question should be DB-bound and fast: current persisted
-    # holdings + the latest persisted formal decision run. Recomputing the full
-    # analysis pipeline belongs to explicit analysis/revalidation requests.
     "portfolio_review": ["get_portfolio_snapshot", "get_persisted_decision_evidence"],
     "bot_follow_pnl": ["get_bot_follow_pnl"],
+    "evidence_provenance": ["get_run_evidence_provenance"],
     "position_analysis": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_macro_context", "get_decision_value_added"],
     "decision_explanation": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_decision_value_added"],
     "position_comparison": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_decision_value_added", "scan_opportunities"],
     "opportunities": ["get_portfolio_snapshot", "get_decision_evidence", "scan_opportunities", "get_decision_value_added"],
-    # Generic performance keeps the economic ledger as the authoritative source.
-    # Do not fan out to legacy/net reports unless the user explicitly asks for them.
     "performance": ["get_decision_ledger"],
     "net_performance": ["get_net_decision_report"],
     "analytics_v2": ["get_analytics_v2"],
@@ -60,6 +57,7 @@ _INTENT_TOOLS = {
 _REQUIRED = {
     "portfolio_review": ["get_portfolio_snapshot", "get_persisted_decision_evidence"],
     "bot_follow_pnl": ["get_bot_follow_pnl"],
+    "evidence_provenance": ["get_run_evidence_provenance"],
     "position_analysis": ["get_portfolio_snapshot", "get_decision_evidence"],
     "decision_explanation": ["get_decision_evidence"],
     "position_comparison": ["get_portfolio_snapshot", "get_decision_evidence"],
@@ -96,9 +94,9 @@ class ContextSelector:
             required: list[str] = []
             parallel: list[list[str]] = []
         elif task.intent == "bot_follow_pnl" and task.objective == "explain_normalized_follow_pnl":
-            # "Normalizar decisiones repetidas" is not the raw plan-level
-            # counterfactual. Use the Decision Ledger's normalized plan-follow
-            # attribution instead of get_bot_follow_pnl.
+            # The ledger tool now exposes a separate structured counterfactual
+            # deduplicated by recommendation episode. Do not use the actual
+            # followed-execution attribution for this hypothetical question.
             allowed = [name for name in ["get_decision_ledger"] if name in available_tools]
             required = list(allowed)
             parallel = []
@@ -112,8 +110,6 @@ class ContextSelector:
             ]
             parallel = [group for group in parallel if len(group) > 1]
 
-        # Unknown requests are not blocked by rigid intents: expose the safe
-        # registry and let the bounded planner choose.
         if not allowed:
             allowed = sorted(available_tools)
 
