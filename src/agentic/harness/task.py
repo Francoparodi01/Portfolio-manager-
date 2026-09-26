@@ -27,12 +27,7 @@ def _plain(text: str) -> str:
 
 
 class TaskParser:
-    """Turn a user message into a bounded task without making financial claims.
-
-    Known intents improve routing, but unknown/composed requests remain `general`
-    and are delegated to the dynamic planner. Follow-ups inherit only structural
-    references (subject/symbol), never an earlier assistant conclusion as evidence.
-    """
+    """Turn a user message into a bounded task without making financial claims."""
 
     def extract_entities(self, text: str) -> list[str]:
         raw = str(text or "")
@@ -85,15 +80,12 @@ class TaskParser:
         markers = (
             "por que", "porque", "y si", "comparalo", "comparala", "y ahora",
             "eso", "esa", "ese", "entonces", "en su lugar", "y cual", "y que",
-            "que te preocupa", "cual te preocupa",
+            "que te preocupa", "cual te preocupa", "esta senal", "esa senal",
         )
         return short and any(marker in text for marker in markers)
 
     @staticmethod
     def _entities(raw: str, text: str) -> list[str]:
-        # Only accept ticker-shaped tokens that the user actually wrote in
-        # uppercase. Converting the whole sentence to uppercase would turn
-        # ordinary Spanish words into fake symbols.
         found = [item for item in _TICKER_RE.findall(raw) if item not in _STOP_SYMBOLS]
         for name, ticker in _ALIASES.items():
             if re.search(rf"\b{re.escape(name)}\b", text):
@@ -123,7 +115,8 @@ class TaskParser:
             return "net_performance", "explain_net_decision_results", ["net_performance"]
         if any(term in text for term in ("cuanto gano", "pnl", "ganancia", "perdio", "ledger")):
             return "performance", "explain_economic_results", ["ledger", "performance"]
-        if any(term in text for term in ("hace 20 dias", "decisiones que tomaste", "outcomes", "resultado de decisiones")):
+        horizon_decisions = "decision" in text and bool(re.search(r"\b\d{1,3}\s*(?:dias|days)\b", text))
+        if horizon_decisions or any(term in text for term in ("hace 20 dias", "decisiones que tomaste", "outcomes", "resultado de decisiones")):
             return "decision_history", "explain_matured_decisions", ["ledger", "outcomes"]
         if any(term in text for term in ("oportunidad", "reemplazar", "en su lugar", "que compraria")):
             return "opportunities", "find_portfolio_alternatives", ["portfolio", "radar", "risk", "decision_lab"]
@@ -131,10 +124,11 @@ class TaskParser:
             return "system_status", "explain_system_health", ["system_status"]
         if any(term in text for term in ("mercado", "macro", "vix", "dolar", "riesgo pais")):
             return "market_context", "explain_market_context", ["macro"]
-        if len(entities) >= 2 and any(term in text for term in ("compar", "cambiar", "vs", "por")):
-            return "position_comparison", "compare_positions", ["portfolio", "decision", "risk", "decision_lab"]
-        if entities and any(term in text for term in ("por que", "porque", "explic", "motivo", "razon")):
+        is_why = any(term in text for term in ("por que", "porque", "explic", "motivo", "razon"))
+        if entities and is_why:
             return "decision_explanation", "explain_current_decision", ["portfolio", "decision", "technical", "macro", "risk", "decision_lab"]
+        if len(entities) >= 2 and any(term in text for term in ("compar", "cambiar", " vs ")):
+            return "position_comparison", "compare_positions", ["portfolio", "decision", "risk", "decision_lab"]
         if entities and any(term in text for term in ("que hago", "conviene", "revis", "analiz", "decision")):
             return "position_analysis", "evaluate_position", ["portfolio", "decision", "technical", "macro", "risk", "decision_lab"]
         if any(term in text for term in ("cartera", "portfolio", "como viene todo", "como esta todo")):
