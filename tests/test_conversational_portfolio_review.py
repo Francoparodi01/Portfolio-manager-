@@ -8,7 +8,7 @@ from src.agentic.harness.synthesis import GroundedSynthesizer
 from src.agentic.harness.task import TaskParser
 
 
-def test_portfolio_review_requires_full_analysis():
+def test_portfolio_review_requires_snapshot_and_structured_decisions_only():
     task = TaskParser().parse("¿Cómo está mi cartera?")
     plan = ContextSelector().select(
         task,
@@ -19,8 +19,8 @@ def test_portfolio_review_requires_full_analysis():
     assert plan.required_tools == [
         "get_portfolio_snapshot",
         "get_decision_evidence",
-        "analyze_portfolio",
     ]
+    assert "analyze_portfolio" not in plan.allowed_tools
 
 
 def test_decision_evidence_fallback_is_compact_not_raw_json():
@@ -54,7 +54,7 @@ def test_decision_evidence_fallback_is_compact_not_raw_json():
     assert "Extracto literal de la herramienta" not in decision.answer
 
 
-def test_full_portfolio_fallback_is_conversational_and_short():
+def test_portfolio_fallback_is_conversational_without_duplicate_full_analysis():
     snapshot = {
         "total_value_ars": 2895125.0,
         "cash_ars": 3842.34,
@@ -65,23 +65,18 @@ def test_full_portfolio_fallback_is_conversational_and_short():
         ],
     }
     decisions = {
+        "evaluated_at": "2026-09-26T15:00:00+00:00",
+        "snapshot_as_of": "2026-09-26T14:59:00+00:00",
         "signals": [
             {"ticker": "NVDA", "decision": "ACCUMULATE", "final_score": 0.1814},
             {"ticker": "AMD", "decision": "HOLD", "final_score": 0.0835},
             {"ticker": "GDX", "decision": "ACCUMULATE", "final_score": 0.152},
         ],
     }
-    analysis = """🧠 ANÁLISIS — 26/09 03:12 ART
-⚠️ Fuera de rueda — validar apertura, no perseguir gaps.
-━━━ SIMULACIÓN CONTEXTUAL ━━━
-🔴 REVALIDAR SELL YPFD -$67.520 ARS score -0.092
-🟢 REVALIDAR BUY NVDA +$60.800 ARS score +0.181
-"""
     history = []
     for tool, content in (
         ("get_portfolio_snapshot", json.dumps(snapshot)),
         ("get_decision_evidence", json.dumps(decisions)),
-        ("analyze_portfolio", analysis),
     ):
         history.append({
             "decision": {"tool": tool},
@@ -90,12 +85,12 @@ def test_full_portfolio_fallback_is_conversational_and_short():
 
     decision = evidence_decision("¿Cómo está mi cartera?", history)
 
-    assert decision.answer_origin == "portfolio_renderer_v2"
+    assert decision.answer_origin == "portfolio_renderer_v3"
     assert "Tu cartera tiene" in decision.answer
     assert "NVDA 16,8%" in decision.answer
     assert "NVDA ACCUMULATE" in decision.answer
-    assert "REVALIDAR SELL YPFD" in decision.answer
-    assert "fuera de rueda" in decision.answer.lower()
+    assert "Señales evaluadas" in decision.answer
+    assert "no son fills" in decision.answer.lower()
     assert "Resumen: Revisé la evidencia" not in decision.answer
     assert "Extracto literal" not in decision.answer
     assert len(decision.answer) < 1500
