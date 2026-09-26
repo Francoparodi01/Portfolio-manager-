@@ -36,11 +36,12 @@ from src.analysis.historical_edge import (
     match_historical_edge,
     normalize_action,
 )
+from src.core.config import get_config
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_STATE_PATH = Path("outputs/economic_meta_policy/watcher_state.json")
-DB_INPUT_VERSION = "meta-db-input-v2"
+DB_INPUT_VERSION = "meta-db-input-v3"
 
 
 def _dsn(value: str) -> str:
@@ -67,6 +68,23 @@ def _float(value: Any, default: float = 0.0) -> float:
         return result
     except (TypeError, ValueError):
         return default
+
+
+def _legacy_single_owner_chat_id() -> int | None:
+    """Resolve the configured legacy owner only when multiuser mode is disabled."""
+    try:
+        cfg = get_config()
+    except Exception:
+        return None
+    if bool(getattr(cfg, "multiuser_enabled", False)):
+        return None
+    raw = str(getattr(getattr(cfg, "scraper", None), "telegram_chat_id", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _action(value: Any) -> str:
@@ -131,6 +149,7 @@ class EconomicMetaAnalysisWatcher:
         self.state_path = Path(state_path)
         self.settle_seconds = max(10, int(settle_seconds))
         self.max_runs_per_poll = max(1, min(int(max_runs_per_poll), 100))
+        self.legacy_single_owner_chat_id = _legacy_single_owner_chat_id()
         self.activated_at = self._load_or_create_activation()
 
     def _load_or_create_activation(self) -> datetime:
@@ -290,6 +309,8 @@ class EconomicMetaAnalysisWatcher:
         )
         for raw in decision_rows:
             row = dict(raw)
+            if row.get("owner_chat_id") is None and self.legacy_single_owner_chat_id is not None:
+                row["owner_chat_id"] = self.legacy_single_owner_chat_id
             ticker = str(row.get("ticker") or "").upper().strip()
             if not ticker:
                 continue
@@ -322,6 +343,8 @@ class EconomicMetaAnalysisWatcher:
 
         for raw in hold_rows:
             row = dict(raw)
+            if row.get("owner_chat_id") is None and self.legacy_single_owner_chat_id is not None:
+                row["owner_chat_id"] = self.legacy_single_owner_chat_id
             ticker = str(row.get("ticker") or "").upper().strip()
             if not ticker or ticker in by_ticker:
                 continue
@@ -375,6 +398,37 @@ class EconomicMetaAnalysisWatcher:
                     as_of=run_as_of,
                     lookback_days=DEFAULT_LOOKBACK_DAYS,
                 )
+                allow_legacy_null = self.legacy_single_owner_chat_id == owner
+                if allow_legacy_null:
+                    legacy_rows = await conn.fetch(
+                        """
+                        SELECT
+                            id,
+                            run_id::text AS run_id,
+                            decided_at,
+                            ticker,
+                            decision,
+                            final_score,
+                            regime,
+                            outcome_20d,
+                            outcome_basis,
+                            outcome_filled_at,
+                            status,
+                            metric_scope,
+                            COALESCE(source, layers->>'source') AS source
+                        FROM decision_log
+                        WHERE owner_chat_id IS NULL
+                          AND decided_at >= $1
+                          AND decided_at < $2
+                          AND COALESCE(source, layers->>'source') = 'execution_plan'
+                          AND COALESCE(metric_scope, 'planner_audit') <> 'debug'
+                        ORDER BY decided_at, id
+                        """,
+                        cutoff,
+                        run_as_of,
+                    )
+                    owner_history.extend(dict(row) for row in legacy_rows)
+
                 # A run with only HOLD observations may have no execution_plan row.
                 # Include HOLDs as chronology/break markers only: historical_edge
                 # never scores them as profitable samples because they are not
@@ -406,6 +460,33 @@ class EconomicMetaAnalysisWatcher:
                         cutoff,
                         run_as_of,
                     )
+                    if allow_legacy_null:
+                        legacy_hold_markers = await conn.fetch(
+                            """
+                            SELECT
+                                id,
+                                run_id::text AS run_id,
+                                observed_at AS decided_at,
+                                ticker,
+                                action AS decision,
+                                final_score,
+                                regime,
+                                outcome_20d,
+                                outcome_basis,
+                                outcome_filled_at,
+                                status,
+                                metric_scope,
+                                source
+                            FROM position_hold_observations
+                            WHERE owner_chat_id IS NULL
+                              AND observed_at >= $1
+                              AND observed_at < $2
+                            ORDER BY observed_at, id
+                            """,
+                            cutoff,
+                            run_as_of,
+                        )
+                        hold_markers = [*hold_markers, *legacy_hold_markers]
                 except asyncpg.UndefinedTableError:
                     hold_markers = []
                 owner_history.extend(dict(row) for row in hold_markers)
