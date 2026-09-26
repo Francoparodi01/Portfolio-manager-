@@ -1,0 +1,10 @@
+{"message":"¿Cómo está mi cartera hoy?","expected_intent":"portfolio_review","required_tools":["get_portfolio_snapshot","get_decision_evidence"],"entities":[]}
+{"message":"¿Qué hago con NVDA?","expected_intent":"position_analysis","required_tools":["get_portfolio_snapshot","get_decision_evidence"],"entities":["NVDA"]}
+{"message":"¿por qué?","state":{"active_symbols":["GDX"],"last_intent":"position_analysis"},"expected_intent":"position_analysis","required_tools":["get_portfolio_snapshot","get_decision_evidence"],"entities":["GDX"]}
+{"message":"comparalo con NVDA","state":{"active_symbols":["GDX"],"last_intent":"position_analysis"},"expected_intent":"position_comparison","required_tools":["get_portfolio_snapshot","get_decision_evidence"],"entities":["NVDA","GDX"]}
+{"message":"Buscame oportunidades para reemplazar lo peor que tengo","expected_intent":"opportunity_search","required_tools":["get_portfolio_snapshot","get_decision_evidence","scan_opportunities"],"entities":[]}
+{"message":"¿Cuánto ganó Quantia?","expected_intent":"performance","required_tools":["get_analytics_v2"],"entities":[]}
+{"message":"¿Qué pasó con las decisiones de hace 20 días?","expected_intent":"historical_outcomes","required_tools":["get_ledger_outcomes"],"horizons":[20],"entities":[]}
+{"message":"¿Por qué A y B permiten esta señal pero C no?","state":{"active_symbols":["MU"],"last_intent":"position_analysis"},"expected_intent":"meta_policy","required_tools":["get_meta_policy_shadow"],"entities":["MU"]}
+{"message":"¿Cómo está el VIX y el riesgo país?","expected_intent":"macro_context","required_tools":["get_macro_context"],"entities":[]}
+{"message":"¿Está funcionando Quantia?","expected_intent":"system_status","required_tools":["get_system_status"],"entities":[]}
