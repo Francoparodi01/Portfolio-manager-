@@ -10,11 +10,14 @@ on:
       - 'src/agentic/harness/**'
       - 'src/agentic/conversation/**'
       - 'src/agentic/contracts.py'
+      - 'src/agentic/model.py'
+      - 'src/agentic/answer.py'
       - 'src/analysis/bot_counterfactual.py'
       - 'scripts/telegram_conversational.py'
       - 'tests/test_conversational_*.py'
       - 'tests/test_semantic_task_router.py'
       - 'tests/test_bot_counterfactual_normalized.py'
+      - 'tests/test_agentic_guards.py'
       - 'evals/conversations/**'
       - 'docs/architecture/conversational-harness.md'
       - 'docker-compose.yml'
@@ -94,7 +97,7 @@ jobs:
             src/agentic/harness/permissions.py \
             src/agentic/harness/verifier.py \
             src/agentic/harness/models.py
-      - name: Run conversational tests and evals
+      - name: Run conversational tests, evals and shared-agent guards
         run: |
           pytest -q \
             tests/test_conversational_harness.py \
@@ -104,7 +107,10 @@ jobs:
             tests/test_conversational_latency_optimizations.py \
             tests/test_conversational_numeric_grounding.py \
             tests/test_semantic_task_router.py \
-            tests/test_bot_counterfactual_normalized.py
+            tests/test_bot_counterfactual_normalized.py \
+            tests/test_agentic_guards.py::test_forced_close_replaces_untrusted_score_and_keeps_original_goal \
+            tests/test_agentic_guards.py::test_replayed_four_consultations_then_synthesis_preserves_audit \
+            tests/test_agentic_guards.py::test_early_completion_also_synthesizes_all_evidence_without_more_tools
 
   project-regression:
     runs-on: ubuntu-latest
