@@ -72,6 +72,23 @@ class GroundedSynthesizer:
     async def synthesize(self, *, task: TaskSpec, evidence: list[EvidenceObject], fallback: str) -> str:
         if os.getenv("QUANTIA_HARNESS_SYNTHESIS_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
             return fallback
+
+        # portfolio_review already has a source-bound deterministic renderer.
+        # Sending the same evidence through the local model adds ~15-20s on the
+        # current hardware and can still fall back to the exact same text. Keep
+        # the LLM for intents where it contributes actual language synthesis.
+        fast_intents = {
+            value.strip()
+            for value in os.getenv(
+                "QUANTIA_HARNESS_SYNTHESIS_BYPASS_INTENTS",
+                "portfolio_review",
+            ).split(",")
+            if value.strip()
+        }
+        if task.intent in fast_intents:
+            logger.info("[CHAT][SYNTHESIS] bypass intent=%s", task.intent)
+            return fallback
+
         bundle = []
         used = 0
         for item in evidence:
