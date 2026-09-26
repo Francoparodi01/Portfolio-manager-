@@ -78,6 +78,32 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
             limits.append("Hay posiciones sin PnL porcentual informado; no se las trata como retorno cero.")
         return "\n".join(rows), limits
 
+    if tool == "get_decision_evidence" and data:
+        signals = data.get("signals")
+        signals = signals if isinstance(signals, list) else []
+        signals = [item for item in signals if isinstance(item, dict)]
+        rows = [
+            f"Decisiones evaluadas: {data.get('evaluated_at') or 'fecha no informada'}.",
+            f"Snapshot de referencia: {data.get('snapshot_as_of') or 'fecha no informada'}.",
+        ]
+        if data.get("analysis_run_id"):
+            rows.append(f"Run de análisis: {data.get('analysis_run_id')}.")
+        compact = []
+        for signal in signals[:12]:
+            ticker = str(signal.get("ticker") or "N/D")
+            decision = str(signal.get("decision") or "N/D")
+            score = _number(signal.get("final_score"), 3)
+            compact.append(f"{ticker} {decision} (score {score})")
+        if compact:
+            rows.append("Señales actuales: " + "; ".join(compact) + ".")
+        if len(signals) > 12:
+            rows.append("Primeras 12 señales; resto en la traza.")
+        limits = [
+            "Las decisiones y scores describen la señal actual del motor; no son fills, retornos ni PnL.",
+            "Esta evidencia por sí sola no prueba edge económico frente a HOLD.",
+        ]
+        return "\n".join(rows), limits
+
     if tool == "get_macro_context" and data:
         labels = {"sp500": "SP500", "vix": "VIX", "wti": "WTI", "ccl": "CCL", "mep": "MEP",
                   "riesgo_pais": "riesgo país (pb)", "merval": "Merval", "reservas": "reservas"}
