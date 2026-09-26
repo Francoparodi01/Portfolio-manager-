@@ -12,9 +12,10 @@ _STOP_SYMBOLS = {
     "ARS", "USD", "CCL", "MEP", "PIT", "META", "SHADOW", "PRODUCTION",
 }
 _ALIASES = {
-    "microsoft": "MSFT", "nvidia": "NVDA", "apple": "AAPL", "amazon": "AMZN",
-    "google": "GOOGL", "tesla": "TSLA", "amd": "AMD", "mu": "MU", "gdx": "GDX",
-    "iren": "IREN",
+    "microsoft": "MSFT", "msft": "MSFT", "nvidia": "NVDA", "nvda": "NVDA",
+    "apple": "AAPL", "aapl": "AAPL", "amazon": "AMZN", "amzn": "AMZN",
+    "google": "GOOGL", "googl": "GOOGL", "tesla": "TSLA", "tsla": "TSLA",
+    "amd": "AMD", "mu": "MU", "gdx": "GDX", "iren": "IREN",
 }
 
 
@@ -79,7 +80,10 @@ class TaskParser:
 
     @staticmethod
     def _entities(raw: str, text: str) -> list[str]:
-        found = [item for item in _TICKER_RE.findall(raw.upper()) if item not in _STOP_SYMBOLS]
+        # Only accept ticker-shaped tokens that the user actually wrote in
+        # uppercase. Converting the whole sentence to uppercase would turn
+        # ordinary Spanish words into fake symbols.
+        found = [item for item in _TICKER_RE.findall(raw) if item not in _STOP_SYMBOLS]
         for name, ticker in _ALIASES.items():
             if re.search(rf"\b{re.escape(name)}\b", text):
                 found.append(ticker)
@@ -96,23 +100,23 @@ class TaskParser:
             return "meta_policy", "explain_shadow_meta_policy", ["meta_policy", "decision_lab"]
         if any(term in text for term in ("decision lab", "plan vs hold", "plan contra hold", "dva", "contrafactual", "counterfactual")):
             return "decision_lab", "compare_recorded_decision_evidence", ["decision_lab"]
-        if any(term in text for term in ("cuanto gano", "cuanto ganó", "pnl", "ganancia", "perdio", "perdió", "ledger")):
+        if any(term in text for term in ("cuanto gano", "pnl", "ganancia", "perdio", "ledger")):
             return "performance", "explain_economic_results", ["ledger", "performance"]
-        if any(term in text for term in ("hace 20 dias", "hace 20 días", "decisiones que tomaste", "outcomes", "resultado de decisiones")):
+        if any(term in text for term in ("hace 20 dias", "decisiones que tomaste", "outcomes", "resultado de decisiones")):
             return "decision_history", "explain_matured_decisions", ["ledger", "outcomes"]
-        if any(term in text for term in ("oportunidad", "reemplazar", "en su lugar", "que compraria", "qué compraría")):
+        if any(term in text for term in ("oportunidad", "reemplazar", "en su lugar", "que compraria")):
             return "opportunities", "find_portfolio_alternatives", ["portfolio", "radar", "risk", "decision_lab"]
-        if any(term in text for term in ("status", "estado del sistema", "esta funcionando", "está funcionando", "salud del sistema")):
+        if any(term in text for term in ("status", "estado del sistema", "esta funcionando", "salud del sistema")):
             return "system_status", "explain_system_health", ["system_status"]
-        if any(term in text for term in ("mercado", "macro", "vix", "dolar", "dólar", "riesgo pais", "riesgo país")):
+        if any(term in text for term in ("mercado", "macro", "vix", "dolar", "riesgo pais")):
             return "market_context", "explain_market_context", ["macro"]
         if len(entities) >= 2 and any(term in text for term in ("compar", "cambiar", "vs", "por")):
             return "position_comparison", "compare_positions", ["portfolio", "decision", "risk", "decision_lab"]
-        if entities and any(term in text for term in ("por que", "porque", "explic", "motivo", "razon", "razón")):
+        if entities and any(term in text for term in ("por que", "porque", "explic", "motivo", "razon")):
             return "decision_explanation", "explain_current_decision", ["portfolio", "decision", "technical", "macro", "risk", "decision_lab"]
-        if entities and any(term in text for term in ("que hago", "qué hago", "conviene", "revis", "analiz", "decision", "decisión")):
+        if entities and any(term in text for term in ("que hago", "conviene", "revis", "analiz", "decision")):
             return "position_analysis", "evaluate_position", ["portfolio", "decision", "technical", "macro", "risk", "decision_lab"]
-        if any(term in text for term in ("cartera", "portfolio", "como viene todo", "cómo viene todo", "como esta todo", "cómo está todo")):
+        if any(term in text for term in ("cartera", "portfolio", "como viene todo", "como esta todo")):
             return "portfolio_review", "review_portfolio", ["portfolio", "decision", "risk"]
         if follow_up and state and state.last_intent:
             return state.last_intent, "continue_previous_task", ["referenced_evidence"]
