@@ -51,7 +51,7 @@ services:
       - ./logs:/app/logs
       - secrets_data:/app/secrets
       - hf_cache:/app/.cache/huggingface
-    command: ["python", "scripts/telegram_conversational.py"]
+    command: ["python", "scripts/telegram_bot.py"]
     environment:
       TZ: America/Argentina/Buenos_Aires
     deploy:
