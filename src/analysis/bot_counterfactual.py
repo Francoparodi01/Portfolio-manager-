@@ -28,7 +28,9 @@ async def fetch_normalized_bot_counterfactual(
       formal runs belong to one episode;
     - a side change or an intervening formal run without the same recommendation
       starts a new episode;
-    - only the first executable plan in each episode contributes notional/PnL.
+    - only the first executable plan in each episode contributes notional/PnL;
+    - plans without a positive persisted notional are excluded rather than
+      receiving a fabricated fallback amount.
 
     This is a counterfactual over persisted formal plans. It is not realized
     account PnL and it does not use actual human execution attribution.
@@ -62,7 +64,7 @@ async def fetch_normalized_bot_counterfactual(
             FROM run_events
             GROUP BY run_id
         ),
-        plans AS (
+        candidate_plans AS (
             SELECT
                 dl.id,
                 dl.run_id,
@@ -70,14 +72,10 @@ async def fetch_normalized_bot_counterfactual(
                 dl.decided_at,
                 dl.ticker,
                 dl.decision,
-                GREATEST(
-                    ABS(COALESCE(
-                        NULLIF(dl.layers->>'amount_ars', '')::numeric,
-                        NULLIF(dl.executed_amount_ars, 0),
-                        dl.theoretical_amount_ars,
-                        0
-                    )),
-                    1
+                COALESCE(
+                    NULLIF(ABS(NULLIF(dl.layers->>'amount_ars', '')::numeric), 0),
+                    NULLIF(ABS(dl.executed_amount_ars), 0),
+                    NULLIF(ABS(dl.theoretical_amount_ars), 0)
                 )::double precision AS target_amount_ars,
                 COALESCE(dl.executable_outcome_5d, dl.outcome_5d) AS outcome_5d,
                 COALESCE(dl.executable_outcome_10d, dl.outcome_10d) AS outcome_10d,
@@ -93,6 +91,12 @@ async def fetch_normalized_bot_counterfactual(
               AND dl.decision_type = 'executable'
               AND dl.decision IN ('BUY', 'SELL')
               AND dl.price_at_decision IS NOT NULL
+        ),
+        plans AS (
+            SELECT *
+            FROM candidate_plans
+            WHERE target_amount_ars IS NOT NULL
+              AND target_amount_ars > 0
         ),
         ordered AS (
             SELECT
@@ -138,7 +142,12 @@ async def fetch_normalized_bot_counterfactual(
             SELECT * FROM representatives WHERE episode_row = 1
         )
         SELECT
+            (SELECT COUNT(*) FROM candidate_plans)::int AS candidate_plans_total,
             (SELECT COUNT(*) FROM plans)::int AS raw_plans_total,
+            (
+                (SELECT COUNT(*) FROM candidate_plans)
+                - (SELECT COUNT(*) FROM plans)
+            )::int AS excluded_missing_notional,
             COUNT(*)::int AS episodes_total,
             COUNT(outcome_5d)::int AS episodes_closed_5d,
             COUNT(outcome_10d)::int AS episodes_closed_10d,
@@ -156,7 +165,9 @@ async def fetch_normalized_bot_counterfactual(
         bool(legacy_single_owner),
     )
     values = dict(row or {})
+    candidate_total = int(values.get("candidate_plans_total") or 0)
     raw_total = int(values.get("raw_plans_total") or 0)
+    excluded_missing_notional = int(values.get("excluded_missing_notional") or 0)
     episodes_total = int(values.get("episodes_total") or 0)
     return {
         "schema_version": "bot-follow-pnl-normalized-v1",
@@ -164,7 +175,9 @@ async def fetch_normalized_bot_counterfactual(
         "mode": "PRODUCTION_OBSERVATION",
         "as_of": datetime.now(timezone.utc).isoformat(),
         "lookback_days": days,
+        "candidate_plans_total": candidate_total,
         "raw_plans_total": raw_total,
+        "excluded_missing_notional": excluded_missing_notional,
         "episodes_total": episodes_total,
         "duplicates_removed": max(0, raw_total - episodes_total),
         "episodes_closed_5d": int(values.get("episodes_closed_5d") or 0),
@@ -185,6 +198,7 @@ async def fetch_normalized_bot_counterfactual(
         "limitations": [
             "Hypothetical bot-follow PnL, not realized account PnL.",
             "Gross directional result before fees/slippage.",
+            "Plans without a positive persisted notional are excluded; no fallback capital is invented.",
             "Episode deduplication prevents repeated consecutive recommendations from adding capital repeatedly.",
             "5D/10D/20D are alternative horizons and must not be summed.",
         ],
