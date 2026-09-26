@@ -21,18 +21,24 @@ class _Response:
 
 
 def _state() -> ConversationState:
+    # Deliberately omit the numeric window from recent prose. The router must
+    # inherit 25d from last_task, not scrape it out of old chat text.
     return ConversationState(
         owner_chat_id=123,
         last_intent="bot_follow_pnl",
-        recent_user_messages=[
-            "cuanto pnl hubiese ganado siguiendo las decisiones del bot los ultimos 25 días"
-        ],
+        recent_user_messages=["consulta anterior sobre rendimiento del bot"],
+        last_task={
+            "intent": "bot_follow_pnl",
+            "lookback_days": 25,
+            "horizon_days": None,
+            "aggregation": "plan_level",
+            "entities": [],
+        },
     )
 
 
 def test_semantic_router_understands_normalized_followup_without_keyword_match(monkeypatch):
     message = "Hacé de cuenta que cada insistencia sobre la misma compra es una sola y decime cómo habría quedado en el período anterior"
-    # The conservative fallback intentionally does not need to know this phrasing.
     assert TaskParser().parse(message, _state()).objective != "explain_normalized_follow_pnl"
 
     async def fake_post(self, url, json):
@@ -57,9 +63,36 @@ def test_semantic_router_understands_normalized_followup_without_keyword_match(m
     assert task.reference == "previous_turn"
 
 
+def test_semantic_router_inherits_structured_window_even_if_model_marks_same_thread_current(monkeypatch):
+    message = "Ahora mostrame el mismo cálculo pero sin abrir una consulta nueva"
+
+    async def fake_post(self, url, json):
+        return _Response({
+            "intent": "bot_follow_pnl",
+            "entities": [],
+            "lookback_days": None,
+            "horizon_days": None,
+            "aggregation": None,
+            "reference": "current_turn",
+            "confidence": 0.86,
+        })
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    task = asyncio.run(SemanticTaskRouter(model="fixture-model").route(message, _state()))
+
+    assert task.lookback_days == 25
+    assert task.aggregation == "plan_level"
+
+
+def test_fallback_inherits_window_from_structured_task_not_old_text():
+    task = TaskParser().parse("y normalizando las repetidas?", _state())
+    assert task.intent == "bot_follow_pnl"
+    assert task.lookback_days == 25
+    assert task.aggregation == "normalized"
+
+
 def test_semantic_router_understands_provenance_paraphrase(monkeypatch):
     message = "¿En qué evidencia te apoyaste para decir eso?"
-    # Fallback sees this as a generic follow-up, not audited provenance.
     assert TaskParser().parse(message, _state()).intent != "evidence_provenance"
 
     async def fake_post(self, url, json):
