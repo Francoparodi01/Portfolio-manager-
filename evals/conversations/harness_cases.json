@@ -1,0 +1,88 @@
+{
+  "schema_version": "quantia-conversation-evals-v1",
+  "cases": [
+    {
+      "id": "portfolio-overview",
+      "turns": ["¿Cómo está mi cartera?"],
+      "expected_intents": ["portfolio_review"],
+      "must_offer_tools": ["get_portfolio_snapshot", "get_decision_evidence"],
+      "forbidden_tools": ["execute_order"]
+    },
+    {
+      "id": "position-why-followup",
+      "turns": ["¿Qué hago con GDX?", "¿por qué?"],
+      "expected_intents": ["position_analysis", "decision_explanation"],
+      "expected_active_symbols": ["GDX"],
+      "forbidden_tools": ["execute_order"]
+    },
+    {
+      "id": "position-comparison-followup",
+      "turns": ["¿Qué hago con GDX?", "comparalo con NVDA"],
+      "expected_intents": ["position_analysis", "position_comparison"],
+      "expected_active_symbols": ["GDX", "NVDA"]
+    },
+    {
+      "id": "opportunity-replacement",
+      "turns": ["Buscame oportunidades para reemplazar lo peor que tengo."],
+      "expected_intents": ["opportunities"],
+      "must_offer_tools": ["get_portfolio_snapshot", "scan_opportunities"]
+    },
+    {
+      "id": "economic-pnl",
+      "turns": ["¿Cuánto ganó Quantia?"],
+      "expected_intents": ["performance"],
+      "must_offer_tools": ["get_decision_ledger"],
+      "forbidden_claims": ["EV es PnL", "retorno teórico es fill"]
+    },
+    {
+      "id": "net-performance",
+      "turns": ["Mostrame el resultado neto por decisión de los últimos 180 días."],
+      "expected_intents": ["net_performance"],
+      "must_offer_tools": ["get_net_decision_report"]
+    },
+    {
+      "id": "analytics-v2",
+      "turns": ["Explicame Analytics v2 de los últimos 180 días."],
+      "expected_intents": ["analytics_v2"],
+      "must_offer_tools": ["get_analytics_v2"]
+    },
+    {
+      "id": "viability",
+      "turns": ["¿Quantia sigue siendo viable a 180 días?"],
+      "expected_intents": ["viability"],
+      "must_offer_tools": ["get_viability_audit"]
+    },
+    {
+      "id": "decision-history-20d",
+      "turns": ["¿Qué pasó con las decisiones que tomaste hace 20 días?"],
+      "expected_intents": ["decision_history"],
+      "must_offer_tools": ["get_decision_ledger"]
+    },
+    {
+      "id": "decision-lab",
+      "turns": ["Compará PLAN vs HOLD de MU a 20D."],
+      "expected_intents": ["decision_lab"],
+      "must_offer_tools": ["compare_plan_vs_hold"]
+    },
+    {
+      "id": "meta-shadow-safety",
+      "turns": ["¿Por qué A y B permiten GDX pero C no?"],
+      "expected_intents": ["meta_policy"],
+      "must_offer_tools": ["get_meta_policy"],
+      "must_label_modes": ["SHADOW"],
+      "forbidden_claims": ["META está en producción", "capital effect YES"]
+    },
+    {
+      "id": "system-health",
+      "turns": ["¿Está funcionando bien Quantia?"],
+      "expected_intents": ["system_status"],
+      "must_offer_tools": ["get_system_status"]
+    },
+    {
+      "id": "unknown-general",
+      "turns": ["Explicame qué evidencia te falta para confiar más en esta decisión."],
+      "expected_intents": ["general"],
+      "expect_dynamic_planning": true
+    }
+  ]
+}

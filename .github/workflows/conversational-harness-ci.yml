@@ -1,0 +1,235 @@
+name: Conversational harness CI
+
+on:
+  push:
+    branches:
+      - feature/conversational-harness
+  pull_request:
+    paths:
+      - 'src/agentic/harness/**'
+      - 'src/agentic/conversation/**'
+      - 'src/agentic/contracts.py'
+      - 'scripts/telegram_conversational.py'
+      - 'tests/test_conversational_*.py'
+      - 'evals/conversations/**'
+      - 'docs/architecture/conversational-harness.md'
+      - 'docker-compose.yml'
+      - '.env.agentic.example'
+      - '.github/workflows/conversational-harness-ci.yml'
+
+env:
+  PYTHONPATH: .
+
+jobs:
+  baseline-main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact remote main baseline
+        uses: actions/checkout@v4
+        with:
+          ref: b93a3a7a3d4397cd49f980437e331978ec329af9
+          fetch-depth: 1
+      - name: Verify baseline SHA
+        run: |
+          test "$(git rev-parse HEAD)" = "b93a3a7a3d4397cd49f980437e331978ec329af9"
+          echo "BASELINE_SHA=$(git rev-parse HEAD)"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+      - name: Run exact main baseline suite
+        run: pytest -q
+
+  harness-focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install focused validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest ruff mypy 'pydantic>=2.10,<3.0'
+      - name: Compile conversational modules
+        run: |
+          python -m compileall -q \
+            src/agentic/harness \
+            src/agentic/conversation \
+            scripts/telegram_conversational.py
+      - name: Lint conversational change
+        run: |
+          ruff check --select E9,F63,F7,F82 \
+            src/agentic/harness \
+            src/agentic/conversation \
+            scripts/telegram_conversational.py \
+            tests/test_conversational_harness.py \
+            tests/test_conversational_evals.py \
+            tests/test_conversational_telegram_surface.py
+      - name: Type check harness contracts and routing
+        run: |
+          mypy --ignore-missing-imports --follow-imports=skip \
+            src/agentic/harness/schemas.py \
+            src/agentic/harness/task.py \
+            src/agentic/harness/context.py \
+            src/agentic/harness/permissions.py \
+            src/agentic/harness/verifier.py \
+            src/agentic/harness/models.py
+      - name: Run conversational tests and evals
+        run: |
+          pytest -q \
+            tests/test_conversational_harness.py \
+            tests/test_conversational_evals.py \
+            tests/test_conversational_telegram_surface.py
+
+  project-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show branch SHA
+        run: git rev-parse HEAD
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+      - name: Run branch full suite
+        run: pytest -q
+
+  failure-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+      - name: Verify Redis then stop it and exercise process fallback
+        env:
+          REDIS_CONTAINER_ID: ${{ job.services.redis.id }}
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+          import subprocess
+          from src.agentic.conversation.session import ConversationSessionStore
+          from src.agentic.harness.schemas import ConversationState
+          from src.core.redis_client import client as redis_client
+
+          async def main():
+              assert await redis_client.ping()
+              store = ConversationSessionStore(424242, ttl_seconds=60)
+              state = ConversationState(owner_chat_id=424242, active_symbols=["GDX"], last_intent="position_analysis")
+              await store.save(state)
+              print("REDIS_BEFORE=OK")
+              subprocess.run(["docker", "stop", os.environ["REDIS_CONTAINER_ID"]], check=True, capture_output=True, text=True)
+              loaded = await store.load()
+              assert loaded.active_symbols == ["GDX"]
+              loaded.active_symbols = ["NVDA"]
+              await store.save(loaded)
+              loaded_again = await store.load()
+              assert loaded_again.active_symbols == ["NVDA"]
+              print("REDIS_FALLBACK=PASS")
+          asyncio.run(main())
+          PY
+      - name: Exercise a real financial tool failure and insufficient-evidence path
+        run: |
+          python - <<'PY'
+          import asyncio
+          import re
+          from src.agentic.harness.runtime import ConversationalHarness
+          from src.agentic.harness.schemas import HarnessState, TaskSpec
+          from src.agentic.harness.tools_ext import register_harness_tools
+          from src.agentic.tools import ToolContext, build_default_registry, execute_tool
+
+          async def main():
+              context = ToolContext(
+                  database_url="postgresql://portfolio:invalid@127.0.0.1:1/portfolio",
+                  owner_chat_id=424242,
+                  repo_root=".",
+                  tool_timeout_seconds=2,
+              )
+              registry = register_harness_tools(build_default_registry(context), context)
+              names = {spec.name for spec in registry.specs()}
+              forbidden = [name for name in names if any(marker in name.lower() for marker in ("execute_order", "place_order", "trade_execution", "broker_order"))]
+              assert not forbidden, forbidden
+
+              observation = await execute_tool(registry, name="get_decision_ledger", arguments={"days": 20})
+              assert not observation.ok
+              evidence = ConversationalHarness._to_evidence(observation)
+              assert not evidence.ok
+              assert any(item.startswith("tool_error:") for item in evidence.warnings), evidence.warnings
+              print(f"FINANCIAL_TOOL_ERROR_TYPE={(observation.error or 'unknown').split(':', 1)[0]}")
+              print(f"EVIDENCE_WARNINGS={evidence.warnings}")
+
+              harness = ConversationalHarness(
+                  database_url="postgresql://portfolio:invalid@127.0.0.1:1/portfolio",
+                  owner_chat_id=424242,
+                  repo_root=".",
+                  legacy_single_owner=False,
+                  require_audit=False,
+              )
+              task = TaskSpec(raw_message="¿Cuánto ganó Quantia?", intent="performance")
+              report = harness.verifier.verify(
+                  task=task,
+                  answer="No tengo evidencia suficiente para determinarlo con seguridad.",
+                  evidence=[evidence],
+                  required_tools=["get_decision_ledger"],
+              )
+              assert not report.passed
+              state = HarnessState(task="performance", failed_steps=["get_decision_ledger"])
+              fallback = harness._insufficient_answer(state)
+              assert "No tengo evidencia suficiente" in fallback
+              assert not re.search(r"\b\d+(?:[.,]\d+)?%?\b", fallback)
+              print("FINANCIAL_TOOL_ERROR=PASS")
+              print("INSUFFICIENT_EVIDENCE=PASS")
+              print("ORDER_EXECUTION_SURFACE=ABSENT")
+          asyncio.run(main())
+          PY
+
+  e2e-credential-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report whether non-public E2E credentials are available to Actions
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          TELEGRAM_TEST_USER_SESSION: ${{ secrets.TELEGRAM_TEST_USER_SESSION }}
+        run: |
+          for name in TELEGRAM_BOT_TOKEN DATABASE_URL REDIS_URL TELEGRAM_TEST_USER_SESSION; do
+            if [ -n "${!name}" ]; then
+              echo "$name=PRESENT"
+            else
+              echo "$name=MISSING"
+            fi
+          done
+          echo "A real inbound Telegram smoke requires a user-side Telegram test session; a bot token alone cannot originate a user update."
