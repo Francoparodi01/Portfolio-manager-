@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from src.agentic.contracts import ToolObservation, ToolSpec
+from src.agentic.read_only import connect_read_only
 from src.agentic.tools import ToolContext, ToolRegistry, read_only_dsn
 
 
@@ -13,8 +14,213 @@ _REGRESSION_MODES = {"signal", "optimizer", "execution", "blocked", "all"}
 _QUALITY_MODES = {"strict", "relaxed", "all"}
 
 
+def _normalized_decision(value: Any) -> str:
+    raw = str(value or "").upper().strip()
+    if raw in {"BUY", "BUY_FULL", "BUY_PARTIAL", "BUY_REBALANCE", "ADD", "ACCUMULATE"}:
+        return "ACCUMULATE"
+    if raw in {"SELL", "SELL_FULL", "SELL_PARTIAL", "EXIT", "CLOSE", "REDUCE"}:
+        return "REDUCE"
+    return raw or "HOLD"
+
+
 def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRegistry:
-    """Register statistical audits that are demonstrably read-only."""
+    """Register additional read-only evidence and statistical audit tools."""
+
+    async def persisted_decision_evidence(arguments: dict[str, Any]) -> ToolObservation:
+        """Read the latest persisted formal analysis instead of recomputing it.
+
+        This is intentionally optimized for conversational status checks. It
+        preserves the original run timestamp so callers can reason about
+        freshness without paying the cost of scripts/run_analysis.py.
+        """
+        started = time.monotonic()
+        conn = await connect_read_only(read_only_dsn(context.database_url), command_timeout=20)
+        try:
+            owner = int(context.owner_chat_id or 0)
+            legacy = bool(context.legacy_single_owner)
+            candidates: list[tuple[str, datetime]] = []
+
+            decision_latest = await conn.fetchrow(
+                """
+                SELECT run_id::text AS run_id, MAX(decided_at) AS as_of
+                FROM decision_log
+                WHERE run_id IS NOT NULL
+                  AND (owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL))
+                  AND COALESCE(source, layers->>'source') = 'execution_plan'
+                GROUP BY run_id
+                ORDER BY MAX(decided_at) DESC
+                LIMIT 1
+                """,
+                owner,
+                legacy,
+            )
+            if decision_latest and decision_latest["run_id"] and decision_latest["as_of"]:
+                candidates.append((str(decision_latest["run_id"]), decision_latest["as_of"]))
+
+            try:
+                hold_latest = await conn.fetchrow(
+                    """
+                    SELECT run_id::text AS run_id, MAX(observed_at) AS as_of
+                    FROM position_hold_observations
+                    WHERE run_id IS NOT NULL
+                      AND (owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL))
+                    GROUP BY run_id
+                    ORDER BY MAX(observed_at) DESC
+                    LIMIT 1
+                    """,
+                    owner,
+                    legacy,
+                )
+            except Exception:
+                hold_latest = None
+            if hold_latest and hold_latest["run_id"] and hold_latest["as_of"]:
+                candidates.append((str(hold_latest["run_id"]), hold_latest["as_of"]))
+
+            snapshot_as_of = await conn.fetchval(
+                """
+                SELECT MAX(scraped_at)
+                FROM portfolio_snapshots
+                WHERE owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL)
+                """,
+                owner,
+                legacy,
+            )
+
+            if not candidates:
+                payload = {
+                    "schema_version": "persisted-decision-evidence-v1",
+                    "evidence_source": "persisted_latest_run",
+                    "status": "missing",
+                    "evaluated_at": None,
+                    "snapshot_as_of": snapshot_as_of.isoformat() if snapshot_as_of else None,
+                    "signals": [],
+                    "warnings": ["No persisted formal decision run is available."],
+                }
+                return ToolObservation(
+                    tool_name="get_persisted_decision_evidence",
+                    arguments=arguments,
+                    ok=True,
+                    content=json.dumps(payload, ensure_ascii=False),
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                )
+
+            run_id, evaluated_at = max(candidates, key=lambda item: item[1])
+            by_ticker: dict[str, dict[str, Any]] = {}
+
+            decision_rows = await conn.fetch(
+                """
+                SELECT
+                    ticker,
+                    decision,
+                    decision_type,
+                    final_score,
+                    layers,
+                    status,
+                    decided_at AS as_of
+                FROM decision_log
+                WHERE run_id=$1::uuid
+                  AND (owner_chat_id=$2 OR ($3::boolean AND owner_chat_id IS NULL))
+                  AND COALESCE(source, layers->>'source') = 'execution_plan'
+                ORDER BY decided_at, id
+                """,
+                run_id,
+                owner,
+                legacy,
+            )
+            for raw in decision_rows:
+                row = dict(raw)
+                ticker = str(row.get("ticker") or "").upper().strip()
+                if not ticker:
+                    continue
+                by_ticker[ticker] = {
+                    "ticker": ticker,
+                    "decision": _normalized_decision(row.get("decision_type") or row.get("decision")),
+                    "final_score": row.get("final_score"),
+                    "layers": row.get("layers") or {},
+                    "status": row.get("status"),
+                    "as_of": row.get("as_of").isoformat() if row.get("as_of") else None,
+                    "source_kind": "decision_log",
+                }
+
+            try:
+                hold_rows = await conn.fetch(
+                    """
+                    SELECT ticker, action, final_score, status, observed_at AS as_of
+                    FROM position_hold_observations
+                    WHERE run_id=$1::uuid
+                      AND (owner_chat_id=$2 OR ($3::boolean AND owner_chat_id IS NULL))
+                    ORDER BY observed_at, id
+                    """,
+                    run_id,
+                    owner,
+                    legacy,
+                )
+            except Exception:
+                hold_rows = []
+            for raw in hold_rows:
+                row = dict(raw)
+                ticker = str(row.get("ticker") or "").upper().strip()
+                if not ticker or ticker in by_ticker:
+                    continue
+                by_ticker[ticker] = {
+                    "ticker": ticker,
+                    "decision": _normalized_decision(row.get("action")),
+                    "final_score": row.get("final_score"),
+                    "layers": {},
+                    "status": row.get("status"),
+                    "as_of": row.get("as_of").isoformat() if row.get("as_of") else None,
+                    "source_kind": "position_hold_observations",
+                }
+
+            if evaluated_at.tzinfo is None:
+                evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+            age_seconds = max(0.0, (datetime.now(timezone.utc) - evaluated_at).total_seconds())
+            payload = {
+                "schema_version": "persisted-decision-evidence-v1",
+                "evidence_source": "persisted_latest_run",
+                "status": "observed",
+                "analysis_run_id": run_id,
+                "evaluated_at": evaluated_at.isoformat(),
+                "decision_run_age_seconds": round(age_seconds, 1),
+                "snapshot_as_of": snapshot_as_of.isoformat() if snapshot_as_of else None,
+                "signals": [by_ticker[key] for key in sorted(by_ticker)],
+                "warnings": [
+                    "Persisted evidence: the chat did not recompute the full analysis pipeline for this status request."
+                ],
+            }
+            content = json.dumps(payload, ensure_ascii=False, default=str)
+            return ToolObservation(
+                tool_name="get_persisted_decision_evidence",
+                arguments=arguments,
+                ok=True,
+                content=content[: context.output_limit_chars],
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+        except Exception as exc:
+            return ToolObservation(
+                tool_name="get_persisted_decision_evidence",
+                arguments=arguments,
+                ok=False,
+                content="",
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        finally:
+            await conn.close()
+
+    registry.register(
+        ToolSpec(
+            name="get_persisted_decision_evidence",
+            description=(
+                "Read the most recent persisted formal Quantia decision run directly from PostgreSQL. "
+                "Fast/read-only status evidence with explicit timestamps; it does not recompute signals or execute orders."
+            ),
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
+            timeout_seconds=20,
+        ),
+        persisted_decision_evidence,
+    )
 
     async def regression_audit(arguments: dict[str, Any]) -> ToolObservation:
         from src.analysis.regression_audit import (
