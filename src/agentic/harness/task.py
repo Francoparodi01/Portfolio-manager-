@@ -113,6 +113,18 @@ class TaskParser:
             return "viability", "explain_viability_audit", ["viability"]
         if any(term in text for term in ("resultado neto", "reporte neto", "neto por decision")):
             return "net_performance", "explain_net_decision_results", ["net_performance"]
+
+        bot_counterfactual = (
+            "bot" in text
+            and any(term in text for term in (
+                "hubiese", "habria", "si seguia", "si hubiera seguido", "siguiendo",
+                "seguir las decisiones", "seguido las decisiones", "seguir al bot",
+            ))
+            and any(term in text for term in ("pnl", "gana", "perd", "resultado", "decision"))
+        )
+        if bot_counterfactual:
+            return "bot_follow_pnl", "explain_hypothetical_bot_plan_pnl", ["bot_follow_pnl"]
+
         if any(term in text for term in ("cuanto gano", "pnl", "ganancia", "perdio", "ledger")):
             return "performance", "explain_economic_results", ["ledger", "performance"]
         horizon_decisions = "decision" in text and bool(re.search(r"\b\d{1,3}\s*(?:dias|days)\b", text))
