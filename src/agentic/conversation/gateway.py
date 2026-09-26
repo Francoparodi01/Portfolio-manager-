@@ -214,7 +214,7 @@ async def run_message(
         legacy_single_owner=legacy_single_owner,
     )
     stage_started = time.monotonic()
-    result = await harness.run(message, session=session)
+    result = await harness.run(message)
     stage_ms["harness"] = int((time.monotonic() - stage_started) * 1000)
     stage_ms["gateway_total"] = int((time.monotonic() - started) * 1000)
     result.metadata["gateway_stage_ms"] = stage_ms
