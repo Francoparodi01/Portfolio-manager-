@@ -1,0 +1,58 @@
+.report-page {
+  --data-app-layout-intent: authored-report;
+  --data-app-content-width: min(1080px, 100%);
+  --data-app-layout-gutter: 36px;
+  max-width: calc(var(--data-app-content-width) + 2 * var(--data-app-layout-gutter));
+  padding: 44px var(--data-app-layout-gutter) 100px;
+}
+
+.report-content,
+.report-sortable-sections,
+.report-section {
+  display: grid;
+  gap: 36px;
+  min-width: 0;
+}
+
+.report-hero { display: grid; gap: 16px; }
+
+.report-hero h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(36px, 5vw, 54px);
+  line-height: 1.06;
+  letter-spacing: -0.035em;
+}
+
+.report-page :is(.report-deck, .report-analysis, .report-disclosure) {
+  color: var(--secondary);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.report-page .rich-narrative-content h2 {
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+}
+
+.report-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.paired-charts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.report-page [data-component-kind="chart"] .chart-container { min-height: 300px; }
+
+@media (max-width: 760px) {
+  .report-page { --data-app-layout-gutter: 18px; padding-block: 32px 72px; }
+  .report-content, .report-sortable-sections, .report-section { gap: 28px; }
+  .report-facts, .paired-charts { grid-template-columns: 1fr; }
+}

@@ -118,14 +118,13 @@ def _count_payload_items(payload: Any, keys: tuple[str, ...]) -> int:
 
 SELECTORS = {
     "login": {
-        # Selectores verificados contra el DOM real de Cocos Capital (Feb 2026)
-        "username": "input[placeholder='Ingresá tu email'], input[type='email'], input[name='email']",
-        "password": "input[placeholder='Ingresá tu contraseña'], input[type='password']",
-        # Botón exacto del screenshot: 'Iniciar sesión'
-        "submit": "button:has-text('Iniciar sesión'), button[type='submit']",
+        # Selectores verificados contra el DOM real de Cocos Capital (Sep 2026)
+        "username": "#sign-in-email-input, [data-testid='sign-in-email-input'], input[placeholder='Ingresá tu email'], input[type='email']",
+        "password": "#sign-in-password-input, [data-testid='sign-in-password-input'], input[placeholder='Ingresá tu contraseña'], input[type='password']",
+        "submit": "button:has-text('Iniciar sesión')",
         # MFA: inputs individuales de 1 dígito o campo único
-        "mfa_single": "input[type='tel'], input[inputmode='numeric'], input[autocomplete='one-time-code']",
-        "mfa_submit": "button:has-text('Confirmar'), button:has-text('Verificar'), button[type='submit']",
+        "mfa_single": "input[autocomplete='one-time-code'], input[inputmode='numeric'], input[type='tel'], input[maxlength='1']",
+        "mfa_submit": "button:has-text('Confirmar'), button:has-text('Verificar')",
     },
     "portfolio": {
         # Verificado contra DOM real de Cocos Capital (Mar 2026)
@@ -453,6 +452,41 @@ class CocosCapitalScraper:
         reason = await self._access_block_reason(response_status=response_status)
         if reason:
             raise CocosAccessBlockedError(f"{reason} during {stage}")
+
+    async def _auth_access_block_reason(self) -> str | None:
+        """Probe the public auth preflight only after a login submit fails.
+
+        This does not attempt to solve or bypass a Cloudflare challenge. It only
+        prevents a challenged auth endpoint from being reported as bad user
+        credentials.
+        """
+
+        def probe() -> str | None:
+            try:
+                response = requests.options(
+                    "https://auth.cocos.capital/auth/v1/token?grant_type=password",
+                    headers={
+                        "Origin": "https://app.cocos.capital",
+                        "Access-Control-Request-Method": "POST",
+                        "Access-Control-Request-Headers": (
+                            "apikey,authorization,content-type,x-client-info"
+                        ),
+                    },
+                    timeout=10,
+                )
+            except requests.RequestException as exc:
+                logger.debug("No se pudo verificar el preflight de auth Cocos: %s", exc)
+                return None
+
+            server = str(response.headers.get("server") or "").lower()
+            mitigation = str(response.headers.get("cf-mitigated") or "").lower()
+            if mitigation == "challenge":
+                return "Cloudflare challenge en auth.cocos.capital"
+            if response.status_code in {403, 429} and "cloudflare" in server:
+                return f"Cloudflare HTTP {response.status_code} en auth.cocos.capital"
+            return None
+
+        return await asyncio.to_thread(probe)
 
     async def _visible_input_elements(self, selector: str = "input") -> list[Any]:
         if not self._page:
@@ -983,7 +1017,45 @@ class CocosCapitalScraper:
                 return True
 
             # ── MFA requerido ──────────────────────
-            logger.info(f"MFA requerido. URL actual: {self._page.url}")
+            # No asumir MFA sólo porque el login no terminó. Cocos puede dejar la
+            # pantalla de email/password visible después de rechazar el submit.
+            # En ese estado, usar un selector genérico "input" escribiría el TOTP
+            # sobre el email.
+            try:
+                body_after_login = await self._page.locator("body").inner_text(timeout=2_000)
+            except Exception:
+                body_after_login = ""
+
+            mfa_selector = SELECTORS["login"]["mfa_single"]
+            visible_inputs = await self._visible_input_elements(mfa_selector)
+            login_url = str(self._page.url or "")
+            mfa_screen_visible = (
+                "enroll-validate-2fa" in login_url
+                or "Código de 6 dígitos" in body_after_login
+                or "Codigo de 6 digitos" in body_after_login
+                or bool(visible_inputs)
+            )
+            login_screen_visible = (
+                self._is_login_url(login_url)
+                or (
+                    "Iniciar sesión" in body_after_login
+                    and "Contraseña" in body_after_login
+                )
+            )
+
+            if not mfa_screen_visible:
+                if login_screen_visible:
+                    access_block_reason = await self._auth_access_block_reason()
+                    if access_block_reason:
+                        raise CocosAccessBlockedError(access_block_reason)
+                    raise CocosAuthenticationError(
+                        "Cocos mantuvo la pantalla de login después de enviar las credenciales"
+                    )
+                raise CocosAuthenticationError(
+                    "Cocos no mostró una pantalla MFA verificable ni una sesión autenticada"
+                )
+
+            logger.info("MFA confirmado. URL actual: %s", login_url)
 
             totp_secret = getattr(self._cfg, "totp_secret", None) or os.environ.get("COCOS_TOTP_SECRET", "")
             if totp_secret and HAS_PYOTP:
@@ -1023,24 +1095,7 @@ class CocosCapitalScraper:
                 "Login confirmado mientras se preparaba MFA"
             ):
                 return True
-            try:
-                await self._page.wait_for_selector(
-                    "input",
-                    state="attached",
-                    timeout=15_000,
-                )
-            except PlaywrightTimeout:
-                if await self._accept_authenticated_page(
-                    "Login confirmado sin inputs MFA visibles"
-                ):
-                    return True
-                raise CocosAuthenticationError(
-                    "Cocos no mostró inputs MFA ni una sesión autenticada"
-                )
-            await asyncio.sleep(0.3)
-
-            all_inputs = await self._page.query_selector_all("input")
-            visible_inputs = await self._visible_input_elements("input")
+            all_inputs = await self._page.query_selector_all(mfa_selector)
             logger.info(
                 "Inputs en pantalla MFA: %d totales, %d visibles",
                 len(all_inputs),

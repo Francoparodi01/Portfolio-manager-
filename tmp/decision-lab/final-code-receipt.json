@@ -1,0 +1,20 @@
+{
+  "branch": "feature/decision-lab-pit-replay",
+  "head": "2096cdd42e237f90bd93f17cbc1eae288b824c3d",
+  "feature_status": "",
+  "pr": "https://github.com/Francoparodi01/Portfolio-manager-/pull/3",
+  "run_id": "737951b6dd461527f8274af304b7fa25d03c74297bb9c41f1721b45c3341d59d",
+  "files": {
+    "src/decision_lab/capture.py": "0b27e9ed4c59558bf27c3ebbfcb7107b1d9c8bcb7fe644758691bb09901db36a",
+    "src/decision_lab/counterfactuals.py": "13f45506ccf6785e9fb908744349920d664ebb94babda66f9957630f734244c4",
+    "src/decision_lab/exporter.py": "9b4817b6f067443d3c92f24fedd12c937305abe760d74f468ada23bdebdb98c3",
+    "src/decision_lab/models.py": "6b714cb6efd4c2faa599e63b1dd2193508c9d1b432cf3cdf85d3971e2732b77c",
+    "src/decision_lab/persistence.py": "66bc328d7b0c15b6d046328eef67061cb57be66f977b518a22c7a56dd43d91b9",
+    "src/decision_lab/queries.py": "afa6bd7c779ca9c840865df5efcb8b49e74deb4d1cb3f68566dcdcd82e6847a5",
+    "src/decision_lab/runner.py": "731802d86f5e407c940761158b94a3c31154cc607b11e6b2eba8951a4a3e86f5",
+    "src/decision_lab/state.py": "1c63adf4ec9980e63e80c40174aa4a188e4e75574f1b08256f9dfa4b29f978c7",
+    "src/decision_lab/statistics.py": "ec65a06ee6f1a608fcbdb8159bb2d5bf75675f13cef6d4415a28914b27184445",
+    "src/decision_lab/strategies.py": "3e6e39879551029e53ebbe979fa0a43de2c6a9e7e7e676cd20d6adf0cd6050e8",
+    "src/decision_lab/__init__.py": "a57ba845b133ec47a5926863c31cbe8e856f1078e54f412a41963125e6713575"
+  }
+}

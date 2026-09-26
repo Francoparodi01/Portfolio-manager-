@@ -1,0 +1,67 @@
+{
+  "version": "analytics-v2",
+  "experiment_id": "quantia-analytics-v2-observation",
+  "evaluated_as_of": "2026-09-22T00:00:00Z",
+  "metric_policy_version": "metric-v2",
+  "dedup_policy_version": "episode-v2",
+  "costs": {
+    "version": "cost-v2",
+    "scenarios": [
+      {
+        "name": "ZERO",
+        "bps": 0.0
+      },
+      {
+        "name": "CURRENT_VIABILITY",
+        "bps": 75.0
+      },
+      {
+        "name": "RESEARCH_BASE",
+        "bps": 150.0
+      },
+      {
+        "name": "STRESS",
+        "bps": 250.0
+      },
+      {
+        "name": "SEVERE",
+        "bps": 400.0
+      }
+    ]
+  },
+  "gates": {
+    "version": "gate-policy-v2",
+    "reportable": 30,
+    "provisional_effective": 20,
+    "confirmed_episodes": 100,
+    "confirmed_effective": 60,
+    "minimum_coverage": 0.9,
+    "minimum_ic": 0.03,
+    "minimum_ev": 0.0025,
+    "max_top1": 0.4,
+    "max_top3": 0.75,
+    "max_drawdown": 0.25,
+    "max_q": 0.1,
+    "stable_periods": 3,
+    "swaps_revalidated": false
+  },
+  "bootstrap_seed": 1729,
+  "bootstrap_resamples": 5000,
+  "bootstrap_block_length": 20,
+  "block_sensitivity": [
+    5,
+    10,
+    20,
+    40
+  ],
+  "confidence_level": 0.95,
+  "horizons": [
+    1,
+    5,
+    10,
+    20,
+    40
+  ],
+  "primary_hypotheses": [],
+  "preregistered_at": null
+}

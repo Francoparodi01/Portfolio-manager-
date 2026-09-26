@@ -1,0 +1,122 @@
+[
+  {
+    "file": "config/decision_lab_costs_v1.json",
+    "sha256": "ca8af8846a6b4041a9dd4ee936c04a62282fbe4438f69346ea66df0cad567043"
+  },
+  {
+    "file": "config/decision_lab_exploratory_v1.json",
+    "sha256": "0c548c3d290505b3418e77ce625fb147208cb8ee3310b08fdadac35051701ce9"
+  },
+  {
+    "file": "docs/decision-lab-source-audit.md",
+    "sha256": "7cc14b14b9121f2ab4360fabfa1f22af4a2d8e2535dd576cd13d71476b86311b"
+  },
+  {
+    "file": "scripts/check_decision_lab_db.py",
+    "sha256": "b990c36ca68e5386a46d2f22bb07f9dfcef2a818549bb7bdb9a6937ce9af0ac2"
+  },
+  {
+    "file": "scripts/run_analysis.py",
+    "sha256": "fda46dd1dc582d2e09df48c7a0da2e3065fdcf2a71675145c6772873d6c700fa"
+  },
+  {
+    "file": "scripts/run_decision_lab.py",
+    "sha256": "ddf1d40552ea9bb0da69fc45aaaf421af816062d8a7d0302a698ad73f6e421c9"
+  },
+  {
+    "file": "src/agentic/answer.py",
+    "sha256": "add8697ca06e794c3e17a6ab5ce4064b964fbeb4a2851958b0a872e339245567"
+  },
+  {
+    "file": "src/agentic/diagnostics.py",
+    "sha256": "408d917e374414438f06676aad517c76abc58f3bbec3527d0a6ea9c219d29dc4"
+  },
+  {
+    "file": "src/agentic/model.py",
+    "sha256": "77d1d5a50982d380f477d732e3dc4598f5c924f4056d0d5fbf2191f5d426a07c"
+  },
+  {
+    "file": "src/agentic/telegram.py",
+    "sha256": "f448f60b33829339a3c7b5ee6259e79cb0cbbfdc18c10a2256763c1f61bf016a"
+  },
+  {
+    "file": "src/agentic/tools.py",
+    "sha256": "1d1574c4d50726f6a05afe0bfa9489f93f257a284d7157809a74890928ac6b8f"
+  },
+  {
+    "file": "src/analysis/analytics_v2/bootstrap.py",
+    "sha256": "00b0896b554043ac416f32795d35c46d1109e7ad9622f511fcf7c27d96dcb2e9"
+  },
+  {
+    "file": "src/analysis/date_block_statistics.py",
+    "sha256": "e278e770c960f632255bd0cc3e45d4e2494e2e20304cc73ef76f482362596b33"
+  },
+  {
+    "file": "src/analysis/optimizer.py",
+    "sha256": "d253b248b4fcce6374b4fdd2e99273fe0f1fc6d8fb85f82e9c280d6681e25898"
+  },
+  {
+    "file": "src/decision_lab/__init__.py",
+    "sha256": "a57ba845b133ec47a5926863c31cbe8e856f1078e54f412a41963125e6713575"
+  },
+  {
+    "file": "src/decision_lab/capture.py",
+    "sha256": "0b27e9ed4c59558bf27c3ebbfcb7107b1d9c8bcb7fe644758691bb09901db36a"
+  },
+  {
+    "file": "src/decision_lab/counterfactuals.py",
+    "sha256": "13f45506ccf6785e9fb908744349920d664ebb94babda66f9957630f734244c4"
+  },
+  {
+    "file": "src/decision_lab/exporter.py",
+    "sha256": "9b4817b6f067443d3c92f24fedd12c937305abe760d74f468ada23bdebdb98c3"
+  },
+  {
+    "file": "src/decision_lab/models.py",
+    "sha256": "6b714cb6efd4c2faa599e63b1dd2193508c9d1b432cf3cdf85d3971e2732b77c"
+  },
+  {
+    "file": "src/decision_lab/persistence.py",
+    "sha256": "66bc328d7b0c15b6d046328eef67061cb57be66f977b518a22c7a56dd43d91b9"
+  },
+  {
+    "file": "src/decision_lab/queries.py",
+    "sha256": "57463e27274851542a8aec6f51f870e5ba38b8ed4fe06c00054ba77ec8b8a54f"
+  },
+  {
+    "file": "src/decision_lab/runner.py",
+    "sha256": "731802d86f5e407c940761158b94a3c31154cc607b11e6b2eba8951a4a3e86f5"
+  },
+  {
+    "file": "src/decision_lab/state.py",
+    "sha256": "1c63adf4ec9980e63e80c40174aa4a188e4e75574f1b08256f9dfa4b29f978c7"
+  },
+  {
+    "file": "src/decision_lab/statistics.py",
+    "sha256": "ec65a06ee6f1a608fcbdb8159bb2d5bf75675f13cef6d4415a28914b27184445"
+  },
+  {
+    "file": "src/decision_lab/strategies.py",
+    "sha256": "3e6e39879551029e53ebbe979fa0a43de2c6a9e7e7e676cd20d6adf0cd6050e8"
+  },
+  {
+    "file": "tests/test_decision_lab.py",
+    "sha256": "2c16e40b366d43b1155c243559c82ebba4d0f310eac025c017b467cdc41cc24f"
+  },
+  {
+    "file": "tests/test_decision_lab_agent.py",
+    "sha256": "1a42abe9ee77d27bf572b644d8098651ed32418170d38c637d7cec43a1562182"
+  },
+  {
+    "file": "tests/test_decision_lab_persistence.py",
+    "sha256": "791c9f4c51f55323ae1479e6cfc11e3115f9a32ef375853a59516ab531b7f2ee"
+  },
+  {
+    "file": "tests/test_decision_lab_statistics.py",
+    "sha256": "a12b7913470a4ec718352e5e70da134f28328ae1ccecfe31a1812cd132a538f3"
+  },
+  {
+    "file": "docs/decision-lab.md",
+    "sha256": "1efb56f0a3cbf09d1057b73b93cf21a941c12c2adefd0e291d7809c6941ed648"
+  }
+]

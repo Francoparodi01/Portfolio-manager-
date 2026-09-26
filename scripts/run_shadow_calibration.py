@@ -26,6 +26,22 @@ from src.collector.db import PortfolioDatabase
 from src.core.config import get_config
 
 
+DEFAULT_MIN_NEW_MATURED_OUTCOMES = 500
+
+
+def _should_refresh_calibration(
+    readiness: dict,
+    *,
+    minimum_new_matured_outcomes: int,
+    force: bool,
+) -> bool:
+    if force or readiness.get("last_calibrated_at") is None:
+        return True
+    return int(readiness.get("new_matured_outcomes") or 0) >= max(
+        1, int(minimum_new_matured_outcomes)
+    )
+
+
 async def run(args: argparse.Namespace) -> dict:
     cfg = get_config()
     db = PortfolioDatabase(cfg.database.url)
@@ -57,6 +73,27 @@ async def run(args: argparse.Namespace) -> dict:
                 "ok": False,
                 "error": "No source shadow run available",
                 "source_model_version": args.source_model_version,
+                "boundary": _boundary(),
+            }
+
+        readiness = await store.refresh_readiness(
+            owner_chat_id=args.owner_chat_id,
+            source_model_version=args.source_model_version,
+        )
+        if not _should_refresh_calibration(
+            readiness,
+            minimum_new_matured_outcomes=args.min_new_matured_outcomes,
+            force=args.force,
+        ):
+            return {
+                "ok": True,
+                "skipped": True,
+                "skip_reason": "insufficient_new_matured_outcomes",
+                "minimum_new_matured_outcomes": args.min_new_matured_outcomes,
+                "refresh_readiness": readiness,
+                "source_run_id": str(source_run["run_id"]),
+                "source_as_of": source_run["as_of_ts"],
+                "model_version": MODEL_VERSION,
                 "boundary": _boundary(),
             }
 
@@ -133,6 +170,7 @@ async def run(args: argparse.Namespace) -> dict:
             "source_as_of": source_run["as_of_ts"],
             "source_model_version": args.source_model_version,
             "model_version": MODEL_VERSION,
+            "refresh_readiness": readiness,
             "forecasts_persisted": persisted,
             "gate_changes": gate_changes,
             "models": [_model_payload(model, walk_forward[horizon]) for horizon, model in sorted(models.items())],
@@ -206,6 +244,13 @@ def render_report(payload: dict) -> str:
         )
     if "forecasts_persisted" in payload:
         lines.append(f"Persisted forecasts: {payload['forecasts_persisted']}")
+    if payload.get("skipped"):
+        readiness = payload.get("refresh_readiness") or {}
+        lines.append(
+            "Skipped: insufficient new matured outcomes "
+            f"({readiness.get('new_matured_outcomes', 0)}/"
+            f"{payload.get('minimum_new_matured_outcomes', 0)})."
+        )
     lines.append("Telegram unchanged; no analysis or execution effect.")
     return "\n".join(lines)
 
@@ -224,6 +269,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--owner-chat-id", type=int, default=0)
     parser.add_argument("--source-model-version", default=SOURCE_MODEL_VERSION)
     parser.add_argument("--latest-report", action="store_true")
+    parser.add_argument(
+        "--min-new-matured-outcomes",
+        type=int,
+        default=DEFAULT_MIN_NEW_MATURED_OUTCOMES,
+        help="Minimum valid outcomes matured since the last fit before rewriting calibration.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Recalculate despite the maturity gate; intended for a manual audit only.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
 

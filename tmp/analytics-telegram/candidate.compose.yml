@@ -1,0 +1,3 @@
+services:
+  telegram_bot:
+    image: cocos_copilot-telegram_bot:analytics-v2-candidate

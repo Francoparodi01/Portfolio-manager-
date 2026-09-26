@@ -180,6 +180,69 @@ class ShadowCalibrationStore:
             )
         return [dict(row) for row in rows]
 
+    async def refresh_readiness(
+        self,
+        *,
+        owner_chat_id: int,
+        source_model_version: str,
+    ) -> dict[str, Any]:
+        """Report newly matured, valid evidence since the last calibration.
+
+        The calibration is an audit artifact.  A new source forecast alone is
+        not new training evidence, so this small read prevents daily rewrites
+        when no outcomes have matured since the prior fit.
+        """
+        async with self.pool.acquire() as conn:
+            latest_trained_at = await conn.fetchval(
+                """
+                SELECT MAX(trained_at)
+                FROM shadow_calibration_runs
+                WHERE owner_chat_id = $1
+                  AND source_model_version = $2
+                  AND model_version = $3
+                """,
+                int(owner_chat_id),
+                str(source_model_version),
+                MODEL_VERSION,
+            )
+            if latest_trained_at is None:
+                row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*)::integer AS new_matured_outcomes,
+                           COUNT(DISTINCT f.as_of_ts::date)::integer AS new_matured_cohorts
+                    FROM shadow_thesis_forecasts f
+                    JOIN shadow_thesis_outcomes o ON o.forecast_id = f.id
+                    WHERE f.owner_chat_id = $1
+                      AND f.model_version = $2
+                      AND f.horizon_sessions IN (5, 20)
+                      AND ABS(o.realized_return) <= 1.0
+                    """,
+                    int(owner_chat_id),
+                    str(source_model_version),
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*)::integer AS new_matured_outcomes,
+                           COUNT(DISTINCT f.as_of_ts::date)::integer AS new_matured_cohorts
+                    FROM shadow_thesis_forecasts f
+                    JOIN shadow_thesis_outcomes o ON o.forecast_id = f.id
+                    WHERE f.owner_chat_id = $1
+                      AND f.model_version = $2
+                      AND f.horizon_sessions IN (5, 20)
+                      AND ABS(o.realized_return) <= 1.0
+                      AND o.matured_at > $3
+                    """,
+                    int(owner_chat_id),
+                    str(source_model_version),
+                    latest_trained_at,
+                )
+        return {
+            "last_calibrated_at": latest_trained_at,
+            "new_matured_outcomes": int(row["new_matured_outcomes"] or 0),
+            "new_matured_cohorts": int(row["new_matured_cohorts"] or 0),
+        }
+
     async def save_calibration(
         self,
         *,

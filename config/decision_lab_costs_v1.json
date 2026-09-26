@@ -1,0 +1,13 @@
+{
+  "version": "decision-lab-ars-v1",
+  "fee_bps": "75",
+  "half_spread_bps": "0",
+  "slippage_bps": "0",
+  "tax_bps": "0",
+  "fx_bps": "0",
+  "minimum_trade_ars": "0",
+  "reporting_currency": "ARS",
+  "cash_convention": "NOMINAL_ARS_NO_INTEREST",
+  "return_basis": "PRICE_ONLY",
+  "rounding": "FLOOR_TO_LOT"
+}

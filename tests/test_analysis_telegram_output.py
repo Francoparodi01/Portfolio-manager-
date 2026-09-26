@@ -56,9 +56,33 @@ from scripts.telegram_bot import (
     compact_radar_report,
     help_text,
     main_keyboard,
+    _portfolio_daily_line,
     _radar_exploratory_keyboard,
+    render_followed_watchlist,
     split_message,
 )
+
+
+def test_portfolio_daily_line_uses_signed_percent_and_ars_or_na():
+    positive = _portfolio_daily_line(
+        {
+            "price_source": "market_prices",
+            "change_pct_1d": 0.0234,
+            "day_pnl_ars": 10_250,
+            "market_price_ts": datetime(2026, 9, 22, 13, 42, tzinfo=timezone.utc),
+        }
+    )
+    negative = _portfolio_daily_line(
+        {
+            "price_source": "market_prices",
+            "change_pct_1d": -0.015,
+            "day_pnl_ars": -6_700,
+        }
+    )
+
+    assert positive == "Hoy: <b>+2,34%</b> · <b>+$10.250 ARS</b> · 10:42 ART"
+    assert negative == "Hoy: <b>-1,50%</b> · <b>-$6.700 ARS</b>"
+    assert "N/A" in _portfolio_daily_line({"price_source": "snapshot"})
 
 
 def test_compact_reason_keeps_operational_reason_without_premature_ellipsis():
@@ -234,6 +258,11 @@ def test_radar_metrics_command_and_callback_are_registered():
     assert CALLBACK_ALIASES["radar_metricas"] == "radar_metrics"
 
 
+def test_followed_watchlist_command_and_callback_are_registered():
+    assert ("seguimiento", "Evolución de ideas seguidas") in BOT_COMMAND_SPECS
+    assert CALLBACK_ALIASES["seguimiento"] == "followed_watchlist"
+
+
 def test_native_command_menu_keeps_only_primary_workflows():
     visible = {command for command, _description in BOT_COMMAND_SPECS}
 
@@ -245,6 +274,7 @@ def test_native_command_menu_keeps_only_primary_workflows():
         "events",
         "ticker",
         "radar",
+        "seguimiento",
         "radar_metricas",
         "mercado",
         "performance",
@@ -286,6 +316,7 @@ def test_help_lists_all_canonical_user_commands():
         "mercado",
         "radar",
         "radar_full",
+        "seguimiento",
         "radar_metricas",
         "shadow AMD",
         "resumen",
@@ -509,7 +540,49 @@ Compra técnica V3: <b>C</b> · esperar setup · 20d · shadow
     assert "<b>SE</b> · V3 A · score +0.280 · R/R 2.1x · también en top actual" in detailed
     assert "sin compra confirmada" in detailed
     assert "compra real vinculada" in detailed
+    assert "/seguimiento" in detailed
     assert len(detailed) < 3900
+
+
+def test_followed_watchlist_renders_observed_price_progress_without_execution_claim():
+    rendered = render_followed_watchlist([
+        {
+            "ticker": "IEMG",
+            "source": "SETUP_ALERT",
+            "user_action_at": datetime(2026, 8, 21, 17, 3, tzinfo=timezone.utc),
+            "baseline_price": 100.0,
+            "baseline_price_at": datetime(2026, 8, 21, 17, 0, tzinfo=timezone.utc),
+            "baseline_source": "market_price_at_follow",
+            "current_price": 108.5,
+            "current_price_at": datetime(2026, 8, 22, 17, 0, tzinfo=timezone.utc),
+            "setup_score": 40.9,
+            "setup_percentile": 1.0,
+            "invalidation_price": 94.0,
+            "target_price": 110.0,
+            "broker_fill_id": None,
+        },
+        {
+            "ticker": "XLE",
+            "source": "SETUP_ALERT",
+            "user_action_at": datetime(2026, 8, 21, 17, 3, tzinfo=timezone.utc),
+            "baseline_price": 100.0,
+            "baseline_price_at": datetime(2026, 8, 21, 17, 0, tzinfo=timezone.utc),
+            "baseline_source": "market_price_at_follow",
+            "current_price": 92.0,
+            "current_price_at": datetime(2026, 8, 22, 17, 0, tzinfo=timezone.utc),
+            "invalidation_price": 94.0,
+            "target_price": 110.0,
+            "broker_fill_id": 77,
+        },
+    ])
+
+    assert "Precio al marcar Seguir: <b>$100.00</b> · último: <b>$108.50</b>" in rendered
+    assert "Evolución observada: <b>+8.5%</b>" in rendered
+    assert "entre invalidación y objetivo experimental" in rendered
+    assert "bajo la invalidación experimental" in rendered
+    assert "sin compra confirmada" in rendered
+    assert "compra real vinculada; ver /performance" in rendered
+    assert "No es rendimiento real ni una recomendación" in rendered
 
 
 def test_exploratory_keyboard_skips_rejected_candidates():

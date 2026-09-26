@@ -1,0 +1,6 @@
+services:
+  telegram_bot:
+    image: cocos_copilot-telegram_bot:agentic-candidate
+    environment:
+      QUANTIA_AGENT_ENABLED: 'true'
+      QUANTIA_AGENT_REQUIRE_AUDIT: 'true'

@@ -52,6 +52,12 @@ El scheduler ejecuta `scripts/run_learning_shadow.py` a las 21:40 ART, despues d
 `scripts/review_learning_candidate.py` solo puede aprobarlas para shadow,
 rechazarlas o archivarlas; no existe promocion automatica a comportamiento live.
 
+Una propuesta de revisar un threshold requiere ahora, además de 30 casos
+maduros y cinco oportunidades limpias, alpha medio positivo contra SPY, al
+menos 30 controles retrospectivos únicos y reutilización de controles no mayor
+que 2x. Si no cumple, queda etiquetada `EVIDENCE_REVIEW`: se conserva como
+hallazgo, pero no como candidata a cambiar una regla.
+
 ## Consultas
 
 ```powershell

@@ -249,7 +249,8 @@ Análisis, el Radar, el optimizer, el planner ni las órdenes.
 
 ### Datos que utiliza
 
-El modelo `price_trend_ensemble_v1` usa exclusivamente precios de cierre
+El núcleo de pronóstico del modelo activo `price_trend_context_overlay_v2` usa
+exclusivamente precios de cierre
 canónicos:
 
 - mínimo de 80 ruedas por activo;
@@ -344,6 +345,11 @@ La evaluación informa, entre otras métricas:
 - error absoluto medio;
 - retorno esperado frente a retorno observado;
 - cantidad de muestras maduras.
+
+La calibración V3 permanece fuera de la salida al usuario y de cualquier
+decisión. Sólo vuelve a ajustarse cuando maduran al menos 500 outcomes válidos
+desde el último ajuste, salvo una auditoría manual con `--force`. Una nueva
+tesis diaria no se confunde con nueva evidencia de entrenamiento.
 
 ### Operación
 

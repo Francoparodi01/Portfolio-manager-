@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.collector.cocos_scraper import CocosCapitalScraper
-from src.collector.cocos_scraper import CocosAuthenticationError, PlaywrightTimeout
+from src.collector.cocos_scraper import (
+    CocosAccessBlockedError,
+    CocosAuthenticationError,
+    PlaywrightTimeout,
+)
 from src.core.config import ScraperConfig
 
 
@@ -155,6 +159,7 @@ def test_login_accepts_authenticated_home_before_waiting_for_mfa_inputs(tmp_path
     page.url = "https://app.cocos.capital/"
     page.goto.return_value = SimpleNamespace(status=200)
     page.query_selector.side_effect = [AsyncMock(), AsyncMock(), AsyncMock()]
+    page.locator = lambda selector: SimpleNamespace(inner_text=AsyncMock(return_value=""))
     scraper._page = page
     scraper._restore_saved_session = AsyncMock(return_value=False)
     scraper._raise_if_access_blocked = AsyncMock()
@@ -184,6 +189,7 @@ def test_login_without_authenticated_page_or_mfa_inputs_uses_auth_cooldown(tmp_p
     page.url = "https://app.cocos.capital/"
     page.goto.return_value = SimpleNamespace(status=200)
     page.query_selector.side_effect = [AsyncMock(), AsyncMock(), AsyncMock()]
+    page.locator = lambda selector: SimpleNamespace(inner_text=AsyncMock(return_value=""))
     page.wait_for_selector.side_effect = [
         None,
         None,
@@ -196,9 +202,79 @@ def test_login_without_authenticated_page_or_mfa_inputs_uses_auth_cooldown(tmp_p
     scraper._restore_saved_session = AsyncMock(return_value=False)
     scraper._raise_if_access_blocked = AsyncMock()
     scraper._accept_authenticated_page = AsyncMock(return_value=False)
+    scraper._visible_input_elements = AsyncMock(return_value=[])
+    scraper._auth_access_block_reason = AsyncMock(return_value=None)
     scraper._screenshot = AsyncMock()
 
     with pytest.raises(CocosAuthenticationError):
+        asyncio.run(scraper.login())
+
+    scraper._screenshot.assert_awaited_once_with("login_failure")
+
+
+def test_login_does_not_write_totp_into_returned_login_form(tmp_path):
+    scraper = CocosCapitalScraper(
+        ScraperConfig(
+            username="user@example.com",
+            password="secret",
+            session_file=str(tmp_path / "cocos_session.json"),
+        )
+    )
+    email_input = AsyncMock()
+    password_input = AsyncMock()
+    submit_button = AsyncMock()
+    body = SimpleNamespace(
+        inner_text=AsyncMock(return_value="Email Contraseña Iniciar sesión")
+    )
+    page = AsyncMock()
+    page.url = "https://app.cocos.capital/sign-in"
+    page.goto.return_value = SimpleNamespace(status=200)
+    page.query_selector.side_effect = [email_input, password_input, submit_button]
+    page.locator = lambda selector: body
+    scraper._page = page
+    scraper._restore_saved_session = AsyncMock(return_value=False)
+    scraper._raise_if_access_blocked = AsyncMock()
+    scraper._accept_authenticated_page = AsyncMock(return_value=False)
+    scraper._visible_input_elements = AsyncMock(return_value=[])
+    scraper._auth_access_block_reason = AsyncMock(return_value=None)
+    scraper._screenshot = AsyncMock()
+
+    with pytest.raises(CocosAuthenticationError, match="mantuvo la pantalla de login"):
+        asyncio.run(scraper.login())
+
+    email_input.type.assert_awaited_once_with("user@example.com", delay=30)
+    password_input.type.assert_awaited_once_with("secret", delay=30)
+    email_input.fill.assert_not_awaited()
+    password_input.fill.assert_not_awaited()
+    scraper._screenshot.assert_awaited_once_with("login_failure")
+
+
+def test_login_classifies_cloudflare_auth_challenge_as_access_block(tmp_path):
+    scraper = CocosCapitalScraper(
+        ScraperConfig(
+            username="user@example.com",
+            password="secret",
+            session_file=str(tmp_path / "cocos_session.json"),
+        )
+    )
+    page = AsyncMock()
+    page.url = "https://app.cocos.capital/sign-in"
+    page.goto.return_value = SimpleNamespace(status=200)
+    page.query_selector.side_effect = [AsyncMock(), AsyncMock(), AsyncMock()]
+    page.locator = lambda selector: SimpleNamespace(
+        inner_text=AsyncMock(return_value="Email Contraseña Iniciar sesión")
+    )
+    scraper._page = page
+    scraper._restore_saved_session = AsyncMock(return_value=False)
+    scraper._raise_if_access_blocked = AsyncMock()
+    scraper._accept_authenticated_page = AsyncMock(return_value=False)
+    scraper._visible_input_elements = AsyncMock(return_value=[])
+    scraper._auth_access_block_reason = AsyncMock(
+        return_value="Cloudflare challenge en auth.cocos.capital"
+    )
+    scraper._screenshot = AsyncMock()
+
+    with pytest.raises(CocosAccessBlockedError, match="Cloudflare challenge"):
         asyncio.run(scraper.login())
 
     scraper._screenshot.assert_awaited_once_with("login_failure")
