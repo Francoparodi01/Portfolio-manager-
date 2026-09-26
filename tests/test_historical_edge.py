@@ -22,11 +22,14 @@ def _row(
     score: float = -0.14,
     regime: str = "TRANSITIONAL",
     filled_after_as_of: bool = False,
+    run_id: str | None = None,
+    metric_scope: str = "planner_audit",
 ):
     decided_at = AS_OF - timedelta(days=days_ago)
     filled_at = AS_OF + timedelta(days=1) if filled_after_as_of else AS_OF - timedelta(hours=1)
     return {
         "id": idx,
+        "run_id": run_id or f"run-{days_ago}",
         "decided_at": decided_at,
         "ticker": ticker,
         "decision": action,
@@ -36,6 +39,7 @@ def _row(
         "outcome_basis": "canonical_cocos",
         "outcome_filled_at": filled_at,
         "status": "APPROVED",
+        "metric_scope": metric_scope,
     }
 
 
@@ -44,12 +48,14 @@ def _profitable_history():
     # 20 independent ticker episodes spread across 10 dates. 15 winners and
     # 5 losers remain strongly positive after the 150 bps research cost.
     for idx in range(20):
+        days_ago = 80 + (idx // 2) * 3
         rows.append(
             _row(
                 idx,
                 ticker=f"T{idx:02d}",
                 outcome=0.055 if idx < 15 else -0.005,
-                days_ago=80 + (idx // 2) * 3,
+                days_ago=days_ago,
+                run_id=f"run-{days_ago}",
             )
         )
     return rows
@@ -64,19 +70,62 @@ def test_score_bucket_uses_fixed_preregistered_bands():
 
 def test_repeated_same_direction_is_one_episode_until_a_break():
     rows = [
-        _row(1, ticker="NVDA", outcome=0.04, days_ago=90),
-        _row(2, ticker="NVDA", outcome=0.03, days_ago=89),
+        _row(1, ticker="NVDA", outcome=0.04, days_ago=90, run_id="r1"),
+        _row(2, ticker="NVDA", outcome=0.03, days_ago=89, run_id="r2"),
         {
-            **_row(3, ticker="NVDA", outcome=0.0, days_ago=88),
+            **_row(3, ticker="NVDA", outcome=0.0, days_ago=88, run_id="r3"),
             "decision": "HOLD",
             "status": "APPROVED",
         },
-        _row(4, ticker="NVDA", outcome=0.05, days_ago=87),
+        _row(4, ticker="NVDA", outcome=0.05, days_ago=87, run_id="r4"),
     ]
     episodes = build_directional_episodes(rows)
     assert len(episodes) == 2
     assert episodes[0]["recommendation_count"] == 2
     assert episodes[1]["recommendation_count"] == 1
+
+
+def test_same_signal_after_intervening_run_is_new_episode():
+    rows = [
+        _row(1, ticker="NVDA", outcome=0.04, days_ago=90, run_id="r1"),
+        _row(
+            2,
+            ticker="AMD",
+            outcome=0.03,
+            days_ago=89,
+            action="BUY",
+            score=0.14,
+            run_id="r2",
+        ),
+        _row(3, ticker="NVDA", outcome=0.05, days_ago=88, run_id="r3"),
+    ]
+    episodes = build_directional_episodes(rows)
+    nvda = [episode for episode in episodes if episode["ticker"] == "NVDA"]
+    assert len(nvda) == 2
+    assert [episode["recommendation_count"] for episode in nvda] == [1, 1]
+
+
+def test_blocked_audit_is_not_learned_as_formal_winner():
+    rows = _profitable_history()
+    rows.append(
+        _row(
+            99,
+            ticker="BLOCKED",
+            outcome=0.90,
+            days_ago=40,
+            metric_scope="blocked_audit",
+        )
+    )
+    match = match_historical_edge(
+        rows,
+        candidate_action="SELL",
+        candidate_score=-0.14,
+        candidate_regime="TRANSITIONAL",
+        as_of=AS_OF,
+        cost_bps=150,
+    )
+    assert match.n_episodes == 20
+    assert match.win_rate_net == 0.75
 
 
 def test_profitable_historical_pattern_passes_shadow_gate():
