@@ -16,6 +16,14 @@ from src.agentic.harness.task import TaskParser
 from src.agentic.model import OllamaAgentModel
 
 
+class _SynthesisResponse:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"message": {"content": json.dumps({"answer": "Respuesta conversacional compacta."})}}
+
+
 def test_portfolio_review_runs_db_bound_evidence_in_parallel():
     task = TaskParser().parse("¿Cómo está mi cartera?")
     plan = ContextSelector().select(
@@ -127,23 +135,27 @@ def test_synthesis_defaults_are_bounded_for_chat_latency(monkeypatch):
 
     synthesizer = GroundedSynthesizer(model="fixture-model")
 
-    assert synthesizer.max_chars == 8000
-    assert synthesizer.context_tokens == 8192
-    assert synthesizer.num_predict == 400
+    assert synthesizer.max_chars == 3500
+    assert synthesizer.context_tokens == 4096
+    assert synthesizer.num_predict == 220
     assert synthesizer.keep_alive == "30m"
 
 
-def test_portfolio_review_bypasses_llm_synthesis(monkeypatch):
+def test_portfolio_review_uses_compact_llm_synthesis_by_default(monkeypatch):
     monkeypatch.delenv("QUANTIA_HARNESS_SYNTHESIS_BYPASS_INTENTS", raising=False)
     synthesizer = GroundedSynthesizer(model="fixture-model")
+    called = 0
 
-    async def should_not_post(*_args, **_kwargs):
-        raise AssertionError("portfolio_review must not call Ollama synthesis")
+    async def fake_post(*_args, **_kwargs):
+        nonlocal called
+        called += 1
+        return _SynthesisResponse()
 
-    monkeypatch.setattr("httpx.AsyncClient.post", should_not_post)
+    monkeypatch.setattr("httpx.AsyncClient.post", fake_post)
     task = TaskSpec(intent="portfolio_review", raw_message="¿Cómo está mi cartera?")
     answer = asyncio.run(
         synthesizer.synthesize(task=task, evidence=[], fallback="respuesta determinística")
     )
 
-    assert answer == "respuesta determinística"
+    assert called == 1
+    assert answer == "Respuesta conversacional compacta."
