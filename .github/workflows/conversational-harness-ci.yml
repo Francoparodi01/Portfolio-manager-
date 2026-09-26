@@ -20,6 +20,30 @@ env:
   PYTHONPATH: .
 
 jobs:
+  baseline-main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact remote main baseline
+        uses: actions/checkout@v4
+        with:
+          ref: b93a3a7a3d4397cd49f980437e331978ec329af9
+          fetch-depth: 1
+      - name: Verify baseline SHA
+        run: |
+          test "$(git rev-parse HEAD)" = "b93a3a7a3d4397cd49f980437e331978ec329af9"
+          echo "BASELINE_SHA=$(git rev-parse HEAD)"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+      - name: Run exact main baseline suite
+        run: pytest -q
+
   harness-focused:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -69,6 +93,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Show branch SHA
+        run: git rev-parse HEAD
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -77,5 +103,5 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
-      - name: Run existing project suite
+      - name: Run branch full suite
         run: pytest -q
