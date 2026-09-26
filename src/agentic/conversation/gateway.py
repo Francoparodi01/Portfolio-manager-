@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from src.agentic.read_only import connect_read_only
 from src.agentic.tools import read_only_dsn, verify_single_owner
 
 RefreshCallback = Callable[[], Awaitable[str]]
+logger = logging.getLogger(__name__)
 
 
 async def _persisted_snapshot_is_fresh(
@@ -136,6 +138,7 @@ async def run_message(
     stage_ms["harness"] = int((time.monotonic() - stage_started) * 1000)
     stage_ms["gateway_total"] = int((time.monotonic() - started) * 1000)
     result.metadata["gateway_stage_ms"] = stage_ms
+    logger.info("[CHAT][GATEWAY] intent=%s stage_ms=%s", task.intent, stage_ms)
     if refresh_warning:
         result.verification.warnings.append("operational_refresh_warning")
         result.metadata["operational_refresh_warning"] = refresh_warning
