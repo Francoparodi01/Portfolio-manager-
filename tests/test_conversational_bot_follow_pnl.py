@@ -70,7 +70,7 @@ def test_bot_follow_pnl_renderer_is_concise_and_does_not_add_horizons():
 
     decision = evidence_decision(QUERY, history)
 
-    assert decision.answer_origin == "bot_follow_pnl_renderer_v2"
+    assert decision.answer_origin == "bot_follow_pnl_renderer_v3"
     assert "últimos 25 días" in decision.answer
     assert "A 5D: +$25.000 ARS" in decision.answer
     assert "A 10D: +$41.000 ARS" in decision.answer
@@ -80,46 +80,65 @@ def test_bot_follow_pnl_renderer_is_concise_and_does_not_add_horizons():
     assert '"schema_version"' not in decision.answer
 
 
-def test_pnl_provenance_followup_reuses_previous_window_and_only_real_source():
+def test_pnl_provenance_followup_routes_only_to_previous_run_trace():
     state = _state_after_bot_pnl()
     task = TaskParser().parse("que datos usaste?", state)
-    assert task.intent == "bot_follow_pnl"
+    assert task.intent == "evidence_provenance"
     assert task.objective == "explain_previous_sources"
-    assert "25 días" in task.raw_message
 
     plan = ContextSelector().select(
         task,
-        {"get_bot_follow_pnl", "get_decision_ledger", "get_system_status", "get_macro_context"},
+        {
+            "get_run_evidence_provenance", "get_bot_follow_pnl", "get_decision_ledger",
+            "get_system_status", "get_macro_context", "get_portfolio_snapshot",
+        },
     )
-    assert plan.allowed_tools == ["get_bot_follow_pnl"]
+    assert plan.allowed_tools == ["get_run_evidence_provenance"]
+    assert plan.required_tools == ["get_run_evidence_provenance"]
 
+
+def test_pnl_provenance_renderer_uses_exact_audited_sources():
     payload = {
-        "schema_version": "bot-follow-pnl-v1",
-        "source": "decision_log_formal_plans",
-        "scope": "FORMAL_PLAN_DIRECTIONAL_GROSS_PLAN_LEVEL_NOT_DEDUPLICATED",
-        "lookback_days": 25,
-        "plans_total": 52,
-        "plans_closed_5d": 35,
-        "plans_closed_10d": 29,
-        "plans_closed_20d": 11,
-        "bot_pnl_5d_ars": -115960,
-        "bot_pnl_10d_ars": -12320,
-        "bot_pnl_20d_ars": -41805,
+        "schema_version": "run-evidence-provenance-v1",
+        "status": "observed",
+        "referenced_run_id": "run-normalized-25d",
+        "referenced_goal": "¿Cuánto hubiese ganado realmente siguiendo al bot, normalizando decisiones repetidas?",
+        "sources": [
+            {
+                "tool": "get_decision_ledger",
+                "source": "decision_ledger",
+                "lookback_days": 25,
+                "normalized_component": {
+                    "source": "decision_log_formal_plan_episodes",
+                    "scope": "FORMAL_PLAN_DIRECTIONAL_GROSS_EPISODE_DEDUPLICATED",
+                    "lookback_days": 25,
+                    "raw_plans_total": 52,
+                    "episodes_total": 17,
+                    "duplicates_removed": 35,
+                },
+            }
+        ],
     }
     history = [{
-        "decision": {"tool": "get_bot_follow_pnl"},
-        "observation": {"tool": "get_bot_follow_pnl", "ok": True, "content": json.dumps(payload)},
+        "decision": {"tool": "get_run_evidence_provenance"},
+        "observation": {
+            "tool": "get_run_evidence_provenance",
+            "ok": True,
+            "content": json.dumps(payload),
+        },
     }]
-    decision = evidence_decision(task.raw_message, history)
 
-    assert "usé una sola fuente" in decision.answer
-    assert "decision_log_formal_plans" in decision.answer
-    assert "ventana de 25 días" in decision.answer
-    assert "No usé snapshot de cartera" in decision.answer
-    assert "contexto macro" in decision.answer
-    assert "estado del sistema" in decision.answer
-    assert "Redis" in decision.answer
-    assert "1559" not in decision.answer
+    decision = evidence_decision("que datos usaste?", history)
+
+    assert decision.answer_origin == "provenance_renderer_v1"
+    assert "respuesta inmediatamente anterior" in decision.answer
+    assert "get_decision_ledger" in decision.answer
+    assert "ventana 25 días" in decision.answer
+    assert "52 planes formales → 17 episodios independientes" in decision.answer
+    assert "35 reiteraciones" in decision.answer
+    assert "macro" in decision.answer
+    assert "cartera" in decision.answer
+    assert "run-normalized-25d" in decision.answer
 
 
 def test_normalized_bot_followup_inherits_25d_and_uses_ledger_not_plan_level_tool():
@@ -148,19 +167,26 @@ def test_normalized_bot_followup_inherits_25d_and_uses_ledger_not_plan_level_too
     assert harness._arguments("get_decision_ledger", task) == {"days": 25}
 
 
-def test_normalized_bot_followup_renderer_uses_normalized_ledger_and_does_not_invent_10d_20d():
-    report = "\n".join([
-        "📒 Decision Ledger",
-        "25d · resultado 5D · lectura económica",
-        "🧭 <b>Planes seguidos</b> <code>NORMALIZADO</code>",
-        "   14/18 maduros · 64,3% positivos",
-        "   Retorno bruto +2,1% · PnL direccional bruto 🟢 <b>+$82.500</b>",
-        "🤖 <b>Bot vs ejecución humana</b> <code>PLAN-LEVEL</code>",
-    ])
+def test_normalized_bot_followup_renderer_uses_deduplicated_counterfactual_not_followed_execution():
+    normalized = {
+        "schema_version": "bot-follow-pnl-normalized-v1",
+        "source": "decision_log_formal_plan_episodes",
+        "lookback_days": 25,
+        "raw_plans_total": 52,
+        "episodes_total": 17,
+        "duplicates_removed": 35,
+        "episodes_closed_5d": 15,
+        "episodes_closed_10d": 12,
+        "episodes_closed_20d": 5,
+        "pnl_5d_ars": -32000.0,
+        "pnl_10d_ars": 18000.0,
+        "pnl_20d_ars": 9000.0,
+    }
     payload = {
         "source": "decision_ledger",
         "lookback_days": 25,
-        "report": report,
+        "normalized_bot_counterfactual": normalized,
+        "report": "Planes seguidos NORMALIZADO 0/0 N/A",
     }
     history = [{
         "decision": {"tool": "get_decision_ledger"},
@@ -169,15 +195,15 @@ def test_normalized_bot_followup_renderer_uses_normalized_ledger_and_does_not_in
     goal = "¿Cuánto hubiese ganado siguiendo al bot, normalizando decisiones repetidas? [ventana heredada: 25 días]"
     decision = evidence_decision(goal, history)
 
-    assert decision.answer_origin == "bot_follow_pnl_renderer_v2"
-    assert "NORMALIZADA" in decision.answer
-    assert "últimos 25 días" in decision.answer
-    assert "14/18 maduros" in decision.answer
-    assert "PnL direccional bruto" in decision.answer
-    assert "+$82.500" in decision.answer
-    assert "5D" in decision.answer
-    assert "no invento 10D/20D" in decision.answer
-    assert "148 planes" not in decision.answer
+    assert decision.answer_origin == "bot_follow_pnl_renderer_v3"
+    assert "52 planes del bot quedan en 17 episodios independientes" in decision.answer
+    assert "35 reiteraciones removidas" in decision.answer
+    assert "A 5D: -$32.000 ARS" in decision.answer
+    assert "A 10D: +$18.000 ARS" in decision.answer
+    assert "A 20D: +$9.000 ARS" in decision.answer
+    assert "0/0" not in decision.answer
+    assert "Planes seguidos" not in decision.answer
+    assert "no deben sumarse" in decision.answer
 
 
 def test_persisted_portfolio_renderer_separates_current_snapshot_from_old_decision_run():
@@ -238,3 +264,18 @@ def test_bot_follow_pnl_bypasses_llm_synthesis(monkeypatch):
         synthesizer.synthesize(task=task, evidence=[], fallback="respuesta determinística")
     )
     assert answer == "respuesta determinística"
+
+
+def test_provenance_bypasses_llm_synthesis(monkeypatch):
+    monkeypatch.delenv("QUANTIA_HARNESS_SYNTHESIS_BYPASS_INTENTS", raising=False)
+    synthesizer = GroundedSynthesizer(model="fixture-model")
+
+    async def should_not_post(*_args, **_kwargs):
+        raise AssertionError("evidence_provenance must not call Ollama synthesis")
+
+    monkeypatch.setattr("httpx.AsyncClient.post", should_not_post)
+    task = TaskSpec(intent="evidence_provenance", raw_message="que datos usaste?")
+    answer = asyncio.run(
+        synthesizer.synthesize(task=task, evidence=[], fallback="procedencia determinística")
+    )
+    assert answer == "procedencia determinística"
