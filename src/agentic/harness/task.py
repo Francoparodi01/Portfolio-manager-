@@ -17,6 +17,9 @@ _ALIASES = {
     "google": "GOOGL", "googl": "GOOGL", "tesla": "TSLA", "tsla": "TSLA",
     "amd": "AMD", "mu": "MU", "gdx": "GDX", "iren": "IREN",
 }
+_REFERENTIAL_INTENTS = {
+    "position_analysis", "decision_explanation", "position_comparison", "decision_lab", "meta_policy"
+}
 
 
 def _plain(text: str) -> str:
@@ -45,7 +48,8 @@ class TaskParser:
         inherited_subject = None
 
         follow_up = self._looks_like_follow_up(text)
-        if state and follow_up:
+        may_inherit_symbol = bool(state and state.last_intent in _REFERENTIAL_INTENTS)
+        if state and follow_up and may_inherit_symbol:
             comparison_follow_up = any(term in text for term in ("comparalo", "comparala", "comparar", " vs "))
             if comparison_follow_up and entities and state.active_symbols:
                 previous = [symbol for symbol in state.active_symbols if symbol not in entities]
@@ -81,7 +85,7 @@ class TaskParser:
         markers = (
             "por que", "porque", "y si", "comparalo", "comparala", "y ahora",
             "eso", "esa", "ese", "entonces", "en su lugar", "y cual", "y que",
-            "que te preocupa", "cual te preocupa", "qué te preocupa",
+            "que te preocupa", "cual te preocupa",
         )
         return short and any(marker in text for marker in markers)
 
