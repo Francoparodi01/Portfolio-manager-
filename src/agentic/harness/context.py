@@ -90,11 +90,13 @@ class ContextSelector:
     """Select the smallest useful tool/context surface for the current task."""
 
     def select(self, task: TaskSpec, available_tools: set[str]) -> ContextPlan:
+        known_bounded_intent = task.intent in _INTENT_TOOLS
         if task.intent == "general":
             allowed = sorted((_BASE_TOOLS & available_tools))
             required: list[str] = []
             parallel: list[list[str]] = []
         elif task.intent == "bot_follow_pnl" and task.objective == "explain_normalized_follow_pnl":
+            known_bounded_intent = True
             allowed = [name for name in ["get_normalized_bot_follow_pnl"] if name in available_tools]
             required = list(allowed)
             parallel = []
@@ -108,7 +110,10 @@ class ContextSelector:
             ]
             parallel = [group for group in parallel if len(group) > 1]
 
-        if not allowed:
+        # Only genuinely unknown/general requests may expose the wider safe
+        # registry. A known financial intent with its authoritative tool missing
+        # fails closed instead of silently consulting unrelated sources.
+        if not allowed and not known_bounded_intent:
             allowed = sorted(available_tools)
 
         complex_task = task.intent in {
