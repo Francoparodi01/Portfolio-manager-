@@ -44,6 +44,7 @@ class OllamaAgentModel:
     _DETERMINISTIC_INTENTS = {
         "portfolio_review",
         "bot_follow_pnl",
+        "evidence_provenance",
         "opportunities",
         "performance",
         "net_performance",
@@ -137,7 +138,6 @@ class OllamaAgentModel:
 
     @staticmethod
     def _history_messages(history: list[dict[str, Any]]) -> list[dict[str, str]]:
-        # Keep the controller context bounded even when analysis/radar reports are long.
         max_total_chars = max(0, min(12000, int(os.getenv("QUANTIA_AGENT_MODEL_HISTORY_CHARS", "8000"))))
         max_observation_chars = max(0, min(4000, int(
             os.getenv("QUANTIA_AGENT_MODEL_OBSERVATION_CHARS", "3000")
@@ -233,8 +233,6 @@ class OllamaAgentModel:
         force_final: bool = False,
     ) -> AgentDecision:
         plan = question_plan(goal, self.conversation_context)
-        # Required evidence is a controller policy, not a suggestion the LLM
-        # can skip. Calls still consume the same audited loop budget.
         available = {tool.name for tool in tools}
         if plan.intent != "general" and available.intersection(plan.required_tools):
             attempted = {(item.get("decision") or {}).get("tool") for item in history
@@ -249,10 +247,12 @@ class OllamaAgentModel:
         if force_final:
             return evidence_decision(goal, history)
 
-        # The conversational TaskParser already routed several bounded intents
-        # deterministically. Once their required evidence exists, asking the LLM
-        # planner again adds latency without adding a new source. Keep the LLM
-        # planner for genuinely open-ended/dynamic intents only.
+        # Provenance is entirely determined by the audited preceding run. Do not
+        # ask the LLM to reinterpret or augment the source list.
+        if history and available == {"get_run_evidence_provenance"}:
+            logger.info("[CHAT][MODEL] planner_bypass intent=evidence_provenance")
+            return evidence_decision(goal, history)
+
         if history:
             try:
                 from src.agentic.harness.task import TaskParser
