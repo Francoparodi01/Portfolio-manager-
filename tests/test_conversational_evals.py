@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from src.agentic.harness.context import ContextSelector
-from src.agentic.harness.permissions import PermissionPolicy
 from src.agentic.harness.schemas import ConversationState
 from src.agentic.harness.task import TaskParser
 
@@ -27,7 +26,6 @@ def test_conversation_eval_dataset_routes_expected_intents_and_safe_tools():
     assert dataset["schema_version"] == "quantia-conversation-evals-v1"
     parser = TaskParser()
     selector = ContextSelector()
-    policy = PermissionPolicy()
 
     for case in dataset["cases"]:
         state = ConversationState(owner_chat_id=123)
@@ -46,5 +44,7 @@ def test_conversation_eval_dataset_routes_expected_intents_and_safe_tools():
         for tool in case.get("must_offer_tools", []):
             assert tool in plan.allowed_tools, (case["id"], tool)
         for tool in case.get("forbidden_tools", []):
+            # Capability authorization is registry-driven and is covered by the
+            # dedicated PermissionPolicy tests. Conversation evals only assert
+            # that routing never offers forbidden names to the model.
             assert tool not in plan.allowed_tools
-            assert not policy.allow(tool)
