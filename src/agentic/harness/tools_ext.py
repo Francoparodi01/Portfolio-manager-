@@ -10,6 +10,8 @@ from src.agentic.read_only import connect_read_only
 from src.agentic.tools import ToolContext, ToolRegistry, read_only_dsn
 from src.core.redis_client import client as redis_client
 
+from .tools_audits import register_audit_tools
+
 
 def _observation(
     *,
@@ -338,4 +340,4 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
         ),
         system_status,
     )
-    return registry
+    return register_audit_tools(registry, context)
