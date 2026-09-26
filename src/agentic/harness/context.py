@@ -9,6 +9,7 @@ _BASE_TOOLS = {
     "get_portfolio_snapshot",
     "get_persisted_decision_evidence",
     "get_bot_follow_pnl",
+    "get_normalized_bot_follow_pnl",
     "get_run_evidence_provenance",
     "get_decision_evidence",
     "analyze_portfolio",
@@ -94,10 +95,7 @@ class ContextSelector:
             required: list[str] = []
             parallel: list[list[str]] = []
         elif task.intent == "bot_follow_pnl" and task.objective == "explain_normalized_follow_pnl":
-            # The ledger tool now exposes a separate structured counterfactual
-            # deduplicated by recommendation episode. Do not use the actual
-            # followed-execution attribution for this hypothetical question.
-            allowed = [name for name in ["get_decision_ledger"] if name in available_tools]
+            allowed = [name for name in ["get_normalized_bot_follow_pnl"] if name in available_tools]
             required = list(allowed)
             parallel = []
         else:
