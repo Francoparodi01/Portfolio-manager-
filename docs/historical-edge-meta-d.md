@@ -10,7 +10,7 @@ No modifica el Decision Engine, sizing, ejecución, órdenes ni capital.
 
 ## Fuente histórica
 
-La fuente es `decision_log` para propuestas formales `execution_plan` del mismo
+La fuente es `decision_log` para propuestas `execution_plan` del mismo
 `owner_chat_id`.
 
 Para evitar leakage, una observación histórica sólo es utilizable cuando:
@@ -19,17 +19,25 @@ Para evitar leakage, una observación histórica sólo es utilizable cuando:
 - tiene `outcome_20d`;
 - `outcome_basis` comienza con `canonical_cocos`;
 - `outcome_filled_at <= as_of`;
-- el registro formal terminó `APPROVED` o `EXECUTED`.
+- el registro formal terminó `APPROVED` o `EXECUTED`;
+- su `metric_scope` es `primary` o `planner_audit`.
 
-Las decisiones bloqueadas se mantienen en el Learning Shadow separado y no se
-mezclan con esta población.
+Las decisiones `blocked_audit`, radar y debug no se aprenden como ganadores de
+META-D. Las bloqueadas siguen disponibles en el Learning Shadow separado.
 
 ## Unidad de análisis
 
 La unidad es un **episodio direccional**, no cada recomendación diaria.
-Repeticiones del mismo BUY/SELL sobre un ticker se deduplican de forma
-conservadora. Un HOLD/no-formal registrado o un cambio BUY↔SELL abre un nuevo
-episodio.
+
+Una repetición del mismo BUY/SELL sobre el mismo ticker pertenece al mismo
+episodio sólo cuando aparece en la misma corrida o en la corrida formal
+inmediatamente siguiente. Si el ticker desaparece durante una corrida, aparece
+un HOLD/no-formal o cambia BUY↔SELL, la próxima señal abre un episodio nuevo.
+
+Esto evita dos sesgos opuestos:
+
+- contar cinco reiteraciones consecutivas como cinco aciertos independientes;
+- colapsar dos tesis separadas por semanas o varias corridas como si fueran una.
 
 ## Perfil histórico
 
@@ -40,13 +48,17 @@ Cada candidato se asigna de forma determinística a:
 - `market_regime` registrado;
 - horizonte primario 20D.
 
-No se buscan cortes retrospectivos para maximizar PnL. Si la celda exacta tiene
-poca muestra se usa un backoff preregistrado y en este orden:
+No se buscan cortes retrospectivos para maximizar PnL. Si la celda exacta no
+alcanza la muestra mínima se usa un backoff preregistrado y en este orden:
 
 1. acción + score + régimen;
 2. acción + score;
 3. acción + régimen;
 4. acción.
+
+Los tres primeros requieren al menos 20 episodios para ser seleccionados; el
+pool sólo por acción requiere al menos 30. Si ninguno alcanza esa cobertura se
+reporta la celda exacta como evidencia insuficiente y META-D falla cerrado.
 
 ## Métricas
 
@@ -66,6 +78,10 @@ Se guardan:
 - concentración top-1 y top-3 de ganancias;
 - calidad y razones del gate.
 
+El profit factor se limita a `100` cuando la muestra no tiene pérdidas netas,
+en vez de persistir `Infinity`, para mantener JSON interoperable. Ese cap sólo
+evita un valor no finito; no convierte una muestra chica en evidencia suficiente.
+
 `outcome_20d` **no es** un contrafactual de cartera HOLD. Por eso META-D no lo
 presenta como DVA vs HOLD. Ese contraste queda para Decision Lab.
 
@@ -77,6 +93,7 @@ META-D requiere simultáneamente:
 - `n_dates >= 8`;
 - win rate neto `>= 55%`;
 - EV neto `>= +25 bps`;
+- mediana neta `> 0`;
 - profit factor `>= 1.10`;
 - concentración top-1 `<= 40%`;
 - concentración top-3 `<= 75%`;
