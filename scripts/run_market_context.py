@@ -23,7 +23,6 @@ from src.analysis.nlp_scorer import (
     DEFAULT_MODEL,
     DEFAULT_MODEL_REVISION,
     DEFAULT_OLLAMA_URL,
-    score_pending_items,
 )
 from src.analysis.sentiment_fetcher import (
     fetch_raw_sentiment_items,
@@ -31,6 +30,7 @@ from src.analysis.sentiment_fetcher import (
     load_active_portfolio_tickers,
     save_raw_sentiment_items,
 )
+from src.analysis.sentiment_queue import score_active_pending_items
 from src.analysis.sentiment_symbols import expand_news_symbols
 from src.analysis.signal_aggregator import (
     ACTIVE_SENTIMENT_SCORER,
@@ -216,6 +216,7 @@ async def _refresh_sentiment(
     ollama_url: str,
     timeout_seconds: float,
 ) -> tuple[dict[str, Any], list]:
+    del ollama_url, timeout_seconds
     sources = _general_sources()
     active_tickers = await load_active_portfolio_tickers(conn)
     news_tickers = expand_news_symbols(active_tickers)
@@ -243,13 +244,11 @@ async def _refresh_sentiment(
 
     items = general_items + ticker_items
     saved = await save_raw_sentiment_items(conn, items)
-    scoring = await score_pending_items(
+    scoring = await score_active_pending_items(
         conn,
         limit=score_limit,
         model=model,
         revision=revision,
-        ollama_url=ollama_url,
-        timeout_seconds=timeout_seconds,
     )
     aggregation = await aggregate_sentiment(conn, window_hours=lookback_hours)
 
@@ -268,6 +267,7 @@ async def _refresh_sentiment(
         "score_pending": int(scoring.get("pending") or 0),
         "score_scored": int(scoring.get("scored") or 0),
         "score_failed": int(scoring.get("failed") or 0),
+        "score_queue_policy": str(scoring.get("queue_policy") or ACTIVE_TICKER_RETRIEVAL_POLICY),
         "aggregated": int(aggregation.get("upserts") or 0),
         "backend": ACTIVE_SENTIMENT_SCORER,
         "aggregation_policy": AGGREGATION_POLICY,
