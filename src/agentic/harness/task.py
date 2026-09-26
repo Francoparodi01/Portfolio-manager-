@@ -68,10 +68,13 @@ class TaskParser:
 
         # Follow-ups such as "¿qué datos usaste?" or "normalizando repetidas"
         # inherit the previous bounded lookback instead of silently falling back
-        # to the tool default (90d). Keep the original user text intact in front
-        # and append explicit orchestration context for audited argument parsing.
+        # to the tool default (90d). Provenance also carries the referenced user
+        # turn so the model-side deterministic router can stay on the same intent
+        # without opening the general tool surface.
         task_raw = raw
-        if state and follow_up and _extract_days(raw) is None and intent in {
+        if state and objective == "explain_previous_sources" and state.recent_user_messages:
+            task_raw = f"{raw} [turno referido: {state.recent_user_messages[-1]}]"
+        if state and follow_up and _extract_days(task_raw) is None and intent in {
             "bot_follow_pnl", "performance", "decision_history"
         }:
             inherited_days = next(
@@ -84,7 +87,7 @@ class TaskParser:
                 None,
             )
             if inherited_days is not None:
-                task_raw = f"{raw} [ventana heredada: {inherited_days} días]"
+                task_raw = f"{task_raw} [ventana heredada: {inherited_days} días]"
 
         ambiguity: list[str] = []
         if intent in {"position_analysis", "decision_explanation"} and not entities:
