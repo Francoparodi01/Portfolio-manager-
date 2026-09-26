@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .news_retrieval_tool import RETRIEVAL_POLICY
 from .synthesis import LAYER_WEIGHTS
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ SOURCE_WEIGHTS = {
     "fed_monetary_policy": 1.0,
     "reuters": 1.0,
     "reuters_business": 1.0,
+    "marketaux": 0.95,
     "cnbc": 0.88,
     "marketwatch": 0.88,
     "yahoo_finance": 0.72,
@@ -34,7 +36,10 @@ SOURCE_WEIGHTS = {
 }
 
 ACTIVE_SENTIMENT_SCORER = os.getenv("SENTIMENT_ACTIVE_SCORER", "finbert").strip().lower() or "finbert"
-AGGREGATION_POLICY = "event_time_finbert_v1"
+ACTIVE_TICKER_RETRIEVAL_POLICY = os.getenv(
+    "SENTIMENT_ACTIVE_TICKER_RETRIEVAL_POLICY", RETRIEVAL_POLICY
+).strip() or RETRIEVAL_POLICY
+AGGREGATION_POLICY = "event_time_finbert_entity_v1"
 
 IMPACT_WEIGHTS = {
     "low": 0.7,
@@ -73,6 +78,7 @@ class SentimentContext:
             "sources": self.sources or {},
             "aggregation_policy": AGGREGATION_POLICY,
             "scorer": ACTIVE_SENTIMENT_SCORER,
+            "ticker_retrieval_policy": ACTIVE_TICKER_RETRIEVAL_POLICY,
             "reason": "used_as_sentiment_layer",
         }
 
@@ -117,7 +123,12 @@ async def aggregate_sentiment(
     half_life_hours: float = 8.0,
     now: datetime | None = None,
 ) -> dict[str, int | str]:
-    """Aggregate active scorer rows using event time <= the requested as-of."""
+    """Aggregate active scorer rows using event time <= the requested as-of.
+
+    Ticker rows are accepted only when their raw evidence was resolved through
+    the active entity-matched retrieval policy. Macro/sector evidence remains
+    allowed from the broad trusted feeds.
+    """
     as_of = _as_utc(now)
     bucket = _bucket_hour(as_of)
     rows = await conn.fetch(
@@ -133,7 +144,8 @@ async def aggregate_sentiment(
                 ss.summary,
                 ss.scored_at,
                 sr.source,
-                COALESCE(sr.published_at, sr.fetched_at) AS event_ts
+                COALESCE(sr.published_at, sr.fetched_at) AS event_ts,
+                COALESCE((sr.raw_payload->>'entity_match_score')::float, 1.0) AS entity_match_score
             FROM sentiment_scored ss
             JOIN sentiment_raw sr ON sr.id = ss.raw_id
             WHERE ss.status = 'SCORED'
@@ -145,16 +157,21 @@ async def aggregate_sentiment(
                   ss.ticker IS NOT NULL
                   OR ss.asset_scope IN ('macro', 'sector')
               )
+              AND (
+                  ss.asset_scope <> 'ticker'
+                  OR sr.raw_payload->>'retrieval_policy' = $4
+              )
             ORDER BY ss.raw_id, ss.scored_at DESC
         )
         SELECT
             ticker, asset_scope, score, impact, confidence, summary,
-            scored_at, source, event_ts
+            scored_at, source, event_ts, entity_match_score
         FROM latest
         """,
         ACTIVE_SENTIMENT_SCORER,
         as_of,
         int(window_hours),
+        ACTIVE_TICKER_RETRIEVAL_POLICY,
     )
 
     grouped: dict[tuple[str, str], list[dict]] = {}
@@ -178,6 +195,7 @@ async def aggregate_sentiment(
         for item in items:
             score = float(item.get("score") or 0.0)
             confidence = max(float(item.get("confidence") or 0.0), 0.05)
+            entity_match_score = max(0.0, min(float(item.get("entity_match_score") or 1.0), 1.0))
             impact = str(item.get("impact") or "low").lower()
             if impact == "high":
                 high_impact_count += 1
@@ -188,6 +206,7 @@ async def aggregate_sentiment(
                 _source_weight(src)
                 * IMPACT_WEIGHTS.get(impact, 0.7)
                 * confidence
+                * entity_match_score
                 * _decay(age, half_life_hours)
             )
             weighted_values.append(score * weight)
@@ -207,6 +226,7 @@ async def aggregate_sentiment(
         sources_payload: dict[str, Any] = dict(sources)
         sources_payload["_policy"] = AGGREGATION_POLICY
         sources_payload["_scorer"] = ACTIVE_SENTIMENT_SCORER
+        sources_payload["_ticker_retrieval_policy"] = ACTIVE_TICKER_RETRIEVAL_POLICY
         sources_payload["_window_hours"] = int(window_hours)
         sources_payload["_half_life_hours"] = float(half_life_hours)
         sources_payload["_as_of"] = as_of.isoformat()
@@ -244,6 +264,7 @@ async def aggregate_sentiment(
         "upserts": upserts,
         "scorer": ACTIVE_SENTIMENT_SCORER,
         "policy": AGGREGATION_POLICY,
+        "ticker_retrieval_policy": ACTIVE_TICKER_RETRIEVAL_POLICY,
     }
 
 
@@ -272,6 +293,7 @@ async def load_sentiment_contexts(
           AND bucket_ts >= $2 - ($3::int * INTERVAL '1 hour')
           AND sources->>'_policy' = $4
           AND sources->>'_scorer' = $5
+          AND sources->>'_ticker_retrieval_policy' = $6
         ORDER BY ticker, bucket_ts DESC
         """,
         lookup,
@@ -279,6 +301,7 @@ async def load_sentiment_contexts(
         int(max_age_hours),
         AGGREGATION_POLICY,
         ACTIVE_SENTIMENT_SCORER,
+        ACTIVE_TICKER_RETRIEVAL_POLICY,
     )
 
     contexts: dict[str, SentimentContext] = {}
@@ -310,7 +333,7 @@ async def load_top_sentiment_events(
     limit: int = 3,
     as_of: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Load highest-impact active-scorer events available at the as-of timestamp."""
+    """Load highest-impact active events available at the as-of timestamp."""
     as_of_utc = _as_utc(as_of)
     rows = await conn.fetch(
         """
@@ -334,6 +357,10 @@ async def load_top_sentiment_events(
               AND (COALESCE(sr.published_at, sr.fetched_at)
                    AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
                   = ($2 AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
+              AND (
+                  ss.asset_scope <> 'ticker'
+                  OR sr.raw_payload->>'retrieval_policy' = $3
+              )
             ORDER BY ss.raw_id, ss.scored_at DESC
         )
         SELECT summary, impact, confidence, score, ticker, asset_scope,
@@ -346,10 +373,11 @@ async def load_top_sentiment_events(
             COALESCE(confidence, 0) DESC,
             ABS(COALESCE(score, 0)) DESC,
             event_ts DESC
-        LIMIT $3
+        LIMIT $4
         """,
         ACTIVE_SENTIMENT_SCORER,
         as_of_utc,
+        ACTIVE_TICKER_RETRIEVAL_POLICY,
         max(1, min(int(limit), 10)),
     )
     return [dict(row) for row in rows]
