@@ -1,5 +1,5 @@
 services:
   telegram_bot:
-    command: ["python", "scripts/telegram_conversational.py"]
+    command: ["python", "scripts/telegram_bot_meta.py"]
     volumes:
       - ./outputs:/app/outputs
