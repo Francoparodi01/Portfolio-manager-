@@ -114,6 +114,9 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
             f"Ventana observada: {int(data.get('lookback_days') or 0)} días; "
             f"{int(data.get('raw_plans_total') or 0)} planes → {int(data.get('episodes_total') or 0)} episodios."
         ]
+        excluded = int(data.get("excluded_missing_notional") or 0)
+        if excluded:
+            rows.append(f"Cobertura: {excluded} planes quedaron fuera por no tener notional positivo persistido.")
         for horizon in (5, 10, 20):
             n = int(data.get(f"episodes_closed_{horizon}d") or 0)
             pnl = data.get(f"pnl_{horizon}d_ars")
@@ -283,9 +286,12 @@ def _normalized_bot_pnl_fallback(history: list[dict[str, Any]]) -> str | None:
     raw_total = int(data.get("raw_plans_total") or 0)
     episodes_total = int(data.get("episodes_total") or 0)
     removed = int(data.get("duplicates_removed") or 0)
+    excluded = int(data.get("excluded_missing_notional") or 0)
     lines = [
         f"Tomando los últimos {days} días y deduplicando recomendaciones repetidas, {raw_total} planes del bot quedan en {episodes_total} episodios independientes ({removed} reiteraciones removidas)."
     ]
+    if excluded:
+        lines.append(f"Cobertura: {excluded} planes no entran al PnL porque no tienen un notional positivo persistido; no les asigno capital ficticio.")
     mature = 0
     for horizon in (5, 10, 20):
         n = int(data.get(f"episodes_closed_{horizon}d") or 0)
@@ -481,9 +487,8 @@ def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision
         limits.extend(source_limits)
     if not successful:
         raise AgentModelError("no successful tool evidence for the closing report")
-    decision_sources = {"get_decision_evidence", "get_persisted_decision_evidence", "analyze_portfolio"}
-    if "get_portfolio_snapshot" in observed_tools and not (decision_sources & observed_tools):
-        limits.insert(0, "En esta corrida no se obtuvo evidencia de decisiones: no se verificó la lectura actual del motor.")
+    if "get_portfolio_snapshot" in observed_tools and "analyze_portfolio" not in observed_tools:
+        limits.insert(0, "En esta corrida no se obtuvo el análisis de cartera: no se verificaron el plan actual ni sus controles.")
 
     card_budget = min(2600, 7600 // len(cards))
     cards = [_excerpt(card, card_budget) for card in cards]
