@@ -68,7 +68,20 @@ def _explicit_days(text: str) -> int | None:
     return max(1, min(365, int(match.group(1))))
 
 
+def _structured_previous(state: ConversationState, key: str) -> Any:
+    task = state.last_task
+    return task.get(key) if isinstance(task, dict) else None
+
+
 def _previous_days(state: ConversationState) -> int | None:
+    value = _structured_previous(state, "lookback_days")
+    try:
+        if value is not None:
+            return max(1, min(730, int(value)))
+    except (TypeError, ValueError):
+        pass
+    # Backward compatibility for sessions created before structured state was
+    # introduced. New turns persist last_task and no longer depend on this scan.
     for text in reversed(state.recent_user_messages):
         days = _explicit_days(text)
         if days is not None:
@@ -103,7 +116,7 @@ class SemanticTaskRouter:
         return (
             "Sos el router semántico de Quantia. Tu única tarea es entender la intención conversacional; "
             "NO calculás finanzas, NO recomendás operaciones y NO elegís herramientas. "
-            "Usá el contexto de conversación para resolver referencias como el turno anterior, el mismo activo, "
+            "Usá el contexto estructurado para resolver referencias como el turno anterior, el mismo activo, "
             "la misma ventana temporal o una modificación del análisis previo.\n\n"
             "Intenciones disponibles y significado:\n"
             "- portfolio_review: estado/composición general de la cartera.\n"
@@ -124,7 +137,7 @@ class SemanticTaskRouter:
             "- general: sólo si ninguna categoría anterior describe el objetivo.\n\n"
             "Para bot_follow_pnl, aggregation='normalized' significa deduplicar recomendaciones repetidas; "
             "aggregation='plan_level' significa contar cada plan formal. No confundas normalizado con operaciones que el humano realmente siguió.\n"
-            "Si el mensaje es un follow-up, conservá la intención, símbolos y ventana relevantes del contexto salvo que el usuario los cambie. "
+            "Si el mensaje modifica o continúa el análisis previo, reference='previous_turn' y no inventes una nueva ventana. "
             "Si pregunta por fuentes de la respuesta anterior, intent=evidence_provenance y reference='previous_turn'.\n\n"
             "Devolvé únicamente JSON válido con este esquema:\n"
             "{\"intent\":\"...\",\"entities\":[\"TICKER\"],\"lookback_days\":null,"
@@ -176,22 +189,36 @@ class SemanticTaskRouter:
         if intent == "evidence_provenance":
             reference = "previous_turn"
 
+        prior_intent = str(_structured_previous(state, "intent") or state.last_intent or "")
+        same_thread = bool(prior_intent and intent == prior_intent)
+
         explicit_days = _explicit_days(raw)
         routed_days = self._bounded_int(value.get("lookback_days"), 1, 730)
         lookback_days = explicit_days if explicit_days is not None else routed_days
-        if lookback_days is None and reference == "previous_turn":
+        if lookback_days is None and (reference == "previous_turn" or same_thread):
             lookback_days = _previous_days(state)
 
         horizon_days = self._bounded_int(value.get("horizon_days"), 1, 365)
+        if horizon_days is None and reference == "previous_turn":
+            horizon_days = self._bounded_int(_structured_previous(state, "horizon_days"), 1, 365)
+
         aggregation = value.get("aggregation")
         aggregation = str(aggregation) if aggregation in {"plan_level", "normalized"} else None
         if intent == "bot_follow_pnl" and aggregation is None:
-            aggregation = "plan_level"
+            inherited_aggregation = _structured_previous(state, "aggregation")
+            if (reference == "previous_turn" or same_thread) and inherited_aggregation in {"plan_level", "normalized"}:
+                aggregation = str(inherited_aggregation)
+            else:
+                aggregation = "plan_level"
 
-        if reference == "previous_turn" and not entities and state.active_symbols and intent in {
+        if not entities and (reference == "previous_turn" or same_thread) and intent in {
             "position_analysis", "decision_explanation", "position_comparison", "meta_policy"
         }:
-            entities = list(state.active_symbols)
+            previous_entities = _structured_previous(state, "entities")
+            if isinstance(previous_entities, list):
+                entities = [str(item).upper().strip() for item in previous_entities if str(item).strip()]
+            elif state.active_symbols:
+                entities = list(state.active_symbols)
 
         if intent == "bot_follow_pnl":
             objective = "explain_normalized_follow_pnl" if aggregation == "normalized" else "explain_hypothetical_bot_plan_pnl"
@@ -235,9 +262,10 @@ class SemanticTaskRouter:
 
         context = {
             "last_intent": state.last_intent,
+            "last_task": state.last_task,
             "active_symbols": state.active_symbols,
             "conversation_subject": state.conversation_subject,
-            "recent_user_messages": state.recent_user_messages[-4:],
+            "recent_user_messages": state.recent_user_messages[-2:],
         }
         payload = {
             "model": self.model,
