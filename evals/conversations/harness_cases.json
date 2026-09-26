@@ -28,6 +28,13 @@
       "must_offer_tools": ["get_portfolio_snapshot", "scan_opportunities"]
     },
     {
+      "id": "bot-follow-pnl-25d",
+      "turns": ["cuanto pnl hubiese ganado siguiendo las decisiones del bot los ultimos 25 días"],
+      "expected_intents": ["bot_follow_pnl"],
+      "must_offer_tools": ["get_bot_follow_pnl"],
+      "forbidden_tools": ["get_net_decision_report"]
+    },
+    {
       "id": "economic-pnl",
       "turns": ["¿Cuánto ganó Quantia?"],
       "expected_intents": ["performance"],
