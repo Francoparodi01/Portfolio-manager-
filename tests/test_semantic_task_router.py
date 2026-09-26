@@ -91,6 +91,20 @@ def test_fallback_inherits_window_from_structured_task_not_old_text():
     assert task.aggregation == "normalized"
 
 
+def test_fallback_keeps_analytical_task_after_provenance_turn():
+    state = _state()
+    state.last_intent = "evidence_provenance"
+
+    normalized = TaskParser().parse("y normalizando las repetidas?", state)
+    assert normalized.intent == "bot_follow_pnl"
+    assert normalized.lookback_days == 25
+    assert normalized.aggregation == "normalized"
+
+    continuation = TaskParser().parse("y ahora?", state)
+    assert continuation.intent == "bot_follow_pnl"
+    assert continuation.lookback_days == 25
+
+
 def test_semantic_router_understands_provenance_paraphrase(monkeypatch):
     message = "¿En qué evidencia te apoyaste para decir eso?"
     assert TaskParser().parse(message, _state()).intent != "evidence_provenance"
