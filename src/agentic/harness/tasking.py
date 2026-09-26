@@ -50,38 +50,46 @@ def parse_task(message: str, state: ConversationState, recent_context: list[dict
     objective = "answer_user"
     intent = "general"
 
-    # Preserve the existing diagnostic policy as one source of routing hints,
-    # but do not make it an exhaustive intent whitelist.
+    # Existing diagnostics remain a useful routing policy, but not an exhaustive
+    # intent whitelist. The conversational harness can still use dynamic planning.
     prior = recent_context or []
     plan = question_plan(raw, prior)
     if plan.intent != "general":
         intent = plan.intent
         required.extend(plan.required_tools)
 
-    if any(term in lower for term in ("cuanto gano", "cuanto gano quantia", "pnl", "performance", "rendimiento", "resultado")):
+    if any(term in lower for term in ("meta policy", "meta-policy", "politica meta", "economic meta", "meta a", "meta b", "meta c")) or (
+        any(term in lower for term in ("a y b", "a/b/c", "a, b", "b y c"))
+        and any(term in lower for term in ("permit", "aprueb", "rechaz", "senal", "señal", "turnover", "edge"))
+    ):
+        intent = "meta_policy"
+        objective = "explain_shadow_meta_policy"
+        required.append("get_meta_policy_shadow")
+
+    if any(term in lower for term in ("cuanto gano", "cuanto gano quantia", "pnl", "performance", "rendimiento", "resultado economico", "resultado económico")):
         intent = "performance" if intent == "general" else intent
         objective = "explain_economic_result"
-        required.append("get_performance")
-        optional.append("get_ledger_outcomes")
+        required.append("get_analytics_v2")
+        optional.extend(["get_ledger_outcomes", "get_performance"])
 
     if any(term in lower for term in ("oportunidad", "reemplazar", "alternativa", "que pondrias", "que comprarias")):
         intent = "opportunity_search" if intent == "general" else intent
         objective = "find_portfolio_alternatives"
-        required.extend(["get_portfolio_snapshot", "scan_opportunities"])
-        optional.extend(["get_decision_evidence", "compare_plan_vs_hold"])
+        required.extend(["get_portfolio_snapshot", "get_decision_evidence", "scan_opportunities"])
+        optional.extend(["compare_plan_vs_hold"])
 
     if any(term in lower for term in ("como esta mi cartera", "como viene todo", "mi cartera hoy", "mi portfolio")):
         intent = "portfolio_review"
         objective = "summarize_current_portfolio"
         required.extend(["get_portfolio_snapshot", "get_decision_evidence"])
-        optional.extend(["get_macro_context", "get_performance"])
+        optional.extend(["get_macro_context", "get_analytics_v2"])
 
     if any(term in lower for term in ("estado del sistema", "funcionando", "anda quantia", "status", "salud del sistema")):
         intent = "system_status"
         objective = "explain_system_health"
         required.append("get_system_status")
 
-    if any(term in lower for term in ("ledger", "hace 20 dias", "hace 10 dias", "hace 5 dias", "hace 40 dias", "decisiones que tomaste")):
+    if any(term in lower for term in ("ledger", "hace 20 dias", "hace 10 dias", "hace 5 dias", "hace 40 dias", "decisiones que tomaste", "decisiones de hace")):
         intent = "historical_outcomes" if intent == "general" else intent
         objective = "explain_historical_decision_outcomes"
         required.append("get_ledger_outcomes")
@@ -92,6 +100,12 @@ def parse_task(message: str, state: ConversationState, recent_context: list[dict
         objective = "explain_position_decision"
         required.extend(["get_portfolio_snapshot", "get_decision_evidence"])
         optional.extend(["analyze_ticker", "compare_plan_vs_hold", "get_decision_value_added"])
+
+    if any(term in lower for term in ("vix", "sp500", "s&p", "ccl", "mep", "riesgo pais", "riesgo país", "wti", "macro")):
+        if intent == "general":
+            intent = "macro_context"
+            objective = "explain_macro_context"
+            required.append("get_macro_context")
 
     # Short follow-ups inherit structured subjects without replaying the full chat.
     referential = (
@@ -107,6 +121,11 @@ def parse_task(message: str, state: ConversationState, recent_context: list[dict
         if intent == "general" and state.last_intent:
             intent = state.last_intent
             objective = "continue_conversation"
+            if state.last_intent in {"position_analysis", "position_comparison"}:
+                required.extend(["get_portfolio_snapshot", "get_decision_evidence"])
+                optional.extend(["analyze_ticker", "compare_plan_vs_hold"])
+            elif state.last_intent == "meta_policy":
+                required.append("get_meta_policy_shadow")
 
     if "compar" in lower and len(entities) >= 2:
         intent = "position_comparison"
