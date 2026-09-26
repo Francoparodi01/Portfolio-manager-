@@ -27,6 +27,7 @@ PRIMARY_HORIZON_DAYS = 20
 DEFAULT_LOOKBACK_DAYS = 365
 DEFAULT_RESEARCH_COST_BPS = 150.0
 CANONICAL_OUTCOME_PREFIX = "canonical_cocos"
+MAX_PROFIT_FACTOR = 100.0
 
 # Fixed, economically interpretable score bands. They intentionally align with
 # existing Quantia decision/meta thresholds instead of being fitted ex post.
@@ -151,7 +152,8 @@ def build_directional_episodes(rows: Sequence[Mapping[str, Any]]) -> list[dict[s
     ordered = sorted(
         (dict(row) for row in rows),
         key=lambda row: (
-            _aware(row.get("decided_at") or row.get("as_of")) or datetime.min.replace(tzinfo=timezone.utc),
+            _aware(row.get("decided_at") or row.get("as_of"))
+            or datetime.min.replace(tzinfo=timezone.utc),
             str(row.get("id") or ""),
         ),
     )
@@ -199,9 +201,12 @@ def _profit_factor(values: Sequence[float]) -> float | None:
     positive = sum(value for value in values if value > 0)
     negative = abs(sum(value for value in values if value < 0))
     if negative > 0:
-        return positive / negative
+        return min(MAX_PROFIT_FACTOR, positive / negative)
     if positive > 0:
-        return float("inf")
+        # Keep JSON/evidence finite. A zero-loss sample is displayed as a capped
+        # high PF, never Infinity, because downstream stores and UIs require
+        # interoperable JSON numbers.
+        return MAX_PROFIT_FACTOR
     return None
 
 
@@ -211,22 +216,32 @@ def _pool_metrics(
     as_of: datetime,
     cost_bps: float,
 ) -> dict[str, Any]:
-    eligible = [episode for episode in episodes if _eligible_anchor(episode["anchor"], as_of=as_of)]
+    eligible = [
+        episode
+        for episode in episodes
+        if _eligible_anchor(episode["anchor"], as_of=as_of)
+    ]
     gross = [_finite(episode["anchor"].get("outcome_20d")) for episode in eligible]
     gross_values = [value for value in gross if value is not None]
     drag = max(0.0, float(cost_bps)) / 10_000.0
     net_values = [value - drag for value in gross_values]
     dates = {
-        (_aware(episode["anchor"].get("decided_at") or episode["anchor"].get("as_of"))).date().isoformat()
+        decided.date().isoformat()
         for episode in eligible
-        if _aware(episode["anchor"].get("decided_at") or episode["anchor"].get("as_of")) is not None
+        if (decided := _aware(
+            episode["anchor"].get("decided_at") or episode["anchor"].get("as_of")
+        )) is not None
     }
     top1, top3 = _positive_concentration(net_values)
     return {
         "episodes": eligible,
         "n_episodes": len(net_values),
         "n_dates": len(dates),
-        "win_rate_net": (sum(value > 0 for value in net_values) / len(net_values)) if net_values else None,
+        "win_rate_net": (
+            sum(value > 0 for value in net_values) / len(net_values)
+            if net_values
+            else None
+        ),
         "mean_gross_return": mean(gross_values) if gross_values else None,
         "mean_net_return": mean(net_values) if net_values else None,
         "median_net_return": median(net_values) if net_values else None,
@@ -307,28 +322,44 @@ def match_historical_edge(
     bucket = score_bucket(candidate_score)
     regime = normalize_regime(candidate_regime)
     evaluated_at = _aware(as_of) or datetime.now(timezone.utc)
-    episodes = build_directional_episodes(rows)
+    bounded_days = max(30, min(int(lookback_days), 730))
+    cutoff = evaluated_at - timedelta(days=bounded_days)
+    visible_rows = []
+    for row in rows:
+        decided_at = _aware(row.get("decided_at") or row.get("as_of"))
+        if decided_at is not None and cutoff <= decided_at < evaluated_at:
+            visible_rows.append(row)
+    episodes = build_directional_episodes(visible_rows)
 
-    # Fixed backoff hierarchy. Broader pools are used only when the more
-    # specific pool lacks enough observations; the code never searches for the
-    # best-performing subgroup.
+    # Fixed backoff hierarchy. Every selected pool already satisfies the minimum
+    # sample used by META-D, so an undersized exact cell may back off to a broader
+    # preregistered pool rather than failing merely because it was too specific.
     candidates = [
-        ("ACTION_SCORE_REGIME", 12, bucket, regime),
+        ("ACTION_SCORE_REGIME", 20, bucket, regime),
         ("ACTION_SCORE", 20, bucket, None),
         ("ACTION_REGIME", 20, None, regime),
         ("ACTION_ONLY", 30, None, None),
     ]
     selected_name = "ACTION_SCORE_REGIME"
     selected_pool: list[dict[str, Any]] = [
-        episode for episode in episodes if _matches(episode, action=action, bucket=bucket, regime=regime)
+        episode
+        for episode in episodes
+        if _matches(episode, action=action, bucket=bucket, regime=regime)
     ]
-    selected_metrics = _pool_metrics(selected_pool, as_of=evaluated_at, cost_bps=cost_bps)
+    selected_metrics = _pool_metrics(
+        selected_pool, as_of=evaluated_at, cost_bps=cost_bps
+    )
 
     for name, minimum, wanted_bucket, wanted_regime in candidates:
         pool = [
             episode
             for episode in episodes
-            if _matches(episode, action=action, bucket=wanted_bucket, regime=wanted_regime)
+            if _matches(
+                episode,
+                action=action,
+                bucket=wanted_bucket,
+                regime=wanted_regime,
+            )
         ]
         metrics = _pool_metrics(pool, as_of=evaluated_at, cost_bps=cost_bps)
         if int(metrics["n_episodes"]) >= minimum:
@@ -344,7 +375,7 @@ def match_historical_edge(
         score_bucket=bucket,
         market_regime=regime,
         specificity=selected_name,
-        lookback_days=max(30, min(int(lookback_days), 730)),
+        lookback_days=bounded_days,
         cost_bps=max(0.0, float(cost_bps)),
         n_episodes=int(selected_metrics["n_episodes"]),
         n_dates=int(selected_metrics["n_dates"]),
@@ -407,6 +438,7 @@ __all__ = [
     "DEFAULT_RESEARCH_COST_BPS",
     "HISTORICAL_EDGE_VERSION",
     "HistoricalEdgeMatch",
+    "MAX_PROFIT_FACTOR",
     "build_directional_episodes",
     "load_historical_rows",
     "match_historical_edge",
