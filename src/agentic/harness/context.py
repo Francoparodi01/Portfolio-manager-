@@ -68,7 +68,7 @@ _REQUIRED = {
 }
 
 _PARALLEL = {
-    "portfolio_review": [["get_portfolio_snapshot", "get_decision_evidence"]],
+    "portfolio_review": [["get_portfolio_snapshot", "get_decision_evidence", "analyze_portfolio"]],
     "position_analysis": [["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker"]],
     "decision_explanation": [["get_decision_evidence", "analyze_ticker"]],
     "position_comparison": [["get_portfolio_snapshot", "get_decision_evidence"]],
