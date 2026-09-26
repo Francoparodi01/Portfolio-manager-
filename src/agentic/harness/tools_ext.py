@@ -11,6 +11,26 @@ from src.agentic.tools import ToolContext, ToolRegistry, read_only_dsn
 from src.core.redis_client import client as redis_client
 
 
+def _observation(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    started: float,
+    payload: dict[str, Any],
+    limit: int,
+    ok: bool = True,
+    error: str | None = None,
+) -> ToolObservation:
+    return ToolObservation(
+        tool_name=tool_name,
+        arguments=arguments,
+        ok=ok,
+        content=json.dumps(payload, ensure_ascii=False, default=str)[:limit],
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+        error=error,
+    )
+
+
 def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> ToolRegistry:
     """Add read-only capabilities that previously lived behind Telegram commands."""
 
@@ -30,19 +50,18 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
             report = render_decision_ledger(data)
         finally:
             await conn.close()
-        payload = {
-            "source": "decision_ledger",
-            "mode": "PRODUCTION_OBSERVATION",
-            "as_of": datetime.now(timezone.utc).isoformat(),
-            "lookback_days": days,
-            "report": report,
-        }
-        return ToolObservation(
+        return _observation(
             tool_name="get_decision_ledger",
             arguments=arguments,
-            ok=True,
-            content=json.dumps(payload, ensure_ascii=False)[: context.output_limit_chars],
-            elapsed_ms=int((time.monotonic() - started) * 1000),
+            started=started,
+            payload={
+                "source": "decision_ledger",
+                "mode": "PRODUCTION_OBSERVATION",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "lookback_days": days,
+                "report": report,
+            },
+            limit=context.output_limit_chars,
         )
 
     registry.register(
@@ -63,26 +82,188 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
         decision_ledger,
     )
 
+    async def net_decision_report(arguments: dict[str, Any]) -> ToolObservation:
+        from src.analysis.net_decision_report import fetch_net_decision_report, render_net_decision_report
+
+        started = time.monotonic()
+        days = int(arguments.get("days", 180))
+        limit_runs = int(arguments.get("limit_runs", 6))
+        conn = await connect_read_only(read_only_dsn(context.database_url), command_timeout=90)
+        try:
+            data = await fetch_net_decision_report(
+                conn,
+                days=days,
+                owner_chat_id=context.owner_chat_id,
+            )
+            report = render_net_decision_report(data, limit_runs=limit_runs)
+        finally:
+            await conn.close()
+        return _observation(
+            tool_name="get_net_decision_report",
+            arguments=arguments,
+            started=started,
+            payload={
+                "source": "net_decision_report",
+                "mode": "PRODUCTION_OBSERVATION",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "lookback_days": days,
+                "report": report,
+            },
+            limit=context.output_limit_chars,
+        )
+
+    registry.register(
+        ToolSpec(
+            name="get_net_decision_report",
+            description=(
+                "Read the owner-scoped net performance report by analysis run and decision. "
+                "This is the natural-language replacement for /neto and never sends Telegram output."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 1, "maximum": 730, "default": 180},
+                    "limit_runs": {"type": "integer", "minimum": 1, "maximum": 20, "default": 6},
+                },
+                "additionalProperties": False,
+            },
+            read_only=True,
+            timeout_seconds=90,
+        ),
+        net_decision_report,
+    )
+
+    async def analytics_v2(arguments: dict[str, Any]) -> ToolObservation:
+        from src.analysis.analytics_v2_live import capture, render_telegram, summarize
+
+        started = time.monotonic()
+        days = int(arguments.get("days", 180))
+        conn = await connect_read_only(read_only_dsn(context.database_url), command_timeout=90)
+        try:
+            snapshot = await capture(
+                conn,
+                owner_chat_id=context.owner_chat_id,
+                days=days,
+                allow_legacy_null=context.legacy_single_owner,
+            )
+            package = summarize(snapshot)
+            report = render_telegram(package)
+        finally:
+            await conn.close()
+        return _observation(
+            tool_name="get_analytics_v2",
+            arguments=arguments,
+            started=started,
+            payload={
+                "source": "analytics_v2",
+                "mode": "OBSERVATION",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "lookback_days": days,
+                "report": report,
+            },
+            limit=context.output_limit_chars,
+        )
+
+    registry.register(
+        ToolSpec(
+            name="get_analytics_v2",
+            description=(
+                "Read the owner-scoped Analytics v2 observational report using the existing live capture/summarizer. "
+                "No archive is written and no attribution/outcome rows are changed."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"days": {"type": "integer", "minimum": 1, "maximum": 730, "default": 180}},
+                "additionalProperties": False,
+            },
+            read_only=True,
+            timeout_seconds=90,
+        ),
+        analytics_v2,
+    )
+
+    async def viability_audit(arguments: dict[str, Any]) -> ToolObservation:
+        from src.analysis.viability_audit import (
+            ViabilityAuditConfig,
+            render_viability_audit,
+            run_viability_audit,
+        )
+
+        started = time.monotonic()
+        days = int(arguments.get("days", 180))
+        cost_bps = float(arguments.get("cost_bps", 75))
+        min_sample = int(arguments.get("min_sample", 30))
+        # Call the read-only analysis module directly. The legacy CLI performs an
+        # attribution refresh before the report; the chat tool deliberately does
+        # not, so a conversation can never mutate attribution tables.
+        report_obj = await run_viability_audit(
+            ViabilityAuditConfig(
+                database_url=read_only_dsn(context.database_url),
+                days=days,
+                cost_bps=cost_bps,
+                min_sample=min_sample,
+            )
+        )
+        report = render_viability_audit(report_obj)
+        return _observation(
+            tool_name="get_viability_audit",
+            arguments=arguments,
+            started=started,
+            payload={
+                "source": "viability_audit",
+                "mode": "OBSERVATION",
+                "as_of": report_obj.generated_at.isoformat(),
+                "lookback_days": report_obj.days,
+                "cost_bps": report_obj.cost_bps,
+                "min_sample": report_obj.min_sample,
+                "verdict": report_obj.verdict,
+                "warnings": report_obj.warnings,
+                "report": report,
+            },
+            limit=context.output_limit_chars,
+        )
+
+    registry.register(
+        ToolSpec(
+            name="get_viability_audit",
+            description=(
+                "Run the existing 5D/10D/20D/40D viability audit in strictly read-only mode. "
+                "Unlike the legacy CLI, this tool does not refresh or write plan attributions."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 1, "maximum": 730, "default": 180},
+                    "cost_bps": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 75},
+                    "min_sample": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 30},
+                },
+                "additionalProperties": False,
+            },
+            read_only=True,
+            timeout_seconds=120,
+        ),
+        viability_audit,
+    )
+
     async def meta_policy(arguments: dict[str, Any]) -> ToolObservation:
         from src.analysis.economic_meta_telegram import render_latest_meta
 
         started = time.monotonic()
         ticker = str(arguments.get("ticker") or "").upper().strip() or None
         report = render_latest_meta(ticker=ticker)
-        payload = {
-            "source": "economic_meta_policy",
-            "mode": "SHADOW",
-            "capital_effect": "NO",
-            "as_of": datetime.now(timezone.utc).isoformat(),
-            "ticker": ticker,
-            "report": report,
-        }
-        return ToolObservation(
+        return _observation(
             tool_name="get_meta_policy",
             arguments=arguments,
-            ok=True,
-            content=json.dumps(payload, ensure_ascii=False),
-            elapsed_ms=int((time.monotonic() - started) * 1000),
+            started=started,
+            payload={
+                "source": "economic_meta_policy",
+                "mode": "SHADOW",
+                "capital_effect": "NO",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "ticker": ticker,
+                "report": report,
+            },
+            limit=context.output_limit_chars,
         )
 
     registry.register(
@@ -137,12 +318,13 @@ def register_harness_tools(registry: ToolRegistry, context: ToolContext) -> Tool
             payload["redis"] = "ERROR"
             payload["redis_error"] = type(exc).__name__
         ok = payload["database"] == "OK"
-        return ToolObservation(
+        return _observation(
             tool_name="get_system_status",
             arguments=arguments,
+            started=started,
+            payload=payload,
+            limit=context.output_limit_chars,
             ok=ok,
-            content=json.dumps(payload, ensure_ascii=False),
-            elapsed_ms=int((time.monotonic() - started) * 1000),
             error=None if ok else "database unavailable",
         )
 
