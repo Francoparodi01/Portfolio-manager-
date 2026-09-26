@@ -43,6 +43,7 @@ class OllamaAgentModel:
 
     _DETERMINISTIC_INTENTS = {
         "portfolio_review",
+        "bot_follow_pnl",
         "opportunities",
         "performance",
         "net_performance",
@@ -117,8 +118,6 @@ class OllamaAgentModel:
             "the distinction between plans, fills, gross outcomes and economic net PnL.\n\n"
             "For a portfolio review, keep the whole account in scope. A ticker-only report is "
             "complementary; synthetic zero cash/portfolio values in that report are not the account. "
-            "For a broad review, the snapshot alone only describes holdings: consult analyze_portfolio "
-            "for the current plan and guards before finishing, unless that tool is unavailable. "
             "A request limited to snapshot/date/cash does not require a full analysis. "
             "Scores are not returns or PnL. Once enough evidence is gathered, choose final. "
             "The runtime renders observed source facts and limitations; it does not publish your "
