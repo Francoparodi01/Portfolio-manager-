@@ -8,6 +8,7 @@ from .schemas import ContextPlan, TaskSpec
 _BASE_TOOLS = {
     "get_portfolio_snapshot",
     "get_persisted_decision_evidence",
+    "get_bot_follow_pnl",
     "get_decision_evidence",
     "analyze_portfolio",
     "analyze_ticker",
@@ -36,12 +37,15 @@ _INTENT_TOOLS = {
     # holdings + the latest persisted formal decision run. Recomputing the full
     # analysis pipeline belongs to explicit analysis/revalidation requests.
     "portfolio_review": ["get_portfolio_snapshot", "get_persisted_decision_evidence"],
+    "bot_follow_pnl": ["get_bot_follow_pnl"],
     "position_analysis": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_macro_context", "get_decision_value_added"],
     "decision_explanation": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_decision_value_added"],
     "position_comparison": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_decision_value_added", "scan_opportunities"],
     "opportunities": ["get_portfolio_snapshot", "get_decision_evidence", "scan_opportunities", "get_decision_value_added"],
-    "performance": ["get_decision_ledger", "get_performance", "get_net_decision_report"],
-    "net_performance": ["get_net_decision_report", "get_decision_ledger"],
+    # Generic performance keeps the economic ledger as the authoritative source.
+    # Do not fan out to legacy/net reports unless the user explicitly asks for them.
+    "performance": ["get_decision_ledger"],
+    "net_performance": ["get_net_decision_report"],
     "analytics_v2": ["get_analytics_v2"],
     "viability": ["get_viability_audit"],
     "regression_audit": ["get_regression_audit"],
@@ -55,6 +59,7 @@ _INTENT_TOOLS = {
 
 _REQUIRED = {
     "portfolio_review": ["get_portfolio_snapshot", "get_persisted_decision_evidence"],
+    "bot_follow_pnl": ["get_bot_follow_pnl"],
     "position_analysis": ["get_portfolio_snapshot", "get_decision_evidence"],
     "decision_explanation": ["get_decision_evidence"],
     "position_comparison": ["get_portfolio_snapshot", "get_decision_evidence"],
@@ -77,7 +82,6 @@ _PARALLEL = {
     "decision_explanation": [["get_decision_evidence", "analyze_ticker"]],
     "position_comparison": [["get_portfolio_snapshot", "get_decision_evidence"]],
     "opportunities": [["get_portfolio_snapshot", "scan_opportunities"]],
-    "performance": [["get_decision_ledger", "get_performance", "get_net_decision_report"]],
     "net_performance": [["get_net_decision_report", "get_decision_ledger"]],
     "market_context": [["get_macro_context", "get_macro_exposure"]],
 }
