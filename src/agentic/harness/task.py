@@ -51,6 +51,17 @@ def _previous_days(state: ConversationState | None) -> int | None:
     return None
 
 
+def _previous_intent(state: ConversationState | None) -> str | None:
+    if state is None:
+        return None
+    if isinstance(state.last_task, dict):
+        value = str(state.last_task.get("intent") or "").strip()
+        if value:
+            return value
+    value = str(state.last_intent or "").strip()
+    return value or None
+
+
 class TaskParser:
     """Conservative rule fallback for when the semantic router is unavailable."""
 
@@ -165,7 +176,7 @@ class TaskParser:
         normalized_follow = any(term in text for term in (
             "normaliz", "deduplic", "sin repetir", "decisiones repetidas", "recomendaciones repetidas"
         ))
-        prior_bot_follow = bool(state and state.last_intent == "bot_follow_pnl")
+        prior_bot_follow = _previous_intent(state) == "bot_follow_pnl"
         if normalized_follow and ("bot" in text or prior_bot_follow):
             return "bot_follow_pnl", "explain_normalized_follow_pnl", ["bot_counterfactual_normalized"]
 
@@ -215,6 +226,7 @@ class TaskParser:
             return "position_analysis", "evaluate_position", ["portfolio", "decision", "technical", "macro", "risk", "decision_lab"]
         if any(term in text for term in ("cartera", "portfolio", "como viene todo", "como esta todo")):
             return "portfolio_review", "review_portfolio", ["portfolio", "decision", "risk"]
-        if follow_up and state and state.last_intent:
-            return state.last_intent, "continue_previous_task", ["referenced_evidence"]
+        previous_intent = _previous_intent(state)
+        if follow_up and previous_intent:
+            return previous_intent, "continue_previous_task", ["referenced_evidence"]
         return "general", "answer_user", []
