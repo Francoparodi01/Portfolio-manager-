@@ -111,11 +111,15 @@ class TaskParser:
             return "meta_policy", "explain_shadow_meta_policy", ["meta_policy", "decision_lab"]
         if any(term in text for term in ("decision lab", "plan vs hold", "plan contra hold", "dva", "contrafactual", "counterfactual")):
             return "decision_lab", "compare_recorded_decision_evidence", ["decision_lab"]
-        if any(term in text for term in ("analytics v2", "analytics", "analitica v2", "analítica v2")):
+        if any(term in text for term in ("regression audit", "regression", "regresion", "auditoria de regresion", "auditoria estadistica")):
+            return "regression_audit", "explain_regression_audit", ["regression_audit"]
+        if any(term in text for term in ("decision calibration", "calibration", "calibracion", "dcl")):
+            return "calibration_audit", "explain_calibration_audit", ["calibration_audit"]
+        if any(term in text for term in ("analytics v2", "analytics", "analitica v2")):
             return "analytics_v2", "explain_observational_analytics", ["analytics_v2"]
         if any(term in text for term in ("viability", "viabilidad", "es viable", "sigue siendo viable")):
             return "viability", "explain_viability_audit", ["viability"]
-        if any(term in text for term in ("resultado neto", "reporte neto", "neto por decision", "neto por decisión")):
+        if any(term in text for term in ("resultado neto", "reporte neto", "neto por decision")):
             return "net_performance", "explain_net_decision_results", ["net_performance"]
         if any(term in text for term in ("cuanto gano", "pnl", "ganancia", "perdio", "ledger")):
             return "performance", "explain_economic_results", ["ledger", "performance"]
