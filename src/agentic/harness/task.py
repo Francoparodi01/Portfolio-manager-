@@ -66,14 +66,10 @@ class TaskParser:
 
         intent, objective, evidence = self._classify(text, entities, state, follow_up)
 
-        # Follow-ups such as "¿qué datos usaste?" or "normalizando repetidas"
-        # inherit the previous bounded lookback instead of silently falling back
-        # to the tool default (90d). Provenance also carries the referenced user
-        # turn so the model-side deterministic router can stay on the same intent
-        # without opening the general tool surface.
+        # A short follow-up can inherit the last explicit bounded lookback. Keep
+        # it in the audited task text so existing deterministic argument parsing
+        # preserves 25d/90d/etc without silently falling back to defaults.
         task_raw = raw
-        if state and objective == "explain_previous_sources" and state.recent_user_messages:
-            task_raw = f"{raw} [turno referido: {state.recent_user_messages[-1]}]"
         if state and follow_up and _extract_days(task_raw) is None and intent in {
             "bot_follow_pnl", "performance", "decision_history"
         }:
@@ -87,7 +83,7 @@ class TaskParser:
                 None,
             )
             if inherited_days is not None:
-                task_raw = f"{task_raw} [ventana heredada: {inherited_days} días]"
+                task_raw = f"{raw} [ventana heredada: {inherited_days} días]"
 
         ambiguity: list[str] = []
         if intent in {"position_analysis", "decision_explanation"} and not entities:
@@ -139,10 +135,10 @@ class TaskParser:
         state: ConversationState | None,
         follow_up: bool,
     ) -> tuple[str, str, list[str]]:
-        # Provenance is a follow-up over the previous bounded workflow. Reuse
-        # that workflow's source surface; do not open the general tool registry.
-        if state and state.last_intent and self._is_provenance_question(text):
-            return state.last_intent, "explain_previous_sources", ["referenced_evidence"]
+        # Provenance never reruns the previous analytical workflow. It reads the
+        # audited tool trace of the immediately preceding completed turn.
+        if state and self._is_provenance_question(text):
+            return "evidence_provenance", "explain_previous_sources", ["previous_run_trace"]
 
         if any(term in text for term in ("a y b", "meta-a", "meta-b", "meta-c", "economic meta", "politica meta")):
             return "meta_policy", "explain_shadow_meta_policy", ["meta_policy", "decision_lab"]
@@ -164,9 +160,7 @@ class TaskParser:
         ))
         prior_bot_follow = bool(state and state.last_intent == "bot_follow_pnl")
         if normalized_follow and ("bot" in text or prior_bot_follow):
-            # Keep the same deterministic intent so planner/synthesis remain
-            # bypassed, but switch the evidence surface in ContextSelector.
-            return "bot_follow_pnl", "explain_normalized_follow_pnl", ["ledger_normalized"]
+            return "bot_follow_pnl", "explain_normalized_follow_pnl", ["bot_counterfactual_normalized"]
 
         bot_counterfactual = (
             "bot" in text
@@ -185,10 +179,6 @@ class TaskParser:
         if horizon_decisions or any(term in text for term in ("hace 20 dias", "decisiones que tomaste", "outcomes", "resultado de decisiones")):
             return "decision_history", "explain_matured_decisions", ["ledger", "outcomes"]
 
-        # Natural-language discovery/buy requests should use the bounded radar
-        # workflow rather than falling through to the unrestricted general intent.
-        # Keep named-ticker questions out of this branch so "¿conviene comprar NVDA?"
-        # remains a position analysis instead of becoming a portfolio-wide scan.
         purchase_recommendation = not entities and (
             any(term in text for term in (
                 "que me recomendas comprar", "que me recomiendas comprar",
