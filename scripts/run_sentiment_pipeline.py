@@ -1,7 +1,8 @@
 """Run the point-in-time FinBERT sentiment pipeline.
 
-The pipeline is contextual/auditable. It replaces the previous sentiment
-scorer in the existing sentiment slot but does not alter planner thresholds.
+Ticker-specific retrieval is entity-matched through the configured news tool.
+General RSS feeds remain available for macro/market context, while local
+FinBERT remains the only active sentiment scorer.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.analysis.news_retrieval_tool import get_news_context
 from src.analysis.nlp_scorer import (
     DEFAULT_MODEL,
     DEFAULT_MODEL_REVISION,
@@ -21,6 +23,7 @@ from src.analysis.nlp_scorer import (
 )
 from src.analysis.sentiment_fetcher import (
     fetch_raw_sentiment_items,
+    get_sentiment_sources,
     load_active_portfolio_tickers,
     save_raw_sentiment_items,
 )
@@ -50,11 +53,18 @@ async def main(
     # the FinBERT scorer intentionally ignores them.
     cfg = get_config()
     db = PortfolioDatabase(cfg.database.url)
+    ticker_provider = os.getenv("SENTIMENT_TICKER_NEWS_PROVIDER", "marketaux").strip().lower() or "marketaux"
     result = {
         "raw_items": 0,
         "raw_saved": 0,
+        "general_raw_items": 0,
+        "ticker_raw_items": 0,
         "portfolio_tickers": 0,
         "news_tickers": 0,
+        "ticker_news_provider": ticker_provider,
+        "ticker_retrieval_status": "not_run",
+        "ticker_retrieval_calls": 0,
+        "ticker_retrieval_rejected": 0,
         "score_pending": 0,
         "score_scored": 0,
         "score_failed": 0,
@@ -84,18 +94,58 @@ async def main(
                 news_tickers = expand_news_symbols(active_tickers)
                 result["portfolio_tickers"] = len(active_tickers)
                 result["news_tickers"] = len(news_tickers)
-                items = await fetch_raw_sentiment_items(
-                    tickers=news_tickers,
+
+                # Keep broad RSS sources for macro/market context, but never use
+                # legacy per-ticker Yahoo feeds as ticker evidence.
+                general_sources = [
+                    source
+                    for source in get_sentiment_sources([])
+                    if source.category != "ticker_news"
+                    and not source.name.startswith("yahoo_finance_ticker_")
+                ]
+                general_items = await fetch_raw_sentiment_items(
+                    sources=general_sources,
                     max_items_per_source=max_items_per_source,
                 )
+                result["general_raw_items"] = len(general_items)
+
+                ticker_items = []
+                retrieval_stats = {
+                    "status": "disabled",
+                    "calls": 0,
+                    "rejected_associations": 0,
+                }
+                if ticker_provider == "marketaux":
+                    ticker_items, retrieval_stats = await get_news_context(
+                        news_tickers,
+                        lookback_hours=int(os.getenv("SENTIMENT_MARKETAUX_LOOKBACK_HOURS", "72")),
+                    )
+                elif ticker_provider not in {"", "none", "disabled"}:
+                    logger.warning(
+                        "unsupported SENTIMENT_TICKER_NEWS_PROVIDER=%s; ticker sentiment retrieval disabled",
+                        ticker_provider,
+                    )
+                    retrieval_stats["status"] = "unsupported_provider"
+
+                result["ticker_raw_items"] = len(ticker_items)
+                result["ticker_retrieval_status"] = str(retrieval_stats.get("status") or "unknown")
+                result["ticker_retrieval_calls"] = int(retrieval_stats.get("calls") or 0)
+                result["ticker_retrieval_rejected"] = int(
+                    retrieval_stats.get("rejected_associations") or 0
+                )
+
+                items = general_items + ticker_items
                 result["raw_items"] = len(items)
                 result["raw_saved"] = await save_raw_sentiment_items(conn, items)
                 logger.info(
-                    "sentiment fetch: %s items saved=%s portfolio=%s news_symbols=%s",
+                    "sentiment fetch: total=%s general=%s ticker=%s saved=%s portfolio=%s news_symbols=%s retrieval=%s",
                     len(items),
+                    len(general_items),
+                    len(ticker_items),
                     result["raw_saved"],
                     active_tickers,
                     news_tickers,
+                    retrieval_stats,
                 )
 
             if rescore_hours > 0:
