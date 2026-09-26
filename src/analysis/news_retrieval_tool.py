@@ -27,8 +27,10 @@ MARKETAUX_ENDPOINT = "https://api.marketaux.com/v1/news/all"
 RETRIEVAL_POLICY = "marketaux_entity_v1"
 DEFAULT_MIN_MATCH_SCORE = 0.65
 DEFAULT_LOOKBACK_HOURS = 72
-DEFAULT_LIMIT = 50
-DEFAULT_BATCH_SIZE = 10
+# Free Marketaux accounts currently allow 3 articles/news request and 100 calls/day.
+# With Quantia's 15-minute scheduler, one <=20-symbol batch per cycle stays at 96 calls/day.
+DEFAULT_LIMIT = 3
+DEFAULT_BATCH_SIZE = 20
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -252,6 +254,7 @@ async def get_news_context(
             "published_after": start.strftime("%Y-%m-%dT%H:%M:%S"),
             "published_before": as_of_utc.strftime("%Y-%m-%dT%H:%M:%S"),
             "language": "en",
+            "group_similar": "true",
             "limit": str(request_limit),
         }
         response = await http.get(MARKETAUX_ENDPOINT, params=params)
