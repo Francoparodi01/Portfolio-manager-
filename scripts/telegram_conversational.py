@@ -311,7 +311,7 @@ async def _handle_account_secret_step(
                 credentials=UserCredentials(username=username, password=password),
                 cipher=cipher,
                 telegram_username=(user.username if user else None),
-                telegram_display_name=(user.full_name if user else None),
+                display_name=(user.full_name if user else None),
             )
         finally:
             await db.close()
