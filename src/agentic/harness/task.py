@@ -33,8 +33,18 @@ def _extract_days(text: str) -> int | None:
     return max(1, min(365, int(match.group(1))))
 
 
+def _previous_days(state: ConversationState | None) -> int | None:
+    if state is None:
+        return None
+    for item in reversed(state.recent_user_messages):
+        days = _extract_days(item)
+        if days is not None:
+            return days
+    return None
+
+
 class TaskParser:
-    """Turn a user message into a bounded task without making financial claims."""
+    """Conservative rule fallback for when the semantic router is unavailable."""
 
     def extract_entities(self, text: str) -> list[str]:
         raw = str(text or "")
@@ -65,25 +75,13 @@ class TaskParser:
                 inherited_subject = state.conversation_subject
 
         intent, objective, evidence = self._classify(text, entities, state, follow_up)
-
-        # A short follow-up can inherit the last explicit bounded lookback. Keep
-        # it in the audited task text so existing deterministic argument parsing
-        # preserves 25d/90d/etc without silently falling back to defaults.
-        task_raw = raw
-        if state and follow_up and _extract_days(task_raw) is None and intent in {
-            "bot_follow_pnl", "performance", "decision_history"
-        }:
-            inherited_days = next(
-                (
-                    days for days in (
-                        _extract_days(item) for item in reversed(state.recent_user_messages)
-                    )
-                    if days is not None
-                ),
-                None,
-            )
-            if inherited_days is not None:
-                task_raw = f"{raw} [ventana heredada: {inherited_days} días]"
+        explicit_days = _extract_days(raw)
+        inherit_window = follow_up and intent in {"bot_follow_pnl", "performance", "decision_history"}
+        lookback_days = explicit_days if explicit_days is not None else (_previous_days(state) if inherit_window else None)
+        aggregation = "normalized" if objective == "explain_normalized_follow_pnl" else (
+            "plan_level" if intent == "bot_follow_pnl" else None
+        )
+        reference = "previous_turn" if intent == "evidence_provenance" or follow_up else "current_turn"
 
         ambiguity: list[str] = []
         if intent in {"position_analysis", "decision_explanation"} and not entities:
@@ -98,7 +96,11 @@ class TaskParser:
             required_evidence=evidence,
             inherited_subject=inherited_subject,
             ambiguity=ambiguity,
-            raw_message=task_raw,
+            raw_message=raw,
+            lookback_days=lookback_days,
+            aggregation=aggregation,
+            reference=reference,
+            routing_source="fallback",
         )
 
     @staticmethod
@@ -135,11 +137,8 @@ class TaskParser:
         state: ConversationState | None,
         follow_up: bool,
     ) -> tuple[str, str, list[str]]:
-        # Provenance never reruns the previous analytical workflow. It reads the
-        # audited tool trace of the immediately preceding completed turn.
         if state and self._is_provenance_question(text):
             return "evidence_provenance", "explain_previous_sources", ["previous_run_trace"]
-
         if any(term in text for term in ("a y b", "meta-a", "meta-b", "meta-c", "economic meta", "politica meta")):
             return "meta_policy", "explain_shadow_meta_policy", ["meta_policy", "decision_lab"]
         if any(term in text for term in ("decision lab", "plan vs hold", "plan contra hold", "dva", "contrafactual", "counterfactual")):
@@ -172,7 +171,6 @@ class TaskParser:
         )
         if bot_counterfactual:
             return "bot_follow_pnl", "explain_hypothetical_bot_plan_pnl", ["bot_follow_pnl"]
-
         if any(term in text for term in ("cuanto gano", "pnl", "ganancia", "perdio", "ledger")):
             return "performance", "explain_economic_results", ["ledger", "performance"]
         horizon_decisions = "decision" in text and bool(re.search(r"\b\d{1,3}\s*(?:dias|days)\b", text))
