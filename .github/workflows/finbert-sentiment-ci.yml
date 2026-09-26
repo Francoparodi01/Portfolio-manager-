@@ -3,17 +3,21 @@ name: FinBERT sentiment CI
 on:
   pull_request:
     paths:
+      - 'src/analysis/news_retrieval_tool.py'
       - 'src/analysis/nlp_scorer.py'
       - 'src/analysis/sentiment_symbols.py'
       - 'src/analysis/sentiment_tool.py'
       - 'src/analysis/signal_aggregator.py'
       - 'scripts/run_sentiment_pipeline.py'
       - 'tests/test_finbert_sentiment.py'
+      - 'tests/test_marketaux_news_tool.py'
       - 'requirements.txt'
+      - '.env.example'
       - '.github/workflows/finbert-sentiment-ci.yml'
   push:
     branches:
       - feature/finbert-sentiment-tool
+      - feature/marketaux-news-context-tool
 
 jobs:
   focused-tests:
@@ -24,10 +28,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install focused test dependencies
-        run: python -m pip install --upgrade pip pytest requests numpy
+        run: python -m pip install --upgrade pip pytest requests numpy httpx beautifulsoup4
       - name: Compile changed Python modules
         run: |
           python -m py_compile \
+            src/analysis/news_retrieval_tool.py \
             src/analysis/nlp_scorer.py \
             src/analysis/sentiment_symbols.py \
             src/analysis/sentiment_tool.py \
@@ -39,7 +44,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          pytest -vv tests/test_finbert_sentiment.py 2>&1 | tee finbert-test-output.txt
+          pytest -vv tests/test_finbert_sentiment.py tests/test_marketaux_news_tool.py 2>&1 | tee finbert-test-output.txt
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
       - name: Upload focused test output
         if: always()
