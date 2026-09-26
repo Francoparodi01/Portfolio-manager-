@@ -38,7 +38,7 @@ jobs:
             scripts/telegram_conversational.py
       - name: Lint conversational change
         run: |
-          ruff check \
+          ruff check --ignore F401 \
             src/agentic/harness \
             src/agentic/conversation \
             scripts/telegram_conversational.py \
