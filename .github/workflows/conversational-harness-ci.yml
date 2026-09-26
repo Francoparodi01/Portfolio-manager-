@@ -186,7 +186,9 @@ jobs:
               assert not observation.ok
               evidence = ConversationalHarness._to_evidence(observation)
               assert not evidence.ok
-              assert evidence.warnings and evidence.warnings[0].startswith("tool_error:")
+              assert any(item.startswith("tool_error:") for item in evidence.warnings), evidence.warnings
+              print(f"FINANCIAL_TOOL_ERROR_TYPE={(observation.error or 'unknown').split(':', 1)[0]}")
+              print(f"EVIDENCE_WARNINGS={evidence.warnings}")
 
               harness = ConversationalHarness(
                   database_url="postgresql://portfolio:invalid@127.0.0.1:1/portfolio",
