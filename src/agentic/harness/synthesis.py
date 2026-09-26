@@ -77,14 +77,11 @@ def _portfolio_answer(state: RunState) -> str:
 
     detail: list[str] = []
     for row in actionable[:5]:
-        detail.append(
-            f"• {row.get('ticker')}: {row.get('reason_primary') or 'sin motivo primario registrado'}"
-        )
+        detail.append(f"• {row.get('ticker')}: {row.get('reason_primary') or 'sin motivo primario registrado'}")
     if decisions.get("snapshot_stale_reason"):
         detail.append(f"• Frescura: {decisions['snapshot_stale_reason']}")
     if not detail:
         detail.append("• El snapshot por sí solo no alcanza para inferir ganancia, pérdida o necesidad de operar.")
-
     return first + "\n\n" + "\n".join(detail)
 
 
@@ -114,6 +111,30 @@ def _position_answer(state: RunState) -> str:
             answer += "\n\nDecision Lab:\n" + explanation
             break
     return answer
+
+
+def _comparison_answer(state: RunState) -> str:
+    current = _payload(state.evidence, "get_decision_evidence") or {}
+    if len(state.task.entities) < 2:
+        return _position_answer(state)
+    rows: list[str] = []
+    for ticker in state.task.entities[:4]:
+        decision, signal = _decision_row(current, ticker)
+        if not decision:
+            rows.append(f"• {ticker}: no encontré decisión vigente estructurada.")
+            continue
+        score = signal.get("final_score") if signal else None
+        score_text = _num(score, 3) if score is not None else "N/D"
+        rows.append(
+            f"• {ticker}: {decision.get('action') or 'N/D'} · score {score_text} · "
+            f"peso {_pct(decision.get('current_weight'))} → {_pct(decision.get('target_weight'))}. "
+            f"{decision.get('reason_primary') or 'Sin motivo primario registrado.'}"
+        )
+    return (
+        "Los comparo con la misma evidencia vigente de Quantia; no elijo un ganador sólo por score.\n\n"
+        + "\n".join(rows)
+        + "\n\nPara decidir un reemplazo real todavía hay que comparar sizing, riesgo y evidencia económica bajo una ventana común."
+    )
 
 
 def _performance_answer(state: RunState) -> str:
@@ -175,6 +196,48 @@ def _status_answer(state: RunState) -> str:
     )
 
 
+def _macro_answer(state: RunState) -> str:
+    payload = _payload(state.evidence, "get_macro_context") or {}
+    if not payload:
+        return "No pude obtener el contexto macro actual."
+    labels = (
+        ("sp500", "SP500"), ("vix", "VIX"), ("wti", "WTI"), ("ccl", "CCL"),
+        ("mep", "MEP"), ("riesgo_pais", "riesgo país"), ("merval", "Merval"),
+    )
+    values = [f"{label} {_num(payload.get(key))}" for key, label in labels if payload.get(key) is not None]
+    answer = "Contexto macro observado: " + (" · ".join(values) if values else "sin indicadores numéricos disponibles") + "."
+    missing = payload.get("missing_indicators") or []
+    if missing:
+        answer += " Faltan: " + ", ".join(map(str, missing)) + "."
+    return answer
+
+
+def _meta_policy_answer(state: RunState) -> str:
+    payload = _payload(state.evidence, "get_meta_policy_shadow") or {}
+    rows = payload.get("records") or []
+    if not rows:
+        return "No encontré registros actuales de Economic Meta Policy para esa consulta."
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        ticker = str(row.get("ticker") or "?").upper()
+        grouped.setdefault(ticker, []).append(row)
+    lines = ["Economic Meta Policy está en SHADOW_ONLY: lo que aprueba o rechaza acá no cambia capital ni la decisión de producción."]
+    for ticker, records in sorted(grouped.items()):
+        first = records[0]
+        parts = []
+        for row in sorted(records, key=lambda item: str(item.get("policy_name") or "")):
+            name = str(row.get("policy_name") or "META-?")
+            decision = str(row.get("decision") or "")
+            reason = str(row.get("rejection_reason") or "").replace("|", ", ")
+            parts.append(f"{name}: {'pasa' if decision == 'ALLOW_SHADOW' else 'no pasa'}" + (f" ({reason})" if reason else ""))
+        lines.append(
+            f"• {ticker}: candidato {first.get('candidate_action') or 'N/D'} · score {_num(first.get('candidate_score'), 3)} · "
+            + " · ".join(parts)
+        )
+    lines.append("Que una META pase significa que el candidato supera ese filtro experimental; no significa comprar o vender en producción.")
+    return "\n".join(lines)
+
+
 def _opportunity_answer(state: RunState) -> str:
     radar = next((item for item in state.evidence if item.tool == "scan_opportunities" and item.ok), None)
     if not radar:
@@ -189,26 +252,31 @@ def _opportunity_answer(state: RunState) -> str:
 
 
 def synthesize(state: RunState) -> str:
-    """Grounded deterministic synthesizer.
-
-    It may format and select facts but never creates market numbers or recomputes
-    Quantia's economic policies. Unknown cases fall back to bounded source excerpts.
-    """
+    """Format verified Quantia facts without inventing market values or policy math."""
     intent = state.task.intent
     if intent == "portfolio_review":
         return _portfolio_answer(state)
-    if intent in {"position_analysis", "position_comparison", "decision_lab_mechanism", "explain_plan"}:
+    if intent in {"position_analysis", "decision_lab_mechanism", "explain_plan"}:
         return _position_answer(state)
+    if intent == "position_comparison":
+        return _comparison_answer(state)
     if intent == "performance":
         return _performance_answer(state)
     if intent == "historical_outcomes":
         return _ledger_answer(state)
     if intent == "system_status":
         return _status_answer(state)
+    if intent == "macro_context":
+        return _macro_answer(state)
+    if intent == "meta_policy":
+        return _meta_policy_answer(state)
     if intent == "opportunity_search":
         return _opportunity_answer(state)
 
-    for tool in ("compare_plan_vs_hold", "get_decision_value_added", "get_decision_counterfactuals", "get_similar_historical_episodes", "get_replay_evidence_quality", "compare_strategy_versions"):
+    for tool in (
+        "compare_plan_vs_hold", "get_decision_value_added", "get_decision_counterfactuals",
+        "get_similar_historical_episodes", "get_replay_evidence_quality", "compare_strategy_versions",
+    ):
         payload = _payload(state.evidence, tool)
         if payload:
             explanation, _ = explain_evidence(payload)
