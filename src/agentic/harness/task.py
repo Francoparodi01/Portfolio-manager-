@@ -26,6 +26,13 @@ def _plain(text: str) -> str:
     )
 
 
+def _extract_days(text: str) -> int | None:
+    match = re.search(r"\b(\d{1,3})\s*(?:dias|days)\b", _plain(text))
+    if not match:
+        return None
+    return max(1, min(365, int(match.group(1))))
+
+
 class TaskParser:
     """Turn a user message into a bounded task without making financial claims."""
 
@@ -58,6 +65,27 @@ class TaskParser:
                 inherited_subject = state.conversation_subject
 
         intent, objective, evidence = self._classify(text, entities, state, follow_up)
+
+        # Follow-ups such as "¿qué datos usaste?" or "normalizando repetidas"
+        # inherit the previous bounded lookback instead of silently falling back
+        # to the tool default (90d). Keep the original user text intact in front
+        # and append explicit orchestration context for audited argument parsing.
+        task_raw = raw
+        if state and follow_up and _extract_days(raw) is None and intent in {
+            "bot_follow_pnl", "performance", "decision_history"
+        }:
+            inherited_days = next(
+                (
+                    days for days in (
+                        _extract_days(item) for item in reversed(state.recent_user_messages)
+                    )
+                    if days is not None
+                ),
+                None,
+            )
+            if inherited_days is not None:
+                task_raw = f"{raw} [ventana heredada: {inherited_days} días]"
+
         ambiguity: list[str] = []
         if intent in {"position_analysis", "decision_explanation"} and not entities:
             ambiguity.append("symbol_missing")
@@ -71,16 +99,18 @@ class TaskParser:
             required_evidence=evidence,
             inherited_subject=inherited_subject,
             ambiguity=ambiguity,
-            raw_message=raw,
+            raw_message=task_raw,
         )
 
     @staticmethod
     def _looks_like_follow_up(text: str) -> bool:
-        short = len(text.split()) <= 12
+        short = len(text.split()) <= 14
         markers = (
             "por que", "porque", "y si", "comparalo", "comparala", "y ahora",
             "eso", "esa", "ese", "entonces", "en su lugar", "y cual", "y que",
             "que te preocupa", "cual te preocupa", "esta senal", "esa senal",
+            "que datos usaste", "que dato usaste", "que fuentes usaste", "que fuente usaste",
+            "de donde sale", "de donde salio", "normaliz", "deduplic", "sin repetir",
         )
         return short and any(marker in text for marker in markers)
 
@@ -92,6 +122,13 @@ class TaskParser:
                 found.append(ticker)
         return list(dict.fromkeys(found))
 
+    @staticmethod
+    def _is_provenance_question(text: str) -> bool:
+        return any(term in text for term in (
+            "que datos usaste", "que dato usaste", "que fuentes usaste", "que fuente usaste",
+            "de donde sale", "de donde salio", "que evidencia usaste", "con que datos",
+        ))
+
     def _classify(
         self,
         text: str,
@@ -99,6 +136,11 @@ class TaskParser:
         state: ConversationState | None,
         follow_up: bool,
     ) -> tuple[str, str, list[str]]:
+        # Provenance is a follow-up over the previous bounded workflow. Reuse
+        # that workflow's source surface; do not open the general tool registry.
+        if state and state.last_intent and self._is_provenance_question(text):
+            return state.last_intent, "explain_previous_sources", ["referenced_evidence"]
+
         if any(term in text for term in ("a y b", "meta-a", "meta-b", "meta-c", "economic meta", "politica meta")):
             return "meta_policy", "explain_shadow_meta_policy", ["meta_policy", "decision_lab"]
         if any(term in text for term in ("decision lab", "plan vs hold", "plan contra hold", "dva", "contrafactual", "counterfactual")):
@@ -113,6 +155,15 @@ class TaskParser:
             return "viability", "explain_viability_audit", ["viability"]
         if any(term in text for term in ("resultado neto", "reporte neto", "neto por decision")):
             return "net_performance", "explain_net_decision_results", ["net_performance"]
+
+        normalized_follow = any(term in text for term in (
+            "normaliz", "deduplic", "sin repetir", "decisiones repetidas", "recomendaciones repetidas"
+        ))
+        prior_bot_follow = bool(state and state.last_intent == "bot_follow_pnl")
+        if normalized_follow and ("bot" in text or prior_bot_follow):
+            # Keep the same deterministic intent so planner/synthesis remain
+            # bypassed, but switch the evidence surface in ContextSelector.
+            return "bot_follow_pnl", "explain_normalized_follow_pnl", ["ledger_normalized"]
 
         bot_counterfactual = (
             "bot" in text
