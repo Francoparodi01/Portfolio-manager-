@@ -23,6 +23,18 @@ def _normalized_decision(value: Any) -> str:
     return raw or "HOLD"
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRegistry:
     """Register additional read-only evidence and statistical audit tools."""
 
@@ -76,7 +88,7 @@ def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRe
             if hold_latest and hold_latest["run_id"] and hold_latest["as_of"]:
                 candidates.append((str(hold_latest["run_id"]), hold_latest["as_of"]))
 
-            snapshot_as_of = await conn.fetchval(
+            latest_snapshot_as_of = await conn.fetchval(
                 """
                 SELECT MAX(scraped_at)
                 FROM portfolio_snapshots
@@ -92,7 +104,10 @@ def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRe
                     "evidence_source": "persisted_latest_run",
                     "status": "missing",
                     "evaluated_at": None,
-                    "snapshot_as_of": snapshot_as_of.isoformat() if snapshot_as_of else None,
+                    "snapshot_as_of": None,
+                    "latest_portfolio_snapshot_as_of": (
+                        latest_snapshot_as_of.isoformat() if latest_snapshot_as_of else None
+                    ),
                     "signals": [],
                     "warnings": ["No persisted formal decision run is available."],
                 }
@@ -105,8 +120,25 @@ def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRe
                 )
 
             run_id, evaluated_at = max(candidates, key=lambda item: item[1])
-            by_ticker: dict[str, dict[str, Any]] = {}
+            if evaluated_at.tzinfo is None:
+                evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
 
+            # Bind the decision run to the portfolio snapshot that existed when
+            # that run was evaluated. Never label today's latest account snapshot
+            # as the source snapshot of an older decision run.
+            run_snapshot_as_of = await conn.fetchval(
+                """
+                SELECT MAX(scraped_at)
+                FROM portfolio_snapshots
+                WHERE (owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL))
+                  AND scraped_at <= $3
+                """,
+                owner,
+                legacy,
+                evaluated_at,
+            )
+
+            by_ticker: dict[str, dict[str, Any]] = {}
             decision_rows = await conn.fetch(
                 """
                 SELECT
@@ -116,6 +148,7 @@ def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRe
                     final_score,
                     layers,
                     status,
+                    block_reason,
                     decided_at AS as_of
                 FROM decision_log
                 WHERE run_id=$1::uuid
@@ -132,12 +165,23 @@ def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRe
                 ticker = str(row.get("ticker") or "").upper().strip()
                 if not ticker:
                     continue
+                layers = _json_object(row.get("layers"))
+                semantic_action = (
+                    layers.get("action")
+                    or row.get("decision")
+                    or row.get("decision_type")
+                )
+                reason = (
+                    layers.get("reason")
+                    or layers.get("block_reason")
+                    or row.get("block_reason")
+                )
                 by_ticker[ticker] = {
                     "ticker": ticker,
-                    "decision": _normalized_decision(row.get("decision_type") or row.get("decision")),
+                    "decision": _normalized_decision(semantic_action),
                     "final_score": row.get("final_score"),
-                    "layers": row.get("layers") or {},
-                    "status": row.get("status"),
+                    "status": str(row.get("status") or "UNKNOWN").upper(),
+                    "reason": str(reason).strip() if reason else None,
                     "as_of": row.get("as_of").isoformat() if row.get("as_of") else None,
                     "source_kind": "decision_log",
                 }
@@ -145,7 +189,7 @@ def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRe
             try:
                 hold_rows = await conn.fetch(
                     """
-                    SELECT ticker, action, final_score, status, observed_at AS as_of
+                    SELECT ticker, action, final_score, status, reason_primary, observed_at AS as_of
                     FROM position_hold_observations
                     WHERE run_id=$1::uuid
                       AND (owner_chat_id=$2 OR ($3::boolean AND owner_chat_id IS NULL))
@@ -166,14 +210,12 @@ def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRe
                     "ticker": ticker,
                     "decision": _normalized_decision(row.get("action")),
                     "final_score": row.get("final_score"),
-                    "layers": {},
-                    "status": row.get("status"),
+                    "status": str(row.get("status") or "OBSERVED").upper(),
+                    "reason": str(row.get("reason_primary") or "").strip() or None,
                     "as_of": row.get("as_of").isoformat() if row.get("as_of") else None,
                     "source_kind": "position_hold_observations",
                 }
 
-            if evaluated_at.tzinfo is None:
-                evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
             age_seconds = max(0.0, (datetime.now(timezone.utc) - evaluated_at).total_seconds())
             payload = {
                 "schema_version": "persisted-decision-evidence-v1",
@@ -182,7 +224,10 @@ def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRe
                 "analysis_run_id": run_id,
                 "evaluated_at": evaluated_at.isoformat(),
                 "decision_run_age_seconds": round(age_seconds, 1),
-                "snapshot_as_of": snapshot_as_of.isoformat() if snapshot_as_of else None,
+                "snapshot_as_of": run_snapshot_as_of.isoformat() if run_snapshot_as_of else None,
+                "latest_portfolio_snapshot_as_of": (
+                    latest_snapshot_as_of.isoformat() if latest_snapshot_as_of else None
+                ),
                 "signals": [by_ticker[key] for key in sorted(by_ticker)],
                 "warnings": [
                     "Persisted evidence: the chat did not recompute the full analysis pipeline for this status request."
@@ -220,6 +265,119 @@ def register_audit_tools(registry: ToolRegistry, context: ToolContext) -> ToolRe
             timeout_seconds=20,
         ),
         persisted_decision_evidence,
+    )
+
+    async def bot_follow_pnl(arguments: dict[str, Any]) -> ToolObservation:
+        """Compute the bot plan-level hypothetical directional PnL read-only.
+
+        This mirrors the bot side of Decision Ledger without running schema
+        migrations, human-fill matching, radar or unrelated reports. It is the
+        bounded source for questions such as 'what if I had followed the bot?'.
+        """
+        started = time.monotonic()
+        days = max(1, min(365, int(arguments.get("days", 90))))
+        conn = await connect_read_only(read_only_dsn(context.database_url), command_timeout=20)
+        try:
+            row = await conn.fetchrow(
+                """
+                WITH plans AS (
+                    SELECT
+                        GREATEST(
+                            ABS(COALESCE(
+                                NULLIF(layers->>'amount_ars', '')::numeric,
+                                NULLIF(executed_amount_ars, 0),
+                                theoretical_amount_ars,
+                                0
+                            )),
+                            1
+                        )::double precision AS target_amount_ars,
+                        COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
+                        COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
+                        COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d
+                    FROM decision_log
+                    WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                      AND (owner_chat_id=$2 OR ($3::boolean AND owner_chat_id IS NULL))
+                      AND COALESCE(source, layers->>'source') = 'execution_plan'
+                      AND COALESCE(run_intent, 'formal_plan') = 'formal_plan'
+                      AND COALESCE(metric_scope, 'planner_audit') IN ('planner_audit', 'primary')
+                      AND status IN ('APPROVED', 'EXECUTED')
+                      AND decision_type = 'executable'
+                      AND decision IN ('BUY', 'SELL')
+                      AND price_at_decision IS NOT NULL
+                )
+                SELECT
+                    COUNT(*)::int AS plans_total,
+                    COUNT(outcome_5d)::int AS plans_closed_5d,
+                    COUNT(outcome_10d)::int AS plans_closed_10d,
+                    COUNT(outcome_20d)::int AS plans_closed_20d,
+                    SUM(target_amount_ars * outcome_5d) AS bot_pnl_5d_ars,
+                    SUM(target_amount_ars * outcome_10d) AS bot_pnl_10d_ars,
+                    SUM(target_amount_ars * outcome_20d) AS bot_pnl_20d_ars
+                FROM plans
+                """,
+                days,
+                int(context.owner_chat_id or 0),
+                bool(context.legacy_single_owner),
+            )
+            values = dict(row or {})
+            payload = {
+                "schema_version": "bot-follow-pnl-v1",
+                "source": "decision_log_formal_plans",
+                "mode": "PRODUCTION_OBSERVATION",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+                "lookback_days": days,
+                "plans_total": int(values.get("plans_total") or 0),
+                "plans_closed_5d": int(values.get("plans_closed_5d") or 0),
+                "plans_closed_10d": int(values.get("plans_closed_10d") or 0),
+                "plans_closed_20d": int(values.get("plans_closed_20d") or 0),
+                "bot_pnl_5d_ars": values.get("bot_pnl_5d_ars"),
+                "bot_pnl_10d_ars": values.get("bot_pnl_10d_ars"),
+                "bot_pnl_20d_ars": values.get("bot_pnl_20d_ars"),
+                "scope": "FORMAL_PLAN_DIRECTIONAL_GROSS_PLAN_LEVEL_NOT_DEDUPLICATED",
+                "limitations": [
+                    "Hypothetical bot PnL, not realized account PnL.",
+                    "Gross directional result before fees/slippage.",
+                    "Plan-level rows can repeat recommendations across runs; do not treat horizons as additive.",
+                ],
+            }
+            content = json.dumps(payload, ensure_ascii=False, default=str)
+            return ToolObservation(
+                tool_name="get_bot_follow_pnl",
+                arguments={"days": days},
+                ok=True,
+                content=content[: context.output_limit_chars],
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+        except Exception as exc:
+            return ToolObservation(
+                tool_name="get_bot_follow_pnl",
+                arguments={"days": days},
+                ok=False,
+                content="",
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        finally:
+            await conn.close()
+
+    registry.register(
+        ToolSpec(
+            name="get_bot_follow_pnl",
+            description=(
+                "Read-only hypothetical PnL of following Quantia formal executable bot plans over a bounded lookback. "
+                "Returns separate 5D/10D/20D gross plan-level outcomes and mature sample counts; never executes trades."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "minimum": 1, "maximum": 365, "default": 90}
+                },
+                "additionalProperties": False,
+            },
+            read_only=True,
+            timeout_seconds=20,
+        ),
+        bot_follow_pnl,
     )
 
     async def regression_audit(arguments: dict[str, Any]) -> ToolObservation:
