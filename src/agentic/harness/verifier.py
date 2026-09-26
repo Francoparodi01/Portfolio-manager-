@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime, timezone
 from typing import Iterable
@@ -8,7 +9,26 @@ from typing import Iterable
 from .schemas import EvidenceMode, EvidenceObject, TaskSpec, VerificationReport
 
 
-_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:[.,]\d+)?%?")
+# Do not capture the horizon label in `5D`/`10D`, but do capture values such as
+# `25 días`, `16,8%`, `-$115.960` and ordinary JSON numbers.
+_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\$?\d+(?:[.,]\d+)?%?(?![A-Za-z])")
+_NUMERIC_INTENTS = {
+    "portfolio_review",
+    "position_analysis",
+    "position_comparison",
+    "opportunities",
+    "performance",
+    "bot_follow_pnl",
+    "net_performance",
+    "analytics_v2",
+    "viability",
+    "regression_audit",
+    "calibration_audit",
+    "decision_history",
+    "decision_lab",
+    "meta_policy",
+    "market_context",
+}
 
 
 class HarnessVerifier:
@@ -43,12 +63,14 @@ class HarnessVerifier:
 
         evidence_text = "\n".join(self._evidence_text(item) for item in items if item.ok)
         unmatched = self._unmatched_numbers(answer, evidence_text)
-        # A few formatting/session numbers are expected. A large mismatch is a
-        # warning because deterministic renderers can derive percentages from
-        # observed ratios. It is never silently promoted to a hard financial fact.
-        numeric_consistency = len(unmatched) <= 3
+        # One unmatched discourse/derived count is tolerated (for example the
+        # number of positions derived from a list). More than that means the
+        # conversational model introduced unsupported quantitative content.
+        numeric_consistency = len(unmatched) <= 1
         if not numeric_consistency:
             warnings.append("numbers_not_directly_traceable:" + ",".join(unmatched[:8]))
+            if task.intent in _NUMERIC_INTENTS:
+                failures.append("numeric_claims_not_grounded")
 
         stale = []
         now = datetime.now(timezone.utc)
@@ -78,20 +100,67 @@ class HarnessVerifier:
         return json.dumps(item.payload, ensure_ascii=False, sort_keys=True)
 
     @staticmethod
-    def _normalize_number(value: str) -> str:
-        # Quantia's structured evidence is JSON and therefore uses `.` for
-        # decimals, while Spanish responses may use `,`. Treat both as the same
-        # decimal separator instead of assuming every dot is a thousands mark.
-        return value.replace("%", "").replace(",", ".").lstrip("+")
+    def _token_values(token: str) -> set[float]:
+        raw = str(token or "").strip().replace("$", "")
+        is_percent = raw.endswith("%")
+        raw = raw.rstrip("%")
+        if not raw:
+            return set()
+
+        candidates: set[str] = {raw.replace(",", ".")}
+        # A single separator followed by exactly three digits is ambiguous in
+        # Spanish output: 115.960 may mean 115960, while 0.168 is a decimal.
+        # Keep both interpretations and let the evidence decide.
+        for sep in (".", ","):
+            if raw.count(sep) == 1:
+                head, tail = raw.split(sep)
+                if len(tail) == 3 and head.lstrip("+-").isdigit() and tail.isdigit():
+                    candidates.add(head + tail)
+        # Mixed separators: interpret the last separator as decimal and the
+        # other as thousands, covering 1.234,56 and 1,234.56.
+        if "." in raw and "," in raw:
+            last_dot, last_comma = raw.rfind("."), raw.rfind(",")
+            if last_comma > last_dot:
+                candidates.add(raw.replace(".", "").replace(",", "."))
+            else:
+                candidates.add(raw.replace(",", ""))
+
+        values: set[float] = set()
+        for candidate in candidates:
+            try:
+                value = float(candidate)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value):
+                continue
+            values.add(value)
+            if is_percent:
+                values.add(value / 100.0)
+        return values
+
+    @staticmethod
+    def _close(left: float, right: float) -> bool:
+        tolerance = max(1e-9, 1e-6 * max(abs(left), abs(right), 1.0))
+        return abs(left - right) <= tolerance
 
     def _unmatched_numbers(self, answer: str, evidence_text: str) -> list[str]:
-        source = {self._normalize_number(value) for value in _NUMBER_RE.findall(evidence_text)}
-        result = []
-        for value in _NUMBER_RE.findall(answer):
-            normalized = self._normalize_number(value)
-            # Ignore tiny discourse ordinals and calendar years.
-            if normalized in {"0", "1", "2", "3"}:
+        source_values: list[float] = []
+        for token in _NUMBER_RE.findall(evidence_text):
+            source_values.extend(self._token_values(token))
+
+        result: list[str] = []
+        for token in _NUMBER_RE.findall(answer):
+            answer_values = self._token_values(token)
+            if not answer_values:
                 continue
-            if normalized not in source:
-                result.append(value)
+            # Ignore tiny discourse ordinals. Horizon labels are excluded by
+            # the regex itself because the number is followed by D/d.
+            if answer_values <= {0.0, 1.0, 2.0, 3.0}:
+                continue
+            if not any(
+                self._close(answer_value, source_value)
+                for answer_value in answer_values
+                for source_value in source_values
+            ):
+                result.append(token)
         return list(dict.fromkeys(result))
