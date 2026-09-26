@@ -3,14 +3,18 @@ name: Conversational harness CI
 on:
   push:
     branches:
+      - main
       - feature/conversational-harness
   pull_request:
     paths:
       - 'src/agentic/harness/**'
       - 'src/agentic/conversation/**'
       - 'src/agentic/contracts.py'
+      - 'src/analysis/bot_counterfactual.py'
       - 'scripts/telegram_conversational.py'
       - 'tests/test_conversational_*.py'
+      - 'tests/test_semantic_task_router.py'
+      - 'tests/test_bot_counterfactual_normalized.py'
       - 'evals/conversations/**'
       - 'docs/architecture/conversational-harness.md'
       - 'docker-compose.yml'
@@ -63,21 +67,29 @@ jobs:
           python -m compileall -q \
             src/agentic/harness \
             src/agentic/conversation \
+            src/analysis/bot_counterfactual.py \
             scripts/telegram_conversational.py
       - name: Lint conversational change
         run: |
           ruff check --select E9,F63,F7,F82 \
             src/agentic/harness \
             src/agentic/conversation \
+            src/analysis/bot_counterfactual.py \
             scripts/telegram_conversational.py \
             tests/test_conversational_harness.py \
             tests/test_conversational_evals.py \
-            tests/test_conversational_telegram_surface.py
+            tests/test_conversational_telegram_surface.py \
+            tests/test_conversational_bot_follow_pnl.py \
+            tests/test_conversational_latency_optimizations.py \
+            tests/test_conversational_numeric_grounding.py \
+            tests/test_semantic_task_router.py \
+            tests/test_bot_counterfactual_normalized.py
       - name: Type check harness contracts and routing
         run: |
           mypy --ignore-missing-imports --follow-imports=skip \
             src/agentic/harness/schemas.py \
             src/agentic/harness/task.py \
+            src/agentic/harness/semantic_router.py \
             src/agentic/harness/context.py \
             src/agentic/harness/permissions.py \
             src/agentic/harness/verifier.py \
@@ -87,7 +99,12 @@ jobs:
           pytest -q \
             tests/test_conversational_harness.py \
             tests/test_conversational_evals.py \
-            tests/test_conversational_telegram_surface.py
+            tests/test_conversational_telegram_surface.py \
+            tests/test_conversational_bot_follow_pnl.py \
+            tests/test_conversational_latency_optimizations.py \
+            tests/test_conversational_numeric_grounding.py \
+            tests/test_semantic_task_router.py \
+            tests/test_bot_counterfactual_normalized.py
 
   project-regression:
     runs-on: ubuntu-latest
@@ -147,16 +164,27 @@ jobs:
           async def main():
               assert await redis_client.ping()
               store = ConversationSessionStore(424242, ttl_seconds=60)
-              state = ConversationState(owner_chat_id=424242, active_symbols=["GDX"], last_intent="position_analysis")
+              state = ConversationState(
+                  owner_chat_id=424242,
+                  active_symbols=["GDX"],
+                  last_intent="position_analysis",
+                  last_task={
+                      "intent": "position_analysis",
+                      "entities": ["GDX"],
+                      "lookback_days": 25,
+                  },
+              )
               await store.save(state)
               print("REDIS_BEFORE=OK")
               subprocess.run(["docker", "stop", os.environ["REDIS_CONTAINER_ID"]], check=True, capture_output=True, text=True)
               loaded = await store.load()
               assert loaded.active_symbols == ["GDX"]
+              assert loaded.last_task and loaded.last_task.get("lookback_days") == 25
               loaded.active_symbols = ["NVDA"]
               await store.save(loaded)
               loaded_again = await store.load()
               assert loaded_again.active_symbols == ["NVDA"]
+              assert loaded_again.last_task and loaded_again.last_task.get("lookback_days") == 25
               print("REDIS_FALLBACK=PASS")
           asyncio.run(main())
           PY
