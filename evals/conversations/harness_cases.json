@@ -5,7 +5,7 @@
       "id": "portfolio-overview",
       "turns": ["¿Cómo está mi cartera?"],
       "expected_intents": ["portfolio_review"],
-      "must_offer_tools": ["get_portfolio_snapshot", "get_decision_evidence"],
+      "must_offer_tools": ["get_portfolio_snapshot", "get_persisted_decision_evidence"],
       "forbidden_tools": ["execute_order"]
     },
     {
