@@ -38,6 +38,7 @@ class CandidateDecision:
     market_regime: str = "UNKNOWN"
     expected_edge_vs_hold_bps: float | None = None
     edge_uncertainty_bps: float | None = None
+    historical_edge: Mapping[str, Any] = field(default_factory=dict)
     opportunity_id: str | None = None
 
     @property
@@ -56,6 +57,14 @@ class MetaPolicyConfig:
     max_portfolio_turnover: float = 0.35
     require_edge_evidence: bool = False
     min_edge_buffer_bps: float = 0.0
+    require_historical_edge: bool = False
+    min_historical_episodes: int = 20
+    min_historical_dates: int = 8
+    min_historical_win_rate: float = 0.55
+    min_historical_ev_net_bps: float = 25.0
+    min_historical_profit_factor: float = 1.10
+    max_historical_top1_share: float = 0.40
+    max_historical_top3_share: float = 0.75
     blocked_regimes_for_buy: tuple[str, ...] = ()
     blocked_regimes_for_sell: tuple[str, ...] = ()
     primary_horizon_days: int = PRIMARY_HORIZON_DAYS
@@ -74,6 +83,16 @@ class MetaPolicyConfig:
             raise ValueError("max_estimated_cost_bps must be non-negative")
         if not 0 <= self.max_portfolio_turnover <= 1:
             raise ValueError("max_portfolio_turnover must be between 0 and 1")
+        if self.min_historical_episodes < 1 or self.min_historical_dates < 1:
+            raise ValueError("historical sample thresholds must be positive")
+        if not 0 <= self.min_historical_win_rate <= 1:
+            raise ValueError("historical win-rate threshold must be between 0 and 1")
+        if self.min_historical_ev_net_bps < 0 or self.min_historical_profit_factor < 0:
+            raise ValueError("historical edge thresholds must be non-negative")
+        if not 0 <= self.max_historical_top1_share <= 1:
+            raise ValueError("historical top1 share must be between 0 and 1")
+        if not 0 <= self.max_historical_top3_share <= 1:
+            raise ValueError("historical top3 share must be between 0 and 1")
         if any(
             (
                 self.affects_production_recommendation,
@@ -123,9 +142,10 @@ class MetaDecisionRecord:
 def preregistered_policies() -> dict[str, MetaPolicyConfig]:
     """Return frozen shadow challengers.
 
-    Thresholds are heuristic preregistration values, not fitted optima. They
-    must not be interpreted as production thresholds until prospective PIT
-    evidence clears the promotion gates.
+    A/B/C retain the original heuristic gates. META-D is the historical-pattern
+    challenger: it only allows a candidate in shadow when its fixed historical
+    bucket has enough point-in-time evidence and positive net directional edge.
+    None of these policies can affect capital.
     """
     policies = {
         "META-A": MetaPolicyConfig(
@@ -148,10 +168,55 @@ def preregistered_policies() -> dict[str, MetaPolicyConfig]:
             require_edge_evidence=True,
             min_edge_buffer_bps=25.0,
         ),
+        "META-D": MetaPolicyConfig(
+            name="META-D",
+            version=f"{ECONOMIC_META_POLICY_VERSION}:meta-d-historical-edge-v1",
+            buy_min_abs_score=0.08,
+            sell_min_abs_score=0.08,
+            require_historical_edge=True,
+        ),
     }
     for policy in policies.values():
         policy.validate()
     return policies
+
+
+def _historical_gate_reasons(item: CandidateDecision, policy: MetaPolicyConfig) -> list[str]:
+    if not policy.require_historical_edge:
+        return []
+    historical = dict(item.historical_edge or {})
+    if not historical:
+        return ["HISTORICAL_EDGE_REQUIRED"]
+
+    reasons: list[str] = []
+    n_episodes = int(historical.get("n_episodes") or 0)
+    n_dates = int(historical.get("n_dates") or 0)
+    win_rate = _optional_float(historical.get("win_rate_net"))
+    ev_net = _optional_float(historical.get("mean_net_return"))
+    profit_factor = _optional_float(historical.get("profit_factor_net"))
+    top1 = _optional_float(historical.get("top1_positive_share"))
+    top3 = _optional_float(historical.get("top3_positive_share"))
+
+    if n_episodes < policy.min_historical_episodes:
+        reasons.append("HIST_SAMPLE_LT_20_EPISODES")
+    if n_dates < policy.min_historical_dates:
+        reasons.append("HIST_SAMPLE_LT_8_DATES")
+    if win_rate is None or win_rate < policy.min_historical_win_rate:
+        reasons.append("HIST_WIN_RATE_LT_55PCT")
+    if ev_net is None or ev_net * 10_000.0 < policy.min_historical_ev_net_bps:
+        reasons.append("HIST_EV_NET_LT_25BPS")
+    if profit_factor is None or profit_factor < policy.min_historical_profit_factor:
+        reasons.append("HIST_PROFIT_FACTOR_LT_1_10")
+    if top1 is not None and top1 > policy.max_historical_top1_share:
+        reasons.append("HIST_TOP1_CONCENTRATION_GT_40PCT")
+    if top3 is not None and top3 > policy.max_historical_top3_share:
+        reasons.append("HIST_TOP3_CONCENTRATION_GT_75PCT")
+    if historical.get("dva_vs_hold_status") not in {
+        None,
+        "UNAVAILABLE_NOT_A_PORTFOLIO_HOLD_COUNTERFACTUAL",
+    }:
+        reasons.append("HIST_DVA_SEMANTICS_UNEXPECTED")
+    return reasons
 
 
 def evaluate_candidate(
@@ -234,6 +299,8 @@ def evaluate_candidate(
                 if float(item.expected_edge_vs_hold_bps) <= required:
                     reasons.append("EDGE_DOES_NOT_CLEAR_COST_UNCERTAINTY")
 
+            reasons.extend(_historical_gate_reasons(item, policy))
+
             if not reasons:
                 return _record(
                     item,
@@ -290,6 +357,7 @@ def _record(
     run_id: str | None,
     evidence_status: str,
 ) -> MetaDecisionRecord:
+    historical = dict(item.historical_edge or {})
     record = MetaDecisionRecord(
         run_id=run_id or str(uuid4()),
         as_of=_utc_iso(item.as_of),
@@ -319,6 +387,10 @@ def _record(
         evidence_status=evidence_status,
         metadata={
             "calibration_status": policy.calibration_status,
+            "historical_edge_status": (
+                "PROVIDED" if historical else "NOT_PROVIDED"
+            ),
+            "historical_edge": historical,
             "policy_thresholds": {
                 "buy_min_abs_score": policy.buy_min_abs_score,
                 "sell_min_abs_score": policy.sell_min_abs_score,
@@ -326,6 +398,14 @@ def _record(
                 "max_portfolio_turnover": policy.max_portfolio_turnover,
                 "require_edge_evidence": policy.require_edge_evidence,
                 "min_edge_buffer_bps": policy.min_edge_buffer_bps,
+                "require_historical_edge": policy.require_historical_edge,
+                "min_historical_episodes": policy.min_historical_episodes,
+                "min_historical_dates": policy.min_historical_dates,
+                "min_historical_win_rate": policy.min_historical_win_rate,
+                "min_historical_ev_net_bps": policy.min_historical_ev_net_bps,
+                "min_historical_profit_factor": policy.min_historical_profit_factor,
+                "max_historical_top1_share": policy.max_historical_top1_share,
+                "max_historical_top3_share": policy.max_historical_top3_share,
             },
         },
     )
@@ -360,6 +440,11 @@ def _coerce_candidate(value: CandidateDecision | Mapping[str, Any]) -> Candidate
             if raw.get("edge_uncertainty_bps") is not None
             else None
         ),
+        historical_edge=(
+            dict(raw.get("historical_edge") or {})
+            if isinstance(raw.get("historical_edge") or {}, Mapping)
+            else {}
+        ),
         opportunity_id=(
             str(raw["opportunity_id"]) if raw.get("opportunity_id") is not None else None
         ),
@@ -374,11 +459,16 @@ def _evidence_status(item: CandidateDecision) -> str:
     return "EDGE_AND_UNCERTAINTY_PROVIDED"
 
 
-def _finite(value: Any) -> bool:
+def _optional_float(value: Any) -> float | None:
     try:
-        return isfinite(float(value))
+        result = float(value)
     except (TypeError, ValueError):
-        return False
+        return None
+    return result if isfinite(result) else None
+
+
+def _finite(value: Any) -> bool:
+    return _optional_float(value) is not None
 
 
 def _utc_iso(value: datetime) -> str:
