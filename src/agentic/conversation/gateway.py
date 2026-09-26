@@ -138,8 +138,6 @@ async def run_message(
     normalized = " ".join(str(message or "").split()).lower()
     is_reset = normalized in {"nuevo", "nueva conversación", "nueva conversacion"} or normalized.startswith("nuevo ")
     if is_reset:
-        # Reset semantics are a product command rather than an analytical intent;
-        # the harness owns the actual reset and then opens with portfolio review.
         task = TaskParser().parse("¿Cómo está mi cartera?", session)
         task_override = None
     else:
@@ -209,12 +207,13 @@ async def run_message(
     )
     stage_ms["harness"] = int((time.monotonic() - stage_started) * 1000)
 
-    # Persist validated semantics independently of free-form conversation text.
-    # Load the state saved by the harness first so active symbols/evidence refs
-    # are preserved, then attach the TaskSpec used for this completed answer.
+    # Preserve the latest analytical task across meta turns such as provenance
+    # questions or generic acknowledgements. This keeps follow-ups bound to the
+    # last real analytical scope without reparsing older prose.
     stage_started = time.monotonic()
     completed_session = await session_store.load()
-    completed_session.last_task = result.task.model_dump(mode="json")
+    if result.task.intent not in {"evidence_provenance", "general"}:
+        completed_session.last_task = result.task.model_dump(mode="json")
     await session_store.save(completed_session)
     stage_ms["task_state_persist"] = int((time.monotonic() - stage_started) * 1000)
 
