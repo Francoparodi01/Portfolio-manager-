@@ -62,7 +62,7 @@ services:
     volumes:
       - ./logs:/app/logs
       - multiuser_secrets_data:/app/secrets
-    command: ["python", "scripts/telegram_bot.py"]
+    command: ["python", "scripts/telegram_conversational.py"]
     environment:
       TZ: America/Argentina/Buenos_Aires
 
