@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -66,6 +67,11 @@ def _excerpt(content: str, limit: int = 1800) -> str:
     if len(content) <= limit:
         return content
     return content[:limit] + "\n[Extracto; fuente completa en la traza.]"
+
+
+def _strip_html(text: str) -> str:
+    clean = re.sub(r"<[^>]+>", "", str(text or ""))
+    return re.sub(r"[ \t]+", " ", clean).strip()
 
 
 def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
@@ -199,6 +205,43 @@ def _successful_tool_content(history: list[dict[str, Any]]) -> dict[str, str]:
 
 def _bot_follow_pnl_fallback(goal: str, history: list[dict[str, Any]]) -> str | None:
     tools = _successful_tool_content(history)
+    normalized_goal = str(goal or "").lower()
+
+    # A normalized follow-up deliberately uses Decision Ledger instead of the
+    # raw plan-level counterfactual. The current normalized reporting surface is
+    # 5D; do not fabricate 10D/20D normalized values that it does not expose.
+    if any(term in normalized_goal for term in ("normaliz", "deduplic", "sin repetir", "repetidas")):
+        raw_ledger = tools.get("get_decision_ledger")
+        if raw_ledger:
+            try:
+                ledger = json.loads(raw_ledger)
+            except (TypeError, ValueError):
+                ledger = None
+            if isinstance(ledger, dict):
+                days = int(ledger.get("lookback_days") or 0)
+                report = _strip_html(str(ledger.get("report") or ""))
+                report_lines = [line.strip() for line in report.splitlines() if line.strip()]
+                marker_index = next(
+                    (i for i, line in enumerate(report_lines) if "Planes seguidos" in line and "NORMALIZADO" in line),
+                    None,
+                )
+                if marker_index is not None:
+                    detail = report_lines[marker_index + 1: marker_index + 4]
+                    lines = [
+                        f"Normalizando decisiones repetidas en los últimos {days} días, uso la atribución NORMALIZADA del Decision Ledger.",
+                    ]
+                    lines.extend(f"• {line}" for line in detail[:2])
+                    lines.append(
+                        "Esta métrica deduplica operaciones atribuibles; no cuenta cada recomendación repetida como una operación nueva."
+                    )
+                    lines.append(
+                        "La salida normalizada disponible hoy en el ledger está cerrada a 5D; no invento 10D/20D normalizados."
+                    )
+                    lines.append(
+                        "Tampoco equivale a simular todos los planes ignorados: describe la atribución normalizada que Quantia puede sostener con evidencia."
+                    )
+                    return "\n".join(lines)
+
     raw = tools.get("get_bot_follow_pnl")
     if not raw:
         return None
@@ -211,6 +254,23 @@ def _bot_follow_pnl_fallback(goal: str, history: list[dict[str, Any]]) -> str | 
 
     days = int(data.get("lookback_days") or 0)
     total = int(data.get("plans_total") or 0)
+
+    provenance_question = any(term in normalized_goal for term in (
+        "que datos usaste", "que dato usaste", "que fuentes usaste", "que fuente usaste",
+        "de donde sale", "de donde salio", "que evidencia usaste", "con que datos",
+    ))
+    if provenance_question:
+        source = str(data.get("source") or "decision_log_formal_plans")
+        scope = str(data.get("scope") or "FORMAL_PLAN_DIRECTIONAL_GROSS_PLAN_LEVEL_NOT_DEDUPLICATED")
+        return "\n".join([
+            "Para la respuesta anterior usé una sola fuente de evidencia, no tres:",
+            f"• {source}: planes formales del bot guardados en decision_log, con ventana de {days} días.",
+            f"• Alcance: {scope}.",
+            f"• Filas consideradas: {total} planes ejecutables; para cada horizonte sólo entran los que ya tienen outcome maduro.",
+            "• El cálculo usa el monto objetivo del plan × outcome direccional a 5D/10D/20D.",
+            "No usé snapshot de cartera, contexto macro, estado del sistema ni Redis para calcular ese PnL.",
+        ])
+
     lines = [f"Tomando los últimos {days} días, Quantia registró {total} planes ejecutables del bot."]
     mature = 0
     for horizon in (5, 10, 20):
@@ -322,8 +382,8 @@ def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision
         return AgentDecision(
             kind="final",
             answer=bot_pnl_answer,
-            rationale="Resumen determinístico del PnL hipotético de planes formales del bot.",
-            answer_origin="bot_follow_pnl_renderer_v1",
+            rationale="Resumen determinístico del PnL/atribución del bot y su procedencia.",
+            answer_origin="bot_follow_pnl_renderer_v2",
         )
 
     portfolio_answer = _portfolio_review_fallback(goal, history)
