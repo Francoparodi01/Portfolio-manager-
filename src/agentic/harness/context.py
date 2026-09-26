@@ -95,6 +95,13 @@ class ContextSelector:
             allowed = sorted((_BASE_TOOLS & available_tools))
             required: list[str] = []
             parallel: list[list[str]] = []
+        elif task.intent == "bot_follow_pnl" and task.objective == "explain_normalized_follow_pnl":
+            # "Normalizar decisiones repetidas" is not the raw plan-level
+            # counterfactual. Use the Decision Ledger's normalized plan-follow
+            # attribution instead of get_bot_follow_pnl.
+            allowed = [name for name in ["get_decision_ledger"] if name in available_tools]
+            required = list(allowed)
+            parallel = []
         else:
             requested = _INTENT_TOOLS.get(task.intent, [])
             allowed = [name for name in requested if name in available_tools]
