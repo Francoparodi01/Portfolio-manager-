@@ -34,27 +34,14 @@ class AgentModel(Protocol):
 
 
 class OllamaAgentModel:
-    """JSON-only controller model for the agent loop.
+    """JSON-only controller model for the generic agent loop.
 
     It never receives an execution tool capable of placing orders. The model only
     decides which registered evidence/analysis tool to invoke next, or when it
-    has enough evidence to stop.
+    has enough evidence to stop. Conversational fast paths belong to
+    ConversationalHarness rather than this generic controller so other agentic
+    flows keep their original orchestration semantics.
     """
-
-    _DETERMINISTIC_INTENTS = {
-        "portfolio_review",
-        "bot_follow_pnl",
-        "evidence_provenance",
-        "opportunities",
-        "performance",
-        "net_performance",
-        "analytics_v2",
-        "viability",
-        "regression_audit",
-        "calibration_audit",
-        "market_context",
-        "system_status",
-    }
 
     def __init__(
         self,
@@ -247,22 +234,11 @@ class OllamaAgentModel:
         if force_final:
             return evidence_decision(goal, history)
 
-        # Provenance is entirely determined by the audited preceding run. Do not
-        # ask the LLM to reinterpret or augment the source list.
+        # Exact provenance can be closed deterministically even in the generic
+        # agent because the only available capability is the audited source trace.
         if history and available == {"get_run_evidence_provenance"}:
             logger.info("[CHAT][MODEL] planner_bypass intent=evidence_provenance")
             return evidence_decision(goal, history)
-
-        if history:
-            try:
-                from src.agentic.harness.task import TaskParser
-
-                routed_intent = TaskParser().parse(goal).intent
-                if routed_intent in self._DETERMINISTIC_INTENTS:
-                    logger.info("[CHAT][MODEL] planner_bypass intent=%s", routed_intent)
-                    return evidence_decision(goal, history)
-            except Exception:
-                pass
 
         messages = [
             {
