@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 
 from .contracts import Evidence, EvidenceMode, EvidenceQuality, RunState, VerificationResult
@@ -9,22 +10,57 @@ _NUMBER = re.compile(r"(?<![A-Za-z0-9])[-+]?\d+(?:[.,]\d+)?%?")
 _EDGE_CLAIMS = ("demuestra", "prueba que", "tiene edge", "edge positivo", "supera a hold", "conviene", "es mejor que hold")
 
 
-def _normalize_number(value: str) -> str:
-    return value.strip().replace(".", "").replace(",", ".").lstrip("+")
+def _number_candidates(raw: str) -> set[float]:
+    text = raw.strip().lstrip("+")
+    percent = text.endswith("%")
+    text = text.rstrip("%")
+    candidates: set[float] = set()
+    variants = {text}
+    if "," in text and "." in text:
+        # Spanish rendered number: 1.234,56
+        variants.add(text.replace(".", "").replace(",", "."))
+        # English rendered number: 1,234.56
+        variants.add(text.replace(",", ""))
+    elif "," in text:
+        variants.add(text.replace(",", "."))
+        variants.add(text.replace(",", ""))
+    elif "." in text:
+        variants.add(text.replace(".", ""))
+    for variant in variants:
+        try:
+            value = float(variant)
+        except ValueError:
+            continue
+        if not math.isfinite(value):
+            continue
+        candidates.add(value)
+        if percent:
+            candidates.add(value / 100.0)
+    return candidates
+
+
+def _matches_observed(raw: str, observed: set[float]) -> bool:
+    for candidate in _number_candidates(raw):
+        for value in observed:
+            tolerance = max(1e-9, abs(value) * 1e-6)
+            if abs(candidate - value) <= tolerance:
+                return True
+    return False
 
 
 def _numeric_grounding(answer: str, evidence: list[Evidence], user_message: str) -> tuple[bool, list[str]]:
     evidence_text = "\n".join(item.excerpt for item in evidence if item.ok) + "\n" + user_message
-    observed = {_normalize_number(item) for item in _NUMBER.findall(evidence_text)}
+    observed: set[float] = set()
+    for raw in _NUMBER.findall(evidence_text):
+        observed.update(_number_candidates(raw))
+
     missing: list[str] = []
-    # Small horizon/control numbers are often explanatory labels. All other
-    # explicit numbers in the answer should be traceable to evidence or user input.
     exempt = {"0", "1", "2", "3", "4", "5", "10", "20", "40", "90", "180"}
     for raw in _NUMBER.findall(answer):
-        value = _normalize_number(raw)
-        if value in exempt:
+        clean = raw.strip().lstrip("+").rstrip("%")
+        if clean in exempt:
             continue
-        if value not in observed:
+        if not _matches_observed(raw, observed):
             missing.append(raw)
     return not missing, list(dict.fromkeys(missing))[:8]
 
