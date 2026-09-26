@@ -110,8 +110,8 @@ def test_context_selector_minimizes_performance_surface():
     }
     plan = ContextSelector().select(task, available)
     assert plan.required_tools == ["get_decision_ledger"]
-    assert set(plan.allowed_tools) == {"get_decision_ledger", "get_performance"}
-    assert ["get_decision_ledger", "get_performance"] in plan.parallel_groups
+    assert plan.allowed_tools == ["get_decision_ledger"]
+    assert plan.parallel_groups == []
 
 
 async def _tool_stub(arguments):
