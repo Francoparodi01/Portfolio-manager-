@@ -41,6 +41,7 @@ async def fetch_normalized_bot_counterfactual(
             FROM execution_plans
             WHERE created_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND run_id IS NOT NULL
+              AND source = 'execution_plan'
               AND (owner_chat_id=$2 OR ($3::boolean AND owner_chat_id IS NULL))
             GROUP BY run_id
             UNION ALL
@@ -49,6 +50,7 @@ async def fetch_normalized_bot_counterfactual(
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND run_id IS NOT NULL
               AND (owner_chat_id=$2 OR ($3::boolean AND owner_chat_id IS NULL))
+              AND COALESCE(source, layers->>'source') = 'execution_plan'
               AND COALESCE(run_intent, 'formal_plan') = 'formal_plan'
             GROUP BY run_id
         ),
