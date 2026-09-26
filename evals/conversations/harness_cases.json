@@ -42,7 +42,7 @@
       ],
       "expected_intents": ["bot_follow_pnl", "evidence_provenance"],
       "must_offer_tools": ["get_run_evidence_provenance"],
-      "forbidden_tools": ["get_bot_follow_pnl", "get_decision_ledger", "get_system_status", "get_macro_context", "get_portfolio_snapshot"]
+      "forbidden_tools": ["get_bot_follow_pnl", "get_normalized_bot_follow_pnl", "get_decision_ledger", "get_system_status", "get_macro_context", "get_portfolio_snapshot"]
     },
     {
       "id": "bot-follow-pnl-normalized-followup",
@@ -51,8 +51,8 @@
         "¿Cuánto hubiese ganado realmente siguiendo al bot, normalizando decisiones repetidas?"
       ],
       "expected_intents": ["bot_follow_pnl", "bot_follow_pnl"],
-      "must_offer_tools": ["get_decision_ledger"],
-      "forbidden_tools": ["get_bot_follow_pnl", "get_net_decision_report"]
+      "must_offer_tools": ["get_normalized_bot_follow_pnl"],
+      "forbidden_tools": ["get_bot_follow_pnl", "get_decision_ledger", "get_net_decision_report"]
     },
     {
       "id": "normalized-provenance-chain",
@@ -63,7 +63,7 @@
       ],
       "expected_intents": ["bot_follow_pnl", "bot_follow_pnl", "evidence_provenance"],
       "must_offer_tools": ["get_run_evidence_provenance"],
-      "forbidden_tools": ["get_bot_follow_pnl", "get_system_status", "get_macro_context", "get_portfolio_snapshot"]
+      "forbidden_tools": ["get_bot_follow_pnl", "get_normalized_bot_follow_pnl", "get_decision_ledger", "get_system_status", "get_macro_context", "get_portfolio_snapshot"]
     },
     {
       "id": "economic-pnl",
