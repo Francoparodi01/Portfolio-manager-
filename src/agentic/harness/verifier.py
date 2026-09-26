@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from typing import Any
 
 from .contracts import Evidence, EvidenceMode, EvidenceQuality, RunState, VerificationResult
 
@@ -17,9 +18,7 @@ def _number_candidates(raw: str) -> set[float]:
     candidates: set[float] = set()
     variants = {text}
     if "," in text and "." in text:
-        # Spanish rendered number: 1.234,56
         variants.add(text.replace(".", "").replace(",", "."))
-        # English rendered number: 1,234.56
         variants.add(text.replace(",", ""))
     elif "," in text:
         variants.add(text.replace(",", "."))
@@ -39,6 +38,34 @@ def _number_candidates(raw: str) -> set[float]:
     return candidates
 
 
+def _structured_numbers(value: Any, observed: set[float]) -> None:
+    """Collect source numbers plus deterministic container counts.
+
+    Counts such as "7 positions" are grounded in the source list even when the
+    raw payload does not contain an explicit `position_count: 7` field.
+    """
+    if isinstance(value, bool) or value is None:
+        return
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if math.isfinite(number):
+            observed.add(number)
+        return
+    if isinstance(value, dict):
+        observed.add(float(len(value)))
+        for item in value.values():
+            _structured_numbers(item, observed)
+        return
+    if isinstance(value, (list, tuple)):
+        observed.add(float(len(value)))
+        for item in value:
+            _structured_numbers(item, observed)
+        return
+    if isinstance(value, str):
+        for raw in _NUMBER.findall(value):
+            observed.update(_number_candidates(raw))
+
+
 def _matches_observed(raw: str, observed: set[float]) -> bool:
     for candidate in _number_candidates(raw):
         for value in observed:
@@ -49,12 +76,18 @@ def _matches_observed(raw: str, observed: set[float]) -> bool:
 
 
 def _numeric_grounding(answer: str, evidence: list[Evidence], user_message: str) -> tuple[bool, list[str]]:
-    evidence_text = "\n".join(item.excerpt for item in evidence if item.ok) + "\n" + user_message
     observed: set[float] = set()
-    for raw in _NUMBER.findall(evidence_text):
+    for item in evidence:
+        if not item.ok:
+            continue
+        _structured_numbers(item.data, observed)
+        for raw in _NUMBER.findall(item.excerpt):
+            observed.update(_number_candidates(raw))
+    for raw in _NUMBER.findall(user_message):
         observed.update(_number_candidates(raw))
 
     missing: list[str] = []
+    # Common horizon/control labels are protocol vocabulary, not financial facts.
     exempt = {"0", "1", "2", "3", "4", "5", "10", "20", "40", "90", "180"}
     for raw in _NUMBER.findall(answer):
         clean = raw.strip().lstrip("+").rstrip("%")
@@ -99,7 +132,7 @@ def verify_response(*, answer: str, state: RunState) -> VerificationResult:
     if unsafe_edge_claim:
         blocking.append("Low/insufficient research evidence was promoted into an economic superiority claim.")
 
-    checks["modes_explicit"] = all(item.mode in EvidenceMode for item in successful)
+    checks["modes_explicit"] = all(isinstance(item.mode, EvidenceMode) for item in successful)
 
     if blocking:
         return VerificationResult(
