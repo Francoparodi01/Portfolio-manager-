@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 
 import httpx
 
 from .schemas import EvidenceObject, TaskSpec
+
+logger = logging.getLogger(__name__)
 
 
 class GroundedSynthesizer:
@@ -76,5 +79,11 @@ class GroundedSynthesizer:
             parsed = json.loads(content)
             answer = str(parsed.get("answer") or "").strip()
             return answer[:12000] if answer else fallback
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[CHAT][SYNTHESIS] fallback model=%s error=%s detail=%s",
+                self.model,
+                type(exc).__name__,
+                str(exc)[:300],
+            )
             return fallback
