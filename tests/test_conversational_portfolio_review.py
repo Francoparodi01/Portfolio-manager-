@@ -62,6 +62,7 @@ def test_decision_evidence_fallback_is_compact_not_raw_json():
 
 def test_portfolio_fallback_uses_persisted_decisions_without_recompute():
     snapshot = {
+        "scraped_at": "2026-09-26T15:02:00+00:00",
         "total_value_ars": 2895125.0,
         "cash_ars": 3842.34,
         "positions": [
@@ -77,9 +78,9 @@ def test_portfolio_fallback_uses_persisted_decisions_without_recompute():
         "evaluated_at": "2026-09-26T15:00:00+00:00",
         "snapshot_as_of": "2026-09-26T14:59:00+00:00",
         "signals": [
-            {"ticker": "NVDA", "decision": "ACCUMULATE", "final_score": 0.1814},
-            {"ticker": "AMD", "decision": "HOLD", "final_score": 0.0835},
-            {"ticker": "GDX", "decision": "ACCUMULATE", "final_score": 0.152},
+            {"ticker": "NVDA", "decision": "ACCUMULATE", "status": "APPROVED", "final_score": 0.1814},
+            {"ticker": "AMD", "decision": "HOLD", "status": "OBSERVED", "final_score": 0.0835},
+            {"ticker": "GDX", "decision": "WATCH", "status": "BLOCKED", "final_score": 0.152},
         ],
     }
     history = []
@@ -94,16 +95,18 @@ def test_portfolio_fallback_uses_persisted_decisions_without_recompute():
 
     decision = evidence_decision("¿Cómo está mi cartera?", history)
 
-    assert decision.answer_origin == "portfolio_renderer_v4"
+    assert decision.answer_origin == "portfolio_renderer_v5"
     assert "Tu cartera tiene" in decision.answer
     assert "NVDA 16,8%" in decision.answer
     assert "NVDA ACCUMULATE" in decision.answer
-    assert "Última corrida persistida" in decision.answer
+    assert "GDX WATCH (score 0,152) · bloqueada" in decision.answer
+    assert "Último análisis formal" in decision.answer
+    assert "no se recalcularon con ese snapshot nuevo" in decision.answer
     assert "no volvió a ejecutar el análisis completo" in decision.answer
     assert "no son fills" in decision.answer.lower()
     assert "Resumen: Revisé la evidencia" not in decision.answer
     assert "Extracto literal" not in decision.answer
-    assert len(decision.answer) < 1500
+    assert len(decision.answer) < 1800
 
 
 def test_synthesis_accepts_json_and_plain_text_answers():
