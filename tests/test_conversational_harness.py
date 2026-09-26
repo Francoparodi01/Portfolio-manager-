@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from src.agentic.contracts import ToolObservation, ToolSpec
 from src.agentic.harness.context import ContextSelector
 from src.agentic.harness.permissions import Capability, PermissionPolicy
+from src.agentic.harness.runtime import ConversationalHarness
 from src.agentic.harness.schemas import (
     ConversationState,
     EvidenceMode,
@@ -13,6 +15,7 @@ from src.agentic.harness.schemas import (
 )
 from src.agentic.harness.task import TaskParser
 from src.agentic.harness.verifier import HarnessVerifier
+from src.agentic.tools import ToolRegistry
 
 
 def test_portfolio_language_does_not_become_fake_tickers():
@@ -38,6 +41,18 @@ def test_why_followup_inherits_active_symbol():
     assert task.entities == ["GDX"]
     assert task.intent == "decision_explanation"
     assert task.inherited_subject == "GDX"
+
+
+def test_why_followup_can_inherit_grounded_subject_from_portfolio_review():
+    state = ConversationState(
+        owner_chat_id=123,
+        active_symbols=["NVDA"],
+        last_intent="portfolio_review",
+        conversation_subject="NVDA",
+    )
+    task = TaskParser().parse("¿por qué?", state)
+    assert task.entities == ["NVDA"]
+    assert task.intent == "decision_explanation"
 
 
 def test_comparison_followup_keeps_previous_subject_and_new_symbol():
@@ -70,12 +85,57 @@ def test_context_selector_minimizes_performance_surface():
     assert ["get_decision_ledger", "get_performance"] in plan.parallel_groups
 
 
-def test_permission_policy_never_allows_trade_execution():
+async def _tool_stub(arguments):
+    return ToolObservation(tool_name="stub", arguments=arguments, ok=True, content="{}")
+
+
+def test_permission_policy_uses_registry_capability_and_fails_closed():
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec("get_portfolio_snapshot", "fixture", {"type": "object", "properties": {}}, capability="READ"),
+        _tool_stub,
+    )
+    registry.register(
+        ToolSpec("harmless_writer", "fixture", {"type": "object", "properties": {}}, capability="WRITE"),
+        _tool_stub,
+    )
     policy = PermissionPolicy()
-    assert policy.capability_for("get_portfolio_snapshot") == Capability.READ
-    assert policy.capability_for("analyze_ticker") == Capability.COMPUTE
-    assert policy.capability_for("execute_order") == Capability.FORBIDDEN
-    assert not policy.allow("place_order")
+    assert policy.capability_for(registry, "get_portfolio_snapshot") == Capability.READ
+    assert policy.capability_for(registry, "harmless_writer") == Capability.FORBIDDEN
+    assert policy.capability_for(registry, "missing_tool") == Capability.FORBIDDEN
+    assert not policy.allow(registry, "harmless_writer")
+
+
+def test_permission_policy_keeps_name_block_as_secondary_defense():
+    registry = ToolRegistry()
+    registry.register(
+        ToolSpec("execute_order", "fixture", {"type": "object", "properties": {}}, capability="READ"),
+        _tool_stub,
+    )
+    assert PermissionPolicy().capability_for(registry, "execute_order") == Capability.FORBIDDEN
+
+
+def test_answer_subject_is_kept_only_when_supported_by_evidence():
+    harness = ConversationalHarness(
+        database_url="postgresql://example.invalid/db",
+        owner_chat_id=123,
+        repo_root=".",
+        legacy_single_owner=True,
+        require_audit=False,
+    )
+    evidence = [
+        EvidenceObject(
+            source="portfolio",
+            tool_name="get_portfolio_snapshot",
+            timestamp=datetime.now(timezone.utc),
+            payload={"positions": [{"ticker": "NVDA"}]},
+            quality=EvidenceQuality.HIGH,
+            mode=EvidenceMode.PRODUCTION,
+            ok=True,
+        )
+    ]
+    assert harness._supported_answer_symbols("Me preocupa más NVDA.", evidence, []) == ["NVDA"]
+    assert harness._supported_answer_symbols("Me preocupa más GDX.", evidence, []) == []
 
 
 def _task() -> TaskSpec:
