@@ -31,7 +31,11 @@ _BASE_TOOLS = {
 }
 
 _INTENT_TOOLS = {
-    "portfolio_review": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_portfolio"],
+    # A broad status question only needs the account snapshot plus structured
+    # decision evidence. Running analyze_portfolio as well launches the same
+    # heavy run_analysis.py pipeline a second time and adds latency without a
+    # materially new source for this bounded intent.
+    "portfolio_review": ["get_portfolio_snapshot", "get_decision_evidence"],
     "position_analysis": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_macro_context", "get_decision_value_added"],
     "decision_explanation": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_decision_value_added"],
     "position_comparison": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_decision_value_added", "scan_opportunities"],
@@ -50,7 +54,7 @@ _INTENT_TOOLS = {
 }
 
 _REQUIRED = {
-    "portfolio_review": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_portfolio"],
+    "portfolio_review": ["get_portfolio_snapshot", "get_decision_evidence"],
     "position_analysis": ["get_portfolio_snapshot", "get_decision_evidence"],
     "decision_explanation": ["get_decision_evidence"],
     "position_comparison": ["get_portfolio_snapshot", "get_decision_evidence"],
@@ -68,7 +72,7 @@ _REQUIRED = {
 }
 
 _PARALLEL = {
-    "portfolio_review": [["get_portfolio_snapshot", "get_decision_evidence", "analyze_portfolio"]],
+    "portfolio_review": [["get_portfolio_snapshot", "get_decision_evidence"]],
     "position_analysis": [["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker"]],
     "decision_explanation": [["get_decision_evidence", "analyze_ticker"]],
     "position_comparison": [["get_portfolio_snapshot", "get_decision_evidence"]],
