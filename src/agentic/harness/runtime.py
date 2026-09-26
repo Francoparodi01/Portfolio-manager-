@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from src.agentic.answer import evidence_decision
 from src.agentic.contracts import AgentDecision, ToolObservation, ToolValidationError
 from src.agentic.diagnostics import decision_lab_arguments
 from src.agentic.model import OllamaAgentModel
@@ -39,6 +40,21 @@ from .tools_ext import register_harness_tools
 from .verifier import HarnessVerifier
 
 
+_DIRECT_AFTER_REQUIRED = {
+    "portfolio_review",
+    "bot_follow_pnl",
+    "evidence_provenance",
+    "performance",
+    "net_performance",
+    "analytics_v2",
+    "viability",
+    "regression_audit",
+    "calibration_audit",
+    "market_context",
+    "system_status",
+}
+
+
 class _RegistryView:
     def __init__(self, base: ToolRegistry, allowed: list[str]) -> None:
         self.base = base
@@ -58,11 +74,7 @@ class _RegistryView:
 
 
 class ConversationalHarness:
-    """Task -> context -> bounded tools -> evidence -> verification -> answer.
-
-    Financial computation remains in existing Quantia services/tools. This class
-    owns orchestration only and has no broker/trade capability.
-    """
+    """Task -> context -> bounded tools -> evidence -> verification -> answer."""
 
     def __init__(
         self,
@@ -87,19 +99,32 @@ class ConversationalHarness:
         self.verifier = HarnessVerifier()
         self.roles = ModelRoles.from_env()
 
-    async def run(self, message: str) -> HarnessResponse:
+    async def run(
+        self,
+        message: str,
+        *,
+        task_override: TaskSpec | None = None,
+        session_override: ConversationState | None = None,
+    ) -> HarnessResponse:
         started = time.monotonic()
         sessions = ConversationSessionStore(self.owner_chat_id)
-        session = await sessions.load()
+        session = session_override.model_copy(deep=True) if session_override is not None else await sessions.load()
         raw = " ".join(str(message or "").split())
+        reset = False
         if raw.lower() in {"nuevo", "nueva conversación", "nueva conversacion"}:
             session = await sessions.reset()
             raw = "¿Cómo está mi cartera?"
+            reset = True
         elif raw.lower().startswith("nuevo "):
             session = await sessions.reset()
             raw = raw[6:].strip()
+            reset = True
 
-        task = self.parser.parse(raw, session)
+        task = (
+            task_override.model_copy(deep=True)
+            if task_override is not None and not reset
+            else self.parser.parse(raw, session)
+        )
         tool_context = ToolContext(
             database_url=self.database_url,
             owner_chat_id=self.owner_chat_id,
@@ -204,68 +229,66 @@ class ConversationalHarness:
                 self._mark_state(state, name, observation.ok)
 
             final_decision: AgentDecision | None = None
-            planner_steps = 0
-            while state.tool_calls < plan.max_tool_calls and planner_steps < plan.max_steps:
-                if time.monotonic() >= deadline:
-                    stop_reason = "time_budget"
-                    break
-                planner_steps += 1
-                llm_calls += 1
-                try:
-                    decision = await model.decide(
-                        goal=task.raw_message,
-                        tools=view.specs(),
-                        history=history,
-                        step_no=planner_steps,
-                        max_steps=plan.max_steps,
-                        force_final=False,
-                    )
-                except Exception as exc:
-                    state.errors.append(f"planner:{type(exc).__name__}")
-                    stop_reason = "planner_error"
-                    break
-                if decision.kind == "final":
-                    final_decision = decision
-                    break
-                name = str(decision.tool_name or "")
-                if not self.permissions.allow(registry, name) or name not in plan.allowed_tools:
-                    state.errors.append(f"permission_denied:{name}")
-                    continue
-                try:
-                    args = view.validate(name, decision.arguments)
-                except Exception as exc:
-                    state.errors.append(f"invalid_tool_args:{name}:{type(exc).__name__}")
-                    continue
-                key = tool_call_key(name, args)
-                if key in calls_seen:
-                    state.errors.append(f"duplicate_call_blocked:{name}")
-                    continue
-                calls_seen.add(key)
-                observation = await self._execute_with_retry(view, name, args, plan.max_retries)
-                state.tool_calls += 1
-                step_no += 1
-                item = self._to_evidence(observation)
-                evidence.append(item)
-                state.evidence_refs.append(item.evidence_id)
-                self._append_history(history, name, observation, decision.rationale or "dynamic planner")
-                await self._record(store, state.run_id, step_no, name, observation, decision.rationale or "dynamic planner")
-                self._mark_state(state, name, observation.ok)
+            if task.intent in _DIRECT_AFTER_REQUIRED and any(item.ok for item in evidence):
+                final_decision = evidence_decision(task.raw_message, history)
+                stop_reason = "bounded_evidence_complete"
+            else:
+                planner_steps = 0
+                while state.tool_calls < plan.max_tool_calls and planner_steps < plan.max_steps:
+                    if time.monotonic() >= deadline:
+                        stop_reason = "time_budget"
+                        break
+                    planner_steps += 1
+                    llm_calls += 1
+                    try:
+                        decision = await model.decide(
+                            goal=task.raw_message,
+                            tools=view.specs(),
+                            history=history,
+                            step_no=planner_steps,
+                            max_steps=plan.max_steps,
+                            force_final=False,
+                        )
+                    except Exception as exc:
+                        state.errors.append(f"planner:{type(exc).__name__}")
+                        stop_reason = "planner_error"
+                        break
+                    if decision.kind == "final":
+                        final_decision = decision
+                        break
+                    name = str(decision.tool_name or "")
+                    if not self.permissions.allow(registry, name) or name not in plan.allowed_tools:
+                        state.errors.append(f"permission_denied:{name}")
+                        continue
+                    try:
+                        args = view.validate(name, decision.arguments)
+                    except Exception as exc:
+                        state.errors.append(f"invalid_tool_args:{name}:{type(exc).__name__}")
+                        continue
+                    key = tool_call_key(name, args)
+                    if key in calls_seen:
+                        state.errors.append(f"duplicate_call_blocked:{name}")
+                        continue
+                    calls_seen.add(key)
+                    observation = await self._execute_with_retry(view, name, args, plan.max_retries)
+                    state.tool_calls += 1
+                    step_no += 1
+                    item = self._to_evidence(observation)
+                    evidence.append(item)
+                    state.evidence_refs.append(item.evidence_id)
+                    self._append_history(history, name, observation, decision.rationale or "dynamic planner")
+                    await self._record(store, state.run_id, step_no, name, observation, decision.rationale or "dynamic planner")
+                    self._mark_state(state, name, observation.ok)
 
-            llm_calls += 1
-            try:
-                fallback_decision = await model.decide(
-                    goal=task.raw_message,
-                    tools=view.specs(),
-                    history=history,
-                    step_no=plan.max_steps + 1,
-                    max_steps=plan.max_steps,
-                    force_final=True,
-                )
-                fallback = str(fallback_decision.answer or "").strip()
-            except Exception:
-                fallback = ""
             if final_decision and final_decision.answer:
                 fallback = str(final_decision.answer)
+            elif history:
+                try:
+                    fallback = str(evidence_decision(task.raw_message, history).answer or "").strip()
+                except Exception:
+                    fallback = ""
+            else:
+                fallback = ""
             if not fallback:
                 fallback = self._insufficient_answer(state)
 
@@ -339,6 +362,8 @@ class ConversationalHarness:
                         "llm_calls": llm_calls,
                         "verification": verification.model_dump(mode="json"),
                         "evidence_refs": state.evidence_refs,
+                        "routing_source": task.routing_source,
+                        "routing_confidence": task.routing_confidence,
                     },
                 )
             return HarnessResponse(
@@ -431,6 +456,8 @@ class ConversationalHarness:
         if name == "scan_opportunities":
             return {"limit": 8}
         if name in {"get_decision_ledger", "get_bot_follow_pnl", "get_normalized_bot_follow_pnl"}:
+            if task.lookback_days is not None:
+                return {"days": max(1, min(365, int(task.lookback_days)))}
             match = re.search(r"\b(\d{1,3})\s*(?:dias|días|days)\b", task.raw_message.lower())
             return {"days": max(1, min(365, int(match.group(1))))} if match else {"days": 90}
         return {}
