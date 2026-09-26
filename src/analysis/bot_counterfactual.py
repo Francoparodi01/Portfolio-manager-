@@ -28,9 +28,11 @@ async def fetch_normalized_bot_counterfactual(
       formal runs belong to one episode;
     - a side change or an intervening formal run without the same recommendation
       starts a new episode;
-    - only the first executable plan in each episode contributes notional/PnL;
-    - plans without a positive persisted notional are excluded rather than
-      receiving a fabricated fallback amount.
+    - episode boundaries use every persisted formal recommendation, even when a
+      row is missing notional;
+    - within each episode, the first row with a positive persisted notional is
+      the representative used for PnL; an episode with no valid notional is
+      excluded instead of receiving fabricated capital.
 
     This is a counterfactual over persisted formal plans. It is not realized
     account PnL and it does not use actual human execution attribution.
@@ -92,12 +94,6 @@ async def fetch_normalized_bot_counterfactual(
               AND dl.decision IN ('BUY', 'SELL')
               AND dl.price_at_decision IS NOT NULL
         ),
-        plans AS (
-            SELECT *
-            FROM candidate_plans
-            WHERE target_amount_ars IS NOT NULL
-              AND target_amount_ars > 0
-        ),
         ordered AS (
             SELECT
                 p.*,
@@ -107,7 +103,7 @@ async def fetch_normalized_bot_counterfactual(
                 LAG(p.run_seq) OVER (
                     PARTITION BY p.ticker ORDER BY p.run_seq, p.decided_at, p.id
                 ) AS prev_run_seq
-            FROM plans p
+            FROM candidate_plans p
         ),
         boundaries AS (
             SELECT
@@ -134,19 +130,32 @@ async def fetch_normalized_bot_counterfactual(
                 e.*,
                 ROW_NUMBER() OVER (
                     PARTITION BY e.ticker, e.episode_id
-                    ORDER BY e.run_seq, e.decided_at, e.id
+                    ORDER BY
+                        CASE WHEN e.target_amount_ars IS NOT NULL AND e.target_amount_ars > 0 THEN 0 ELSE 1 END,
+                        e.run_seq,
+                        e.decided_at,
+                        e.id
                 ) AS episode_row
             FROM episode_ids e
         ),
         chosen AS (
-            SELECT * FROM representatives WHERE episode_row = 1
+            SELECT *
+            FROM representatives
+            WHERE episode_row = 1
+              AND target_amount_ars IS NOT NULL
+              AND target_amount_ars > 0
         )
         SELECT
             (SELECT COUNT(*) FROM candidate_plans)::int AS candidate_plans_total,
-            (SELECT COUNT(*) FROM plans)::int AS raw_plans_total,
             (
-                (SELECT COUNT(*) FROM candidate_plans)
-                - (SELECT COUNT(*) FROM plans)
+                SELECT COUNT(*)
+                FROM candidate_plans
+                WHERE target_amount_ars IS NOT NULL AND target_amount_ars > 0
+            )::int AS raw_plans_total,
+            (
+                SELECT COUNT(*)
+                FROM candidate_plans
+                WHERE target_amount_ars IS NULL OR target_amount_ars <= 0
             )::int AS excluded_missing_notional,
             COUNT(*)::int AS episodes_total,
             COUNT(outcome_5d)::int AS episodes_closed_5d,
@@ -193,7 +202,7 @@ async def fetch_normalized_bot_counterfactual(
         "episode_definition": (
             "Same ticker + same BUY/SELL across consecutive formal runs is one episode; "
             "a side change or an intervening formal run without that recommendation starts a new episode. "
-            "Only the first executable plan in each episode contributes notional and outcome."
+            "Episode continuity uses all formal recommendations, and the first row with valid positive notional is the representative."
         ),
         "limitations": [
             "Hypothetical bot-follow PnL, not realized account PnL.",
