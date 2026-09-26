@@ -10,12 +10,13 @@ from src.agentic.conversation.gateway import (
     _schedule_background_refresh,
 )
 from src.agentic.harness.context import ContextSelector
+from src.agentic.harness.schemas import TaskSpec
 from src.agentic.harness.synthesis import GroundedSynthesizer
 from src.agentic.harness.task import TaskParser
 from src.agentic.model import OllamaAgentModel
 
 
-def test_portfolio_review_runs_required_evidence_in_parallel():
+def test_portfolio_review_runs_minimum_required_evidence_in_parallel():
     task = TaskParser().parse("¿Cómo está mi cartera?")
     plan = ContextSelector().select(
         task,
@@ -26,8 +27,8 @@ def test_portfolio_review_runs_required_evidence_in_parallel():
     assert [
         "get_portfolio_snapshot",
         "get_decision_evidence",
-        "analyze_portfolio",
     ] in plan.parallel_groups
+    assert "analyze_portfolio" not in plan.allowed_tools
 
 
 def test_explicit_refresh_language_bypasses_snapshot_fast_path():
@@ -124,3 +125,19 @@ def test_synthesis_defaults_are_bounded_for_chat_latency(monkeypatch):
     assert synthesizer.context_tokens == 8192
     assert synthesizer.num_predict == 400
     assert synthesizer.keep_alive == "30m"
+
+
+def test_portfolio_review_bypasses_llm_synthesis(monkeypatch):
+    monkeypatch.delenv("QUANTIA_HARNESS_SYNTHESIS_BYPASS_INTENTS", raising=False)
+    synthesizer = GroundedSynthesizer(model="fixture-model")
+
+    async def should_not_post(*_args, **_kwargs):
+        raise AssertionError("portfolio_review must not call Ollama synthesis")
+
+    monkeypatch.setattr("httpx.AsyncClient.post", should_not_post)
+    task = TaskSpec(intent="portfolio_review", raw_message="¿Cómo está mi cartera?")
+    answer = asyncio.run(
+        synthesizer.synthesize(task=task, evidence=[], fallback="respuesta determinística")
+    )
+
+    assert answer == "respuesta determinística"
