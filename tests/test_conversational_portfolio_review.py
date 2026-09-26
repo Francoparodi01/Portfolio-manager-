@@ -8,18 +8,24 @@ from src.agentic.harness.synthesis import GroundedSynthesizer
 from src.agentic.harness.task import TaskParser
 
 
-def test_portfolio_review_requires_snapshot_and_structured_decisions_only():
+def test_portfolio_review_requires_snapshot_and_persisted_decisions_only():
     task = TaskParser().parse("¿Cómo está mi cartera?")
     plan = ContextSelector().select(
         task,
-        {"get_portfolio_snapshot", "get_decision_evidence", "analyze_portfolio"},
+        {
+            "get_portfolio_snapshot",
+            "get_persisted_decision_evidence",
+            "get_decision_evidence",
+            "analyze_portfolio",
+        },
     )
 
     assert task.intent == "portfolio_review"
     assert plan.required_tools == [
         "get_portfolio_snapshot",
-        "get_decision_evidence",
+        "get_persisted_decision_evidence",
     ]
+    assert "get_decision_evidence" not in plan.allowed_tools
     assert "analyze_portfolio" not in plan.allowed_tools
 
 
@@ -54,7 +60,7 @@ def test_decision_evidence_fallback_is_compact_not_raw_json():
     assert "Extracto literal de la herramienta" not in decision.answer
 
 
-def test_portfolio_fallback_is_conversational_without_duplicate_full_analysis():
+def test_portfolio_fallback_uses_persisted_decisions_without_recompute():
     snapshot = {
         "total_value_ars": 2895125.0,
         "cash_ars": 3842.34,
@@ -65,6 +71,9 @@ def test_portfolio_fallback_is_conversational_without_duplicate_full_analysis():
         ],
     }
     decisions = {
+        "schema_version": "persisted-decision-evidence-v1",
+        "evidence_source": "persisted_latest_run",
+        "analysis_run_id": "run-persisted",
         "evaluated_at": "2026-09-26T15:00:00+00:00",
         "snapshot_as_of": "2026-09-26T14:59:00+00:00",
         "signals": [
@@ -76,7 +85,7 @@ def test_portfolio_fallback_is_conversational_without_duplicate_full_analysis():
     history = []
     for tool, content in (
         ("get_portfolio_snapshot", json.dumps(snapshot)),
-        ("get_decision_evidence", json.dumps(decisions)),
+        ("get_persisted_decision_evidence", json.dumps(decisions)),
     ):
         history.append({
             "decision": {"tool": tool},
@@ -85,11 +94,12 @@ def test_portfolio_fallback_is_conversational_without_duplicate_full_analysis():
 
     decision = evidence_decision("¿Cómo está mi cartera?", history)
 
-    assert decision.answer_origin == "portfolio_renderer_v3"
+    assert decision.answer_origin == "portfolio_renderer_v4"
     assert "Tu cartera tiene" in decision.answer
     assert "NVDA 16,8%" in decision.answer
     assert "NVDA ACCUMULATE" in decision.answer
-    assert "Señales evaluadas" in decision.answer
+    assert "Última corrida persistida" in decision.answer
+    assert "no volvió a ejecutar el análisis completo" in decision.answer
     assert "no son fills" in decision.answer.lower()
     assert "Resumen: Revisé la evidencia" not in decision.answer
     assert "Extracto literal" not in decision.answer
