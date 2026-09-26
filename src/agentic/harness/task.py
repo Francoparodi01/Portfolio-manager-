@@ -118,7 +118,27 @@ class TaskParser:
         horizon_decisions = "decision" in text and bool(re.search(r"\b\d{1,3}\s*(?:dias|days)\b", text))
         if horizon_decisions or any(term in text for term in ("hace 20 dias", "decisiones que tomaste", "outcomes", "resultado de decisiones")):
             return "decision_history", "explain_matured_decisions", ["ledger", "outcomes"]
-        if any(term in text for term in ("oportunidad", "reemplazar", "en su lugar", "que compraria")):
+
+        # Natural-language discovery/buy requests should use the bounded radar
+        # workflow rather than falling through to the unrestricted general intent.
+        # Keep named-ticker questions out of this branch so "¿conviene comprar NVDA?"
+        # remains a position analysis instead of becoming a portfolio-wide scan.
+        purchase_recommendation = not entities and (
+            any(term in text for term in (
+                "que me recomendas comprar", "que me recomiendas comprar",
+                "que recomendas comprar", "que recomiendas comprar",
+                "que puedo comprar", "que deberia comprar", "que compro",
+                "que comprarias", "opciones para comprar", "opciones de compra",
+                "donde pondrias el cash", "donde pondrias el efectivo",
+            ))
+            or (
+                any(term in text for term in ("comprar", "compro", "compraria", "comprarias"))
+                and any(term in text for term in ("recomend", "suger", "opcion", "opciones"))
+            )
+        )
+        if purchase_recommendation or any(
+            term in text for term in ("oportunidad", "reemplazar", "en su lugar", "que compraria")
+        ):
             return "opportunities", "find_portfolio_alternatives", ["portfolio", "radar", "risk", "decision_lab"]
         if any(term in text for term in ("status", "estado del sistema", "esta funcionando", "salud del sistema")):
             return "system_status", "explain_system_health", ["system_status"]
@@ -129,7 +149,7 @@ class TaskParser:
             return "decision_explanation", "explain_current_decision", ["portfolio", "decision", "technical", "macro", "risk", "decision_lab"]
         if len(entities) >= 2 and any(term in text for term in ("compar", "cambiar", " vs ")):
             return "position_comparison", "compare_positions", ["portfolio", "decision", "risk", "decision_lab"]
-        if entities and any(term in text for term in ("que hago", "conviene", "revis", "analiz", "decision")):
+        if entities and any(term in text for term in ("que hago", "conviene", "revis", "analiz", "decision", "comprar")):
             return "position_analysis", "evaluate_position", ["portfolio", "decision", "technical", "macro", "risk", "decision_lab"]
         if any(term in text for term in ("cartera", "portfolio", "como viene todo", "como esta todo")):
             return "portfolio_review", "review_portfolio", ["portfolio", "decision", "risk"]
