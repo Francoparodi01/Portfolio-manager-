@@ -17,9 +17,6 @@ _ALIASES = {
     "google": "GOOGL", "googl": "GOOGL", "tesla": "TSLA", "tsla": "TSLA",
     "amd": "AMD", "mu": "MU", "gdx": "GDX", "iren": "IREN",
 }
-_REFERENTIAL_INTENTS = {
-    "position_analysis", "decision_explanation", "position_comparison", "decision_lab", "meta_policy"
-}
 
 
 def _plain(text: str) -> str:
@@ -37,6 +34,10 @@ class TaskParser:
     references (subject/symbol), never an earlier assistant conclusion as evidence.
     """
 
+    def extract_entities(self, text: str) -> list[str]:
+        raw = str(text or "")
+        return self._entities(raw, _plain(raw))
+
     def parse(self, message: str, state: ConversationState | None = None) -> TaskSpec:
         raw = " ".join(str(message or "").split())
         if not raw:
@@ -48,8 +49,7 @@ class TaskParser:
         inherited_subject = None
 
         follow_up = self._looks_like_follow_up(text)
-        may_inherit_symbol = bool(state and state.last_intent in _REFERENTIAL_INTENTS)
-        if state and follow_up and may_inherit_symbol:
+        if state and follow_up:
             comparison_follow_up = any(term in text for term in ("comparalo", "comparala", "comparar", " vs "))
             if comparison_follow_up and entities and state.active_symbols:
                 previous = [symbol for symbol in state.active_symbols if symbol not in entities]
