@@ -20,6 +20,8 @@ from src.agentic import (
     ToolContext,
     build_default_registry,
 )
+from src.agentic.bot_directional_history import register_bot_directional_history_tool
+from src.agentic.harness.tools_ext import register_harness_tools
 from src.agentic.orchestrator import default_max_steps
 from src.agentic.tools import verify_single_owner
 from src.agentic.diagnostics import question_plan
@@ -39,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--goal", required=True, help="Analytical objective for the agent.")
     parser.add_argument("--owner-chat-id", type=int, default=None)
-    parser.add_argument("--model", default=os.getenv("QUANTIA_AGENT_MODEL", "qwen2.5:3b"))
+    parser.add_argument("--model", default=os.getenv("QUANTIA_AGENT_MODEL", "qwen3.5:9b"))
     parser.add_argument("--max-steps", type=int, default=default_max_steps())
     parser.add_argument("--json", action="store_true", help="Print the complete trace as JSON.")
     parser.add_argument("--output-json", type=Path, help="Write the full trace to a new file.")
@@ -90,6 +92,8 @@ async def async_main(args: argparse.Namespace) -> int:
         legacy_single_owner=legacy_single_owner,
     )
     registry = build_default_registry(context)
+    registry = register_harness_tools(registry, context)
+    registry = register_bot_directional_history_tool(registry, context)
     store = AgentRunStore(cfg.database.url) if cfg.database.url else None
     prior = []
     context_namespace = os.getenv("QUANTIA_AGENT_CONTEXT_NAMESPACE", "interactive")
@@ -122,7 +126,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 owner_chat_id=owner_chat_id,
                 metadata={
                     "trigger": "cli",
-                    "agent_version": "quantia-agent-diagnostics-v2",
+                    "agent_version": "quantia-agent-diagnostics-v3",
                     "source_hashes": source_hashes,
                     "conversation_id": conversation_id,
                     "context_namespace": context_namespace,
