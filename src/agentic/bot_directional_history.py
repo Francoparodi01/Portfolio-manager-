@@ -100,7 +100,9 @@ def _summarize_side(
         "side": side,
         "n_episodes": n,
         "n_dates": len(dates),
-        "recommendations_in_episodes": sum(int(episode.get("recommendation_count") or 1) for episode in eligible),
+        "recommendations_in_episodes": sum(
+            int(episode.get("recommendation_count") or 1) for episode in eligible
+        ),
         "win_rate_net": (sum(value > 0 for value in net_values) / n) if n else None,
         "mean_gross_return": mean(gross_values) if gross_values else None,
         "mean_net_return": mean(net_values) if net_values else None,
@@ -126,10 +128,12 @@ async def fetch_bot_directional_history(
         raise ValueError("horizon must be one of 5, 10, 20 or 40")
     evaluated_at = as_of or datetime.now(timezone.utc)
     cutoff = evaluated_at - timedelta(days=bounded_days)
-    outcome_col = f"outcome_{selected_horizon}d"
 
+    # Keep every formal plan row in the window, including rows whose selected
+    # horizon is not mature yet. They are needed to preserve run chronology and
+    # correctly deduplicate consecutive recommendations into episodes.
     rows = await conn.fetch(
-        f"""
+        """
         SELECT
             id,
             run_id::text AS run_id,
@@ -153,13 +157,6 @@ async def fetch_bot_directional_history(
           AND decided_at < $3
           AND COALESCE(source, layers->>'source') = 'execution_plan'
           AND COALESCE(metric_scope, 'planner_audit') <> 'debug'
-          AND {outcome_col} IS NOT NULL OR (
-              (owner_chat_id = $1 OR ($4::boolean AND owner_chat_id IS NULL))
-              AND decided_at >= $2
-              AND decided_at < $3
-              AND COALESCE(source, layers->>'source') = 'execution_plan'
-              AND COALESCE(metric_scope, 'planner_audit') <> 'debug'
-          )
         ORDER BY decided_at, id
         """,
         int(owner_chat_id),
@@ -204,7 +201,12 @@ async def fetch_bot_directional_history(
         hold_rows = []
 
     evidence_rows.extend(dict(row) for row in hold_rows)
-    evidence_rows.sort(key=lambda row: (_aware(row.get("decided_at")) or datetime.min.replace(tzinfo=timezone.utc), str(row.get("id") or "")))
+    evidence_rows.sort(
+        key=lambda row: (
+            _aware(row.get("decided_at")) or datetime.min.replace(tzinfo=timezone.utc),
+            str(row.get("id") or ""),
+        )
+    )
     episodes = build_directional_episodes(evidence_rows)
     sides = {
         side: _summarize_side(
@@ -225,7 +227,10 @@ async def fetch_bot_directional_history(
         "horizon_days": selected_horizon,
         "cost_bps": max(0.0, float(cost_bps)),
         "legacy_null_included": bool(allow_legacy_null),
-        "episode_definition": "same ticker+direction in consecutive formal runs is one episode; HOLD/absence/direction change breaks it",
+        "episode_definition": (
+            "same ticker+direction in consecutive formal runs is one episode; "
+            "HOLD/absence/direction change breaks it"
+        ),
         "outcome_semantics": "canonical directional return; net subtracts research cost only",
         "realized_account_pnl": False,
         "dva_vs_hold": False,
