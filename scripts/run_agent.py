@@ -16,11 +16,11 @@ sys.path.insert(0, str(ROOT))
 from src.agentic import (
     AgentOrchestrator,
     AgentRunStore,
-    OllamaAgentModel,
     ToolContext,
     build_default_registry,
 )
 from src.agentic.bot_directional_history import register_bot_directional_history_tool
+from src.agentic.classic_model import ClassicAgentModel
 from src.agentic.harness.tools_ext import register_harness_tools
 from src.agentic.orchestrator import default_max_steps
 from src.agentic.tools import verify_single_owner
@@ -103,7 +103,7 @@ async def async_main(args: argparse.Namespace) -> int:
         await store.ensure_schema()
         prior = await store.recent_context(owner_chat_id, namespace=context_namespace)
     conversation_id = prior[-1]["conversation_id"] if prior else str(uuid4())
-    model = OllamaAgentModel(model=args.model, conversation_context=prior)
+    model = ClassicAgentModel(model=args.model, conversation_context=prior)
     plan = question_plan(args.goal, prior)
     source_files = sorted((ROOT / "src/agentic").glob("*.py")) + [ROOT / "scripts/run_agent.py", ROOT / "scripts/run_analysis.py"]
     source_hashes = {str(path.relative_to(ROOT)).replace("\\", "/"): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files}
