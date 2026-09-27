@@ -15,7 +15,7 @@ class ModelRoles:
 
     @classmethod
     def from_env(cls) -> "ModelRoles":
-        default = os.getenv("QUANTIA_AGENT_MODEL", "qwen2.5:3b")
+        default = os.getenv("QUANTIA_AGENT_MODEL", "qwen3.5:9b")
         return cls(
             router=os.getenv("QUANTIA_LLM_ROUTER", default),
             reasoning=os.getenv("QUANTIA_LLM_REASONING", default),
