@@ -11,7 +11,7 @@ class AgentPromptContext:
     source_hashes: dict[str, str]
 
 
-_CONTEXT_FILES = (
+REQUIRED_CONTEXT_FILES = (
     "AGENTS.md",
     "docs/agent/quantia-semantics.md",
     "docs/agent/quantia-data-model.md",
@@ -24,7 +24,7 @@ def load_agent_prompt_context(root: str | Path, *, max_chars: int = 24000) -> Ag
     hashes: dict[str, str] = {}
     used = 0
 
-    for relative in _CONTEXT_FILES:
+    for relative in REQUIRED_CONTEXT_FILES:
         path = base / relative
         if not path.is_file():
             continue
@@ -43,4 +43,14 @@ def load_agent_prompt_context(root: str | Path, *, max_chars: int = 24000) -> Ag
     return AgentPromptContext(text="".join(chunks).strip(), source_hashes=hashes)
 
 
-__all__ = ["AgentPromptContext", "load_agent_prompt_context"]
+def missing_prompt_context_files(context: AgentPromptContext) -> tuple[str, ...]:
+    present = set(context.source_hashes)
+    return tuple(relative for relative in REQUIRED_CONTEXT_FILES if relative not in present)
+
+
+__all__ = [
+    "AgentPromptContext",
+    "REQUIRED_CONTEXT_FILES",
+    "load_agent_prompt_context",
+    "missing_prompt_context_files",
+]
