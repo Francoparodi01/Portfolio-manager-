@@ -21,6 +21,7 @@ from src.agentic import (
 )
 from src.agentic.bot_directional_history import register_bot_directional_history_tool
 from src.agentic.diagnostics import question_plan
+from src.agentic.docs_retriever import register_docs_retriever_tool
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
 from src.agentic.harness.tools_ext import register_harness_tools
 from src.agentic.orchestrator import default_max_steps
@@ -100,6 +101,7 @@ async def async_main(args: argparse.Namespace) -> int:
     registry = register_harness_tools(registry, context)
     registry = register_bot_directional_history_tool(registry, context)
     registry = register_sql_explorer_tools(registry, context)
+    registry = register_docs_retriever_tool(registry, context)
 
     store = AgentRunStore(cfg.database.url) if cfg.database.url else None
     prior = []
@@ -156,6 +158,7 @@ async def async_main(args: argparse.Namespace) -> int:
                     "required_tools": list(plan.required_tools),
                     "dynamic_planning": True,
                     "sql_explorer": "owner-scoped-read-only-v1",
+                    "docs_retriever": "checked-in-markdown-v1",
                     "read_only": True,
                     "legacy_single_owner": legacy_single_owner,
                 },
