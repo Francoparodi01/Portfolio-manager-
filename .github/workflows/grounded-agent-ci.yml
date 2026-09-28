@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths:
+      - '.dockerignore'
       - 'AGENTS.md'
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
@@ -17,6 +18,7 @@ on:
       - '.github/workflows/grounded-agent-ci.yml'
   pull_request:
     paths:
+      - '.dockerignore'
       - 'AGENTS.md'
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
