@@ -1,0 +1,63 @@
+name: Grounded agent CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'AGENTS.md'
+      - 'docs/agent/**'
+      - 'src/agentic/prompt_context.py'
+      - 'src/agentic/grounded_model.py'
+      - 'src/agentic/sql_explorer.py'
+      - 'scripts/run_agent.py'
+      - 'tests/test_grounded_agent_architecture.py'
+      - 'evals/agent/**'
+      - '.github/workflows/grounded-agent-ci.yml'
+  pull_request:
+    paths:
+      - 'AGENTS.md'
+      - 'docs/agent/**'
+      - 'src/agentic/prompt_context.py'
+      - 'src/agentic/grounded_model.py'
+      - 'src/agentic/sql_explorer.py'
+      - 'scripts/run_agent.py'
+      - 'tests/test_grounded_agent_architecture.py'
+      - 'evals/agent/**'
+      - '.github/workflows/grounded-agent-ci.yml'
+
+env:
+  PYTHONPATH: .
+
+jobs:
+  grounded-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest ruff
+      - name: Compile grounded agent modules
+        run: |
+          python -m compileall -q \
+            src/agentic/prompt_context.py \
+            src/agentic/grounded_model.py \
+            src/agentic/sql_explorer.py \
+            scripts/run_agent.py
+      - name: Lint grounded agent modules
+        run: |
+          ruff check --select E9,F63,F7,F82 \
+            src/agentic/prompt_context.py \
+            src/agentic/grounded_model.py \
+            src/agentic/sql_explorer.py \
+            scripts/run_agent.py \
+            tests/test_grounded_agent_architecture.py
+      - name: Run architecture and safety tests
+        run: pytest -q tests/test_grounded_agent_architecture.py
+      - name: Validate eval corpus JSON
+        run: python -m json.tool evals/agent/grounded_queries_v1.json > /dev/null
