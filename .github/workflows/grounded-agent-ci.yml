@@ -11,6 +11,7 @@ on:
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
       - 'scripts/run_agent.py'
+      - 'scripts/run_grounded_agent_evals.py'
       - 'tests/test_grounded_agent_architecture.py'
       - 'evals/agent/**'
       - '.github/workflows/grounded-agent-ci.yml'
@@ -23,6 +24,7 @@ on:
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
       - 'scripts/run_agent.py'
+      - 'scripts/run_grounded_agent_evals.py'
       - 'tests/test_grounded_agent_architecture.py'
       - 'evals/agent/**'
       - '.github/workflows/grounded-agent-ci.yml'
@@ -51,7 +53,8 @@ jobs:
             src/agentic/grounded_model.py \
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
-            scripts/run_agent.py
+            scripts/run_agent.py \
+            scripts/run_grounded_agent_evals.py
       - name: Lint grounded agent modules
         run: |
           ruff check --select E9,F63,F7,F82 \
@@ -60,8 +63,11 @@ jobs:
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
             scripts/run_agent.py \
+            scripts/run_grounded_agent_evals.py \
             tests/test_grounded_agent_architecture.py
       - name: Run architecture and safety tests
         run: pytest -q tests/test_grounded_agent_architecture.py
       - name: Validate eval corpus JSON
         run: python -m json.tool evals/agent/grounded_queries_v1.json > /dev/null
+      - name: Check eval runner CLI
+        run: python scripts/run_grounded_agent_evals.py --help > /dev/null
