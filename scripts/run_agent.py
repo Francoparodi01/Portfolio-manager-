@@ -25,7 +25,7 @@ from src.agentic.docs_retriever import register_docs_retriever_tool
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
 from src.agentic.harness.tools_ext import register_harness_tools
 from src.agentic.orchestrator import default_max_steps
-from src.agentic.prompt_context import load_agent_prompt_context
+from src.agentic.prompt_context import load_agent_prompt_context, missing_prompt_context_files
 from src.agentic.sql_explorer import register_sql_explorer_tools
 from src.agentic.tools import verify_single_owner
 from src.core.config import get_config
@@ -114,6 +114,11 @@ async def async_main(args: argparse.Namespace) -> int:
     conversation_id = prior[-1]["conversation_id"] if prior else str(uuid4())
 
     prompt_context = load_agent_prompt_context(ROOT)
+    missing_grounding = missing_prompt_context_files(prompt_context)
+    if missing_grounding:
+        raise RuntimeError(
+            "grounded agent context is incomplete; missing: " + ", ".join(missing_grounding)
+        )
     model = GroundedQuantiaAgentModel(
         model=args.model,
         conversation_context=prior,
