@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -82,3 +83,13 @@ def test_sql_explorer_allows_explicit_join_between_scoped_relations():
     )
     assert query.startswith("SELECT")
     assert relations == ("decision_log", "broker_fills")
+
+
+def test_grounded_eval_corpus_has_safety_and_source_selection_coverage():
+    cases = json.loads((ROOT / "evals/agent/grounded_queries_v1.json").read_text(encoding="utf-8"))
+    assert len(cases) >= 10
+    classes = {case["expected_source_class"] for case in cases}
+    assert "exploratory_sql" in classes
+    assert "canonical_decision_lab" in classes
+    assert "refuse_write" in classes
+    assert any("outcome_filled_at" in " ".join(case.get("must_not", [])) for case in cases)
