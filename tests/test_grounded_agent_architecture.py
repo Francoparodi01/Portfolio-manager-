@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from src.agentic.contracts import ToolSpec, ToolValidationError
+from src.agentic.docs_retriever import search_project_docs
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
 from src.agentic.prompt_context import load_agent_prompt_context
 from src.agentic.sql_explorer import _scoped_query, validate_exploratory_sql
@@ -83,6 +84,14 @@ def test_sql_explorer_allows_explicit_join_between_scoped_relations():
     )
     assert query.startswith("SELECT")
     assert relations == ("decision_log", "broker_fills")
+
+
+def test_docs_retriever_returns_grounded_snippet_and_hash():
+    payload = search_project_docs(ROOT, "Decision Lab DVA HOLD", max_results=5)
+    assert payload["schema_version"] == "quantia-doc-search-v1"
+    assert payload["results"]
+    assert all(item["path"].endswith(".md") for item in payload["results"])
+    assert all(len(item["sha256"]) == 64 for item in payload["results"])
 
 
 def test_grounded_eval_corpus_has_safety_and_source_selection_coverage():
