@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
-import hashlib
-from uuid import uuid4
 from pathlib import Path
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -20,11 +20,13 @@ from src.agentic import (
     build_default_registry,
 )
 from src.agentic.bot_directional_history import register_bot_directional_history_tool
-from src.agentic.classic_model import ClassicAgentModel
+from src.agentic.diagnostics import question_plan
+from src.agentic.grounded_model import GroundedQuantiaAgentModel
 from src.agentic.harness.tools_ext import register_harness_tools
 from src.agentic.orchestrator import default_max_steps
+from src.agentic.prompt_context import load_agent_prompt_context
+from src.agentic.sql_explorer import register_sql_explorer_tools
 from src.agentic.tools import verify_single_owner
-from src.agentic.diagnostics import question_plan
 from src.core.config import get_config
 
 
@@ -76,8 +78,11 @@ async def async_main(args: argparse.Namespace) -> int:
             owner_chat_id = int(configured)
     if not owner_chat_id:
         raise ValueError("an account owner is required")
-    legacy_single_owner = (not cfg.multiuser_enabled and configured == str(owner_chat_id)
-                           and await verify_single_owner(cfg.database.url, owner_chat_id))
+    legacy_single_owner = (
+        not cfg.multiuser_enabled
+        and configured == str(owner_chat_id)
+        and await verify_single_owner(cfg.database.url, owner_chat_id)
+    )
 
     timeout_seconds = float(os.getenv("QUANTIA_AGENT_TOOL_TIMEOUT_SECONDS", "600"))
     output_limit = int(os.getenv("QUANTIA_AGENT_TOOL_OUTPUT_CHARS", "18000"))
@@ -94,6 +99,8 @@ async def async_main(args: argparse.Namespace) -> int:
     registry = build_default_registry(context)
     registry = register_harness_tools(registry, context)
     registry = register_bot_directional_history_tool(registry, context)
+    registry = register_sql_explorer_tools(registry, context)
+
     store = AgentRunStore(cfg.database.url) if cfg.database.url else None
     prior = []
     context_namespace = os.getenv("QUANTIA_AGENT_CONTEXT_NAMESPACE", "interactive")
@@ -103,10 +110,22 @@ async def async_main(args: argparse.Namespace) -> int:
         await store.ensure_schema()
         prior = await store.recent_context(owner_chat_id, namespace=context_namespace)
     conversation_id = prior[-1]["conversation_id"] if prior else str(uuid4())
-    model = ClassicAgentModel(model=args.model, conversation_context=prior)
+
+    prompt_context = load_agent_prompt_context(ROOT)
+    model = GroundedQuantiaAgentModel(
+        model=args.model,
+        conversation_context=prior,
+        project_context=prompt_context.text,
+    )
     plan = question_plan(args.goal, prior)
-    source_files = sorted((ROOT / "src/agentic").glob("*.py")) + [ROOT / "scripts/run_agent.py", ROOT / "scripts/run_analysis.py"]
-    source_hashes = {str(path.relative_to(ROOT)).replace("\\", "/"): hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files}
+    source_files = sorted((ROOT / "src/agentic").glob("*.py")) + [
+        ROOT / "scripts/run_agent.py",
+        ROOT / "scripts/run_analysis.py",
+    ]
+    source_hashes = {
+        str(path.relative_to(ROOT)).replace("\\", "/"): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in source_files
+    }
     orchestrator = AgentOrchestrator(
         model=model,
         registry=registry,
@@ -126,14 +145,17 @@ async def async_main(args: argparse.Namespace) -> int:
                 owner_chat_id=owner_chat_id,
                 metadata={
                     "trigger": "cli",
-                    "agent_version": "quantia-agent-diagnostics-v3",
+                    "agent_version": "quantia-grounded-agent-v1",
                     "source_hashes": source_hashes,
+                    "prompt_context_hashes": prompt_context.source_hashes,
                     "conversation_id": conversation_id,
                     "context_namespace": context_namespace,
                     "context_run_ids": [turn["run_id"] for turn in prior],
                     "context_policy": "owner-user-goals-3-turns-24h-v1",
                     "question_intent": plan.intent,
                     "required_tools": list(plan.required_tools),
+                    "dynamic_planning": True,
+                    "sql_explorer": "owner-scoped-read-only-v1",
                     "read_only": True,
                     "legacy_single_owner": legacy_single_owner,
                 },
