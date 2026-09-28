@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -39,6 +40,83 @@ def test_grounded_model_injects_dynamic_planning_context():
     assert "decide the evidence plan yourself" in prompt
     assert "query_quantia_sql" in prompt
     assert "Never request a write capability" in prompt
+
+
+def test_dynamic_planner_can_choose_generic_sql_without_hardcoded_route(monkeypatch):
+    model = GroundedQuantiaAgentModel(model="fixture", project_context="fixture")
+
+    async def fake_call(_payload):
+        return json.dumps({
+            "kind": "tool",
+            "tool": "query_quantia_sql",
+            "arguments": {
+                "sql": "SELECT decision, COUNT(*) AS n FROM decision_log GROUP BY decision",
+                "purpose": "comparar decisiones",
+                "max_rows": 50,
+            },
+            "rationale": "Necesito agrupar evidencia histórica.",
+        })
+
+    monkeypatch.setattr(model, "_call", fake_call)
+    tool = ToolSpec(
+        name="query_quantia_sql",
+        description="fixture",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string"},
+                "purpose": {"type": "string"},
+                "max_rows": {"type": "integer"},
+            },
+            "required": ["sql"],
+            "additionalProperties": False,
+        },
+    )
+    decision = asyncio.run(model.decide(
+        goal="Buscá patrones de decisiones por tu cuenta.",
+        tools=[tool],
+        history=[],
+        step_no=1,
+        max_steps=4,
+    ))
+    assert decision.kind == "tool"
+    assert decision.tool_name == "query_quantia_sql"
+
+
+def test_grounded_llm_synthesis_keeps_runtime_provenance(monkeypatch):
+    model = GroundedQuantiaAgentModel(model="fixture", project_context="fixture")
+
+    async def fake_call(_payload):
+        return json.dumps({
+            "kind": "final",
+            "answer": "En la muestra observada, SELL muestra un EV mayor que BUY; lo trataría como evidencia exploratoria, no como regla de producción.",
+            "rationale": "La consulta ya devolvió la comparación necesaria.",
+        })
+
+    monkeypatch.setattr(model, "_call", fake_call)
+    history = [{
+        "decision": {"tool": "query_quantia_sql"},
+        "observation": {
+            "tool_name": "query_quantia_sql",
+            "ok": True,
+            "content": json.dumps({
+                "schema_version": "quantia-sql-explorer-v1",
+                "query_sha256": "a" * 64,
+                "rows": [{"decision": "SELL", "ev": 0.03}],
+            }),
+        },
+    }]
+    decision = asyncio.run(model.decide(
+        goal="Compará BUY y SELL.",
+        tools=[],
+        history=history,
+        step_no=2,
+        max_steps=4,
+    ))
+    assert decision.kind == "final"
+    assert decision.answer_origin == "grounded_llm_v1"
+    assert "Fuentes auditadas: query_quantia_sql" in decision.answer
+    assert "aaaaaaaaaaaa" in decision.answer
 
 
 def test_sql_explorer_accepts_owner_scoped_aggregate_shape():
