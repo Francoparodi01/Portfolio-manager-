@@ -9,7 +9,7 @@ import pytest
 from src.agentic.contracts import ToolSpec, ToolValidationError
 from src.agentic.docs_retriever import search_project_docs
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
-from src.agentic.prompt_context import load_agent_prompt_context
+from src.agentic.prompt_context import load_agent_prompt_context, missing_prompt_context_files
 from src.agentic.sql_explorer import _scoped_query, validate_exploratory_sql
 
 
@@ -26,6 +26,27 @@ def test_prompt_context_loads_contract_semantics_and_catalog():
         "docs/agent/quantia-semantics.md",
         "docs/agent/quantia-data-model.md",
     }
+    assert missing_prompt_context_files(context) == ()
+
+
+def test_missing_prompt_context_is_detectable(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("fixture", encoding="utf-8")
+    context = load_agent_prompt_context(tmp_path)
+    assert missing_prompt_context_files(context) == (
+        "docs/agent/quantia-semantics.md",
+        "docs/agent/quantia-data-model.md",
+    )
+
+
+def test_dockerignore_whitelists_runtime_grounding_and_rag_docs():
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+    lines = [line.strip() for line in dockerignore.splitlines() if line.strip() and not line.startswith("#")]
+    assert "!AGENTS.md" in lines
+    assert "!README.md" in lines
+    assert "!docs/" in lines
+    assert "!docs/**/*.md" in lines
+    assert lines.index("!AGENTS.md") > lines.index("*.md")
+    assert lines.index("!docs/") > lines.index("docs")
 
 
 def test_grounded_model_injects_dynamic_planning_context():
