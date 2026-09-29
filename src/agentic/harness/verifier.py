@@ -23,6 +23,16 @@ from .schemas import (
 _NUMBER_RE = re.compile(
     r"(?<![A-Za-z0-9_])[-+]?\$?(?:\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)%?(?![A-Za-z])"
 )
+# Human-facing deterministic renderers localize/reshape ISO timestamps. Date/time
+# components are provenance labels, not financial numeric claims, so they are
+# removed before scalar traceability checks. Their source freshness is verified
+# independently below from EvidenceObject.timestamp/source.
+_DATETIME_RE = re.compile(
+    r"\b(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?"
+    r"|\d{1,2}/\d{1,2}(?:/\d{2,4})?"
+    r"|\d{1,2}:\d{2}(?::\d{2})?(?:\s*(?:ART|UTC))?)\b",
+    re.IGNORECASE,
+)
 _NUMERIC_INTENTS = {
     "portfolio_review",
     "position_analysis",
@@ -211,11 +221,33 @@ class HarnessVerifier:
 
     @staticmethod
     def _token_values(token: str) -> set[float]:
-        raw = str(token or "").strip().replace("$", "")
-        is_percent = raw.endswith("%")
-        raw = raw.rstrip("%")
+        return {value for value, _tolerance in HarnessVerifier._token_candidates(token)}
+
+    @staticmethod
+    def _decimal_places(token: str) -> int:
+        raw = str(token or "").strip().replace("$", "").rstrip("%")
+        unsigned = raw.lstrip("+-")
+        dot_count, comma_count = unsigned.count("."), unsigned.count(",")
+        if dot_count and comma_count:
+            decimal_sep = "," if unsigned.rfind(",") > unsigned.rfind(".") else "."
+            return len(unsigned.rsplit(decimal_sep, 1)[1])
+        if dot_count == 1:
+            head, tail = unsigned.split(".")
+            # 2.895 is ambiguous; keep display precision conservative while the
+            # alternate thousands candidate remains exact.
+            return len(tail) if head == "0" or len(tail) != 3 else 3
+        if comma_count == 1:
+            head, tail = unsigned.split(",")
+            return len(tail) if head == "0" or len(tail) != 3 else 3
+        return 0
+
+    @staticmethod
+    def _token_candidates(token: str) -> list[tuple[float, float]]:
+        raw_token = str(token or "").strip().replace("$", "")
+        is_percent = raw_token.endswith("%")
+        raw = raw_token.rstrip("%")
         if not raw:
-            return set()
+            return []
 
         candidates: set[str] = set()
         dot_count, comma_count = raw.count("."), raw.count(",")
@@ -241,7 +273,9 @@ class HarnessVerifier:
                     if len(tail) == 3 and head.lstrip("+-").isdigit() and tail.isdigit():
                         candidates.add(head + tail)
 
-        values: set[float] = set()
+        decimals = HarnessVerifier._decimal_places(token)
+        display_tolerance = 0.5 * (10 ** (-decimals)) if decimals else 0.5
+        values: list[tuple[float, float]] = []
         for candidate in candidates:
             try:
                 value = float(candidate)
@@ -249,31 +283,34 @@ class HarnessVerifier:
                 continue
             if not math.isfinite(value):
                 continue
-            values.add(value)
+            values.append((value, display_tolerance))
             if is_percent:
-                values.add(value / 100.0)
+                values.append((value / 100.0, display_tolerance / 100.0))
         return values
 
     @staticmethod
-    def _close(left: float, right: float) -> bool:
-        tolerance = max(1e-9, 1e-6 * max(abs(left), abs(right), 1.0))
+    def _close(left: float, right: float, display_tolerance: float = 0.0) -> bool:
+        tolerance = max(display_tolerance, 1e-9, 1e-6 * max(abs(left), abs(right), 1.0))
         return abs(left - right) <= tolerance
 
     def _unmatched_numbers(self, answer: str, evidence_text: str) -> list[str]:
         source_values: list[float] = []
-        for token in _NUMBER_RE.findall(evidence_text):
+        evidence_without_times = _DATETIME_RE.sub(" ", evidence_text)
+        answer_without_times = _DATETIME_RE.sub(" ", answer)
+        for token in _NUMBER_RE.findall(evidence_without_times):
             source_values.extend(self._token_values(token))
 
         result: list[str] = []
-        for token in _NUMBER_RE.findall(answer):
-            answer_values = self._token_values(token)
-            if not answer_values:
+        for token in _NUMBER_RE.findall(answer_without_times):
+            answer_candidates = self._token_candidates(token)
+            if not answer_candidates:
                 continue
+            answer_values = {value for value, _tolerance in answer_candidates}
             if answer_values <= {0.0, 1.0, 2.0, 3.0}:
                 continue
             if not any(
-                self._close(answer_value, source_value)
-                for answer_value in answer_values
+                self._close(answer_value, source_value, display_tolerance)
+                for answer_value, display_tolerance in answer_candidates
                 for source_value in source_values
             ):
                 result.append(token)
