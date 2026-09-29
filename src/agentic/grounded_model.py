@@ -39,6 +39,25 @@ def _successful_tools(history: list[dict[str, Any]]) -> set[str]:
     return found
 
 
+def _attempted_tools(history: list[dict[str, Any]]) -> set[str]:
+    attempted: set[str] = set()
+    for item in history:
+        if item.get("observation") is None:
+            continue
+        decision = item.get("decision") or {}
+        observation = item.get("observation") or {}
+        name = str(
+            decision.get("tool")
+            or decision.get("tool_name")
+            or observation.get("tool")
+            or observation.get("tool_name")
+            or ""
+        )
+        if name:
+            attempted.add(name)
+    return attempted
+
+
 def _provenance_suffix(history: list[dict[str, Any]]) -> str:
     tools: list[str] = []
     sql_hashes: list[str] = []
@@ -175,6 +194,23 @@ class GroundedQuantiaAgentModel(OllamaAgentModel):
                 force_final=force_final,
             )
 
+        # High-confidence canonical routes are bootstrapped deterministically before
+        # handing control back to the dynamic planner. This prevents the controller
+        # from trying to synthesize a portfolio/explanation answer with zero evidence,
+        # while still allowing it to choose additional tools after the required facts
+        # have been observed.
+        if not force_final and plan.required_tools:
+            available = {tool.name for tool in tools}
+            attempted = _attempted_tools(history)
+            for name in plan.required_tools:
+                if name in available and name not in attempted:
+                    return AgentDecision(
+                        kind="tool",
+                        tool_name=name,
+                        arguments={},
+                        rationale=f"Fuente canónica requerida por la política {plan.intent} antes de la síntesis dinámica.",
+                    )
+
         messages = [
             {
                 "role": "system",
@@ -205,6 +241,10 @@ class GroundedQuantiaAgentModel(OllamaAgentModel):
             "messages": messages,
             "stream": False,
             "format": "json",
+            # The controller only needs a compact JSON action. Disabling model
+            # thinking avoids spending the response budget on a hidden reasoning
+            # channel and is supported by current Ollama thinking-capable models.
+            "think": False,
             "keep_alive": self.keep_alive,
             "options": {
                 "temperature": self.temperature,
@@ -235,8 +275,9 @@ class GroundedQuantiaAgentModel(OllamaAgentModel):
                             "role": "user",
                             "content": (
                                 "The previous controller output was invalid or insufficiently grounded. "
-                                "Return exactly one valid JSON object. Gather evidence before finalizing; "
-                                "when forced to finalize, use only successful observations."
+                                "Return exactly one valid JSON object. If there is no successful observation yet, "
+                                "you MUST choose exactly one allowed tool instead of finalizing. "
+                                "When forced to finalize, use only successful observations."
                             ),
                         },
                     ]
