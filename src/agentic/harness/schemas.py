@@ -138,6 +138,7 @@ class VerificationReport(StrictModel):
     numeric_consistency: bool = True
     stale_or_missing_sources: list[str] = Field(default_factory=list)
     claim_results: list[ClaimVerification] = Field(default_factory=list)
+    claim_status_counts: dict[str, int] = Field(default_factory=dict)
     required_claim_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
     failures: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
