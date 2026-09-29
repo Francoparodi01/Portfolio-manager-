@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from src.agentic.contracts import ToolSpec
+from src.agentic.contracts import AgentDecision, AgentTraceStep, ToolObservation, ToolSpec
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
-from src.agentic.orchestrator import AgentOrchestrator
+from src.agentic.orchestrator import AgentOrchestrator, _resolved_subject_from_steps
 from src.agentic.tools import ToolRegistry
 
 
@@ -146,6 +149,138 @@ def test_meta_policy_explanation_bootstraps_decision_evidence(monkeypatch):
     ))
     assert decision.kind == "tool"
     assert decision.tool_name == "get_decision_evidence"
+
+
+def test_referential_meta_policy_uses_prior_resolved_subject_and_closes(monkeypatch):
+    model = GroundedQuantiaAgentModel(
+        model="fixture",
+        project_context="fixture",
+        conversation_context=[{
+            "run_id": "prior",
+            "goal": "¿Cuál es hoy la decisión más importante de mi cartera y por qué?",
+            "resolved_subject": "GDX",
+        }],
+    )
+
+    async def should_not_call_model(_payload):
+        raise AssertionError("referential Meta Policy follow-up must stay deterministic")
+
+    monkeypatch.setattr(model, "_call", should_not_call_model)
+    tools = [_tool("get_decision_evidence"), _tool("get_meta_policy")]
+    goal = "¿Por qué Meta Policy está bloqueando esta decisión?"
+
+    first = asyncio.run(model.decide(
+        goal=goal,
+        tools=tools,
+        history=[],
+        step_no=1,
+        max_steps=8,
+    ))
+    assert first.tool_name == "get_decision_evidence"
+
+    history = [{
+        "decision": {"kind": "tool", "tool": "get_decision_evidence", "arguments": {}},
+        "observation": {
+            "tool_name": "get_decision_evidence",
+            "ok": True,
+            "content": json.dumps({
+                "plan": {"decisions": [{
+                    "ticker": "GDX",
+                    "action": "BUY",
+                    "reason_primary": "Aumentar posición",
+                    "reason_secondary": "score +0.088",
+                }]}
+            }),
+        },
+    }]
+    second = asyncio.run(model.decide(
+        goal=goal,
+        tools=tools,
+        history=history,
+        step_no=2,
+        max_steps=8,
+    ))
+    assert second.kind == "tool"
+    assert second.tool_name == "get_meta_policy"
+    assert second.arguments == {"ticker": "GDX"}
+
+    history.append({
+        "decision": {"kind": "tool", "tool": "get_meta_policy", "arguments": {"ticker": "GDX"}},
+        "observation": {
+            "tool_name": "get_meta_policy",
+            "ok": True,
+            "content": json.dumps({
+                "source": "economic_meta_policy",
+                "mode": "SHADOW",
+                "capital_effect": "NO",
+                "ticker": "GDX",
+                "report": "Economic Meta Policy v1 · SHADOW_ONLY · Capital effect: NO",
+            }),
+        },
+    })
+    final = asyncio.run(model.decide(
+        goal=goal,
+        tools=tools,
+        history=history,
+        step_no=3,
+        max_steps=8,
+    ))
+    assert final.kind == "final"
+    assert final.answer_origin == "meta_policy_followup_renderer_v1"
+    assert "Retomo GDX" in final.answer
+    assert "capital_effect=NO" in final.answer
+    assert "no modifica capital" in final.answer
+
+
+def test_priority_run_resolves_subject_from_structured_observation():
+    evidence = json.dumps({
+        "plan": {
+            "buy_orders": [{"ticker": "GDX", "amount_ars": 627_000}],
+            "sell_orders": [{"ticker": "MU", "amount_ars": 341_250}],
+        }
+    })
+    steps = [
+        AgentTraceStep(
+            step_no=1,
+            decision=AgentDecision(kind="tool", tool_name="get_decision_evidence"),
+            observation=ToolObservation("get_decision_evidence", {}, True, evidence),
+        ),
+        AgentTraceStep(
+            step_no=2,
+            decision=AgentDecision(
+                kind="final",
+                answer="GDX es la principal decisión operativa.",
+                answer_origin="portfolio_priority_renderer_v1",
+                objective_status="EXPLAINED",
+            ),
+        ),
+    ]
+    assert _resolved_subject_from_steps(steps) == "GDX"
+
+
+def test_recent_context_exposes_only_structured_subject_not_assistant_answer(monkeypatch):
+    from src.agentic import persistence
+
+    now = datetime(2026, 9, 29, tzinfo=timezone.utc)
+    conn = SimpleNamespace(
+        fetch=AsyncMock(return_value=[{
+            "id": "prior",
+            "goal": "¿Cuál es la decisión más importante?",
+            "started_at": now,
+            "conversation_id": "session",
+            "resolved_subject": "GDX",
+        }]),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(persistence, "connect_read_only", AsyncMock(return_value=conn))
+    context = asyncio.run(
+        persistence.AgentRunStore("postgresql://fixture").recent_context(123, as_of=now)
+    )
+    sql = conn.fetch.call_args.args[0]
+    assert context[0]["resolved_subject"] == "GDX"
+    assert "resolved_subject" in sql
+    assert "final_answer" not in sql
+    conn.close.assert_awaited_once()
 
 
 def test_capability_question_is_runtime_metadata_not_market_evidence(monkeypatch):
