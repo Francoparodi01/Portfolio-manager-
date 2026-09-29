@@ -115,7 +115,11 @@ class AgentRunStore:
                     "started_at": row["started_at"].isoformat(),
                     "conversation_id": row["conversation_id"],
                 }
-                subject = str(row["resolved_subject"] or "").upper().strip()
+                try:
+                    subject_value = row["resolved_subject"]
+                except (KeyError, IndexError, TypeError):
+                    subject_value = None
+                subject = str(subject_value or "").upper().strip()
                 if subject:
                     item["resolved_subject"] = subject[:20]
                 context.append(item)
