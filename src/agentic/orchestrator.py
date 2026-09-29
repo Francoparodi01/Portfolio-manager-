@@ -149,7 +149,8 @@ class AgentOrchestrator:
                 )
 
                 if decision.kind == "final":
-                    if not any(s.observation and s.observation.ok for s in steps):
+                    runtime_meta_final = decision.answer_origin == "runtime_capabilities_v1"
+                    if not runtime_meta_final and not any(s.observation and s.observation.ok for s in steps):
                         raise AgentModelError("no successful tool evidence; cannot substantiate a final answer")
                     decision.answer = validate_answer(decision.answer)
                     step = AgentTraceStep(step_no=step_no, decision=decision)
@@ -235,7 +236,8 @@ class AgentOrchestrator:
                 )
                 if final_decision.kind != "final":
                     raise AgentModelError("model refused forced finalization")
-                if not any(s.observation and s.observation.ok for s in steps):
+                runtime_meta_final = final_decision.answer_origin == "runtime_capabilities_v1"
+                if not runtime_meta_final and not any(s.observation and s.observation.ok for s in steps):
                     raise AgentModelError("no successful tool evidence at budget exhaustion")
                 final_decision.answer = validate_answer(final_decision.answer)
                 answer = final_decision.answer or ""
