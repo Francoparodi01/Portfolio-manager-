@@ -37,7 +37,6 @@ node_modules
 frontend/node_modules
 frontend/dist
 frontend/.vite
-frontend/.playwright-cli
 frontend/output
 docs/export
 playwright-report
@@ -60,16 +59,12 @@ Thumbs.db
 .vscode
 .idea
 
-# Repo-only documentation and validation artifacts
-docs
+# Validation artifacts not needed at runtime
 tests
-*.md
 .env.example
 .env.multiuser.example
 
-# Runtime grounding/RAG documentation required by the agent.
-# These exceptions must remain after the broad docs/*.md ignores above.
-!AGENTS.md
-!README.md
-!docs/
-!docs/**/*.md
+# IMPORTANT: Markdown/docs are intentionally INCLUDED in the image.
+# Quantia Agent loads AGENTS.md and docs/agent/*.md at runtime and the docs
+# retriever searches checked-in Markdown. Do not add broad `docs` or `*.md`
+# ignore rules here.
