@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
+from src.agentic.harness.observability import summarize_run_rows
 from src.agentic.harness.schemas import (
     ClaimStatus,
     EvidenceMode,
@@ -174,3 +176,105 @@ def test_claim_verifier_distinguishes_failed_tool_from_missing_evidence():
     assert claims["current_decision"].status == ClaimStatus.SUPPORTED
     assert report.claim_status_counts["FAILED"] == 1
     assert "required_claim_not_supported:meta_policy_state:failed" in report.failures
+
+
+def test_observability_aggregates_run_claim_and_latency_metrics():
+    rows = [
+        {
+            "status": "COMPLETE",
+            "stop_reason": "bounded_evidence_complete",
+            "metadata": {
+                "latency_ms": 100,
+                "tool_calls": 2,
+                "llm_calls": 1,
+                "verification": {
+                    "passed": True,
+                    "numeric_consistency": True,
+                    "required_claim_coverage": 1.0,
+                    "claim_status_counts": {
+                        "SUPPORTED": 2,
+                        "MISSING": 1,
+                        "STALE": 0,
+                        "FAILED": 0,
+                    },
+                },
+            },
+        },
+        {
+            "status": "PARTIAL",
+            "stop_reason": "planner_error",
+            "metadata": {
+                "latency_ms": 300,
+                "tool_calls": 4,
+                "llm_calls": 2,
+                "verification": {
+                    "passed": False,
+                    "numeric_consistency": True,
+                    "required_claim_coverage": 0.5,
+                    "claim_status_counts": {
+                        "SUPPORTED": 1,
+                        "MISSING": 0,
+                        "STALE": 0,
+                        "FAILED": 1,
+                    },
+                },
+            },
+        },
+        {
+            "status": "FAILED",
+            "stop_reason": "timeout",
+            "metadata": {
+                "latency_ms": 500,
+                "tool_calls": 1,
+                "llm_calls": 1,
+            },
+        },
+    ]
+
+    summary = summarize_run_rows(rows, window_days=7)
+
+    assert summary.runs_total == 3
+    assert summary.status_counts == {"COMPLETE": 1, "PARTIAL": 1, "FAILED": 1}
+    assert summary.stop_reason_counts["bounded_evidence_complete"] == 1
+    assert summary.completion_rate == 0.3333
+    assert summary.verification_pass_rate == 0.5
+    assert summary.numeric_consistency_rate == 1.0
+    assert summary.avg_required_claim_coverage == 0.75
+    assert summary.claim_status_counts == {
+        "SUPPORTED": 3,
+        "MISSING": 1,
+        "STALE": 0,
+        "FAILED": 1,
+    }
+    assert summary.avg_latency_ms == 300.0
+    assert summary.p95_latency_ms == 500
+    assert summary.avg_tool_calls == 2.3333
+    assert summary.avg_llm_calls == 1.3333
+
+
+def test_observability_accepts_json_metadata_and_claim_result_fallback():
+    metadata = json.dumps({
+        "latency_ms": 250,
+        "tool_calls": 3,
+        "llm_calls": 0,
+        "verification": {
+            "passed": True,
+            "numeric_consistency": False,
+            "required_claim_coverage": 1.0,
+            "claim_results": [
+                {"claim_id": "a", "status": "SUPPORTED"},
+                {"claim_id": "b", "status": "STALE"},
+            ],
+        },
+    })
+
+    summary = summarize_run_rows([
+        {"status": "COMPLETE", "stop_reason": "model_final", "metadata": metadata}
+    ], window_days=30)
+
+    assert summary.runs_total == 1
+    assert summary.verification_pass_rate == 1.0
+    assert summary.numeric_consistency_rate == 0.0
+    assert summary.claim_status_counts["SUPPORTED"] == 1
+    assert summary.claim_status_counts["STALE"] == 1
+    assert summary.avg_latency_ms == 250.0
