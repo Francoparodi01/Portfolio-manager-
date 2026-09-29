@@ -38,6 +38,38 @@ def _is_capability_question(goal: str) -> bool:
     return mentions_tools and asks_availability
 
 
+def _bootstrap_required_tools(goal: str, planned: tuple[str, ...]) -> tuple[str, ...]:
+    """Return canonical evidence that must exist before the controller LLM runs.
+
+    Keep this deliberately narrow. The question planner remains the primary
+    router, but common portfolio-decision wording is recognized independently so
+    a noun such as "decision" cannot fall through because of a stem mismatch.
+    """
+    required = list(planned)
+    text = _plain(goal)
+    portfolio_question = any(term in text for term in ("cartera", "portfolio", "portafolio"))
+    decision_question = any(
+        term in text
+        for term in (
+            "revis",
+            "analiz",
+            "evalu",
+            "decid",
+            "decis",
+            "importante",
+            "por que",
+            "porque",
+        )
+    )
+    if portfolio_question and decision_question:
+        required = ["get_portfolio_snapshot", "get_decision_evidence", *required]
+
+    if "meta policy" in text and any(term in text for term in ("bloque", "por que", "porque", "explic")):
+        required = ["get_decision_evidence", *required]
+
+    return tuple(dict.fromkeys(required))
+
+
 def _successful_tools(history: list[dict[str, Any]]) -> set[str]:
     found: set[str] = set()
     for item in history:
@@ -234,16 +266,20 @@ class GroundedQuantiaAgentModel(OllamaAgentModel):
         # from trying to synthesize a portfolio/explanation answer with zero evidence,
         # while still allowing it to choose additional tools after the required facts
         # have been observed.
-        if not force_final and plan.required_tools:
+        bootstrap_tools = _bootstrap_required_tools(goal, plan.required_tools)
+        if not force_final and bootstrap_tools:
             available = {tool.name for tool in tools}
             attempted = _attempted_tools(history)
-            for name in plan.required_tools:
+            for name in bootstrap_tools:
                 if name in available and name not in attempted:
                     return AgentDecision(
                         kind="tool",
                         tool_name=name,
                         arguments={},
-                        rationale=f"Fuente canónica requerida por la política {plan.intent} antes de la síntesis dinámica.",
+                        rationale=(
+                            f"Fuente canónica requerida antes de la síntesis dinámica "
+                            f"({plan.intent if plan.intent != 'general' else 'portfolio_bootstrap'})."
+                        ),
                     )
 
         messages = [
