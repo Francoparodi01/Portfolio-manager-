@@ -52,6 +52,84 @@ def test_portfolio_question_bootstraps_canonical_evidence_before_llm(monkeypatch
     assert second.tool_name == "get_decision_evidence"
 
 
+def test_portfolio_question_closes_after_two_canonical_tools_without_llm(monkeypatch):
+    model = GroundedQuantiaAgentModel(model="fixture", project_context="fixture")
+
+    async def should_not_call_model(_payload):
+        raise AssertionError("canonical portfolio close must not invoke the LLM")
+
+    monkeypatch.setattr(model, "_call", should_not_call_model)
+    tools = [_tool("get_portfolio_snapshot"), _tool("get_decision_evidence")]
+    goal = "¿Cuál es hoy la decisión más importante de mi cartera y por qué?"
+    history = [
+        {
+            "decision": {"kind": "tool", "tool": "get_portfolio_snapshot", "arguments": {}},
+            "observation": {
+                "tool_name": "get_portfolio_snapshot",
+                "ok": True,
+                "content": json.dumps({
+                    "total_value_ars": 2_820_635,
+                    "cash_ars": 3_845.79,
+                    "positions": [{"ticker": "GDX", "weight": 0.126}],
+                }),
+            },
+        },
+        {
+            "decision": {"kind": "tool", "tool": "get_decision_evidence", "arguments": {}},
+            "observation": {
+                "tool_name": "get_decision_evidence",
+                "ok": True,
+                "content": json.dumps({
+                    "plan": {
+                        "decisions": [
+                            {
+                                "ticker": "GDX",
+                                "action": "BUY",
+                                "current_weight": 0.126,
+                                "target_weight": 0.35,
+                                "reason_primary": "Aumentar posición",
+                                "reason_secondary": "score +0.085",
+                            }
+                        ],
+                        "buy_orders": [
+                            {
+                                "ticker": "GDX",
+                                "action": "BUY",
+                                "amount_ars": 399_000,
+                                "theoretical_ars": 632_536,
+                            }
+                        ],
+                        "sell_orders": [
+                            {
+                                "ticker": "IREN",
+                                "action": "SELL_PARTIAL",
+                                "amount_ars": 260_360,
+                                "theoretical_ars": 260_472,
+                            }
+                        ],
+                        "blocked_orders": [
+                            {"ticker": "NVDA", "reason": "BUY_SCORE_GUARD"}
+                        ],
+                    }
+                }),
+            },
+        },
+    ]
+
+    final = asyncio.run(model.decide(
+        goal=goal,
+        tools=tools,
+        history=history,
+        step_no=3,
+        max_steps=8,
+    ))
+    assert final.kind == "final"
+    assert final.answer_origin == "portfolio_priority_renderer_v1"
+    assert final.objective_status == "EXPLAINED"
+    assert "GDX BUY" in final.answer
+    assert "$399.000" in final.answer
+
+
 def test_meta_policy_explanation_bootstraps_decision_evidence(monkeypatch):
     model = GroundedQuantiaAgentModel(model="fixture", project_context="fixture")
 
