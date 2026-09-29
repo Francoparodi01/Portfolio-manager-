@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import unicodedata
 from typing import Any
 
 from .answer import evidence_decision
@@ -18,6 +19,23 @@ _DECISION_LAB_TOOLS = {
     "get_similar_historical_episodes",
 }
 _REAL_PNL_TOOLS = {"get_decision_ledger", "get_analytics_v2"}
+
+
+def _plain(text: str) -> str:
+    return "".join(
+        char for char in unicodedata.normalize("NFKD", str(text or "").lower())
+        if not unicodedata.combining(char)
+    )
+
+
+def _is_capability_question(goal: str) -> bool:
+    text = _plain(goal)
+    mentions_tools = any(term in text for term in ("herramient", "tools", "capacidades", "capabilities"))
+    asks_availability = any(
+        term in text
+        for term in ("dispon", "tenes", "tienes", "podes", "puedes", "que hay", "cuales")
+    )
+    return mentions_tools and asks_availability
 
 
 def _successful_tools(history: list[dict[str, Any]]) -> set[str]:
@@ -183,6 +201,23 @@ class GroundedQuantiaAgentModel(OllamaAgentModel):
         max_steps: int,
         force_final: bool = False,
     ) -> AgentDecision:
+        if _is_capability_question(goal):
+            lines = [
+                f"- {tool.name}: {' '.join(tool.description.split())[:240]}"
+                for tool in tools
+            ]
+            answer = "Herramientas disponibles en este run:\n" + (
+                "\n".join(lines) if lines else "- No hay herramientas registradas."
+            )
+            return AgentDecision(
+                kind="final",
+                answer=answer,
+                rationale="Respuesta derivada del registro runtime de herramientas; no requiere evidencia de mercado.",
+                confidence=1.0,
+                answer_origin="runtime_capabilities_v1",
+                objective_status="EXPLAINED",
+            )
+
         plan = question_plan(goal, self.conversation_context)
         if plan.intent.startswith("decision_lab"):
             return await super().decide(
