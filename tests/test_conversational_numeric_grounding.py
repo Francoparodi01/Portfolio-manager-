@@ -103,6 +103,12 @@ def test_claim_verifier_marks_required_claims_supported_and_optional_gaps_visibl
     claims = {item.claim_id: item for item in report.claim_results}
     assert report.passed
     assert report.required_claim_coverage == 1.0
+    assert report.claim_status_counts == {
+        "SUPPORTED": 2,
+        "MISSING": 2,
+        "STALE": 0,
+        "FAILED": 0,
+    }
     assert claims["portfolio_state"].status == ClaimStatus.SUPPORTED
     assert claims["current_decision"].status == ClaimStatus.SUPPORTED
     assert claims["historical_edge"].status == ClaimStatus.MISSING
@@ -121,6 +127,8 @@ def test_claim_verifier_fails_closed_when_required_claim_is_missing():
     claims = {item.claim_id: item for item in report.claim_results}
     assert not report.passed
     assert report.required_claim_coverage == 0.5
+    assert report.claim_status_counts["SUPPORTED"] == 1
+    assert report.claim_status_counts["MISSING"] == 3
     assert claims["current_decision"].status == ClaimStatus.MISSING
     assert "required_claim_not_supported:current_decision:missing" in report.failures
 
@@ -144,6 +152,7 @@ def test_claim_verifier_treats_stale_required_portfolio_evidence_as_unsupported(
     assert not report.passed
     assert claims["portfolio_state"].status == ClaimStatus.STALE
     assert report.required_claim_coverage == 0.5
+    assert report.claim_status_counts["STALE"] == 1
     assert "get_portfolio_snapshot" in report.stale_or_missing_sources
     assert "required_claim_not_supported:portfolio_state:stale" in report.failures
 
@@ -163,4 +172,5 @@ def test_claim_verifier_distinguishes_failed_tool_from_missing_evidence():
     assert not report.passed
     assert claims["meta_policy_state"].status == ClaimStatus.FAILED
     assert claims["current_decision"].status == ClaimStatus.SUPPORTED
+    assert report.claim_status_counts["FAILED"] == 1
     assert "required_claim_not_supported:meta_policy_state:failed" in report.failures
