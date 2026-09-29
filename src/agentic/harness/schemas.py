@@ -50,9 +50,18 @@ class TaskSpec(StrictModel):
         return list(dict.fromkeys(str(item).upper().strip() for item in value if str(item).strip()))
 
 
+class EvidenceClaim(StrictModel):
+    claim_id: str
+    description: str
+    tools: list[str] = Field(default_factory=list)
+    available_tools: list[str] = Field(default_factory=list)
+    required: bool = True
+
+
 class ContextPlan(StrictModel):
     allowed_tools: list[str] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
+    evidence_claims: list[EvidenceClaim] = Field(default_factory=list)
     parallel_groups: list[list[str]] = Field(default_factory=list)
     max_steps: int = Field(default=6, ge=1, le=20)
     max_tool_calls: int = Field(default=8, ge=1, le=30)
