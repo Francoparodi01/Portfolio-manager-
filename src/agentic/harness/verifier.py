@@ -122,6 +122,10 @@ class HarnessVerifier:
         required_claim_coverage = (
             supported_required / len(required_claims) if required_claims else 1.0
         )
+        claim_status_counts = {
+            status.value: sum(1 for result in claim_results if result.status == status)
+            for status in ClaimStatus
+        }
 
         for result in claim_results:
             if result.required and result.status != ClaimStatus.SUPPORTED:
@@ -140,6 +144,7 @@ class HarnessVerifier:
             numeric_consistency=numeric_consistency,
             stale_or_missing_sources=sorted(set(stale)),
             claim_results=claim_results,
+            claim_status_counts=claim_status_counts,
             required_claim_coverage=required_claim_coverage,
             failures=list(dict.fromkeys(failures)),
             warnings=list(dict.fromkeys(warnings)),
