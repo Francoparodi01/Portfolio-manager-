@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.dockerignore'
+      - 'Dockerfile'
       - 'AGENTS.md'
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
@@ -19,6 +20,7 @@ on:
   pull_request:
     paths:
       - '.dockerignore'
+      - 'Dockerfile'
       - 'AGENTS.md'
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
