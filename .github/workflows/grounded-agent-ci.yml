@@ -14,10 +14,14 @@ on:
       - 'src/agentic/persistence.py'
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
+      - 'src/agentic/harness/context.py'
+      - 'src/agentic/harness/evidence_planner.py'
+      - 'src/agentic/harness/schemas.py'
       - 'scripts/run_agent.py'
       - 'scripts/run_grounded_agent_evals.py'
       - 'tests/test_grounded_agent_architecture.py'
       - 'tests/test_grounded_agent_bootstrap.py'
+      - 'tests/test_harness_evidence_planner.py'
       - 'evals/agent/**'
       - '.github/workflows/grounded-agent-ci.yml'
   pull_request:
@@ -32,10 +36,14 @@ on:
       - 'src/agentic/persistence.py'
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
+      - 'src/agentic/harness/context.py'
+      - 'src/agentic/harness/evidence_planner.py'
+      - 'src/agentic/harness/schemas.py'
       - 'scripts/run_agent.py'
       - 'scripts/run_grounded_agent_evals.py'
       - 'tests/test_grounded_agent_architecture.py'
       - 'tests/test_grounded_agent_bootstrap.py'
+      - 'tests/test_harness_evidence_planner.py'
       - 'evals/agent/**'
       - '.github/workflows/grounded-agent-ci.yml'
 
@@ -65,6 +73,9 @@ jobs:
             src/agentic/persistence.py \
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
+            src/agentic/harness/context.py \
+            src/agentic/harness/evidence_planner.py \
+            src/agentic/harness/schemas.py \
             scripts/run_agent.py \
             scripts/run_grounded_agent_evals.py
       - name: Lint grounded agent modules
@@ -76,12 +87,16 @@ jobs:
             src/agentic/persistence.py \
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
+            src/agentic/harness/context.py \
+            src/agentic/harness/evidence_planner.py \
+            src/agentic/harness/schemas.py \
             scripts/run_agent.py \
             scripts/run_grounded_agent_evals.py \
             tests/test_grounded_agent_architecture.py \
-            tests/test_grounded_agent_bootstrap.py
+            tests/test_grounded_agent_bootstrap.py \
+            tests/test_harness_evidence_planner.py
       - name: Run architecture and safety tests
-        run: pytest -q tests/test_grounded_agent_architecture.py tests/test_grounded_agent_bootstrap.py
+        run: pytest -q tests/test_grounded_agent_architecture.py tests/test_grounded_agent_bootstrap.py tests/test_harness_evidence_planner.py
       - name: Validate eval corpus JSON
         run: python -m json.tool evals/agent/grounded_queries_v1.json > /dev/null
       - name: Check eval runner CLI
