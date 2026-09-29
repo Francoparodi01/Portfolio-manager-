@@ -46,6 +46,11 @@ RUN playwright install chromium
 
 COPY . .
 
+# Fail the image build instead of silently shipping an ungrounded agent.
+RUN test -f /app/AGENTS.md \
+    && test -f /app/docs/agent/quantia-semantics.md \
+    && test -f /app/docs/agent/quantia-data-model.md
+
 # ── directorios de runtime ─────────────────────
 RUN mkdir -p /app/screenshots /app/logs /app/secrets /app/.cache/huggingface \
     && mkdir -p /tmp/cocos_mfa \
