@@ -38,15 +38,18 @@ def test_missing_prompt_context_is_detectable(tmp_path):
     )
 
 
-def test_dockerignore_whitelists_runtime_grounding_and_rag_docs():
+def test_docker_context_keeps_runtime_grounding_and_rag_docs():
     dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
     lines = [line.strip() for line in dockerignore.splitlines() if line.strip() and not line.startswith("#")]
-    assert "!AGENTS.md" in lines
-    assert "!README.md" in lines
-    assert "!docs/" in lines
-    assert "!docs/**/*.md" in lines
-    assert lines.index("!AGENTS.md") > lines.index("*.md")
-    assert lines.index("!docs/") > lines.index("docs")
+    assert "docs" not in lines
+    assert "*.md" not in lines
+    assert "AGENTS.md" not in lines
+    assert "docs/agent" not in lines
+
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "test -f /app/AGENTS.md" in dockerfile
+    assert "test -f /app/docs/agent/quantia-semantics.md" in dockerfile
+    assert "test -f /app/docs/agent/quantia-data-model.md" in dockerfile
 
 
 def test_grounded_model_injects_dynamic_planning_context():
