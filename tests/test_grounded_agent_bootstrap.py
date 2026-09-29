@@ -5,6 +5,8 @@ import json
 
 from src.agentic.contracts import ToolSpec
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
+from src.agentic.orchestrator import AgentOrchestrator
+from src.agentic.tools import ToolRegistry
 
 
 def _tool(name: str) -> ToolSpec:
@@ -66,6 +68,53 @@ def test_meta_policy_explanation_bootstraps_decision_evidence(monkeypatch):
     ))
     assert decision.kind == "tool"
     assert decision.tool_name == "get_decision_evidence"
+
+
+def test_capability_question_is_runtime_metadata_not_market_evidence(monkeypatch):
+    model = GroundedQuantiaAgentModel(model="fixture", project_context="fixture")
+
+    async def should_not_call_model(_payload):
+        raise AssertionError("capability inventory must come from the runtime registry")
+
+    monkeypatch.setattr(model, "_call", should_not_call_model)
+    decision = asyncio.run(model.decide(
+        goal="Decime qué herramientas tenés disponibles.",
+        tools=[_tool("get_portfolio_snapshot"), _tool("get_decision_evidence")],
+        history=[],
+        step_no=1,
+        max_steps=8,
+    ))
+    assert decision.kind == "final"
+    assert decision.answer_origin == "runtime_capabilities_v1"
+    assert "get_portfolio_snapshot" in decision.answer
+    assert "get_decision_evidence" in decision.answer
+
+
+def test_orchestrator_allows_runtime_capability_final_without_tool_observation(monkeypatch):
+    model = GroundedQuantiaAgentModel(model="fixture", project_context="fixture")
+
+    async def should_not_call_model(_payload):
+        raise AssertionError("capability inventory must not invoke the LLM")
+
+    monkeypatch.setattr(model, "_call", should_not_call_model)
+    registry = ToolRegistry()
+
+    async def should_not_execute(_arguments):
+        raise AssertionError("capability inventory must not execute a data tool")
+
+    registry.register(_tool("get_portfolio_snapshot"), should_not_execute)
+    result = asyncio.run(AgentOrchestrator(
+        model=model,
+        registry=registry,
+        store=None,
+        require_audit=False,
+    ).run(goal="Decime qué herramientas tenés disponibles."))
+
+    assert result.status == "COMPLETE"
+    assert result.stop_reason == "model_final"
+    assert len(result.steps) == 1
+    assert result.steps[0].observation is None
+    assert result.steps[0].decision.answer_origin == "runtime_capabilities_v1"
 
 
 def test_grounded_controller_disables_thinking_for_json_control_output(monkeypatch):
