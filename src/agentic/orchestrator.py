@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import asyncio
 import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -18,6 +19,43 @@ from .contracts import (
 from .model import AgentModel
 from .persistence import AgentRunStore
 from .tools import ToolRegistry, execute_tool, tool_call_key
+
+
+def _resolved_subject_from_steps(steps: list[AgentTraceStep]) -> str | None:
+    """Persist only a structured referent, never the assistant's prose, for follow-ups."""
+    if not steps or steps[-1].decision.kind != "final":
+        return None
+    if steps[-1].decision.answer_origin != "portfolio_priority_renderer_v1":
+        return None
+
+    for step in reversed(steps):
+        observation = step.observation
+        if not observation or not observation.ok or observation.tool_name != "get_decision_evidence":
+            continue
+        try:
+            payload = json.loads(observation.content)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+        orders: list[dict[str, Any]] = []
+        for key in ("buy_orders", "sell_orders"):
+            rows = plan.get(key) if isinstance(plan.get(key), list) else []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    amount = float(row.get("amount_ars") or 0.0)
+                except (TypeError, ValueError):
+                    amount = 0.0
+                ticker = str(row.get("ticker") or "").upper().strip()
+                if amount > 0 and ticker:
+                    orders.append({"ticker": ticker, "amount": amount})
+        if not orders:
+            return None
+        return max(orders, key=lambda row: row["amount"])["ticker"][:20]
+    return None
 
 
 class AgentOrchestrator:
@@ -271,17 +309,29 @@ class AgentOrchestrator:
             finished_at = datetime.now(timezone.utc)
             if self.store and audit_persisted:
                 try:
+                    metadata_patch = {
+                        "steps_used": len(steps),
+                        "objective_status": (
+                            steps[-1].decision.objective_status
+                            if steps and steps[-1].decision.kind == "final"
+                            else "INSUFFICIENT"
+                        ),
+                        "answer_origin": (
+                            steps[-1].decision.answer_origin
+                            if steps and steps[-1].decision.kind == "final"
+                            else None
+                        ),
+                    }
+                    resolved_subject = _resolved_subject_from_steps(steps)
+                    if resolved_subject:
+                        metadata_patch["resolved_subject"] = resolved_subject
                     await self.store.finish_run(
                         run_id=run_id,
                         status=status,
                         stop_reason=stop_reason,
                         final_answer=answer,
                         finished_at=finished_at,
-                        metadata_patch={"steps_used": len(steps),
-                                        "objective_status": (steps[-1].decision.objective_status
-                                                             if steps and steps[-1].decision.kind == "final" else "INSUFFICIENT"),
-                                        "answer_origin": (steps[-1].decision.answer_origin
-                                                          if steps and steps[-1].decision.kind == "final" else None)},
+                        metadata_patch=metadata_patch,
                     )
                 except Exception:
                     audit_complete = False
