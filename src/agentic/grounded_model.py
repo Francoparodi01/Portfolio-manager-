@@ -58,6 +58,29 @@ def _is_portfolio_decision_question(goal: str) -> bool:
     return portfolio_question and decision_question
 
 
+def _referential_meta_policy_subject(goal: str, context: list[dict[str, Any]]) -> str | None:
+    """Resolve 'esta decisión' only from structured prior-run subject metadata."""
+    text = _plain(goal)
+    if "meta policy" not in text:
+        return None
+    refers_back = any(
+        phrase in text
+        for phrase in (
+            "esta decision",
+            "esa decision",
+            "esta recomendacion",
+            "esa recomendacion",
+        )
+    )
+    if not refers_back:
+        return None
+    for turn in reversed(context):
+        subject = str(turn.get("resolved_subject") or "").upper().strip()
+        if subject:
+            return subject[:20]
+    return None
+
+
 def _bootstrap_required_tools(goal: str, planned: tuple[str, ...]) -> tuple[str, ...]:
     """Return canonical evidence that must exist before the controller LLM runs."""
     required = list(planned)
@@ -245,6 +268,60 @@ def _portfolio_priority_decision(goal: str, history: list[dict[str, Any]]) -> Ag
     )
 
 
+def _meta_policy_followup_decision(subject: str, history: list[dict[str, Any]]) -> AgentDecision:
+    """Explain a referential Meta Policy follow-up for exactly one prior subject."""
+    payloads = _successful_payloads(history)
+    policy = payloads.get("get_meta_policy") or {}
+    evidence = payloads.get("get_decision_evidence") or {}
+    plan = evidence.get("plan") if isinstance(evidence.get("plan"), dict) else {}
+    decisions = plan.get("decisions") if isinstance(plan.get("decisions"), list) else []
+    decision_row = next(
+        (
+            row for row in decisions
+            if isinstance(row, dict) and str(row.get("ticker") or "").upper() == subject
+        ),
+        {},
+    )
+
+    mode = str(policy.get("mode") or "N/D")
+    capital_effect = str(policy.get("capital_effect") or "N/D")
+    report = " ".join(str(policy.get("report") or "").split())
+    lines = [f"Retomo {subject}, la decisión referida del turno anterior."]
+    lines.append(f"Meta Policy observada para {subject}: modo {mode}; capital_effect={capital_effect}.")
+    if report:
+        lines.append(f"Registro de Meta Policy: {report[:900]}")
+
+    action = str(decision_row.get("action") or "").strip()
+    primary_reason = str(decision_row.get("reason_primary") or "").strip()
+    secondary_reason = str(decision_row.get("reason_secondary") or "").strip()
+    if action:
+        detail = f"En el planner actual, {subject} figura como {action}."
+        if primary_reason:
+            detail += f" {primary_reason}."
+        if secondary_reason:
+            detail += f" {secondary_reason}."
+        lines.append(detail)
+
+    if capital_effect.upper() == "NO":
+        lines.append(
+            "Con capital_effect=NO, Meta Policy no modifica capital ni ejecuta un bloqueo operativo; "
+            "cualquier aprobación o bloqueo allí pertenece al experimento shadow."
+        )
+    else:
+        lines.append(
+            "El capital_effect informado no es NO; no atribuyo el efecto operativo sin una fuente adicional que lo confirme."
+        )
+    lines.append("Esto separa la Meta Policy experimental de los guards y decisiones del planner operativo.")
+    return AgentDecision(
+        kind="final",
+        answer="\n".join(lines),
+        rationale="Follow-up referencial resuelto con el sujeto estructurado del turno anterior.",
+        confidence=None,
+        answer_origin="meta_policy_followup_renderer_v1",
+        objective_status="EXPLAINED",
+    )
+
+
 def _provenance_suffix(history: list[dict[str, Any]]) -> str:
     tools: list[str] = []
     sql_hashes: list[str] = []
@@ -427,6 +504,20 @@ class GroundedQuantiaAgentModel(OllamaAgentModel):
             if importance_goal:
                 return _portfolio_priority_decision(goal, history)
             return evidence_decision(goal, history)
+
+        referenced_subject = _referential_meta_policy_subject(goal, self.conversation_context)
+        if referenced_subject and "get_decision_evidence" in successful:
+            available = {tool.name for tool in tools}
+            attempted = _attempted_tools(history)
+            if not force_final and "get_meta_policy" in available and "get_meta_policy" not in attempted:
+                return AgentDecision(
+                    kind="tool",
+                    tool_name="get_meta_policy",
+                    arguments={"ticker": referenced_subject},
+                    rationale=f"Resolver 'esta decisión' contra el sujeto auditado del turno anterior: {referenced_subject}.",
+                )
+            if "get_meta_policy" in successful:
+                return _meta_policy_followup_decision(referenced_subject, history)
 
         messages = [
             {
