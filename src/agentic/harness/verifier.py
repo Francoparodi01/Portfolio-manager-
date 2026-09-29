@@ -6,7 +6,16 @@ import re
 from datetime import datetime, timezone
 from typing import Iterable
 
-from .schemas import EvidenceMode, EvidenceObject, TaskSpec, VerificationReport
+from .evidence_planner import EvidencePlanner
+from .schemas import (
+    ClaimStatus,
+    ClaimVerification,
+    EvidenceClaim,
+    EvidenceMode,
+    EvidenceObject,
+    TaskSpec,
+    VerificationReport,
+)
 
 
 # Do not capture the horizon label in `5D`/`10D`, but do capture localized
@@ -31,10 +40,19 @@ _NUMERIC_INTENTS = {
     "meta_policy",
     "market_context",
 }
+_STALE_SOURCES = {"market", "macro", "portfolio"}
+_STALE_AFTER_SECONDS = 24 * 3600
 
 
 class HarnessVerifier:
-    """Deterministic final gate; it never creates missing financial facts."""
+    """Deterministic final gate; it never creates missing financial facts.
+
+    Besides answer-level grounding, the verifier evaluates the evidence plan
+    claim by claim. A claim is SUPPORTED only when at least one canonical tool
+    produced a successful, non-stale observation. Required claims fail closed;
+    optional gaps remain visible in observability instead of being treated as
+    proven facts.
+    """
 
     def verify(
         self,
@@ -74,16 +92,46 @@ class HarnessVerifier:
             if task.intent in _NUMERIC_INTENTS:
                 failures.append("numeric_claims_not_grounded")
 
-        stale = []
+        stale: list[str] = []
         now = datetime.now(timezone.utc)
         for item in items:
             if item.timestamp.tzinfo is None:
                 warnings.append(f"naive_timestamp:{item.tool_name}")
                 continue
-            age = (now - item.timestamp).total_seconds()
-            if item.source in {"market", "macro", "portfolio"} and age > 24 * 3600:
+            if self._is_stale(item, now):
                 stale.append(item.tool_name)
             warnings.extend(item.warnings)
+
+        # Rebuild the deterministic claim contract from the semantic task. The
+        # planner emits canonical claims even when an optional tool was never
+        # called, so telemetry can distinguish "missing" from "supported".
+        claim_plan = EvidencePlanner().plan(
+            task=task,
+            available_tools={item.tool_name for item in items} | required,
+            required_tools=list(required),
+        )
+        claim_results = self._verify_claims(
+            claims=claim_plan,
+            items=items,
+            stale_tools=set(stale),
+        )
+        required_claims = [result for result in claim_results if result.required]
+        supported_required = sum(
+            1 for result in required_claims if result.status == ClaimStatus.SUPPORTED
+        )
+        required_claim_coverage = (
+            supported_required / len(required_claims) if required_claims else 1.0
+        )
+
+        for result in claim_results:
+            if result.required and result.status != ClaimStatus.SUPPORTED:
+                failures.append(
+                    f"required_claim_not_supported:{result.claim_id}:{result.status.value.lower()}"
+                )
+            elif not result.required and result.status != ClaimStatus.SUPPORTED:
+                warnings.append(
+                    f"optional_claim_{result.status.value.lower()}:{result.claim_id}"
+                )
 
         passed = not failures
         return VerificationReport(
@@ -91,9 +139,64 @@ class HarnessVerifier:
             grounded=bool(items) and not any(code == "no_successful_evidence" for code in failures),
             numeric_consistency=numeric_consistency,
             stale_or_missing_sources=sorted(set(stale)),
-            failures=failures,
+            claim_results=claim_results,
+            required_claim_coverage=required_claim_coverage,
+            failures=list(dict.fromkeys(failures)),
             warnings=list(dict.fromkeys(warnings)),
         )
+
+    @staticmethod
+    def _is_stale(item: EvidenceObject, now: datetime) -> bool:
+        if item.timestamp.tzinfo is None:
+            return False
+        age = (now - item.timestamp).total_seconds()
+        return item.source in _STALE_SOURCES and age > _STALE_AFTER_SECONDS
+
+    @staticmethod
+    def _verify_claims(
+        *,
+        claims: list[EvidenceClaim],
+        items: list[EvidenceObject],
+        stale_tools: set[str],
+    ) -> list[ClaimVerification]:
+        results: list[ClaimVerification] = []
+        for claim in claims:
+            relevant = [item for item in items if item.tool_name in claim.tools]
+            successful = [item for item in relevant if item.ok]
+            fresh = [item for item in successful if item.tool_name not in stale_tools]
+
+            if fresh:
+                status = ClaimStatus.SUPPORTED
+                used = fresh
+                claim_warnings: list[str] = []
+            elif successful:
+                status = ClaimStatus.STALE
+                used = successful
+                claim_warnings = ["supporting_evidence_stale"]
+            elif relevant:
+                status = ClaimStatus.FAILED
+                used = relevant
+                claim_warnings = ["supporting_tool_failed"]
+            else:
+                status = ClaimStatus.MISSING
+                used = []
+                claim_warnings = ["supporting_evidence_not_observed"]
+
+            supporting_tools = list(dict.fromkeys(item.tool_name for item in used))
+            evidence_ids = [item.evidence_id for item in used]
+            for item in used:
+                claim_warnings.extend(item.warnings)
+
+            results.append(ClaimVerification(
+                claim_id=claim.claim_id,
+                description=claim.description,
+                required=claim.required,
+                status=status,
+                supporting_tools=supporting_tools,
+                evidence_ids=evidence_ids,
+                warnings=list(dict.fromkeys(claim_warnings)),
+            ))
+        return results
 
     @staticmethod
     def _evidence_text(item: EvidenceObject) -> str:
