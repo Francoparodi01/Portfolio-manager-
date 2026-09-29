@@ -26,6 +26,13 @@ class EvidenceQuality(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class ClaimStatus(str, Enum):
+    SUPPORTED = "SUPPORTED"
+    MISSING = "MISSING"
+    STALE = "STALE"
+    FAILED = "FAILED"
+
+
 class TaskSpec(StrictModel):
     intent: str = "general"
     entities: list[str] = Field(default_factory=list)
@@ -56,6 +63,16 @@ class EvidenceClaim(StrictModel):
     tools: list[str] = Field(default_factory=list)
     available_tools: list[str] = Field(default_factory=list)
     required: bool = True
+
+
+class ClaimVerification(StrictModel):
+    claim_id: str
+    description: str
+    required: bool
+    status: ClaimStatus
+    supporting_tools: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ContextPlan(StrictModel):
@@ -120,6 +137,8 @@ class VerificationReport(StrictModel):
     grounded: bool
     numeric_consistency: bool = True
     stale_or_missing_sources: list[str] = Field(default_factory=list)
+    claim_results: list[ClaimVerification] = Field(default_factory=list)
+    required_claim_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
     failures: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
