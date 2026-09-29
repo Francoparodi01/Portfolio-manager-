@@ -144,6 +144,22 @@ class VerificationReport(StrictModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class HarnessObservabilitySummary(StrictModel):
+    window_days: int = Field(ge=1, le=365)
+    runs_total: int = Field(ge=0)
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    stop_reason_counts: dict[str, int] = Field(default_factory=dict)
+    completion_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    verification_pass_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    numeric_consistency_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    avg_required_claim_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    claim_status_counts: dict[str, int] = Field(default_factory=dict)
+    avg_latency_ms: float | None = Field(default=None, ge=0.0)
+    p95_latency_ms: int | None = Field(default=None, ge=0)
+    avg_tool_calls: float | None = Field(default=None, ge=0.0)
+    avg_llm_calls: float | None = Field(default=None, ge=0.0)
+
+
 class HarnessResponse(StrictModel):
     run_id: str
     conversation_id: str
