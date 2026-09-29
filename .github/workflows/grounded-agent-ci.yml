@@ -10,6 +10,8 @@ on:
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
       - 'src/agentic/grounded_model.py'
+      - 'src/agentic/orchestrator.py'
+      - 'src/agentic/persistence.py'
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
       - 'scripts/run_agent.py'
@@ -26,6 +28,8 @@ on:
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
       - 'src/agentic/grounded_model.py'
+      - 'src/agentic/orchestrator.py'
+      - 'src/agentic/persistence.py'
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
       - 'scripts/run_agent.py'
@@ -57,6 +61,8 @@ jobs:
           python -m compileall -q \
             src/agentic/prompt_context.py \
             src/agentic/grounded_model.py \
+            src/agentic/orchestrator.py \
+            src/agentic/persistence.py \
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
             scripts/run_agent.py \
@@ -66,6 +72,8 @@ jobs:
           ruff check --select E9,F63,F7,F82 \
             src/agentic/prompt_context.py \
             src/agentic/grounded_model.py \
+            src/agentic/orchestrator.py \
+            src/agentic/persistence.py \
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
             scripts/run_agent.py \
