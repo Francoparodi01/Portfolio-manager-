@@ -115,8 +115,13 @@ class RebalanceReport:
             f"<b>{self.risk_gate_state}</b>"
             + (f" — <i>{self.risk_gate_reason}</i>" if self.risk_gate_reason else ""),
             f"   Portfolio: <b>${self.portfolio_value_ars:,.0f} ARS</b>",
-            f"   Ret esperado: {opt.expected_return_annual:.1%}  "
-            f"Vol: {opt.expected_vol_annual:.1%}  Sharpe: {opt.sharpe_ratio:.2f}",
+            f"   Ret esperado teórico: {opt.expected_return_annual:.1%}  Vol: {opt.expected_vol_annual:.1%}",
+            "   Sharpe actual: "
+            + (f"{opt.current_portfolio_sharpe:.2f}" if opt.current_portfolio_sharpe is not None else "N/D")
+            + " | teórico: "
+            + (f"{opt.theoretical_target_sharpe:.2f}" if opt.theoretical_target_sharpe is not None else "N/D")
+            + " | ejecutable: "
+            + (f"{opt.executable_target_sharpe:.2f}" if opt.executable_target_sharpe is not None else "N/D"),
         ]
 
         if opt.views_used:
@@ -799,7 +804,7 @@ def run_optimizer(
             frozen_weight=round(frozen_weight, 6),
             reserved_cash_weight=round(reserved_cash_weight, 6),
             optimizable_budget=round(optimizable_budget, 6),
-            theoretical_target_sharpe=round(sharpe, 3),
+            theoretical_target_sharpe=(round(sharpe, 3) if frozen_weight <= 1e-9 else None),
         )
 
         # ── PASO 8: Calcular trades ───────────────────────────────────────────
