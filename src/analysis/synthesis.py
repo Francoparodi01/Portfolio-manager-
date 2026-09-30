@@ -85,13 +85,18 @@ class SynthesisResult:
             f"{icon} <b>{self.ticker}</b> → <b>{self.decision}</b>   [{bar}] {self.conviction:.0%}",
             f"   Score: <code>{self.final_score:+.3f}</code>   Sizing: <b>{self.position_size:.1%}</b>",
         ]
-        for layer in self.layers:
-            if abs(layer.raw_score) > 0.02:
-                bar_len  = min(int(abs(layer.raw_score) * 5), 5)
-                bar_char = "█" if layer.weighted > 0 else "▓"
-                mini_bar = bar_char * bar_len + "░" * (5 - bar_len)
-                sign     = "+" if layer.weighted >= 0 else ""
-                lines.append(f"   <code>{layer.name:10s} {mini_bar} {sign}{layer.weighted:.3f}</code>")
+        layer_values = {layer.name.lower(): layer.weighted for layer in self.layers}
+        lines.append(
+            "   <code>"
+            f"T {layer_values.get('technical', 0.0):+.3f} | "
+            f"M {layer_values.get('macro', 0.0):+.3f} | "
+            f"Risk {layer_values.get('risk', 0.0):+.3f} | "
+            f"S {layer_values.get('sentiment', 0.0):+.3f}</code>"
+        )
+        lines.append(
+            f"   Regime <b>{html.escape(self.technical_regime)}</b> | "
+            f"Trend <code>{self.trend_score:+.3f}</code>"
+        )
         if self.reasoning:
             safe = html.escape(self.reasoning.strip())
             if len(safe) > 400:

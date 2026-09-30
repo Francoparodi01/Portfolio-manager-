@@ -112,6 +112,23 @@ class OrderStatus(str, Enum):
     EXPIRED = "EXPIRED"
 
 
+class SignalClass(str, Enum):
+    POS_STRONG = "POS_STRONG"
+    POS_OPERABLE = "POS_OPERABLE"
+    POS_WEAK = "POS_WEAK"
+    NEUTRAL = "NEUTRAL"
+    NEG_WEAK = "NEG_WEAK"
+    NEG_OPERABLE = "NEG_OPERABLE"
+
+
+class PortfolioIntent(str, Enum):
+    INCREASE = "INCREASE"
+    MAINTAIN = "MAINTAIN"
+    REDUCE = "REDUCE"
+    EXIT = "EXIT"
+
+
+# Legacy score enum remains as a compatibility adapter for DB/API/renderers.
 class ScoreRange(str, Enum):
     POS_FUERTE = "POS_FUERTE"
     POS_OPERABLE = "POS_OPERABLE"
@@ -141,6 +158,7 @@ class AssetSignal:
     macro: float
     sentiment: float
     explanation: Optional[str] = None
+    risk: float = 0.0
     technical_regime: str = "TRANSITIONAL"
     trend_score: float = 0.0
     structural_break_confirmed: bool = False
@@ -206,6 +224,16 @@ class DecisionIntent:
     block_code: Optional[str] = None
     funding_for: dict[str, float] = field(default_factory=dict)
     funded_by: dict[str, float] = field(default_factory=dict)
+    signal_class: Optional[SignalClass] = None
+    portfolio_intent: Optional[PortfolioIntent] = None
+    theoretical_target_weight: Optional[float] = None
+    executable_target_weight: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.theoretical_target_weight is None:
+            self.theoretical_target_weight = float(self.target_weight)
+        if self.executable_target_weight is None:
+            self.executable_target_weight = float(self.current_weight)
 
 
 @dataclass
@@ -355,6 +383,29 @@ def classify_score(score: Optional[float]) -> tuple[ScoreRange, str]:
         rango = ScoreRange.NEG_OPERABLE
 
     return rango, SCORE_RANGE_LABELS[rango]
+
+
+def signal_class(score: Optional[float]) -> SignalClass:
+    legacy, _ = classify_score(score)
+    return {
+        ScoreRange.POS_FUERTE: SignalClass.POS_STRONG,
+        ScoreRange.POS_OPERABLE: SignalClass.POS_OPERABLE,
+        ScoreRange.POS_DEBIL: SignalClass.POS_WEAK,
+        ScoreRange.NEUTRAL: SignalClass.NEUTRAL,
+        ScoreRange.NEG_DEBIL: SignalClass.NEG_WEAK,
+        ScoreRange.NEG_OPERABLE: SignalClass.NEG_OPERABLE,
+    }[legacy]
+
+
+def portfolio_intent(current_weight: float, theoretical_target_weight: float) -> PortfolioIntent:
+    delta = theoretical_target_weight - current_weight
+    if theoretical_target_weight <= SELL_FULL_THRESH and current_weight > SELL_FULL_THRESH:
+        return PortfolioIntent.EXIT
+    if delta > MIN_WEIGHT_DELTA:
+        return PortfolioIntent.INCREASE
+    if delta < -MIN_WEIGHT_DELTA:
+        return PortfolioIntent.REDUCE
+    return PortfolioIntent.MAINTAIN
 
 
 def signal_label_for_render(score: Optional[float]) -> str:
@@ -662,6 +713,10 @@ def derive_decision_intents(
             score=round(score, 4) if score is not None else None,
             conviction=round(conv, 4) if conv is not None else None,
             theoretical_ars=round(theoretical_ars, 0),
+            signal_class=signal_class(score),
+            portfolio_intent=portfolio_intent(w_cur, w_opt),
+            theoretical_target_weight=round(w_opt, 4),
+            executable_target_weight=round(w_cur, 4),
         ))
 
     priority_order = {
@@ -1335,6 +1390,23 @@ def reconcile_funding(
         f"warnings={len(warnings)}"
     )
 
+    # Materialize the executable target separately from the optimizer target.
+    # WATCH/BLOCKED/HOLD keep current weight; filled/planned orders move only by
+    # the executable nominal amount. This prevents theoretical targets from being
+    # presented as executable recommendations.
+    buy_amounts = {o.ticker: float(o.amount_ars or 0.0) for o in buy_orders}
+    sell_amounts = {o.ticker: float(o.amount_ars or 0.0) for o in sell_orders}
+    for d in decisions:
+        theoretical = d.theoretical_target_weight
+        if theoretical is None:
+            theoretical = float(d.target_weight or d.current_weight or 0.0)
+            d.theoretical_target_weight = theoretical
+        executable = float(d.current_weight or 0.0)
+        if portfolio_value_ars > 0:
+            executable += buy_amounts.get(d.ticker, 0.0) / portfolio_value_ars
+            executable -= sell_amounts.get(d.ticker, 0.0) / portfolio_value_ars
+        d.executable_target_weight = round(max(0.0, executable), 4)
+
     return ExecutionPlan(
         decisions=decisions,
         sell_orders=sell_orders,
@@ -1391,6 +1463,7 @@ def build_signals_from_synthesis(results: list) -> dict[str, AssetSignal]:
             technical=round(layers.get("technical", 0.0), 4),
             macro=round(layers.get("macro", 0.0), 4),
             sentiment=round(layers.get("sentiment", 0.0), 4),
+            risk=round(layers.get("risk", 0.0), 4),
             technical_regime=str(getattr(r, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL"),
             trend_score=round(float(getattr(r, "trend_score", 0.0) or 0.0), 4),
             structural_break_confirmed=bool(getattr(r, "structural_break_confirmed", False)),

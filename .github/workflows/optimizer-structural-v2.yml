@@ -1,0 +1,88 @@
+name: Optimizer Structural V2 Validation
+
+on:
+  pull_request:
+    paths:
+      - "src/analysis/**"
+      - "scripts/run_analysis.py"
+      - "tests/**"
+      - ".github/workflows/optimizer-structural-v2.yml"
+  push:
+    branches:
+      - "feature/optimizer-calibration-v2-structural"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Compile changed runtime
+        run: python -m compileall -q src/analysis scripts/run_analysis.py
+      - name: Structural v2 tests
+        run: |
+          python -m pytest -q \
+            tests/test_optimizer_structural_v2.py \
+            tests/test_optimizer_structural_v2_regressions.py \
+            tests/test_optimizer_challenger_v2.py \
+            tests/test_upcoming_earnings.py \
+            tests/test_execution_nominals_and_rotation.py
+      - name: Full-suite regression gate vs main
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q > /tmp/candidate-suite.log 2>&1
+          candidate_status=$?
+          set -e
+
+          git fetch origin main
+          git worktree add --detach /tmp/quantia-main origin/main
+          set +e
+          (cd /tmp/quantia-main && python -m pytest -q) > /tmp/main-suite.log 2>&1
+          main_status=$?
+          set -e
+
+          echo "=== candidate summary ==="
+          tail -n 30 /tmp/candidate-suite.log
+          echo "=== main baseline summary ==="
+          tail -n 30 /tmp/main-suite.log
+          echo "candidate_exit=${candidate_status} main_exit=${main_status}"
+
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          def failures(path: str) -> set[str]:
+              text = Path(path).read_text(encoding="utf-8", errors="replace")
+              return set(re.findall(r"^FAILED\s+(\S+)", text, flags=re.MULTILINE))
+
+          candidate = failures("/tmp/candidate-suite.log")
+          baseline = failures("/tmp/main-suite.log")
+          new = sorted(candidate - baseline)
+          fixed = sorted(baseline - candidate)
+
+          print(f"candidate_failures={len(candidate)}")
+          print(f"baseline_failures={len(baseline)}")
+          print(f"new_failures={len(new)}")
+          if fixed:
+              print("baseline failures fixed by branch:")
+              for node in fixed:
+                  print(f"  FIXED {node}")
+          if new:
+              print("new failures introduced by branch:")
+              for node in new:
+                  print(f"  NEW {node}")
+              raise SystemExit(1)
+          print("No new full-suite failures versus main.")
+          PY
