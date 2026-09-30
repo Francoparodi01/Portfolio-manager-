@@ -14,6 +14,10 @@ PRE_EARNINGS_SHADOW_SESSIONS = 2
 DEFAULT_UPCOMING_EARNINGS_DAYS = 45
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
+# Explicit source precedence for conflicting scheduled dates. Higher is preferred.
+# Fiscal identity still controls deduplication; disagreement is preserved in audit fields.
+EARNINGS_SOURCE_PRIORITY = {"SEC": 100, "NASDAQ": 90, "YAHOO": 70, "UNKNOWN": 0}
+
 
 def _as_date(value: Any) -> date | None:
     if isinstance(value, datetime):
@@ -63,6 +67,9 @@ class UpcomingEarningsEvent:
     reported_eps: float | None = None
     surprise_pct: float | None = None
     source_url: str = ""
+    date_conflict: bool = False
+    conflicting_dates: tuple[date, ...] = ()
+    conflicting_sources: tuple[str, ...] = ()
 
     @property
     def fiscal_label(self) -> str:
@@ -119,19 +126,16 @@ def _same_earnings_event(
     left: UpcomingEarningsEvent,
     right: UpcomingEarningsEvent,
 ) -> bool:
-    if left.issuer_id != right.issuer_id or abs((left.event_date - right.event_date).days) > 1:
+    if left.issuer_id != right.issuer_id:
         return False
-    if (
-        left.fiscal_period_end
-        and right.fiscal_period_end
-        and left.fiscal_period_end != right.fiscal_period_end
-    ):
-        return False
+    if left.fiscal_period_end and right.fiscal_period_end:
+        return left.fiscal_period_end == right.fiscal_period_end
     left_period = (left.fiscal_year, left.fiscal_quarter)
     right_period = (right.fiscal_year, right.fiscal_quarter)
-    if all(left_period) and all(right_period) and left_period != right_period:
-        return False
-    return True
+    if all(left_period) and all(right_period):
+        return left_period == right_period
+    # Without fiscal identity, only collapse near-identical scheduled dates.
+    return abs((left.event_date - right.event_date).days) <= 1
 
 
 def _canonical_event_rank(event: UpcomingEarningsEvent) -> tuple:
@@ -148,6 +152,7 @@ def _canonical_event_rank(event: UpcomingEarningsEvent) -> tuple:
         fiscal_detail,
         int(known_time),
         lifecycle_rank,
+        EARNINGS_SOURCE_PRIORITY.get(event.source, 10),
         event.confidence,
         -event.event_date.toordinal(),
     )
@@ -173,9 +178,14 @@ def deduplicate_earnings_events(
         selected = max(group, key=_canonical_event_rank)
         reported = next((item for item in group if item.reported_eps is not None), None)
         estimate = next((item.eps_estimate for item in group if item.eps_estimate is not None), None)
+        distinct_dates = tuple(sorted({item.event_date for item in group}))
+        distinct_sources = tuple(sorted({item.source for item in group}))
         canonical.append(
             replace(
                 selected,
+                date_conflict=len(distinct_dates) > 1,
+                conflicting_dates=distinct_dates if len(distinct_dates) > 1 else (),
+                conflicting_sources=distinct_sources if len(distinct_dates) > 1 else (),
                 earnings_phase=(
                     "post_reported"
                     if any(item.earnings_phase == "post_reported" for item in group)
