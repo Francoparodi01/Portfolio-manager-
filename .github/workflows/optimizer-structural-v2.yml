@@ -35,6 +35,7 @@ jobs:
           python -m pytest -q \
             tests/test_optimizer_structural_v2.py \
             tests/test_optimizer_structural_v2_regressions.py \
+            tests/test_optimizer_challenger_v2.py \
             tests/test_upcoming_earnings.py \
             tests/test_execution_nominals_and_rotation.py
       - name: Full-suite regression gate vs main
