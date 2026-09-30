@@ -157,8 +157,8 @@ class AssetSignal:
     technical: float
     macro: float
     sentiment: float
-    risk: float = 0.0
     explanation: Optional[str] = None
+    risk: float = 0.0
     technical_regime: str = "TRANSITIONAL"
     trend_score: float = 0.0
     structural_break_confirmed: bool = False
