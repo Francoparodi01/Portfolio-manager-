@@ -3120,6 +3120,7 @@ def render_report(
         tech = _layer_weighted(r, "technical")
         macro = _layer_weighted(r, "macro")
         sent = _layer_weighted(r, "sentiment")
+        risk = _layer_weighted(r, "risk")
         sentiment_label = (
             "sentiment OFF"
             if not bool(getattr(r, "sentiment_active", True))
