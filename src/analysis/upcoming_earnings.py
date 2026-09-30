@@ -322,6 +322,10 @@ def render_upcoming_earnings_html(
         )
         if not compact:
             line += f" | {escape(event.source)} conf {event.confidence:.2f}"
+        if event.date_conflict:
+            dates = ", ".join(item.strftime("%d/%m") for item in event.conflicting_dates)
+            sources = ", ".join(event.conflicting_sources)
+            line += f" | ⚠️ conflicto fechas [{escape(dates)}] fuentes [{escape(sources)}]"
         lines.append(line)
     lines.append("Shadow: informa la ventana; no cambia scores ni ordenes.")
     return lines
