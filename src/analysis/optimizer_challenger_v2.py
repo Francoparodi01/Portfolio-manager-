@@ -78,6 +78,12 @@ def run_calibrated_optimizer_v2(
     context = challenger_context
     asset_groups = {str(k).upper(): str(v).upper() for k, v in (asset_groups or {}).items()}
 
+    if abs(float(context.cash_ars) - float(cash_ars or 0.0)) > 0.01:
+        return _fail(
+            context,
+            horizon_days,
+            f"CASH_CONTEXT_MISMATCH:{float(cash_ars or 0.0):.2f}!={float(context.cash_ars):.2f}",
+        )
     if getattr(returns, "empty", True):
         return _fail(context, horizon_days, "EMPTY_COMMON_RETURN_PANEL")
     universe = [str(t).upper() for t in list(returns.columns)]
@@ -177,6 +183,7 @@ def run_calibrated_optimizer_v2(
             cov_matrix=covariance,
             pi="equal",
             absolute_views=views,
+            omega="idzorek",
             view_confidences=[confidences[ticker] for ticker in universe],
             tau=champion_core.TAU,
             risk_aversion=champion_core.RISK_AVERSION,
@@ -223,7 +230,7 @@ def run_calibrated_optimizer_v2(
     )
     return ChallengerTarget(
         status="OK_SHADOW",
-        reason="CALIBRATED_BL_PRIMARY_PIT",
+        reason="CALIBRATED_BL_PRIMARY_PIT_IDZOREK",
         context=context,
         horizon_days=horizon_days,
         weights={ticker: round(value, 8) for ticker, value in weights.items()},
