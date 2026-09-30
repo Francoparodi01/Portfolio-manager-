@@ -985,6 +985,8 @@ def _layers_payload_for_decision(
     payload.setdefault("source", "optimizer")
 
     def _attach_feature_snapshot_and_context() -> dict:
+        from src.analysis.versioning import version_manifest
+        payload.setdefault("versions", version_manifest())
         feature_snapshot = build_feature_snapshot_from_layers(payload)
         payload["feature_snapshot"] = feature_snapshot.to_dict()
         if run_id:
