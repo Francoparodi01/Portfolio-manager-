@@ -26,6 +26,13 @@ class EvidenceQuality(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class ClaimStatus(str, Enum):
+    SUPPORTED = "SUPPORTED"
+    MISSING = "MISSING"
+    STALE = "STALE"
+    FAILED = "FAILED"
+
+
 class TaskSpec(StrictModel):
     intent: str = "general"
     entities: list[str] = Field(default_factory=list)
@@ -50,9 +57,28 @@ class TaskSpec(StrictModel):
         return list(dict.fromkeys(str(item).upper().strip() for item in value if str(item).strip()))
 
 
+class EvidenceClaim(StrictModel):
+    claim_id: str
+    description: str
+    tools: list[str] = Field(default_factory=list)
+    available_tools: list[str] = Field(default_factory=list)
+    required: bool = True
+
+
+class ClaimVerification(StrictModel):
+    claim_id: str
+    description: str
+    required: bool
+    status: ClaimStatus
+    supporting_tools: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ContextPlan(StrictModel):
     allowed_tools: list[str] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
+    evidence_claims: list[EvidenceClaim] = Field(default_factory=list)
     parallel_groups: list[list[str]] = Field(default_factory=list)
     max_steps: int = Field(default=6, ge=1, le=20)
     max_tool_calls: int = Field(default=8, ge=1, le=30)
@@ -111,8 +137,27 @@ class VerificationReport(StrictModel):
     grounded: bool
     numeric_consistency: bool = True
     stale_or_missing_sources: list[str] = Field(default_factory=list)
+    claim_results: list[ClaimVerification] = Field(default_factory=list)
+    claim_status_counts: dict[str, int] = Field(default_factory=dict)
+    required_claim_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
     failures: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class HarnessObservabilitySummary(StrictModel):
+    window_days: int = Field(ge=1, le=365)
+    runs_total: int = Field(ge=0)
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    stop_reason_counts: dict[str, int] = Field(default_factory=dict)
+    completion_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    verification_pass_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    numeric_consistency_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    avg_required_claim_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    claim_status_counts: dict[str, int] = Field(default_factory=dict)
+    avg_latency_ms: float | None = Field(default=None, ge=0.0)
+    p95_latency_ms: int | None = Field(default=None, ge=0)
+    avg_tool_calls: float | None = Field(default=None, ge=0.0)
+    avg_llm_calls: float | None = Field(default=None, ge=0.0)
 
 
 class HarnessResponse(StrictModel):

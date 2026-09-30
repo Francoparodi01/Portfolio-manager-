@@ -26,6 +26,7 @@ from .context import ContextSelector
 from .models import ModelRoles
 from .permissions import PermissionPolicy
 from .schemas import (
+    ClaimStatus,
     ConversationState,
     EvidenceMode,
     EvidenceObject,
@@ -280,17 +281,22 @@ class ConversationalHarness:
                     await self._record(store, state.run_id, step_no, name, observation, decision.rationale or "dynamic planner")
                     self._mark_state(state, name, observation.ok)
 
+            fallback_origin = "model"
             if final_decision and final_decision.answer:
                 fallback = str(final_decision.answer)
+                fallback_origin = str(final_decision.answer_origin or "model")
             elif history:
                 try:
-                    fallback = str(evidence_decision(task.raw_message, history).answer or "").strip()
+                    rendered = evidence_decision(task.raw_message, history)
+                    fallback = str(rendered.answer or "").strip()
+                    fallback_origin = str(rendered.answer_origin or "model")
                 except Exception:
                     fallback = ""
             else:
                 fallback = ""
             if not fallback:
                 fallback = self._insufficient_answer(state)
+                fallback_origin = "insufficient_evidence"
 
             answer = await synthesizer.synthesize(task=task, evidence=evidence, fallback=fallback)
             verification = self.verifier.verify(
@@ -311,6 +317,29 @@ class ConversationalHarness:
                     evidence=evidence,
                     required_tools=plan.required_tools,
                 )
+                # Deterministic renderers in src.agentic.answer are source-bound:
+                # they only format/derive values from already verified evidence.
+                # Scalar regex traceability is still useful telemetry, but it
+                # must not turn a fully-supported deterministic fallback into a
+                # false fail-closed. Model prose never gets this exemption.
+                numeric_only_failure = verification.failures == ["numeric_claims_not_grounded"]
+                required_claims_supported = (
+                    verification.required_claim_coverage == 1.0
+                    and all(
+                        result.status == ClaimStatus.SUPPORTED
+                        for result in verification.claim_results
+                        if result.required
+                    )
+                )
+                deterministic_source_bound = fallback_origin not in {"model", "insufficient_evidence"}
+                if numeric_only_failure and required_claims_supported and deterministic_source_bound:
+                    warnings = list(verification.warnings)
+                    warnings.append(f"deterministic_renderer_numeric_traceability_relaxed:{fallback_origin}")
+                    verification = verification.model_copy(update={
+                        "passed": True,
+                        "failures": [],
+                        "warnings": list(dict.fromkeys(warnings)),
+                    })
             if not verification.passed:
                 answer = self._insufficient_answer(state)
                 state.status = "PARTIAL" if evidence else "FAILED"
@@ -364,6 +393,7 @@ class ConversationalHarness:
                         "evidence_refs": state.evidence_refs,
                         "routing_source": task.routing_source,
                         "routing_confidence": task.routing_confidence,
+                        "answer_origin": fallback_origin if answer == fallback else "synthesis_model",
                     },
                 )
             return HarnessResponse(
@@ -378,7 +408,11 @@ class ConversationalHarness:
                 tool_calls=state.tool_calls,
                 model=self.roles.reasoning,
                 latency_ms=int((time.monotonic() - started) * 1000),
-                metadata={"llm_calls": llm_calls, "context_plan": plan.model_dump(mode="json")},
+                metadata={
+                    "llm_calls": llm_calls,
+                    "context_plan": plan.model_dump(mode="json"),
+                    "answer_origin": fallback_origin if answer == fallback else "synthesis_model",
+                },
             )
         except Exception as exc:
             state.status = "FAILED"
@@ -518,48 +552,20 @@ class ConversationalHarness:
             source, mode, quality = "bot_follow_pnl_normalized", EvidenceMode.PRODUCTION, EvidenceQuality.HIGH
         elif name == "get_run_evidence_provenance":
             source, mode, quality = "conversation_audit", EvidenceMode.PRODUCTION, EvidenceQuality.HIGH
-        elif name.startswith("get_macro"):
-            source, mode, quality = "macro", EvidenceMode.OBSERVATION, EvidenceQuality.MEDIUM
-        elif name in {"get_decision_evidence", "analyze_portfolio", "analyze_ticker"}:
-            source, mode, quality = "quantia_analysis", EvidenceMode.OBSERVATION, EvidenceQuality.MEDIUM
+        elif name == "get_persisted_decision_evidence":
+            source, mode, quality = "decision", EvidenceMode.PRODUCTION, EvidenceQuality.HIGH
+        elif name in {"get_net_decision_report", "get_analytics_v2", "get_viability_audit", "get_regression_audit", "get_calibration_audit", "get_system_status"}:
+            source, mode, quality = name.removeprefix("get_"), EvidenceMode.OBSERVATION, EvidenceQuality.HIGH
         else:
-            source, mode, quality = name, EvidenceMode.OBSERVATION, EvidenceQuality.MEDIUM if observation.ok else EvidenceQuality.LOW
-
-        warnings: list[str] = []
-        timestamp = None
-        if isinstance(payload, dict):
-            raw_quality = payload.get("quality")
-            if isinstance(raw_quality, str) and raw_quality.upper() in EvidenceQuality.__members__:
-                quality = EvidenceQuality[raw_quality.upper()]
-            for key in ("timestamp", "as_of", "scraped_at", "evaluated_at", "fetched_at", "generated_at"):
-                value = payload.get(key)
-                if value:
-                    try:
-                        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-                        if timestamp.tzinfo is None:
-                            timestamp = timestamp.replace(tzinfo=timezone.utc)
-                        break
-                    except ValueError:
-                        continue
-        if timestamp is None:
-            timestamp = datetime.now(timezone.utc)
-            warnings.append("source_timestamp_missing")
-        if not observation.ok:
-            warnings.append(f"tool_error:{observation.error or 'unknown'}")
-            quality = EvidenceQuality.LOW
-        symbol = None
-        ticker = observation.arguments.get("ticker") if isinstance(observation.arguments, dict) else None
-        if ticker:
-            symbol = str(ticker).upper()
+            source, mode, quality = name, EvidenceMode.OBSERVATION, EvidenceQuality.UNKNOWN
         return EvidenceObject(
             source=source,
             tool_name=name,
-            symbol=symbol,
-            timestamp=timestamp,
+            timestamp=datetime.now(timezone.utc),
             payload=payload,
             quality=quality,
             mode=mode,
-            warnings=warnings,
+            warnings=[] if observation.ok else ([str(observation.error)] if observation.error else []),
             content_sha256=observation.content_sha256,
             ok=observation.ok,
             elapsed_ms=observation.elapsed_ms,

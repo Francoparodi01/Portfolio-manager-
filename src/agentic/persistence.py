@@ -226,7 +226,10 @@ class AgentRunStore:
                     stop_reason = $3,
                     final_answer = $4,
                     finished_at = $5,
-                    metadata = metadata || $6::jsonb
+                    metadata = metadata || $6::jsonb || jsonb_build_object(
+                        'latency_ms',
+                        GREATEST(0, (EXTRACT(EPOCH FROM ($5 - started_at)) * 1000)::bigint)
+                    )
                 WHERE id = $1::uuid
                 """,
                 run_id,

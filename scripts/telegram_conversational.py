@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Quantia Telegram conversational gateway.
+"""Quantia Telegram hybrid surface.
 
-User-facing UX is text-only. Legacy handlers remain importable as internal
-business adapters, but no keyboard/menu/command catalog is exposed here.
+Free-form text and /agente use the unified conversational harness. The original
+Telegram inline menus/buttons remain intact and keep calling the legacy,
+deterministic business actions, so button output stays identical to the classic
+bot instead of being rewritten by the conversational renderer.
 """
 # ruff: noqa: E402
 from __future__ import annotations
@@ -20,7 +22,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from scripts import telegram_bot as legacy
 from src.agentic.conversation.gateway import run_message
@@ -31,16 +40,9 @@ _ACTIVE_CHATS: set[int] = set()
 HEARTBEAT_TASK_KEY = "conversational_heartbeat_task"
 META_TASK_KEY = "conversational_meta_watcher_task"
 
-# Legacy settings code occasionally tries to return to the old inline menu. Keep
-# the credential/business logic reusable while making that navigation a no-op.
-async def _no_menu(_context, _chat_id: int) -> None:
-    return None
-
-legacy.send_menu = _no_menu
-
 
 def _command_to_language(text: str) -> str:
-    """Compatibility only; slash commands are never advertised by the new UI."""
+    """Keep slash compatibility while routing agent-style commands to the harness."""
     clean = str(text or "").strip()
     if not clean.startswith("/"):
         return clean
@@ -72,48 +74,41 @@ def _command_to_language(text: str) -> str:
 
 def _configuration_intent(text: str) -> bool:
     normalized = re.sub(r"\s+", " ", str(text).lower()).strip()
-    return any(phrase in normalized for phrase in (
-        "configurar mi cuenta", "configurar cuenta", "cambiar credenciales",
-        "reconfigurar mi cuenta", "conectar mi cuenta",
-    ))
-
-
-async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_chat or not await legacy.ensure_allowed_chat(update, context):
-        return
-    await legacy.send_text(
-        context,
-        int(update.effective_chat.id),
-        "<b>QUANTIA</b>\nEscribí lo que quieras saber sobre tu cartera, decisiones, resultados o evidencia.",
+    return any(
+        phrase in normalized
+        for phrase in (
+            "configurar mi cuenta",
+            "configurar cuenta",
+            "cambiar credenciales",
+            "reconfigurar mi cuenta",
+            "conectar mi cuenta",
+        )
     )
 
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_chat:
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Restore the exact classic inline menu."""
+    if not update.effective_chat or not await legacy.ensure_allowed_chat(update, context):
         return
-    if not await legacy.ensure_allowed_chat(update, context):
-        return
-    chat_id = int(update.effective_chat.id)
-    text = _command_to_language(update.message.text or "")
+    await legacy.send_menu(context, int(update.effective_chat.id))
 
-    # Preserve the existing secure credential flow in multiuser mode without
-    # surfacing its old menu/buttons.
-    if context.user_data.get(legacy.SETTINGS_STATE_KEY):
-        await legacy.settings_text_handler(update, context)
-        return
-    if _configuration_intent(text) and legacy._multiuser_enabled():
-        await legacy.action_settings(context, chat_id, force_reconfigure=True)
-        return
 
+async def _run_harness_query(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str,
+) -> None:
     if chat_id in _ACTIVE_CHATS:
         await legacy.send_text(context, chat_id, "Ya estoy procesando tu consulta anterior.")
         return
+
     _ACTIVE_CHATS.add(chat_id)
     try:
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
         except Exception:
             pass
+
         cfg = legacy.get_config()
         configured_raw = str(getattr(cfg.scraper, "telegram_chat_id", "") or "").strip()
         configured_owner = int(configured_raw) if configured_raw.lstrip("-").isdigit() else None
@@ -155,11 +150,63 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         _ACTIVE_CHATS.discard(chat_id)
 
 
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Natural-language surface: always the current conversational harness."""
+    if not update.message or not update.effective_chat:
+        return
+    if not await legacy.ensure_allowed_chat(update, context):
+        return
+
+    chat_id = int(update.effective_chat.id)
+    text = _command_to_language(update.message.text or "")
+
+    # Preserve the original secure credential flow.
+    if context.user_data.get(legacy.SETTINGS_STATE_KEY):
+        await legacy.settings_text_handler(update, context)
+        return
+    if _configuration_intent(text) and legacy._multiuser_enabled():
+        await legacy.action_settings(context, chat_id, force_reconfigure=True)
+        return
+
+    await _run_harness_query(context, chat_id, text)
+
+
+async def hybrid_callback_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Classic buttons stay classic; only the Agente button opens the new agent."""
+    query = update.callback_query
+    if query is None or update.effective_chat is None:
+        return
+
+    raw_action = str(query.data or "").strip()
+    if raw_action == "agent_prompt":
+        if not await legacy.ensure_allowed_chat(update, context):
+            return
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        await legacy.send_text(
+            context,
+            int(update.effective_chat.id),
+            "🤖 Escribime tu pregunta en lenguaje natural. El agente conversacional actual está activo.",
+        )
+        return
+
+    # Every other button delegates to the original callback router. This keeps
+    # Portfolio, Plan, Radar, Results, Analytics, Meta, Status, submenus, refresh
+    # behavior and output formatting exactly on the deterministic legacy path.
+    await legacy.callback_handler(update, context)
+
+
 async def post_init(app: Application) -> None:
-    # Remove Telegram's visible command catalog. /start remains an invisible
-    # transport bootstrap only; all normal interaction is natural language.
+    # Inline buttons are the discoverable UI. Keep the slash-command catalog
+    # hidden so the conversational surface remains uncluttered.
     try:
         from telegram import MenuButtonDefault
+
         await app.bot.set_my_commands([])
         await app.bot.set_chat_menu_button(menu_button=MenuButtonDefault())
     except Exception as exc:
@@ -192,7 +239,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.exception("[CHAT] Telegram error", exc_info=context.error)
     if isinstance(update, Update) and update.effective_chat:
         try:
-            await legacy.send_text(context, int(update.effective_chat.id), "Ocurrió un error interno. No se ejecutó ninguna operación.")
+            await legacy.send_text(
+                context,
+                int(update.effective_chat.id),
+                "Ocurrió un error interno. No se ejecutó ninguna operación.",
+            )
         except Exception:
             pass
 
@@ -205,16 +256,16 @@ def build_app() -> Application:
         .post_shutdown(post_shutdown)
         .build()
     )
-    # /start is the Telegram bootstrap. No other visible command or callback
-    # handler is registered; legacy slash input is accepted by the text gateway.
     app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("menu", start_handler))
+    app.add_handler(CallbackQueryHandler(hybrid_callback_handler))
     app.add_handler(MessageHandler(filters.TEXT, text_handler))
     app.add_error_handler(error_handler)
     return app
 
 
 def main() -> None:
-    logger.info("[CHAT] Iniciando Quantia conversational harness")
+    logger.info("[CHAT] Iniciando Quantia hybrid UI: classic buttons + conversational agent")
     build_app().run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+from .evidence_planner import EvidencePlanner
 from .schemas import ContextPlan, TaskSpec
 
 
@@ -89,6 +90,9 @@ _PARALLEL = {
 class ContextSelector:
     """Select the smallest useful tool/context surface for the current task."""
 
+    def __init__(self) -> None:
+        self.evidence_planner = EvidencePlanner()
+
     def select(self, task: TaskSpec, available_tools: set[str]) -> ContextPlan:
         known_bounded_intent = task.intent in _INTENT_TOOLS
         if task.intent == "general":
@@ -116,12 +120,18 @@ class ContextSelector:
         if not allowed and not known_bounded_intent:
             allowed = sorted(available_tools)
 
+        claims = self.evidence_planner.plan(
+            task=task,
+            available_tools=set(allowed),
+            required_tools=required,
+        )
         complex_task = task.intent in {
             "position_analysis", "position_comparison", "opportunities", "decision_lab", "meta_policy"
         }
         return ContextPlan(
             allowed_tools=allowed,
             required_tools=required,
+            evidence_claims=claims,
             parallel_groups=parallel,
             max_steps=self._env_int("QUANTIA_HARNESS_MAX_STEPS", 8 if complex_task else 5, 1, 20),
             max_tool_calls=self._env_int("QUANTIA_HARNESS_MAX_TOOL_CALLS", 10 if complex_task else 6, 1, 30),
