@@ -2716,6 +2716,7 @@ def _render_compact_report(
         tech = _layer_weighted(r, "technical")
         macro = _layer_weighted(r, "macro")
         sent = _layer_weighted(r, "sentiment")
+        risk = _layer_weighted(r, "risk")
         technical_regime = str(getattr(r, "technical_regime", "TRANSITIONAL") or "TRANSITIONAL")
         trend_score = float(getattr(r, "trend_score", 0.0) or 0.0)
         cw = float(current_w.get(ticker, 0.0))
@@ -2895,7 +2896,8 @@ def render_report(
                 f"   Recomendación: "
                 f"{'reducir' if main_order.side.value == 'SELL' else 'aumentar'} "
                 f"exposición de <b>{_pct(d.current_weight)}</b> a "
-                f"<b>{_pct(d.target_weight)}</b>."
+                f"<b>{_pct(d.executable_target_weight if d.executable_target_weight is not None else d.target_weight)}</b> "
+                f"(target teórico {_pct(d.theoretical_target_weight if d.theoretical_target_weight is not None else d.target_weight)})."
             )
 
         if result is not None:
@@ -2946,7 +2948,8 @@ def render_report(
                 None,
             )
             weight_text = (
-                f" | peso {_pct(d.current_weight)} → {_pct(d.target_weight)}"
+                f" | actual {_pct(d.current_weight)} | teórico {_pct(d.theoretical_target_weight if d.theoretical_target_weight is not None else d.target_weight)} "
+                f"| ejecutable {_pct(d.executable_target_weight if d.executable_target_weight is not None else d.current_weight)}"
                 if d is not None
                 else ""
             )
@@ -3109,7 +3112,8 @@ def render_report(
         d = decision_map.get(ticker)
 
         cw = float(current_w.get(ticker, 0.0))
-        tw = d.target_weight if d else cw
+        theoretical_tw = (d.theoretical_target_weight if d and d.theoretical_target_weight is not None else (d.target_weight if d else cw))
+        executable_tw = (d.executable_target_weight if d and d.executable_target_weight is not None else cw)
         action_str = d.action.value if d else "HOLD"
         icon = _action_icon(d.action if d else DecisionType.HOLD)
 
@@ -3139,7 +3143,7 @@ def render_report(
         h.append(
             f"{icon} <b>{ticker}</b> → <b>{action_str}</b>{ars_str} | "
             f"score <code>{score:+.3f}</code> | <b>{signal_label}</b> | "
-            f"peso {_pct(cw)} → {_pct(tw)}"
+            f"actual {_pct(cw)} | teórico {_pct(theoretical_tw)} | ejecutable {_pct(executable_tw)}"
         )
         h.append(
             f"   Régimen técnico: <b>{escape(str(getattr(r, 'technical_regime', 'TRANSITIONAL')))}</b> | "
@@ -3171,9 +3175,12 @@ def render_report(
 
         if action_str != DecisionType.HOLD.value:
             h.append(
-                f"   Capas: <code>técnico {tech:+.3f} | "
-                f"macro {macro:+.3f} | "
-                f"{sentiment_label}</code>"
+                f"   Capas: <code>T {tech:+.3f} | M {macro:+.3f} | "
+                f"Risk {risk:+.3f} | S {sent:+.3f}</code>"
+            )
+            h.append(
+                f"   Regime <b>{escape(str(getattr(r, 'technical_regime', 'TRANSITIONAL')))}</b> | "
+                f"Trend <code>{float(getattr(r, 'trend_score', 0.0) or 0.0):+.3f}</code>"
             )
 
         source_mode = str(
