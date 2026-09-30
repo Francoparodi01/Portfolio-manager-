@@ -58,6 +58,12 @@ class OptimizationResult:
     actual_engine: str = ""
     engine_note: str = ""
     cash_weight: float = 0.0
+    frozen_weight: float = 0.0
+    reserved_cash_weight: float = 0.0
+    optimizable_budget: float = 1.0
+    current_portfolio_sharpe: Optional[float] = None
+    theoretical_target_sharpe: Optional[float] = None
+    executable_target_sharpe: Optional[float] = None
 
 
 @dataclass
@@ -743,8 +749,35 @@ def run_optimizer(
         else:
             raw_weights = _optimize_max_sharpe_np(mu_ann, cov, universe, w_max_arr)
 
-        weights_optimal = dict(zip(universe, raw_weights))
-        cash_weight = max(0.0, 1.0 - float(np.sum(raw_weights)))
+        # Preserve non-evaluable holdings and explicit cash outside the optimizer simplex.
+        # The optimizer may rank only assets with valid history; it must not implicitly
+        # liquidate or reallocate capital that it cannot evaluate.
+        optimizable_set = set(universe)
+        frozen_weight = sum(
+            weight for ticker, weight in current_w_map.items()
+            if ticker not in optimizable_set
+        )
+        reserved_cash_weight = (
+            max(0.0, float(cash_ars or 0.0)) / portfolio_value_ars
+            if portfolio_value_ars > 0 else 0.0
+        )
+        optimizable_budget = max(0.0, 1.0 - frozen_weight - reserved_cash_weight)
+        raw_asset_sum = max(0.0, float(np.sum(raw_weights)))
+        scaled_weights = np.asarray(raw_weights, dtype=float) * optimizable_budget
+        weights_optimal = dict(zip(universe, scaled_weights))
+        optimizer_cash = max(0.0, optimizable_budget * (1.0 - raw_asset_sum))
+        cash_weight = reserved_cash_weight + optimizer_cash
+        invariant_total = frozen_weight + float(np.sum(scaled_weights)) + cash_weight
+        if abs(invariant_total - 1.0) > 1e-6:
+            raise ValueError(
+                "Portfolio budget invariant violated: "
+                f"frozen={frozen_weight:.6f} optimized={np.sum(scaled_weights):.6f} "
+                f"cash={cash_weight:.6f} total={invariant_total:.6f}"
+            )
+        logger.info(
+            "Optimizer budget: frozen=%.2f%% cash=%.2f%% optimizable=%.2f%%",
+            frozen_weight * 100, reserved_cash_weight * 100, optimizable_budget * 100,
+        )
 
         # ── PASO 7: Stats del portfolio óptimo ───────────────────────────────
         w_arr = np.array([weights_optimal[t] for t in universe])
@@ -763,6 +796,10 @@ def run_optimizer(
             actual_engine=actual_engine,
             engine_note=engine_note,
             cash_weight=round(cash_weight, 6),
+            frozen_weight=round(frozen_weight, 6),
+            reserved_cash_weight=round(reserved_cash_weight, 6),
+            optimizable_budget=round(optimizable_budget, 6),
+            theoretical_target_sharpe=round(sharpe, 3),
         )
 
         # ── PASO 8: Calcular trades ───────────────────────────────────────────
@@ -771,7 +808,9 @@ def run_optimizer(
 
         for ticker in all_tickers:
             w_cur = current_w_map.get(ticker, 0.0)
-            w_opt = weights_optimal.get(ticker, 0.0)
+            # Frozen/non-evaluable positions keep their current weight. Absence from
+            # the optimizer universe is not an instruction to liquidate.
+            w_opt = weights_optimal.get(ticker, w_cur if ticker not in optimizable_set else 0.0)
             delta = w_opt - w_cur
             amount_ars = abs(delta) * portfolio_value_ars
 
