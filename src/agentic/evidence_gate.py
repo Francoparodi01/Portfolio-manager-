@@ -265,6 +265,96 @@ def canonical_sql_is_redundant(intent: str, history: list[dict[str, Any]]) -> bo
     return False
 
 
+def _pct(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "N/D"
+    return f"{float(value) * 100:.2f}%"
+
+
+def _number(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "N/D"
+    return f"{float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def render_portfolio_review(gate: EvidenceGateResult) -> str:
+    """Deterministic safe renderer for current portfolio evidence.
+
+    It intentionally does not derive a frozen target or reinterpret planner actions.
+    """
+    data = gate.normalized or {}
+    decisions = [row for row in data.get("decisions", []) if isinstance(row, dict)]
+    complete_rows = [
+        row for row in decisions
+        if all(row.get(field) is not None for field in PORTFOLIO_REVIEW_REQUIREMENT.required_fields)
+    ]
+    candidates = complete_rows or decisions
+    chosen = None
+    if candidates:
+        chosen = max(
+            candidates,
+            key=lambda row: abs(
+                float(row.get("theoretical_target_weight") or row.get("current_weight") or 0.0)
+                - float(row.get("current_weight") or 0.0)
+            ),
+        )
+
+    parts: list[str] = []
+    if chosen:
+        action = str(chosen.get("action") or "N/D")
+        parts.append(
+            f"{chosen.get('ticker', 'N/D')}: peso actual {_pct(chosen.get('current_weight'))}; "
+            f"target teórico del optimizer {_pct(chosen.get('theoretical_target_weight'))}; "
+            f"target ejecutable del planner {_pct(chosen.get('executable_target_weight'))}."
+        )
+        parts.append(
+            "SignalClass " + str(chosen.get("signal_class") or "N/D")
+            + " · PortfolioIntent " + str(chosen.get("portfolio_intent") or "N/D")
+            + " · Risk " + str(chosen.get("risk") if chosen.get("risk") is not None else "N/D")
+            + " · Regime " + str(chosen.get("technical_regime") or "N/D")
+            + " · Trend " + str(chosen.get("trend_score") if chosen.get("trend_score") is not None else "N/D")
+            + f" · acción {action}."
+        )
+        if action.upper() in {"WATCH", "BLOCKED"}:
+            parts.append(
+                f"{action.upper()} no es una orden: el target teórico informa la preferencia del optimizer, "
+                "pero el target ejecutable conserva lo que el planner permite hacer ahora."
+            )
+        else:
+            parts.append(
+                "El target teórico pertenece al optimizer; el ejecutable incorpora las restricciones del planner y es la referencia operativa del plan."
+            )
+    else:
+        parts.append("La evidencia actual no contiene una decisión con todos los campos necesarios para comparar optimizer y planner.")
+
+    frozen = [str(item) for item in data.get("non_evaluable_positions", []) if str(item)]
+    if frozen:
+        parts.append(
+            "Posiciones frozen/no evaluables detectadas por presencia en el snapshot y ausencia en la evidencia evaluable: "
+            + ", ".join(frozen)
+            + ". No les asigno target 0: la evidencia no informa un frozen_weight explícito del optimizer."
+        )
+        cash = data.get("cash_ars")
+        parts.append(
+            "El presupuesto total debe leerse como posiciones optimizables + posiciones frozen/no evaluables + cash"
+            + (f" ({_number(cash)} ARS informado)." if isinstance(cash, (int, float)) else ".")
+        )
+    else:
+        parts.append("No detecté posiciones del snapshot ausentes de la evidencia evaluable en este run.")
+
+    stale = data.get("snapshot_stale_reason")
+    if stale:
+        parts.append(f"Freshness: el snapshot está marcado como desactualizado: {stale}.")
+    elif data.get("snapshot_as_of"):
+        parts.append(f"Snapshot usado: {data.get('snapshot_as_of')}; análisis: {data.get('evaluated_at') or 'N/D'}.")
+
+    if gate.missing_fields:
+        parts.append("Campos faltantes para completar el contrato: " + ", ".join(gate.missing_fields) + ".")
+    if gate.missing_tools:
+        parts.append("Fuentes canónicas faltantes: " + ", ".join(gate.missing_tools) + ".")
+    return "\n".join(parts)
+
+
 __all__ = [
     "EvidenceRequirement",
     "EvidenceGateResult",
@@ -274,5 +364,6 @@ __all__ = [
     "evaluate_evidence",
     "evidence_complete",
     "normalize_portfolio_review",
+    "render_portfolio_review",
     "successful_payloads",
 ]
