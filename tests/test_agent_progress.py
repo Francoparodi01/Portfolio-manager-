@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from src.agentic.contracts import AgentDecision, ToolObservation, ToolSpec
 from src.agentic.orchestrator import AgentOrchestrator
 from src.agentic.progress import (
@@ -189,3 +191,39 @@ def test_telegram_edits_one_progress_message_then_deletes_it(tmp_path):
     delete_message.assert_awaited_once_with(chat_id=123, message_id=77)
     assert any("Respuesta final" in text for text in sent_answers)
     send_document.assert_awaited_once()
+
+
+def test_telegram_cancellation_reaps_agent_task_and_cleans_active_chat():
+    from src.agentic.telegram import _active_chats
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def command(args, timeout):
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        finally:
+            cancelled.set()
+
+    context = SimpleNamespace(
+        bot=SimpleNamespace(
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=88)),
+            edit_message_text=AsyncMock(),
+            delete_message=AsyncMock(),
+            send_document=AsyncMock(),
+        )
+    )
+
+    async def scenario():
+        task = asyncio.create_task(
+            run_report(context, 321, "Revisá mi cartera", run_command=command, send_text=AsyncMock())
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cancelled.is_set()
+
+    asyncio.run(scenario())
+    assert 321 not in _active_chats
