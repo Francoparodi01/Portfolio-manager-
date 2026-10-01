@@ -48,7 +48,7 @@ def _registry() -> ToolRegistry:
 def test_safe_tool_labels_never_expose_arguments_or_reasoning():
     assert safe_tool_label("get_portfolio_snapshot") == "Consultando cartera"
     assert safe_tool_label("get_macro_context") == "Revisando contexto macro"
-    assert safe_tool_label("compare_plan_vs_hold") == "Consultando evidencia"
+    assert safe_tool_label("compare_plan_vs_hold") == "Contrastando evidencia histórica"
     text = render_progress([
         AgentProgressEvent(AgentProgressState.RECEIVED),
         AgentProgressEvent(AgentProgressState.USING_TOOL, "get_portfolio_snapshot", 1),
