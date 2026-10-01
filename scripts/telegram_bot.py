@@ -138,6 +138,8 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("menu", "Abrir panel principal"),
     ("help", "Cómo leer Quantia"),
     ("portfolio", "Cartera actual"),
+    ("replica_iniciar", "Iniciar réplica de cartera"),
+    ("replica", "Consultar la réplica"),
     ("analisis", "Plan operativo"),
     ("events", "Próximos balances"),
     ("ticker", "Análisis por ticker"),
@@ -834,6 +836,8 @@ def help_text() -> str:
         "El bot informa y audita. No ejecuta órdenes.\n\n"
         "<b>Cartera y análisis</b>\n"
         "<code>/portfolio</code>: cartera actual y concentración.\n"
+        "<code>/replica_iniciar</code>: copia la cartera de hoy y empieza la réplica.\n"
+        "<code>/replica</code>: consulta el estado simulado.\n"
         "<code>/analisis</code>: plan operativo compacto y auditable.\n"
         "<code>/analisis_test</code>: simulación compacta sin guardar.\n"
         "<code>/analisis_full</code>: simulación completa sin guardar.\n"
@@ -1185,6 +1189,58 @@ async def action_portfolio(
     ]
 
     await send_text(context, chat_id, sync_note + "\n".join(lines))
+
+
+async def action_replica_start(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    if not get_config:
+        await send_text(context, chat_id, "❌ Configuración de base de datos no disponible.")
+        return
+    owner_id = chat_id if _multiuser_enabled() else None
+    sync_note = await sync_operational_state(full=False, owner_chat_id=owner_id, force=True)
+    from src.analysis.paper_portfolio import initialize
+    result = await initialize(get_config().database.url, owner_id)
+    if not result.get("ok"):
+        if result.get("reason") == "active":
+            message = "Ya existe una réplica activa. Usá /replica para consultar su estado."
+        elif result.get("reason") == "snapshot_not_today":
+            message = "No encontré un snapshot de cartera de hoy. Actualizá la cartera y volvé a iniciar."
+        else:
+            message = "No pude iniciar: falta un snapshot de cartera actualizado de hoy."
+        await send_text(context, chat_id, sync_note + "🧪 " + message)
+        return
+    await send_text(
+        context, chat_id,
+        sync_note + "🧪 <b>Réplica iniciada</b>\n"
+        + f"Posiciones copiadas: {result['position_count']} · efectivo: {_money(result['cash_ars'])}\n"
+        + "Desde ahora sigue cada plan de /analisis en modo simulado. Consultala con /replica."
+    )
+
+
+async def action_replica_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    if not get_config:
+        await send_text(context, chat_id, "❌ Configuración de base de datos no disponible.")
+        return
+    from src.analysis.paper_portfolio import status
+    owner_id = chat_id if _multiuser_enabled() else None
+    replica = await status(get_config().database.url, owner_id)
+    if not replica:
+        await send_text(context, chat_id, "No hay una réplica activa. Iniciá una con /replica_iniciar.")
+        return
+    lines = [
+        "🧪 <b>RÉPLICA DE CARTERA</b>",
+        f"Valor estimado: <b>{_money(replica['nav_ars'])}</b>",
+        f"Resultado simulado: <b>{_money(replica['pnl_ars'])}</b>"
+        + (f" ({replica['pnl_pct']:+.2%})" if replica["pnl_pct"] is not None else ""),
+        f"Efectivo: {_money(replica['cash_ars'])}",
+        f"Posiciones: {len(replica['positions'])}",
+    ]
+    for p in sorted(replica["positions"], key=lambda x: -float(x.get("market_value") or 0))[:15]:
+        lines.append(f"· {p['ticker']} · {_format_quantity(p['quantity'])} · {_money(p['market_value'])}")
+    if len(replica["positions"]) > 15:
+        lines.append(f"… y {len(replica['positions']) - 15} más")
+    lines.append(f"Último plan seguido: {replica['last_run_id'] or 'ninguno'}")
+    lines.append("<i>Simulación; no envía órdenes al broker.</i>")
+    await send_text(context, chat_id, "\n".join(lines))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3049,6 +3105,8 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "agent_prompt":   action_agent_prompt,
         "analytics_v2":   action_analytics_v2,
         "portfolio":      action_portfolio,
+        "replica_start":  action_replica_start,
+        "replica_status": action_replica_status,
         "analysis":       action_analysis,
         "analysis_test":  action_analysis_test,
         "analysis_full":  action_analysis_full,
@@ -3145,6 +3203,12 @@ async def portfolio_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def analysis_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "analysis")
+
+async def replica_start_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "replica_start")
+
+async def replica_status_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "replica_status")
 
 async def analysis_test_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "analysis_test")
@@ -3768,6 +3832,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("menu",             menu_handler))
     app.add_handler(CommandHandler("help",             help_handler))
     app.add_handler(CommandHandler("portfolio",        portfolio_handler))
+    app.add_handler(CommandHandler("replica_iniciar",   replica_start_handler))
+    app.add_handler(CommandHandler("replica",           replica_status_handler))
     app.add_handler(CommandHandler("analisis",         analysis_handler))
     app.add_handler(CommandHandler("analysis",         analysis_handler))
     app.add_handler(CommandHandler("analisis_semanal", analysis_handler))
