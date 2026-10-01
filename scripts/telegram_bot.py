@@ -1232,6 +1232,7 @@ async def action_replica_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int
         f"Resultado simulado: <b>{_money(replica['pnl_ars'])}</b>"
         + (f" ({replica['pnl_pct']:+.2%})" if replica["pnl_pct"] is not None else ""),
         f"Efectivo: {_money(replica['cash_ars'])}",
+        f"Precios al: {replica['marked_at'] or 'sin cotizaciones'}",
         f"Posiciones: {len(replica['positions'])}",
     ]
     for p in sorted(replica["positions"], key=lambda x: -float(x.get("market_value") or 0))[:15]:
