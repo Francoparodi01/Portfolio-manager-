@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.agentic.contracts import ToolSpec, ToolValidationError
-from src.agentic.docs_retriever import search_project_docs
+from src.agentic.docs_retriever import search_project_docs, search_project_source
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
 from src.agentic.prompt_context import load_agent_prompt_context, missing_prompt_context_files
 from src.agentic.sql_explorer import _scoped_query, validate_exploratory_sql
@@ -63,6 +63,7 @@ def test_grounded_model_injects_dynamic_planning_context():
     assert "final_score is not PnL" in prompt
     assert "decide the evidence plan yourself" in prompt
     assert "query_quantia_sql" in prompt
+    assert "search_quantia_source" in prompt
     assert "Never request a write capability" in prompt
 
 
@@ -154,6 +155,12 @@ def test_sql_explorer_accepts_owner_scoped_aggregate_shape():
     assert "LIMIT 100" in wrapped
 
 
+def test_sql_explorer_accepts_a_single_trailing_semicolon():
+    query, relations = validate_exploratory_sql("SELECT ticker FROM decision_log LIMIT 5;")
+    assert query == "SELECT ticker FROM decision_log LIMIT 5"
+    assert relations == ("decision_log",)
+
+
 def test_sql_explorer_legacy_scope_is_explicit():
     query, relations = validate_exploratory_sql("SELECT ticker, final_score FROM decision_log LIMIT 5")
     wrapped = _scoped_query(query, relations, allow_legacy_null=True, max_rows=5)
@@ -194,6 +201,25 @@ def test_docs_retriever_returns_grounded_snippet_and_hash():
     assert payload["results"]
     assert all(item["path"].endswith(".md") for item in payload["results"])
     assert all(len(item["sha256"]) == 64 for item in payload["results"])
+
+
+def test_source_retriever_reads_allowlisted_code_but_not_environment_files(tmp_path):
+    source_dir = tmp_path / "scripts"
+    source_dir.mkdir()
+    (source_dir / "telegram_bot.py").write_text(
+        "async def action_analysis_full():\\n    --no-persist\\n    run_intent = exploratory\\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("run_intent=secret\\n", encoding="utf-8")
+
+    payload = search_project_source(tmp_path, "action_analysis_full no-persist exploratory")
+
+    assert payload["schema_version"] == "quantia-source-search-v1"
+    assert payload["results"]
+    assert payload["results"][0]["path"] == "scripts/telegram_bot.py"
+    assert payload["results"][0]["start_line"] >= 1
+    assert all(len(item["sha256"]) == 64 for item in payload["results"])
+    assert all(".env" not in item["path"] for item in payload["results"])
 
 
 def test_grounded_eval_corpus_has_safety_and_source_selection_coverage():
