@@ -3815,6 +3815,8 @@ async def main(
     owner_chat_id:    int | None = None,
     run_intent:       str = "formal_plan",
     agent_json:       bool = False,
+    paper_portfolio_id: int | None = None,
+    paper_source_run_id: str | None = None,
 ):
     if agent_json and not (no_persist and no_telegram and no_llm):
         raise ValueError("--agent-json requires --no-persist --no-telegram --no-llm")
@@ -3831,7 +3833,23 @@ async def main(
         )
 
     # ── 1. Posiciones ──────────────────────────────────────────────────────────
-    if tickers_override:
+    if paper_portfolio_id is not None:
+        from src.analysis.paper_portfolio import status as paper_status
+        replica = await paper_status(cfg.database.url, owner_chat_id)
+        if not replica or int(replica["id"]) != int(paper_portfolio_id):
+            raise RuntimeError("La réplica activa cambió o ya no existe.")
+        positions = replica["positions"]
+        total_ars = float(replica["nav_ars"])
+        cash_ars = float(replica["cash_ars"])
+        history = []
+        portfolio_snapshot = {
+            "scraped_at": datetime.now(ART_TZ).isoformat(),
+            "total_value_ars": total_ars,
+            "cash_ars": cash_ars,
+            "_paper_replica": True,
+        }
+        latest_broker_movement = None
+    elif tickers_override:
         positions = [{"ticker": t, "market_value": 0} for t in tickers_override]
         total_ars = cash_ars = 0.0
         history   = []
@@ -4479,6 +4497,21 @@ async def main(
     else:
         logger.info("Paso 9.5: sin execution_plan o portfolio vacío — skip")
 
+    # ── 9.6 Aplicar plan recalculado desde la réplica (aislado) ───────────────
+    if paper_portfolio_id is not None and execution_plan and total_ars > 0:
+        try:
+            from src.analysis.paper_portfolio import apply_formal_plan
+            applied = await apply_formal_plan(
+                cfg.database.url,
+                owner_chat_id,
+                paper_source_run_id or analysis_run_id,
+                execution_plan,
+            )
+            if applied:
+                logger.info("Plan independiente aplicado a réplica, source_run=%s", paper_source_run_id or analysis_run_id)
+        except Exception as exc:
+            logger.warning("No se pudo actualizar la cartera réplica (no crítico): %s", exc)
+
     # ── 10. Information Coefficient ────────────────────────────────────────────
     ic_metrics = await _compute_information_coefficient(
         cfg,
@@ -4533,8 +4566,37 @@ async def main(
         print(_json.dumps(decision_evidence(results=results, execution_plan=execution_plan,
               macro_snap=macro_snap, portfolio_snapshot=portfolio_snapshot, total_ars=total_ars,
               cash_ars=cash_ars, analysis_run_id=analysis_run_id), ensure_ascii=False, allow_nan=False))
-    else:
+    elif paper_portfolio_id is None:
         print(report)
+
+    if (
+        paper_portfolio_id is None
+        and not no_persist
+        and run_intent == "formal_plan"
+        and execution_plan is not None
+    ):
+        try:
+            from src.analysis.paper_portfolio import status as paper_status
+            replica = await paper_status(cfg.database.url, owner_chat_id)
+            if replica:
+                logger.info("Recalculando el plan con holdings virtuales de réplica id=%s", replica["id"])
+                await main(
+                    tickers_override=[],
+                    period=period,
+                    no_telegram=True,
+                    no_llm=no_llm,
+                    no_sentiment=no_sentiment,
+                    no_optimizer=no_optimizer,
+                    skip_radar=skip_radar,
+                    no_persist=True,
+                    owner_chat_id=owner_chat_id,
+                    run_intent="exploratory",
+                    agent_json=False,
+                    paper_portfolio_id=int(replica["id"]),
+                    paper_source_run_id=analysis_run_id,
+                )
+        except Exception as exc:
+            logger.warning("No se pudo simular la decisión en la réplica (no crítico): %s", exc)
 
     if not no_telegram and cfg.scraper.telegram_enabled:
         logger.info("Enviando a Telegram...")
