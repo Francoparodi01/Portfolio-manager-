@@ -207,10 +207,10 @@ def test_source_retriever_reads_allowlisted_code_but_not_environment_files(tmp_p
     source_dir = tmp_path / "scripts"
     source_dir.mkdir()
     (source_dir / "telegram_bot.py").write_text(
-        "async def action_analysis_full():\\n    --no-persist\\n    run_intent = exploratory\\n",
+        "async def action_analysis_full():\n    --no-persist\n    run_intent = exploratory\n",
         encoding="utf-8",
     )
-    (tmp_path / ".env").write_text("run_intent=secret\\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("run_intent=secret\n", encoding="utf-8")
 
     payload = search_project_source(tmp_path, "action_analysis_full no-persist exploratory")
 
