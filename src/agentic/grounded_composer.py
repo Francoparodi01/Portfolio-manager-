@@ -233,6 +233,10 @@ class GroundedAgentComposer:
             return None
         return value, percent
 
+    @staticmethod
+    def _numeric_matches(value: float, source: float) -> bool:
+        return abs(value - source) <= max(1e-8, 1e-5 * max(abs(value), abs(source), 1.0))
+
     def deterministic_issues(self, *, answer: str, gate: EvidenceGateResult) -> tuple[str, ...]:
         issues: list[str] = []
         normalized = gate.normalized or {}
@@ -252,18 +256,19 @@ class GroundedAgentComposer:
             if value in {0.0, 1.0, 2.0, 3.0}:
                 continue
             if not any(
-                abs(candidate - source) <= max(1e-8, 1e-5 * max(abs(candidate), abs(source), 1.0))
+                self._numeric_matches(candidate, source)
                 for candidate in candidates
                 for source in source_values
             ):
                 unmatched.append(token)
-        if len(set(unmatched)) > 1:
+        if unmatched:
             issues.append("unsupported_numeric_claims:" + ",".join(list(dict.fromkeys(unmatched))[:8]))
 
         lower = answer.lower()
         if any(term in lower for term in ("fill", "se ejecutó", "se ejecuto", "fue ejecutada", "fue ejecutado")):
             issues.append("plan_presented_as_fill")
 
+        executable_clauses = re.findall(r"target ejecutable[^.\n]{0,100}", lower)
         for row in normalized.get("decisions", []):
             if not isinstance(row, dict):
                 continue
@@ -276,9 +281,18 @@ class GroundedAgentComposer:
                 if re.search(pattern, lower):
                     issues.append(f"non_order_action_presented_as_order:{ticker}:{action}")
             if isinstance(theoretical, (int, float)) and isinstance(executable, (int, float)) and theoretical != executable:
-                theoretical_pct = theoretical * 100.0
-                if re.search(rf"target ejecutable[^.\n]{{0,40}}{re.escape(f'{theoretical_pct:.1f}')}", lower):
-                    issues.append(f"theoretical_target_confused_with_executable:{ticker}")
+                for clause in executable_clauses:
+                    for token in _NUMBER_RE.findall(clause):
+                        parsed = self._parse_number(token)
+                        if not parsed:
+                            continue
+                        value, percent = parsed
+                        normalized_value = value / 100.0 if percent else value
+                        if self._numeric_matches(normalized_value, float(theoretical)) and not self._numeric_matches(
+                            normalized_value, float(executable)
+                        ):
+                            issues.append(f"theoretical_target_confused_with_executable:{ticker}")
+                            break
 
         for ticker in normalized.get("non_evaluable_positions", []):
             if re.search(rf"\b{re.escape(str(ticker).lower())}\b[^.\n]{{0,80}}target[^.\n]{{0,20}}\b0(?:[.,]0+)?%?", lower):
