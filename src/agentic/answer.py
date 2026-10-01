@@ -511,11 +511,21 @@ def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision
     card_budget = min(2600, 7600 // len(cards))
     cards = [_excerpt(card, card_budget) for card in cards]
     limits = list(dict.fromkeys(limits))
+    source_search_succeeded = "search_quantia_source" in observed_tools
+    if source_search_succeeded:
+        opening = (
+            "Hallazgo de implementación para tu pregunta «" + _excerpt(goal, 400) + "»: "
+            "encontré código relacionado abajo. Los fragmentos muestran qué hace el código; "
+            "no confirman por sí solos una ejecución en producción ni resultados de base de datos.\n\n"
+        )
+    else:
+        opening = (
+            "Hallazgos para tu pregunta «" + _excerpt(goal, 400) + "»: "
+            f"obtuve {successful} consulta(s) con resultado. La evidencia y sus límites están abajo.\n\n"
+        )
     answer = (
-        "Resumen: Revisé la evidencia disponible para tu consulta: «" + _excerpt(goal, 400) + "». "
-        f"Consultas con resultado: {successful}. Este cierre describe sus datos y límites; "
-        "no establece una operación ni una rentabilidad validada.\n\n"
-        "Evidencia:\n" + "\n\n".join(cards)
+        opening
+        + "Evidencia:\n" + "\n\n".join(cards)
         + "\n\nFaltantes y límites:\n- " + "\n- ".join(limits)
         + "\n- Sólo se verificó lo consultado. La traza conserva las fuentes; no certifica la calidad económica de sus señales."
     )
