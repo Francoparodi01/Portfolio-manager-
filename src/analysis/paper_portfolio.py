@@ -194,16 +194,32 @@ async def status(database_url: str, owner_chat_id: int | None) -> dict | None:
                 "SELECT * FROM paper_portfolios WHERE owner_key=$1 AND status='active'",
                 _owner_key(owner_chat_id),
             )
-        if not row:
-            return None
-        positions = _clean_positions(json.loads(row["positions"]) if isinstance(row["positions"], str) else row["positions"])
-        baseline = _clean_positions(json.loads(row["baseline_positions"]) if isinstance(row["baseline_positions"], str) else row["baseline_positions"])
+            if not row:
+                return None
+            positions = _clean_positions(json.loads(row["positions"]) if isinstance(row["positions"], str) else row["positions"])
+            baseline = _clean_positions(json.loads(row["baseline_positions"]) if isinstance(row["baseline_positions"], str) else row["baseline_positions"])
+            tickers = [p["ticker"] for p in positions]
+            marks = await conn.fetch(
+                """SELECT DISTINCT ON (ticker) ticker, last_price::float AS last_price, ts
+                   FROM market_prices
+                   WHERE ticker = ANY($1::text[]) AND last_price > 0
+                   ORDER BY ticker, ts DESC""",
+                tickers,
+            ) if tickers else []
+        mark_by_ticker = {str(r["ticker"]).upper(): r for r in marks}
+        for position in positions:
+            mark = mark_by_ticker.get(position["ticker"])
+            if mark:
+                position["current_price"] = float(mark["last_price"])
+                position["market_value"] = position["quantity"] * position["current_price"]
         baseline_nav = float(row["baseline_cash_ars"]) + sum(float(p["market_value"]) for p in baseline)
         nav = float(row["cash_ars"]) + sum(float(p["market_value"]) for p in positions)
+        marked_at = max((m["ts"] for m in marks), default=None)
         return {"id": int(row["id"]), "opened_at": row["opened_at"].isoformat(),
                 "cash_ars": float(row["cash_ars"]), "positions": positions,
                 "nav_ars": nav, "baseline_nav_ars": baseline_nav,
                 "pnl_ars": nav-baseline_nav, "pnl_pct": (nav/baseline_nav-1) if baseline_nav else None,
-                "last_run_id": row["last_run_id"]}
+                "last_run_id": row["last_run_id"],
+                "marked_at": marked_at.isoformat() if marked_at else None}
     finally:
         await db.close()
