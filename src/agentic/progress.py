@@ -66,7 +66,16 @@ def safe_tool_label(tool_name: str | None) -> str:
         return "Consultando cartera"
     if "macro" in name:
         return "Revisando contexto macro"
-    if any(token in name for token in ("decision", "performance", "history", "replay", "counterfactual", "ledger")):
+    if any(token in name for token in (
+        "decision",
+        "performance",
+        "history",
+        "replay",
+        "counterfactual",
+        "ledger",
+        "plan_vs_hold",
+        "strategy_version",
+    )):
         return "Contrastando evidencia histórica"
     if any(token in name for token in ("ticker", "market", "quote", "radar", "signal")):
         return "Consultando mercado y señales"
@@ -87,7 +96,7 @@ def read_progress_events(path: str | Path) -> list[AgentProgressEvent]:
             payload = json.loads(raw)
             if isinstance(payload, dict):
                 events.append(AgentProgressEvent.from_mapping(payload))
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        except (ValueError, KeyError, TypeError):
             continue
     return events
 
@@ -115,7 +124,7 @@ def render_progress(events: list[AgentProgressEvent]) -> str:
         AgentProgressState.COMPOSING,
     } for event in events)
     if planned:
-        lines.append("✓ Planificando análisis")
+        lines.append("✓ Plan de análisis definido")
     else:
         lines.append("⏳ Planificando análisis…")
         return "\n".join(lines)
@@ -145,4 +154,6 @@ def render_progress(events: list[AgentProgressEvent]) -> str:
     elif not tool_events:
         lines.append("⏳ Seleccionando evidencia…")
 
-    return "\n".join(lines[-8:])
+    if len(lines) <= 8:
+        return "\n".join(lines)
+    return "\n".join(lines[:4] + lines[-4:])
