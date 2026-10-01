@@ -22,6 +22,7 @@ from .evidence_gate import (
     INTENT_REQUIREMENTS,
     canonical_sql_is_redundant,
     evaluate_evidence,
+    render_portfolio_review,
     successful_payloads,
 )
 from .model import AgentModel
@@ -146,22 +147,31 @@ class AgentOrchestrator:
         gate,
         composer_issue: str | None = None,
     ) -> AgentDecision:
-        context = getattr(self.model, "conversation_context", None)
-        try:
-            decision = diagnostic_decision(
-                goal,
-                history,
-                plan,
-                context if isinstance(context, list) else None,
+        if plan.intent == "portfolio_review" and gate.normalized:
+            decision = AgentDecision(
+                kind="final",
+                answer=render_portfolio_review(gate),
+                rationale=gate.reason,
+                answer_origin="portfolio_renderer_v6_current_run",
+                objective_status="EXPLAINED" if gate.complete else "PARTIAL",
             )
-        except Exception:
-            decision = evidence_decision(goal, history)
+        else:
+            context = getattr(self.model, "conversation_context", None)
+            try:
+                decision = diagnostic_decision(
+                    goal,
+                    history,
+                    plan,
+                    context if isinstance(context, list) else None,
+                )
+            except Exception:
+                decision = evidence_decision(goal, history)
+            decision.answer_origin = "evidence_renderer_v2"
+            if gate.complete:
+                decision.objective_status = "EXPLAINED"
+            elif decision.objective_status == "NOT_ASSESSED":
+                decision.objective_status = "PARTIAL" if successful_payloads(history) else "INSUFFICIENT"
         decision.answer = validate_answer(decision.answer)
-        decision.answer_origin = "evidence_renderer_v2"
-        if gate.complete:
-            decision.objective_status = "EXPLAINED"
-        elif decision.objective_status == "NOT_ASSESSED":
-            decision.objective_status = "PARTIAL" if successful_payloads(history) else "INSUFFICIENT"
         reason = gate.reason
         if composer_issue:
             reason += f" Safe renderer used: {composer_issue}."
