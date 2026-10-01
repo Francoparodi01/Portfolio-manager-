@@ -268,7 +268,7 @@ def canonical_sql_is_redundant(intent: str, history: list[dict[str, Any]]) -> bo
 def _pct(value: Any) -> str:
     if not isinstance(value, (int, float)):
         return "N/D"
-    return f"{float(value) * 100:.2f}%"
+    return f"{float(value) * 100:.2f}%".replace(".", ",")
 
 
 def _number(value: Any) -> str:
