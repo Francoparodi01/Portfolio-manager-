@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.agentic.answer import evidence_decision
 from src.agentic.contracts import ToolSpec, ToolValidationError
 from src.agentic.docs_retriever import search_project_docs, search_project_source
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
@@ -220,6 +221,34 @@ def test_source_retriever_reads_allowlisted_code_but_not_environment_files(tmp_p
     assert payload["results"][0]["start_line"] >= 1
     assert all(len(item["sha256"]) == 64 for item in payload["results"])
     assert all(".env" not in item["path"] for item in payload["results"])
+
+
+
+def test_forced_fallback_answers_with_the_source_finding():
+    decision = evidence_decision(
+        "¿Qué hace /analisis_full?",
+        [{
+            "decision": {"tool": "search_quantia_source"},
+            "observation": {
+                "tool_name": "search_quantia_source",
+                "ok": True,
+                "content": json.dumps({
+                    "schema_version": "quantia-source-search-v1",
+                    "results": [{
+                        "path": "scripts/telegram_bot.py",
+                        "start_line": 123,
+                        "snippet": "async def action_analysis_full():\\n    run_intent = exploratory",
+                        "sha256": "a" * 64,
+                    }],
+                }),
+            },
+        }],
+    )
+
+    assert "Hallazgo de implementación" in decision.answer
+    assert "scripts/telegram_bot.py:123" in decision.answer
+    assert "run_intent = exploratory" in decision.answer
+    assert decision.answer_origin == "evidence_renderer_v1"
 
 
 def test_grounded_eval_corpus_has_safety_and_source_selection_coverage():
