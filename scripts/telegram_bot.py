@@ -1267,7 +1267,14 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
         full=False,
         owner_chat_id=chat_id,
     )
-    cached = await _load_cached_report("analysis", chat_id)
+    owner_id = chat_id if _multiuser_enabled() else None
+    replica_active = False
+    try:
+        from src.analysis.paper_portfolio import status as paper_status
+        replica_active = await paper_status(get_config().database.url, owner_id) is not None
+    except Exception as exc:
+        logger.warning("[BOT][ANALYSIS] No pude consultar réplica: %s", exc)
+    cached = None if replica_active else await _load_cached_report("analysis", chat_id)
     if cached:
         logger.info(
             "[BOT][ANALYSIS] cache_hit=true total_s=%.2f",
