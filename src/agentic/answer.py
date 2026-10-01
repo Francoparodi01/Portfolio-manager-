@@ -82,6 +82,24 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
     if not isinstance(data, dict):
         data = {}
 
+    if data.get("schema_version") == "quantia-source-search-v1":
+        results = data.get("results") if isinstance(data.get("results"), list) else []
+        cards = []
+        for item in results[:3]:
+            if not isinstance(item, dict):
+                continue
+            cards.append(
+                f"{item.get('path') or 'archivo'}:{item.get('start_line') or '?'} "
+                f"— {str(item.get('snippet') or '').strip()[:1100]}"
+            )
+        if not cards:
+            return "No se encontraron coincidencias en las rutas de código permitidas.", [
+                "La búsqueda cubre scripts/ y módulos Python seleccionados; no demuestra ausencia en otros archivos."
+            ]
+        return "\n".join(cards), [
+            "Fragmentos de código fuente versionado; describen implementación, no confirman datos ni ejecución en producción."
+        ]
+
     if data.get("schema_version") == "decision-lab-agent-evidence-v1":
         from src.decision_lab.queries import explain_evidence
         answer, _status = explain_evidence(data)
