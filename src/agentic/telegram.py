@@ -96,6 +96,17 @@ async def _follow_progress(
         await _edit_progress_message(context, chat_id, message_id, text)
 
 
+async def _cancel_command_task(command_task: asyncio.Task | None) -> None:
+    """Preserve cancellation semantics: UI cancellation must reap the agent subprocess."""
+    if command_task is None or command_task.done():
+        return
+    command_task.cancel()
+    try:
+        await command_task
+    except asyncio.CancelledError:
+        pass
+
+
 async def run_report(context, chat_id, goal, *, run_command, send_text):
     goal = " ".join(goal.split())
     new_conversation = goal.lower() == "nuevo" or goal.lower().startswith("nuevo ")
@@ -112,6 +123,7 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
         return
     _active_chats.add(chat_id)
     progress_message_id = None
+    command_task = None
     try:
         with tempfile.TemporaryDirectory(prefix="quantia_agent_") as folder:
             artifact = Path(folder) / "quantia_agent_trace.json"
@@ -167,5 +179,6 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
                                                 filename=artifact.name,
                                                 caption="Traza del agente: herramientas, observaciones, límites y estado de auditoría.")
     finally:
+        await _cancel_command_task(command_task)
         await _delete_progress_message(context, chat_id, progress_message_id)
         _active_chats.discard(chat_id)
