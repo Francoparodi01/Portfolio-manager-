@@ -4479,6 +4479,21 @@ async def main(
     else:
         logger.info("Paso 9.5: sin execution_plan o portfolio vacío — skip")
 
+    # ── 9.6 Aplicar una sola vez el plan formal a la cartera réplica ────────
+    if not no_persist and run_intent == "formal_plan" and execution_plan and total_ars > 0:
+        try:
+            from src.analysis.paper_portfolio import apply_formal_plan
+            applied = await apply_formal_plan(
+                cfg.database.url,
+                owner_chat_id,
+                analysis_run_id,
+                execution_plan,
+            )
+            if applied:
+                logger.info("Plan formal aplicado a cartera réplica (paper), run=%s", analysis_run_id)
+        except Exception as exc:
+            logger.warning("No se pudo actualizar la cartera réplica (no crítico): %s", exc)
+
     # ── 10. Information Coefficient ────────────────────────────────────────────
     ic_metrics = await _compute_information_coefficient(
         cfg,
