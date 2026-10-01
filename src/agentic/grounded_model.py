@@ -147,6 +147,8 @@ class GroundedQuantiaAgentModel(OllamaAgentModel):
               "- Use inspect_quantia_schema when exact live columns are uncertain.\n"
               "- Use query_quantia_sql for exploratory SELECT analysis that is not a canonical metric.\n"
               "- Use search_quantia_docs for architecture, metric definitions and implementation rationale grounded in repository documentation.\n"
+              "- Use search_quantia_source to verify how commands and code paths actually behave; cite the returned path and line.\n"
+              "- For query_quantia_sql, submit one SELECT without comments or multiple statements; repair from the exact validation error and do not repeat an identical failed call.\n"
               "- Prefer canonical deterministic tools for PnL, PLAN-vs-HOLD/DVA, current portfolio state, or canonical episode methodology.\n"
               "- A failed SQL query is evidence of a bad query/schema assumption, not evidence that the financial value is zero. Repair by inspecting schema or choosing another valid source.\n"
               "- Never request a write capability. Never output SQL as if it had executed unless a successful tool observation contains its result.\n"
