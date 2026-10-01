@@ -157,16 +157,16 @@ async def apply_formal_plan(database_url: str, owner_chat_id: int | None, run_id
                         sold = min(qty, float(pos["quantity"]))
                         fraction = sold / float(pos["quantity"]) if pos["quantity"] else 0
                         proceeds = amount if sold >= float(pos["quantity"]) else amount * fraction
-                        cash += proceeds * 0.993
+                        cash += proceeds * 0.9925
                         pos["quantity"] = max(0.0, float(pos["quantity"]) - sold)
                         pos["current_price"] = price or pos["current_price"]
                         pos["market_value"] = pos["quantity"] * pos["current_price"]
                     elif side == "BUY":
-                        spend = min(amount, cash / 1.007)
+                        spend = min(amount, cash / 1.0075)
                         bought = min(qty, spend / price) if price > 0 else qty
                         if bought <= 0:
                             continue
-                        cash -= spend * 1.007
+                        cash -= spend * 1.0075
                         if not pos:
                             pos = {"ticker": ticker, "quantity": 0.0, "current_price": price, "market_value": 0.0}
                             by_ticker[ticker] = pos
