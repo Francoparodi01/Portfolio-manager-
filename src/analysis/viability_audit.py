@@ -1,10 +1,11 @@
 """
-Read-only viability audit for the trading project.
+Read-only retrospective audit for the trading project.
 
-This module separates bot-only, followed-by-user and manual-only execution,
-measures 5d/10d/20d/40d independently, and reports whether the bot clears a
-conservative bar: positive IC, lower drawdown, and better net EV after costs.
-It does not change guards, thresholds, optimizer weights, or execution logic.
+This module separates bot-only, followed-by-user and manual-only execution and
+measures 5d/10d/20d/40d outcomes after costs. IC is score/outcome correlation;
+the sequential drawdown is descriptive and is not a portfolio-risk estimate.
+Passing these historical gates is not validation for capital allocation.
+The audit does not change guards, thresholds, optimizer weights, or execution.
 """
 
 from __future__ import annotations
@@ -437,7 +438,6 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
         "IC bot-only 5d positivo": "IC (correlación) bot 5D",
         "EV neto bot-only 5d positivo": "EV neto bot 5D",
         "EV neto bot-only mayor que manual-only 5d": "Ventaja vs manual",
-        "drawdown bot-only menor que manual-only 5d": "Drawdown vs manual",
         "comparacion contra manual-only 5d": "Comparación manual",
     }
     lines += ["", "<b>Gates bot-only</b>"]
@@ -1257,12 +1257,6 @@ def _positive(value: Optional[float]) -> Optional[bool]:
 
 
 def _gt(left: Optional[float], right: Optional[float]) -> Optional[bool]:
-    if left is None or right is None:
-        return None
-    return left > right
-
-
-def _drawdown_better(left: Optional[float], right: Optional[float]) -> Optional[bool]:
     if left is None or right is None:
         return None
     return left > right
