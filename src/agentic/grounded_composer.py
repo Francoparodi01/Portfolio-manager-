@@ -277,8 +277,13 @@ class GroundedAgentComposer:
             theoretical = row.get("theoretical_target_weight")
             executable = row.get("executable_target_weight")
             if ticker and action in {"WATCH", "BLOCKED"}:
-                pattern = rf"\b{re.escape(ticker.lower())}\b[^.\n]{{0,100}}\b(comprar|vender|ejecutar)\b"
-                if re.search(pattern, lower):
+                ticker_re = re.escape(ticker.lower())
+                same_sentence = rf"\b{ticker_re}\b[^.\n]{{0,100}}\b(comprar|vender|ejecutar)\b"
+                next_sentence = (
+                    rf"\b{ticker_re}\b[^.\n]{{0,100}}\b(?:watch|blocked)\b[.\n]+"
+                    rf"\s*[^.\n]{{0,100}}\b(comprar|vender|ejecutar)\b[^.\n]{{0,60}}\b{ticker_re}\b"
+                )
+                if re.search(same_sentence, lower) or re.search(next_sentence, lower):
                     issues.append(f"non_order_action_presented_as_order:{ticker}:{action}")
             if isinstance(theoretical, (int, float)) and isinstance(executable, (int, float)) and theoretical != executable:
                 for clause in executable_clauses:
