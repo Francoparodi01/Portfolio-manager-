@@ -10,11 +10,16 @@ on:
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
       - 'src/agentic/grounded_model.py'
+      - 'src/agentic/grounded_composer.py'
+      - 'src/agentic/evidence_gate.py'
+      - 'src/agentic/orchestrator.py'
+      - 'src/agentic/telegram.py'
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
       - 'scripts/run_agent.py'
       - 'scripts/run_grounded_agent_evals.py'
       - 'tests/test_grounded_agent_architecture.py'
+      - 'tests/test_agent_orchestrator_v2.py'
       - 'evals/agent/**'
       - '.github/workflows/grounded-agent-ci.yml'
   pull_request:
@@ -25,11 +30,16 @@ on:
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
       - 'src/agentic/grounded_model.py'
+      - 'src/agentic/grounded_composer.py'
+      - 'src/agentic/evidence_gate.py'
+      - 'src/agentic/orchestrator.py'
+      - 'src/agentic/telegram.py'
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
       - 'scripts/run_agent.py'
       - 'scripts/run_grounded_agent_evals.py'
       - 'tests/test_grounded_agent_architecture.py'
+      - 'tests/test_agent_orchestrator_v2.py'
       - 'evals/agent/**'
       - '.github/workflows/grounded-agent-ci.yml'
 
@@ -55,6 +65,10 @@ jobs:
           python -m compileall -q \
             src/agentic/prompt_context.py \
             src/agentic/grounded_model.py \
+            src/agentic/grounded_composer.py \
+            src/agentic/evidence_gate.py \
+            src/agentic/orchestrator.py \
+            src/agentic/telegram.py \
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
             scripts/run_agent.py \
@@ -64,13 +78,21 @@ jobs:
           ruff check --select E9,F63,F7,F82 \
             src/agentic/prompt_context.py \
             src/agentic/grounded_model.py \
+            src/agentic/grounded_composer.py \
+            src/agentic/evidence_gate.py \
+            src/agentic/orchestrator.py \
+            src/agentic/telegram.py \
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
             scripts/run_agent.py \
             scripts/run_grounded_agent_evals.py \
-            tests/test_grounded_agent_architecture.py
+            tests/test_grounded_agent_architecture.py \
+            tests/test_agent_orchestrator_v2.py
       - name: Run architecture and safety tests
-        run: pytest -q tests/test_grounded_agent_architecture.py
+        run: |
+          pytest -q \
+            tests/test_grounded_agent_architecture.py \
+            tests/test_agent_orchestrator_v2.py
       - name: Validate eval corpus JSON
         run: python -m json.tool evals/agent/grounded_queries_v1.json > /dev/null
       - name: Check eval runner CLI

@@ -22,7 +22,9 @@ from src.agentic import (
 from src.agentic.bot_directional_history import register_bot_directional_history_tool
 from src.agentic.diagnostics import question_plan
 from src.agentic.docs_retriever import register_docs_retriever_tool
+from src.agentic.grounded_composer import GroundedAgentComposer
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
+from src.agentic.harness.models import ModelRoles
 from src.agentic.harness.tools_ext import register_harness_tools
 from src.agentic.orchestrator import default_max_steps
 from src.agentic.prompt_context import load_agent_prompt_context, missing_prompt_context_files
@@ -38,13 +40,17 @@ def _bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _controller_model_default() -> str:
+    return os.getenv("QUANTIA_LLM_ROUTER") or os.getenv("QUANTIA_AGENT_MODEL", "qwen3.5:9b")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Quantia's bounded read-only agentic loop."
     )
     parser.add_argument("--goal", required=True, help="Analytical objective for the agent.")
     parser.add_argument("--owner-chat-id", type=int, default=None)
-    parser.add_argument("--model", default=os.getenv("QUANTIA_AGENT_MODEL", "qwen3.5:9b"))
+    parser.add_argument("--model", default=_controller_model_default())
     parser.add_argument("--max-steps", type=int, default=default_max_steps())
     parser.add_argument("--json", action="store_true", help="Print the complete trace as JSON.")
     parser.add_argument("--output-json", type=Path, help="Write the full trace to a new file.")
@@ -119,10 +125,16 @@ async def async_main(args: argparse.Namespace) -> int:
         raise RuntimeError(
             "grounded agent context is incomplete; missing: " + ", ".join(missing_grounding)
         )
+
+    roles = ModelRoles.from_env()
     model = GroundedQuantiaAgentModel(
         model=args.model,
         conversation_context=prior,
         project_context=prompt_context.text,
+    )
+    composer = GroundedAgentComposer(
+        synthesis_model=roles.synthesis,
+        verifier_model=roles.verifier,
     )
     plan = question_plan(args.goal, prior)
     source_files = sorted((ROOT / "src/agentic").glob("*.py")) + [
@@ -137,6 +149,7 @@ async def async_main(args: argparse.Namespace) -> int:
         model=model,
         registry=registry,
         store=store,
+        composer=composer,
         max_steps=args.max_steps,
         max_identical_calls=1,
         require_audit=require_audit,
@@ -152,7 +165,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 owner_chat_id=owner_chat_id,
                 metadata={
                     "trigger": "cli",
-                    "agent_version": "quantia-grounded-agent-v1",
+                    "agent_version": "quantia-agent-orchestrator-v2",
                     "source_hashes": source_hashes,
                     "prompt_context_hashes": prompt_context.source_hashes,
                     "conversation_id": conversation_id,
@@ -162,6 +175,13 @@ async def async_main(args: argparse.Namespace) -> int:
                     "question_intent": plan.intent,
                     "required_tools": list(plan.required_tools),
                     "dynamic_planning": True,
+                    "model_roles": {
+                        "controller": model.name,
+                        "router": roles.router,
+                        "reasoning": roles.reasoning,
+                        "synthesis": roles.synthesis,
+                        "verifier": roles.verifier,
+                    },
                     "sql_explorer": "owner-scoped-read-only-v1",
                     "docs_retriever": "checked-in-markdown-v1",
                     "read_only": True,
