@@ -159,20 +159,24 @@ def normalize_portfolio_review(history: list[dict[str, Any]]) -> dict[str, Any]:
         for row in positions
         if isinstance(row, dict) and _ticker(row.get("ticker"))
     }
-    evaluable_tickers = set(signal_by_ticker) | {
+    evidence_tickers = set(signal_by_ticker) | {
         row["ticker"] for row in normalized_rows if row.get("ticker")
     }
-    non_evaluable = sorted(portfolio_tickers - evaluable_tickers)
+    evaluable_portfolio_tickers = portfolio_tickers & evidence_tickers
+    non_evaluable = sorted(portfolio_tickers - evidence_tickers)
 
     return {
-        "snapshot": snapshot,
-        "decision_evidence": evidence,
         "decisions": normalized_rows,
         "non_evaluable_positions": non_evaluable,
+        "portfolio_position_count": len(portfolio_tickers),
+        "evaluable_position_count": len(evaluable_portfolio_tickers),
+        "non_evaluable_position_count": len(non_evaluable),
         "cash_ars": snapshot.get("cash_ars", evidence.get("cash_ars")),
         "total_value_ars": snapshot.get("total_value_ars", evidence.get("total_value_ars")),
         "snapshot_as_of": snapshot.get("scraped_at") or evidence.get("snapshot_as_of"),
         "evaluated_at": evidence.get("evaluated_at"),
+        "analysis_run_id": evidence.get("analysis_run_id"),
+        "scope": evidence.get("scope"),
         "snapshot_stale_reason": evidence.get("snapshot_stale_reason"),
     }
 
