@@ -16,9 +16,9 @@ Abrir `http://127.0.0.1:8765`. Si `DATABASE_URL` usa el hostname Docker `db`, el
 
 - Población: intenciones `BUY`/`SELL` ejecutables, no bloqueadas, de planes factibles del usuario (`owner_chat_id`). No implica que el usuario haya ejecutado la recomendación.
 - Duplicados: una señal por fecha argentina, ticker y lado; gana la primera intención del día. Días distintos pueden representar el mismo trade económico y solaparse: **n no es un número de episodios independientes**.
-- Precios: velas diarias ARS de BYMA. La fecha de la vela usa día UTC como los joins de velas del proyecto. Entrada: apertura de la próxima sesión disponible luego del día del plan. Salida: cierre de la sesión H contando la entrada como sesión 1. Si el precio de entrada o salida es ambiguo o no existe, el resultado queda pendiente.
+- Precios: velas diarias ARS de BYMA. La fecha de la vela usa día UTC como los joins de velas del proyecto. Entrada: apertura de la próxima sesión disponible luego del día del plan. Salida: cierre de la sesión H contando la entrada como sesión 1. Si el precio de entrada o salida es ambiguo o no existe, el resultado queda sin evaluar (inmaduro o sin cobertura).
 - Retorno: `BUY = cierre_salida / apertura_entrada - 1`; `SELL = 1 - cierre_salida / apertura_entrada` (caída evitada frente a HOLD). EV neto resta el costo supuesto (por defecto 75 puntos básicos) una vez por señal. Es un **contrafactual direccional**, no PnL de cuenta ni simulación ejecutable con cash, sizing y restricciones.
-- Cobertura: n, pendientes, velas inválidas/conflictivas y señales excluidas a la vista. Si la consulta excede el límite de seguridad, falla en vez de mostrar una muestra como si fuese el universo.
+- Cobertura: n, señales sin resultado, velas inválidas/conflictivas y señales excluidas a la vista. Si la consulta excede el límite de seguridad, falla en vez de mostrar una muestra como si fuese el universo.
 
 ## Comprobaciones necesarias con BD real
 
