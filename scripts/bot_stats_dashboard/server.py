@@ -1,217 +1,167 @@
-"""Read-only, local dashboard of Quantia formal bot plans.
-
-Run: DATABASE_URL=... OWNER_CHAT_ID=... python server.py
-No writes to PostgreSQL. Outcomes are recomputed from market_candles, not decision_log.
-"""
+"""Owner-scoped local research dashboard. All DB connections are read-only."""
 from __future__ import annotations
-
+import argparse
 import asyncio
-from bisect import bisect_right
-from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
-from zoneinfo import ZoneInfo
-
 import asyncpg
 from dotenv import load_dotenv
+from metrics import compute, number
 
-ART = ZoneInfo("America/Argentina/Buenos_Aires")
-HORIZONS = (5, 10, 20, 40)
 HERE = Path(__file__).resolve().parent
-load_dotenv(HERE.parents[1] / ".env", override=False)
+ROOT = HERE.parents[1]
 
 
 def owner_chat_id():
-    return os.environ.get("OWNER_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
-
-
-def as_float(value):
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def compute(rows, candles, *, cost_bps=75.0):
-    """One plan intent per ART date/ticker/side; returns by later BYMA sessions.
-
-    Entry is next daily candle's open. H-day exit is the close of the Hth
-    session including entry. SELL measures avoidance versus holding to exit.
-    These are hypothetical directional returns, not an executable portfolio.
-    """
-    quality = Counter()
-    usable = defaultdict(dict)
-    conflicted = set()
-    for row in candles:
-        ticker = str(row["ticker"]).upper()
-        # The project's candle joins use the UTC date of daily candle timestamps.
-        d = row["ts"].astimezone(timezone.utc).date()
-        opening, closing = as_float(row["open_price"]), as_float(row["close_price"])
-        if not opening or not closing or opening <= 0 or closing <= 0:
-            quality["invalid_candles"] += 1
-            usable[ticker][d] = None
-            continue
-        if d in usable[ticker]:
-            prior = usable[ticker][d]
-            if prior != (opening, closing):
-                usable[ticker][d] = None
-                conflicted.add((ticker, d))
-        else:
-            usable[ticker][d] = (opening, closing)
-    series = {}
-    quality["conflicting_candle_days"] = len(conflicted)
-    for ticker, days in usable.items():
-        dates = sorted(days)
-        series[ticker] = (dates, [days[d] for d in dates])
-
-    seen = set()
-    selected = []
-    for row in sorted(rows, key=lambda r: (r["created_at"], r["intent_id"])):
-        quality["raw_intents"] += 1
-        if not row["feasible"] or not row["is_executable"] or row["was_blocked"]:
-            quality["ineligible_intents"] += 1
-            continue
-        side = str(row["side"]).upper()
-        if side not in ("BUY", "SELL"):
-            quality["ineligible_intents"] += 1
-            continue
-        day = row["created_at"].astimezone(ART).date()
-        key = (day, str(row["ticker"]).upper(), side)
-        if key in seen:
-            quality["same_day_duplicates"] += 1
-            continue
-        seen.add(key)
-        selected.append(row)
-    quality["unique_signals"] = len(selected)
-
-    evaluated = []
-    for row in selected:
-        ticker, side = str(row["ticker"]).upper(), str(row["side"]).upper()
-        dates, prices = series.get(ticker, ([], []))
-        decision_date = row["created_at"].astimezone(ART).date()
-        idx = bisect_right(dates, decision_date)
-        item = {"date": decision_date.isoformat(), "ticker": ticker, "side": side,
-                "run_id": str(row["run_id"]) if row["run_id"] else None,
-                "returns": {}}
-        if idx >= len(dates):
-            quality["no_next_session"] += 1
-        elif prices[idx] is None:
-            quality["ambiguous_entry_price"] += 1
-        else:
-            opening = prices[idx][0]
-            for horizon in HORIZONS:
-                end = idx + horizon - 1
-                if end >= len(dates) or prices[end] is None:
-                    item["returns"][str(horizon)] = None
-                    continue
-                gross = (prices[end][1] / opening - 1) * (1 if side == "BUY" else -1)
-                item["returns"][str(horizon)] = gross - cost_bps / 10000
-        evaluated.append(item)
-
-    metrics = {}
-    for horizon in HORIZONS:
-        values = [s["returns"].get(str(horizon)) for s in evaluated]
-        vals = [v for v in values if v is not None]
-        metrics[str(horizon)] = {
-            "n": len(vals), "pending": len(values) - len(vals),
-            "mean_pct": round(100 * sum(vals) / len(vals), 3) if vals else None,
-            "median_pct": round(100 * (sorted(vals)[(len(vals)-1)//2] + sorted(vals)[len(vals)//2]) / 2, 3) if vals else None,
-            "win_pct": round(100 * sum(v > 0 for v in vals) / len(vals), 1) if vals else None,
-        }
-    weekly = defaultdict(lambda: {"n": 0, "sum": 0.0})
-    for item in evaluated:
-        value = item["returns"].get("5")
-        if value is None:
-            continue
-        day = datetime.fromisoformat(item["date"]).date()
-        week = (day - timedelta(days=day.weekday())).isoformat()
-        weekly[week]["n"] += 1
-        weekly[week]["sum"] += value
-    trends = [{"week": week, "n": v["n"], "mean_pct": round(100*v["sum"]/v["n"], 3)}
-              for week, v in sorted(weekly.items())]
-    return {"metrics": metrics, "quality": dict(quality), "weekly_5d": trends,
-            "signals": evaluated[-100:][::-1]}
+    return os.environ.get('OWNER_CHAT_ID') or os.environ.get('TELEGRAM_CHAT_ID')
 
 
 async def load(owner_id, days):
-    dsn = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
-    conn = await asyncpg.connect(dsn, timeout=10,
-        server_settings={"default_transaction_read_only": "on", "statement_timeout": "15000"})
+    if not owner_id or not 30 <= days <= 730:
+        raise ValueError('Owner requerido; ventana entre 30 y 730 dias')
+    dsn = os.environ['DATABASE_URL'].replace('postgresql+asyncpg://', 'postgresql://')
+    conn = await asyncpg.connect(dsn, timeout=15, server_settings={
+        'default_transaction_read_only': 'on', 'statement_timeout': '15000'})
     try:
-        async with conn.transaction(readonly=True):
+        async with conn.transaction(readonly=True, isolation='repeatable_read'):
+            db_time = await conn.fetchval('SELECT NOW()')
+            readonly = await conn.fetchval("SELECT current_setting('transaction_read_only')")
+            if readonly != 'on':
+                raise RuntimeError('Read-only required')
+            start = db_time-timedelta(days=days)
+            # Separate plan count: an inner join hides plans without intents.
+            plans = dict(await conn.fetchrow("""
+                SELECT count(*) AS all_owner_plans,
+                       count(*) FILTER (WHERE source='execution_plan') AS all_bot_plans,
+                       count(*) FILTER (WHERE source='execution_plan' AND created_at >= $2) AS window_bot_plans,
+                       min(created_at) AS first_plan, max(created_at) AS last_plan
+                FROM execution_plans WHERE owner_chat_id=$1 AND created_at <= $3
+            """, owner_id, start, db_time))
             rows = await conn.fetch("""
-                SELECT p.id AS plan_id, p.run_id, p.created_at, p.feasible,
-                       i.id AS intent_id, i.ticker, i.side, i.is_executable, i.was_blocked
-                FROM execution_plans p JOIN order_intents i ON i.execution_plan_id = p.id
-                WHERE p.owner_chat_id = $1 AND p.created_at >= NOW() - $2::integer * INTERVAL '1 day'
-                ORDER BY p.created_at DESC, i.id DESC
-                LIMIT 25001
-            """, owner_id, days)
-            tickers = sorted({str(r["ticker"]).upper() for r in rows})
+                SELECT p.id AS plan_id,p.run_id,p.created_at,p.source,p.feasible,
+                       i.id AS intent_id,i.ticker,i.side,i.is_executable,i.was_blocked
+                FROM execution_plans p JOIN order_intents i ON i.execution_plan_id=p.id
+                WHERE p.owner_chat_id=$1 AND p.created_at >= $2 AND p.created_at <= $3
+                ORDER BY p.created_at,i.id LIMIT 25001
+            """, owner_id, start, db_time)
+            # Independent SQL denominator, without calling the Python selector.
+            counts = dict(await conn.fetchrow("""
+                SELECT count(*) AS raw_intents,
+                  count(*) FILTER (WHERE p.source='execution_plan' AND p.feasible
+                    AND i.is_executable AND i.was_blocked IS FALSE AND i.side IN ('BUY','SELL') AND trim(i.ticker)<>'') AS eligible_intents,
+                  count(DISTINCT ((p.created_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date,upper(trim(i.ticker)),i.side))
+                    FILTER (WHERE p.source='execution_plan' AND p.feasible AND i.is_executable
+                    AND i.was_blocked IS FALSE AND i.side IN ('BUY','SELL') AND trim(i.ticker)<>'') AS unique_signals
+                FROM execution_plans p JOIN order_intents i ON i.execution_plan_id=p.id
+                WHERE p.owner_chat_id=$1 AND p.created_at >= $2 AND p.created_at <= $3
+            """, owner_id, start, db_time))
+            tickers = sorted({str(r['ticker']).strip().upper() for r in rows if r['source'] == 'execution_plan'})
+            # Market facts have no owner: restrict to this owner's bot tickers.
             candles = await conn.fetch("""
-                SELECT ticker, ts, open_price, close_price
-                FROM market_candles
-                WHERE ticker = ANY($1::text[]) AND interval = '1d'
-                  AND currency = 'ARS' AND venue = 'BYMA'
-                  AND ts >= NOW() - ($2::integer + 120) * INTERVAL '1 day'
-                ORDER BY ticker, ts
-                LIMIT 250001
-            """, tickers, days) if tickers else []
-            db_time = await conn.fetchval("SELECT NOW()")
-        return [dict(r) for r in rows], [dict(r) for r in candles], db_time
+                SELECT m.ticker,m.long_ticker,m.source,m.currency,m.venue,m.interval,
+                       m.ts,m.open_price,m.close_price,m.scraped_at
+                FROM market_candles m
+                WHERE m.ticker=ANY($1::text[]) AND m.interval='1d' AND m.currency='ARS' AND m.venue='BYMA'
+                  AND m.ts >= $2 AND m.ts <= $3 AND m.scraped_at <= $3
+                ORDER BY m.ticker,m.ts LIMIT 250001
+            """, tickers, start-timedelta(days=7), db_time) if tickers else []
+            registry_available = bool(await conn.fetchval("SELECT to_regclass('public.corporate_events') IS NOT NULL AND to_regclass('public.corporate_event_instrument_effects') IS NOT NULL"))
+            events = await conn.fetch("""
+                SELECT e.event_type,e.lifecycle_status,e.effective_at,f.ticker,f.price_factor
+                FROM corporate_events e JOIN corporate_event_instrument_effects f ON f.event_id=e.id
+                WHERE f.ticker=ANY($1::text[]) AND f.is_active
+                  AND (f.venue IS NULL OR f.venue='BYMA') AND (f.currency IS NULL OR f.currency='ARS')
+                  AND e.effective_at >= $2 AND e.effective_at <= $3 LIMIT 10001
+            """, tickers, start, db_time) if registry_available and tickers else []
+            # Context only, not inputs to bot returns or account PnL.
+            decisions = [dict(r) for r in await conn.fetch("""
+                SELECT source,status,count(*) AS n FROM decision_log
+                WHERE owner_chat_id=$1 AND decided_at >= $2 AND decided_at <= $3
+                GROUP BY source,status ORDER BY source,status
+            """, owner_id, start, db_time)]
+            account = dict(await conn.fetchrow("""
+                SELECT (SELECT count(*) FROM portfolio_snapshots WHERE owner_chat_id=$1
+                          AND scraped_at >= $2 AND scraped_at <= $3) AS snapshots,
+                       (SELECT count(*) FROM broker_fills WHERE owner_chat_id=$1
+                          AND executed_at >= $2 AND executed_at <= $3) AS raw_fills
+            """, owner_id, start, db_time))
+        if len(rows)>25000 or len(candles)>250000 or len(events)>10000:
+            raise ValueError('Extraccion excede el limite; reducir la ventana')
+        return dict(rows=[dict(r) for r in rows], candles=[dict(r) for r in candles],
+                    events=[dict(r) for r in events], events_available=registry_available,
+                    as_of=db_time, start=start, plans=plans, counts=counts,
+                    decisions=decisions, account=account, readonly=readonly)
     finally:
         await conn.close()
 
 
+async def stats(owner_id, days=180, cost=75):
+    data = await load(owner_id, days)
+    result = compute(data['rows'], data['candles'], as_of=data['as_of'], cost_bps=cost,
+                     events=data['events'], events_available=data['events_available'])
+    q, c = result['quality'], data['counts']
+    reconciled = (q['raw_intents'] == c['raw_intents'] and q['unique_signals'] == c['unique_signals']
+                  and q['same_day_duplicates'] == c['eligible_intents']-c['unique_signals'])
+    if not reconciled:
+        raise RuntimeError('Raw count reconciliation failed')
+    result.update(as_of=data['as_of'].isoformat(), window_start=data['start'].isoformat(), days=days,
+                  cost_bps=cost, raw_candles=len(data['candles']), plans=data['plans'],
+                  raw_intents=len(data['rows']), sql_counts=c, counts_reconciled=reconciled,
+                  readonly=data['readonly'], decision_sources=data['decisions'], account=data['account'],
+                  corporate_events=len(data['events']), corporate_registry_available=data['events_available'],
+                  account_realized_pnl=None, account_pnl_status='No medido: requiere conciliacion de lotes, costos y flujos; los fills no son PnL.')
+    return result
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.headers.get('Host') not in (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'):
+            self.send_error(403); return
         uri = urlsplit(self.path)
-        if uri.path in ("/", "/index.html"):
-            body = (HERE / "index.html").read_bytes()
-            kind = "text/html; charset=utf-8"
-        elif uri.path == "/api/stats":
+        if uri.path in ('/', '/index.html'):
+            body, kind = (HERE/'index.html').read_bytes(), 'text/html; charset=utf-8'
+        elif uri.path == '/api/stats':
             try:
                 q = parse_qs(uri.query)
-                days = int(q.get("days", ["180"])[0])
-                cost = float(q.get("cost_bps", ["75"])[0])
-                if not 30 <= days <= 730 or not 0 <= cost <= 400:
-                    raise ValueError("days 30–730; cost_bps 0–400")
-                rows, candles, db_time = asyncio.run(load(int(owner_chat_id()), days))
-                if len(rows) > 25000 or len(candles) > 250000:
-                    raise ValueError("La ventana excede el límite de extracción; elegí menos días.")
-                result = compute(rows, candles, cost_bps=cost)
-                result.update({"as_of":db_time.isoformat(), "days":days, "cost_bps":cost,
-                               "raw_candles":len(candles), "raw_intents":len(rows)})
-                body = json.dumps(result, ensure_ascii=False).encode()
-                kind = "application/json; charset=utf-8"
-            except (KeyError, ValueError) as exc:
-                self.send_error(400, str(exc)); return
+                days, cost = int(q.get('days', ['180'])[0]), number(q.get('cost_bps', ['75'])[0])
+                if not 30 <= days <= 730 or cost is None or not 0 <= cost <= 400:
+                    raise ValueError('Ventana 30-730 dias; costo 0-400 pb finitos')
+                result = asyncio.run(stats(int(owner_chat_id()), days, cost))
+                body, kind = json.dumps(result, ensure_ascii=False, default=str, allow_nan=False).encode(), 'application/json; charset=utf-8'
+            except (KeyError, ValueError):
+                self.send_error(400, 'Configuracion o parametros invalidos'); return
             except Exception as exc:
-                # Never echo DSN or database error text to a browser.
-                self.log_message("Database request failed: %s", type(exc).__name__)
-                self.send_error(503, "Base de datos no disponible o esquema incompatible"); return
+                self.log_message('Read failed: %s', type(exc).__name__)
+                self.send_error(503, 'No se pudo verificar la base de datos'); return
+        elif uri.path == '/report.pdf' and (ROOT/'output/pdf/quantia-bot-stats.pdf').exists():
+            body, kind = (ROOT/'output/pdf/quantia-bot-stats.pdf').read_bytes(), 'application/pdf'
         else:
             self.send_error(404); return
         self.send_response(200)
-        self.send_header("Content-Type", kind)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header('Content-Type', kind)
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
 
 def main():
-    if not os.environ.get("DATABASE_URL") or not owner_chat_id():
-        raise SystemExit("Se necesitan DATABASE_URL y OWNER_CHAT_ID o TELEGRAM_CHAT_ID en el entorno/.env.")
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
-    print("Dashboard local: http://127.0.0.1:8765")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--env-file', type=Path, default=ROOT/'.env')
+    parser.add_argument('--port', type=int, default=8765)
+    args = parser.parse_args()
+    load_dotenv(args.env_file, override=False)
+    if not os.environ.get('DATABASE_URL') or not owner_chat_id():
+        raise SystemExit('Se necesitan DATABASE_URL y OWNER_CHAT_ID o TELEGRAM_CHAT_ID')
+    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    print(f'Dashboard local: http://127.0.0.1:{args.port}', flush=True)
     server.serve_forever()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
