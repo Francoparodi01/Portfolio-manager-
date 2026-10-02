@@ -4,7 +4,7 @@ Dashboard local y de solo lectura para reconstruir resultados desde `execution_p
 
 ## Ejecución en el equipo que tiene acceso a la BD
 
-Colocar esta carpeta en `scripts/bot_stats_dashboard/` del proyecto Quantia. Usar el entorno Python del proyecto (`asyncpg` ya está en `requirements.txt`). Configurar `DATABASE_URL` y `OWNER_CHAT_ID` en variables de entorno del proceso, sin pegarlas en el código ni en el navegador. En Windows PowerShell, desde la raíz del repositorio:
+Colocar esta carpeta en `scripts/bot_stats_dashboard/` del proyecto Quantia. Usar el entorno Python del proyecto (`asyncpg` ya está en `requirements.txt`). Se reutiliza el `.env` existente del proyecto: `DATABASE_URL` y `TELEGRAM_CHAT_ID` (o `OWNER_CHAT_ID` si se configura). No se modifica ese archivo ni se muestran las credenciales. En Windows PowerShell, desde la raíz del repositorio:
 
 ```powershell
 python scripts/bot_stats_dashboard/server.py
