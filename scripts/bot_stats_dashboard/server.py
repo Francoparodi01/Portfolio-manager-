@@ -18,10 +18,16 @@ from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 import asyncpg
+from dotenv import load_dotenv
 
 ART = ZoneInfo("America/Argentina/Buenos_Aires")
 HORIZONS = (5, 10, 20, 40)
 HERE = Path(__file__).resolve().parent
+load_dotenv(HERE.parents[1] / ".env", override=False)
+
+
+def owner_chat_id():
+    return os.environ.get("OWNER_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
 
 
 def as_float(value):
@@ -175,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
                 cost = float(q.get("cost_bps", ["75"])[0])
                 if not 30 <= days <= 730 or not 0 <= cost <= 400:
                     raise ValueError("days 30–730; cost_bps 0–400")
-                rows, candles, db_time = asyncio.run(load(int(os.environ["OWNER_CHAT_ID"]), days))
+                rows, candles, db_time = asyncio.run(load(int(owner_chat_id()), days))
                 if len(rows) > 25000 or len(candles) > 250000:
                     raise ValueError("La ventana excede el límite de extracción; elegí menos días.")
                 result = compute(rows, candles, cost_bps=cost)
@@ -200,8 +206,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    if not os.environ.get("DATABASE_URL") or not os.environ.get("OWNER_CHAT_ID"):
-        raise SystemExit("Definí DATABASE_URL y OWNER_CHAT_ID en el entorno; no pegues claves en el código.")
+    if not os.environ.get("DATABASE_URL") or not owner_chat_id():
+        raise SystemExit("Se necesitan DATABASE_URL y OWNER_CHAT_ID o TELEGRAM_CHAT_ID en el entorno/.env.")
     server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
     print("Dashboard local: http://127.0.0.1:8765")
     server.serve_forever()
