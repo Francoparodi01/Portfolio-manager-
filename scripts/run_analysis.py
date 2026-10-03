@@ -3830,7 +3830,7 @@ async def main(
         configured_owner = str(cfg.scraper.telegram_chat_id or "").strip()
         if configured_owner.isdigit():
             owner_chat_id = int(configured_owner)
-    if owner_chat_id is None:
+    if owner_chat_id is None and not no_persist:
         raise ValueError("owner_chat_id is required for persisted analysis")
     analysis_run_id = str(uuid4())
     no_persist, run_intent, off_market_context = _analysis_run_policy(
