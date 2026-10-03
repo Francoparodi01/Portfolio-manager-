@@ -716,6 +716,14 @@ async def candles(request: web.Request) -> web.Response:
 
 async def decisions(request: web.Request) -> web.Response:
     days = max(1, min(int(request.query.get("days", "90")), 365))
+    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    owner_raw = request.query.get("owner_chat_id") or configured_owner
+    try:
+        owner_chat_id = int(owner_raw) if owner_raw else None
+    except ValueError:
+        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+    if owner_chat_id is None:
+        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         await ensure_decision_audit_scope_columns(conn)
@@ -732,8 +740,9 @@ async def decisions(request: web.Request) -> web.Response:
                 COUNT(*) FILTER (WHERE metric_scope = 'radar_audit') AS radar_audit,
                 COUNT(*) FILTER (WHERE metric_scope = 'debug') AS debug_events
             FROM decision_log
-            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
-        """, days)
+            WHERE owner_chat_id = $2
+              AND decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+        """, days, owner_chat_id)
         groups = await conn.fetch("""
             SELECT
                 COALESCE(metric_scope, 'debug') AS metric_scope,
@@ -747,20 +756,22 @@ async def decisions(request: web.Request) -> web.Response:
                 COUNT(outcome_10d) FILTER (WHERE outcome_basis = 'canonical_cocos') AS con_10d,
                 COUNT(outcome_20d) FILTER (WHERE outcome_basis = 'canonical_cocos') AS con_20d
             FROM decision_log
-            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+            WHERE owner_chat_id = $2
+              AND decided_at >= NOW() - ($1::int * INTERVAL '1 day')
             GROUP BY 1,2,3,4,5,6
             ORDER BY n DESC, metric_scope, source, status
             LIMIT 30
-        """, days)
+        """, days, owner_chat_id)
         recent = await conn.fetch("""
             SELECT decided_at, ticker, decision, status, source, final_score,
                    metric_scope, run_intent, decision_stage,
                    outcome_5d, outcome_basis, was_correct
             FROM decision_log
-            WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+            WHERE owner_chat_id = $2
+              AND decided_at >= NOW() - ($1::int * INTERVAL '1 day')
             ORDER BY decided_at DESC
             LIMIT 20
-        """, days)
+        """, days, owner_chat_id)
 
     return _json({
         "ok": True,
@@ -773,12 +784,21 @@ async def decisions(request: web.Request) -> web.Response:
 
 async def portfolio_view(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
+    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    owner_raw = request.query.get("owner_chat_id") or configured_owner
+    try:
+        owner_chat_id = int(owner_raw) if owner_raw else None
+    except ValueError:
+        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+    if owner_chat_id is None:
+        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
     pool: asyncpg.Pool = request.app["pool"]
     corporate_applications = []
     async with pool.acquire() as conn:
         latest_snapshot = await conn.fetchrow("""
             SELECT snapshot_id, scraped_at, total_value_ars, cash_ars, confidence_score
             FROM portfolio_snapshots
+            WHERE owner_chat_id = $1
             ORDER BY scraped_at DESC
             LIMIT 1
         """)
@@ -856,9 +876,10 @@ async def portfolio_view(request: web.Request) -> web.Response:
                 cash_ars,
                 confidence_score
             FROM portfolio_snapshots
-            WHERE scraped_at >= NOW() - ($1::int * INTERVAL '1 day')
+            WHERE owner_chat_id = $2
+              AND scraped_at >= NOW() - ($1::int * INTERVAL '1 day')
             ORDER BY (scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date, scraped_at DESC
-        """, days)
+        """, days, owner_chat_id)
 
     snapshot_payload = _row(latest_snapshot)
     if latest_snapshot and corporate_applications:
@@ -894,6 +915,14 @@ async def portfolio_view(request: web.Request) -> web.Response:
 
 async def performance_view(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "180")), 365))
+    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    owner_raw = request.query.get("owner_chat_id") or configured_owner
+    try:
+        owner_chat_id = int(owner_raw) if owner_raw else None
+    except ValueError:
+        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+    if owner_chat_id is None:
+        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         await ensure_decision_audit_scope_columns(conn)
@@ -967,6 +996,7 @@ async def performance_view(request: web.Request) -> web.Response:
                 LEFT JOIN fill_link fl ON fl.decision_log_id = dl.id
                 LEFT JOIN attributed_fill_decisions attributed
                   ON attributed.decision_log_id = dl.id
+                WHERE dl.owner_chat_id = $2
             ),
             followed_base AS (
                 SELECT
@@ -1002,6 +1032,7 @@ async def performance_view(request: web.Request) -> web.Response:
                 JOIN decision_log dl
                   ON dl.id = attribution.representative_decision_log_id
                 WHERE attribution.eligible_for_viability = TRUE
+                  AND attribution.owner_chat_id = $2
             ),
             hold_ranked AS (
                 SELECT
@@ -1045,6 +1076,7 @@ async def performance_view(request: web.Request) -> web.Response:
                     hold.layers
                 FROM hold_ranked hold
                 WHERE hold.daily_rank = 1
+                  AND hold.owner_chat_id = $2
             ),
             raw_base AS (
                 SELECT * FROM decision_base
@@ -1162,7 +1194,7 @@ async def performance_view(request: web.Request) -> web.Response:
                 MAX(outcome_5d) AS best_5d,
                 MIN(outcome_5d) AS worst_5d
             FROM real
-        """, days)
+        """, days, owner_chat_id)
         by_ticker = await conn.fetch(perf_base_cte + """
             SELECT
                 ticker,
@@ -1178,7 +1210,7 @@ async def performance_view(request: web.Request) -> web.Response:
             GROUP BY ticker
             ORDER BY n DESC, avg_5d DESC
             LIMIT 12
-        """, days)
+        """, days, owner_chat_id)
         score_points = await conn.fetch(perf_base_cte + """
             SELECT
                 decided_at,
@@ -1215,7 +1247,7 @@ async def performance_view(request: web.Request) -> web.Response:
                     'hold_audit'
               )
             ORDER BY effective_at DESC, decided_at DESC
-        """, days)
+        """, days, owner_chat_id)
         status_counts = await conn.fetch(perf_base_cte + """
             SELECT
                 metric_scope,
@@ -1228,7 +1260,7 @@ async def performance_view(request: web.Request) -> web.Response:
             GROUP BY 1, 2, 3
             ORDER BY n DESC
             LIMIT 16
-        """, days)
+        """, days, owner_chat_id)
         window_counts = await conn.fetchrow(perf_base_cte + """
             SELECT
                 COUNT(*) AS total,
@@ -1253,7 +1285,7 @@ async def performance_view(request: web.Request) -> web.Response:
                 ) AS pending_primary_5d
             FROM perf_base
             WHERE effective_at >= NOW() - ($1::int * INTERVAL '1 day')
-        """, days)
+        """, days, owner_chat_id)
         bot_prediction_summary = await conn.fetchrow(perf_base_cte + """
             , bot AS (
                 SELECT
@@ -1293,7 +1325,7 @@ async def performance_view(request: web.Request) -> web.Response:
                       AND outcome_5d IS NOT NULL
                 ) AS worst_directional_5d
             FROM bot
-        """, days)
+        """, days, owner_chat_id)
         bot_direction_breakdown = await conn.fetch(perf_base_cte + """
             , bot AS (
                 SELECT *
@@ -1357,7 +1389,7 @@ async def performance_view(request: web.Request) -> web.Response:
                 END AS payoff_ratio
             FROM agg
             ORDER BY decision
-        """, days)
+        """, days, owner_chat_id)
         bot_signal_breakdown = await conn.fetch(perf_base_cte + """
             , bot AS (
                 SELECT *
@@ -1404,7 +1436,7 @@ async def performance_view(request: web.Request) -> web.Response:
                 END AS payoff_ratio
             FROM agg
             ORDER BY closed_5d DESC, total DESC, signal_family
-        """, days)
+        """, days, owner_chat_id)
         source_breakdown = await conn.fetch(perf_base_cte + """
             SELECT
                 COALESCE(source, 'sin_source') AS source,
@@ -1450,7 +1482,7 @@ async def performance_view(request: web.Request) -> web.Response:
             HAVING COUNT(*) > 0
             ORDER BY closed_5d DESC, total DESC, source, metric_scope
             LIMIT 12
-        """, days)
+        """, days, owner_chat_id)
         buy_confirmation_breakdown = await conn.fetch(perf_base_cte + """
             , bot_buy AS (
                 SELECT *
@@ -1484,7 +1516,7 @@ async def performance_view(request: web.Request) -> web.Response:
             FROM bot_buy
             GROUP BY buy_confirmation
             ORDER BY closed_5d DESC, total DESC, buy_confirmation
-        """, days)
+        """, days, owner_chat_id)
         evitable_loss = await conn.fetchrow(perf_base_cte + """
             , strong_negative_sell AS (
                 SELECT *
@@ -1510,7 +1542,7 @@ async def performance_view(request: web.Request) -> web.Response:
                 MIN(outcome_5d) AS worst_false_alarm_5d,
                 MAX(outcome_5d) AS best_avoided_loss_5d
             FROM strong_negative_sell
-        """, days)
+        """, days, owner_chat_id)
         bot_prediction_recent = await conn.fetch(perf_base_cte + """
             SELECT
                 decided_at,
@@ -1541,7 +1573,7 @@ async def performance_view(request: web.Request) -> web.Response:
               AND status IN ('APPROVED', 'EXECUTED', 'EXECUTED_MANUAL')
             ORDER BY effective_at DESC, decided_at DESC
             LIMIT 12
-        """, days)
+        """, days, owner_chat_id)
         performance_recent = await conn.fetch(perf_base_cte + """
             , ranked_recent AS (
                 SELECT
@@ -1602,7 +1634,7 @@ async def performance_view(request: web.Request) -> web.Response:
             FROM ranked_recent
             WHERE scope_rank <= 50
             ORDER BY effective_at DESC, decided_at DESC
-        """, days)
+        """, days, owner_chat_id)
 
     summary_dict = _row(summary)
 
@@ -1903,6 +1935,14 @@ async def audit_timeline(request: web.Request) -> web.Response:
 
 async def radar_audit(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
+    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    owner_raw = request.query.get("owner_chat_id") or configured_owner
+    try:
+        owner_chat_id = int(owner_raw) if owner_raw else None
+    except ValueError:
+        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+    if owner_chat_id is None:
+        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         await ensure_decision_audit_scope_columns(conn)
@@ -1937,7 +1977,8 @@ async def radar_audit(request: web.Request) -> web.Response:
                     COALESCE(NULLIF(next_executable_price, 0), price_at_decision) AS audit_entry_price,
                     layers
                 FROM decision_log
-                WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                WHERE owner_chat_id = $2
+                  AND decided_at >= NOW() - ($1::int * INTERVAL '1 day')
                   AND COALESCE(source, layers->>'source') = 'radar'
                   AND COALESCE(metric_scope, 'radar_audit') = 'radar_audit'
                   AND decision IN ('BUY', 'SELL')
@@ -2032,7 +2073,7 @@ async def radar_audit(request: web.Request) -> web.Response:
             ) path ON TRUE
             ORDER BY r.decided_at DESC, r.id DESC
             LIMIT 160
-        """, days)
+        """, days, owner_chat_id)
 
     items = [_row(r) for r in rows]
     for item in items:
