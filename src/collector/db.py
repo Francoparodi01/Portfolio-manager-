@@ -96,6 +96,54 @@ SUPERSEDED_BROKER_FILL_REASON = "cocos_ticket_replaced_provisional_movement"
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
 
+# Safe legacy-owner repair for a single-account deployment. If more than one
+# active bot user exists, no historical row is reassigned automatically.
+OWNER_LINEAGE_BACKFILL_SQL = """
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE portfolio_snapshots s
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE s.owner_chat_id IS NULL;
+
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE decision_log d
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE d.owner_chat_id IS NULL;
+
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE execution_plans p
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE p.owner_chat_id IS NULL;
+
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE broker_fills f
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE f.owner_chat_id IS NULL;
+"""
+
 
 def _schema_sql() -> str:
     return SCHEMA_PATH.read_text(encoding="utf-8")
@@ -566,7 +614,9 @@ class PortfolioDatabase:
                 logger.exception("Schema init failed while executing init.sql")
                 raise
 
-        logger.info("Schema inicializado desde init.sql")
+        async with self._pool.acquire() as conn:
+            await conn.execute(OWNER_LINEAGE_BACKFILL_SQL)
+        logger.info("Schema inicializado desde init.sql + owner lineage backfill seguro")
 
     async def _ensure_execution_timestamp_meta_columns(self, conn) -> None:
         if self._execution_timestamp_meta_ready:
