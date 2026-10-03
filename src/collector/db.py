@@ -142,6 +142,17 @@ UPDATE broker_fills f
 SET owner_chat_id = o.owner_chat_id
 FROM single_owner o
 WHERE f.owner_chat_id IS NULL;
+
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE broker_movements m
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE m.owner_chat_id IS NULL;
 """
 
 
