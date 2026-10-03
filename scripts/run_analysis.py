@@ -3826,6 +3826,12 @@ async def main(
         raise ValueError("--agent-json requires --no-persist --no-telegram --no-llm")
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
+    if owner_chat_id is None:
+        configured_owner = str(cfg.scraper.telegram_chat_id or "").strip()
+        if configured_owner.isdigit():
+            owner_chat_id = int(configured_owner)
+    if owner_chat_id is None:
+        raise ValueError("owner_chat_id is required for persisted analysis")
     analysis_run_id = str(uuid4())
     no_persist, run_intent, off_market_context = _analysis_run_policy(
         no_persist,
