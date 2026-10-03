@@ -96,6 +96,65 @@ SUPERSEDED_BROKER_FILL_REASON = "cocos_ticket_replaced_provisional_movement"
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
 
+# Safe legacy-owner repair for a single-account deployment. If more than one
+# active bot user exists, no historical row is reassigned automatically.
+OWNER_LINEAGE_BACKFILL_SQL = """
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE portfolio_snapshots s
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE s.owner_chat_id IS NULL;
+
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE decision_log d
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE d.owner_chat_id IS NULL;
+
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE execution_plans p
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE p.owner_chat_id IS NULL;
+
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE broker_fills f
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE f.owner_chat_id IS NULL;
+
+WITH single_owner AS (
+    SELECT MIN(chat_id) AS owner_chat_id
+    FROM bot_users
+    WHERE is_active = TRUE
+    HAVING COUNT(*) = 1
+)
+UPDATE broker_movements m
+SET owner_chat_id = o.owner_chat_id
+FROM single_owner o
+WHERE m.owner_chat_id IS NULL;
+"""
+
 
 def _schema_sql() -> str:
     return SCHEMA_PATH.read_text(encoding="utf-8")
@@ -566,7 +625,9 @@ class PortfolioDatabase:
                 logger.exception("Schema init failed while executing init.sql")
                 raise
 
-        logger.info("Schema inicializado desde init.sql")
+        async with self._pool.acquire() as conn:
+            await conn.execute(OWNER_LINEAGE_BACKFILL_SQL)
+        logger.info("Schema inicializado desde init.sql + owner lineage backfill seguro")
 
     async def _ensure_execution_timestamp_meta_columns(self, conn) -> None:
         if self._execution_timestamp_meta_ready:
@@ -1730,20 +1791,14 @@ class PortfolioDatabase:
                     [p.ticker for p in snapshot.positions],
                 )
 
-                await conn.execute(
+                inserted_snapshot_id = await conn.fetchval(
                     """
                     INSERT INTO portfolio_snapshots
                         (snapshot_id, owner_chat_id, scraped_at, total_value_ars, cash_ars,
                          confidence_score, dom_hash, raw_html_hash)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-                    ON CONFLICT (snapshot_id) DO UPDATE SET
-                        owner_chat_id    = EXCLUDED.owner_chat_id,
-                        scraped_at       = EXCLUDED.scraped_at,
-                        total_value_ars  = EXCLUDED.total_value_ars,
-                        cash_ars         = EXCLUDED.cash_ars,
-                        confidence_score = EXCLUDED.confidence_score,
-                        dom_hash         = EXCLUDED.dom_hash,
-                        raw_html_hash    = EXCLUDED.raw_html_hash
+                    ON CONFLICT (snapshot_id) DO NOTHING
+                    RETURNING snapshot_id
                     """,
                     sid,
                     snapshot.owner_chat_id,
@@ -1754,6 +1809,32 @@ class PortfolioDatabase:
                     snapshot.dom_hash,
                     snapshot.raw_html_hash,
                 )
+
+                if inserted_snapshot_id is None:
+                    existing_snapshot = await conn.fetchrow(
+                        """
+                        SELECT snapshot_id, scraped_at, total_value_ars, cash_ars,
+                               confidence_score, dom_hash, raw_html_hash
+                        FROM portfolio_snapshots
+                        WHERE snapshot_id = $1
+                        """,
+                        sid,
+                    )
+                    if not existing_snapshot:
+                        raise RuntimeError(f"snapshot_id {sid} conflict could not be read")
+                    if (
+                        existing_snapshot["scraped_at"] != snapshot.scraped_at
+                        or float(existing_snapshot["total_value_ars"] or 0) != float(snapshot.total_value_ars)
+                        or float(existing_snapshot["cash_ars"] or 0) != float(snapshot.cash_ars)
+                        or existing_snapshot["confidence_score"] != snapshot.confidence_score
+                        or existing_snapshot["dom_hash"] != snapshot.dom_hash
+                        or existing_snapshot["raw_html_hash"] != snapshot.raw_html_hash
+                    ):
+                        raise ValueError(
+                            f"snapshot_id {sid} already exists with different evidence; "
+                            "historical snapshots are immutable"
+                        )
+                    return sid
 
                 if snapshot.positions:
                     rows = [
@@ -1775,14 +1856,6 @@ class PortfolioDatabase:
                         for p in snapshot.positions
                     ]
 
-                    await conn.execute(
-                        """
-                        DELETE FROM positions
-                        WHERE snapshot_id = $1
-                        """,
-                        sid,
-                    )
-
                     await conn.executemany(
                         """
                         INSERT INTO positions
@@ -1798,8 +1871,7 @@ class PortfolioDatabase:
                     """
                     INSERT INTO raw_snapshots (snapshot_id, scraped_at, payload)
                     VALUES ($1,$2,$3::jsonb)
-                    ON CONFLICT (snapshot_id, scraped_at) DO UPDATE SET
-                        payload = EXCLUDED.payload
+                    ON CONFLICT (snapshot_id, scraped_at) DO NOTHING
                     """,
                     sid,
                     snapshot.scraped_at,
@@ -1919,11 +1991,16 @@ class PortfolioDatabase:
                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
                 )
                 ON CONFLICT (ts, long_ticker, interval) DO UPDATE SET
+                    ticker      = EXCLUDED.ticker,
+                    asset_type  = EXCLUDED.asset_type,
+                    currency    = EXCLUDED.currency,
+                    venue       = EXCLUDED.venue,
                     open_price  = EXCLUDED.open_price,
                     high_price  = EXCLUDED.high_price,
                     low_price   = EXCLUDED.low_price,
                     close_price = EXCLUDED.close_price,
                     volume      = EXCLUDED.volume,
+                    source      = EXCLUDED.source,
                     scraped_at  = NOW()
                 """,
                 rows,

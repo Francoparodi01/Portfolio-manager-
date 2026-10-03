@@ -1409,7 +1409,8 @@ async def _save_execution_plan_events(
               AND decision = $2
               AND decision_date = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
               AND COALESCE(source, layers->>'source') = 'execution_plan'
-              AND COALESCE(owner_chat_id, 0) = COALESCE($3::bigint, 0)
+              AND owner_chat_id IS NOT DISTINCT FROM $3::bigint
+              AND run_id = $5::uuid
               AND (
                     ($4::text = 'blocked_corporate_action'
                      AND COALESCE(decision_type, '') = 'blocked_corporate_action')
@@ -1423,6 +1424,7 @@ async def _save_execution_plan_events(
             decision,
             owner_chat_id,
             decision_type,
+            run_id_to_db(run_id),
         )
 
         size_pct = abs(delta_weight) if delta_weight else (
@@ -1496,14 +1498,18 @@ async def _save_execution_plan_events(
                     outcome_5d = NULL,
                     outcome_10d = NULL,
                     outcome_20d = NULL,
-                    was_correct = NULL,
-                    outcome_filled_at = NULL,
-                    next_executable_at = NULL,
-                    next_executable_price = NULL,
+                    outcome_40d = NULL,
                     executable_outcome_5d = NULL,
                     executable_outcome_10d = NULL,
                     executable_outcome_20d = NULL,
-                    executable_was_correct = NULL
+                    executable_outcome_40d = NULL,
+                    was_correct = NULL,
+                    executable_was_correct = NULL,
+                    outcome_basis = NULL,
+                    outcome_basis_ratio = NULL,
+                    outcome_filled_at = NULL,
+                    next_executable_at = NULL,
+                    next_executable_price = NULL
                 WHERE id = $1
                 """,
                 int(existing_id),
@@ -3820,6 +3826,12 @@ async def main(
         raise ValueError("--agent-json requires --no-persist --no-telegram --no-llm")
     cfg      = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
+    if owner_chat_id is None:
+        configured_owner = str(cfg.scraper.telegram_chat_id or "").strip()
+        if configured_owner.isdigit():
+            owner_chat_id = int(configured_owner)
+    if owner_chat_id is None and not no_persist:
+        raise ValueError("owner_chat_id is required for persisted analysis")
     analysis_run_id = str(uuid4())
     no_persist, run_intent, off_market_context = _analysis_run_policy(
         no_persist,
