@@ -38,6 +38,8 @@ def test_known_buy_sell_cost_and_fixed_dates():
     assert run([signal(side='SELL')])['metrics']['5']['mean_pct']==pytest.approx(-10.75)
     assert run(cost_bps=0)['metrics']['5']['mean_pct']==pytest.approx(10)
     assert status(buy,'40')=='immature'
+    assert buy['signal_sides']=={'BUY':1}
+    assert buy['evaluated_price_sources']=={'COCOS':3}
 
 
 def test_empty_preserves_missing_metrics():

@@ -20,6 +20,27 @@ def owner_chat_id():
     return os.environ.get('OWNER_CHAT_ID') or os.environ.get('TELEGRAM_CHAT_ID')
 
 
+async def verify_legacy_single_owner(conn, owner_id):
+    """Allow NULL-owner legacy rows only when this is the sole explicit owner.
+
+    This is stricter than treating NULL as a wildcard: the requested owner must
+    exist and no operational source, including execution_plans, may name another.
+    """
+    requested_owner_exists = await conn.fetchval("""SELECT EXISTS (
+        SELECT 1 FROM portfolio_snapshots WHERE owner_chat_id=$1
+        UNION ALL SELECT 1 FROM decision_log WHERE owner_chat_id=$1
+        UNION ALL SELECT 1 FROM broker_fills WHERE owner_chat_id=$1
+        UNION ALL SELECT 1 FROM execution_plans WHERE owner_chat_id=$1
+    )""", owner_id)
+    other_owner_exists = await conn.fetchval("""SELECT EXISTS (
+        SELECT 1 FROM portfolio_snapshots WHERE owner_chat_id IS NOT NULL AND owner_chat_id<>$1
+        UNION ALL SELECT 1 FROM decision_log WHERE owner_chat_id IS NOT NULL AND owner_chat_id<>$1
+        UNION ALL SELECT 1 FROM broker_fills WHERE owner_chat_id IS NOT NULL AND owner_chat_id<>$1
+        UNION ALL SELECT 1 FROM execution_plans WHERE owner_chat_id IS NOT NULL AND owner_chat_id<>$1
+    )""", owner_id)
+    return bool(requested_owner_exists and not other_owner_exists)
+
+
 async def load(owner_id, days):
     if not owner_id or not 30 <= days <= 730:
         raise ValueError('Owner requerido; ventana entre 30 y 730 dias')
@@ -33,21 +54,27 @@ async def load(owner_id, days):
             if readonly != 'on':
                 raise RuntimeError('Read-only required')
             start = db_time-timedelta(days=days)
+            legacy_owner_inferred = await verify_legacy_single_owner(conn, owner_id)
             # Separate plan count: an inner join hides plans without intents.
             plans = dict(await conn.fetchrow("""
                 SELECT count(*) AS all_owner_plans,
                        count(*) FILTER (WHERE source='execution_plan') AS all_bot_plans,
                        count(*) FILTER (WHERE source='execution_plan' AND created_at >= $2) AS window_bot_plans,
+                       count(*) FILTER (WHERE owner_chat_id=$1) AS explicit_owner_plans,
+                       count(*) FILTER (WHERE owner_chat_id IS NULL) AS legacy_null_plans,
                        min(created_at) AS first_plan, max(created_at) AS last_plan
-                FROM execution_plans WHERE owner_chat_id=$1 AND created_at <= $3
-            """, owner_id, start, db_time))
+                FROM execution_plans
+                WHERE (owner_chat_id=$1 OR ($4::boolean AND owner_chat_id IS NULL))
+                  AND created_at <= $3
+            """, owner_id, start, db_time, legacy_owner_inferred))
             rows = await conn.fetch("""
                 SELECT p.id AS plan_id,p.run_id,p.created_at,p.source,p.feasible,
                        i.id AS intent_id,i.ticker,i.side,i.is_executable,i.was_blocked
                 FROM execution_plans p JOIN order_intents i ON i.execution_plan_id=p.id
-                WHERE p.owner_chat_id=$1 AND p.created_at >= $2 AND p.created_at <= $3
+                WHERE (p.owner_chat_id=$1 OR ($4::boolean AND p.owner_chat_id IS NULL))
+                  AND p.created_at >= $2 AND p.created_at <= $3
                 ORDER BY p.created_at,i.id LIMIT 25001
-            """, owner_id, start, db_time)
+            """, owner_id, start, db_time, legacy_owner_inferred)
             # Independent SQL denominator, without calling the Python selector.
             counts = dict(await conn.fetchrow("""
                 SELECT count(*) AS raw_intents,
@@ -57,8 +84,9 @@ async def load(owner_id, days):
                     FILTER (WHERE p.source='execution_plan' AND p.feasible AND i.is_executable
                     AND i.was_blocked IS FALSE AND i.side IN ('BUY','SELL') AND trim(i.ticker)<>'') AS unique_signals
                 FROM execution_plans p JOIN order_intents i ON i.execution_plan_id=p.id
-                WHERE p.owner_chat_id=$1 AND p.created_at >= $2 AND p.created_at <= $3
-            """, owner_id, start, db_time))
+                WHERE (p.owner_chat_id=$1 OR ($4::boolean AND p.owner_chat_id IS NULL))
+                  AND p.created_at >= $2 AND p.created_at <= $3
+            """, owner_id, start, db_time, legacy_owner_inferred))
             tickers = sorted({str(r['ticker']).strip().upper() for r in rows if r['source'] == 'execution_plan'})
             # Market facts have no owner: restrict to this owner's bot tickers.
             candles = await conn.fetch("""
@@ -79,22 +107,28 @@ async def load(owner_id, days):
             """, tickers, start, db_time) if registry_available and tickers else []
             # Context only, not inputs to bot returns or account PnL.
             decisions = [dict(r) for r in await conn.fetch("""
-                SELECT source,status,count(*) AS n FROM decision_log
-                WHERE owner_chat_id=$1 AND decided_at >= $2 AND decided_at <= $3
-                GROUP BY source,status ORDER BY source,status
-            """, owner_id, start, db_time)]
+                SELECT COALESCE(source,layers->>'source') AS source,status,count(*) AS n
+                FROM decision_log
+                WHERE (owner_chat_id=$1 OR ($4::boolean AND owner_chat_id IS NULL))
+                  AND COALESCE(source,layers->>'source','') <> 'execution_plan'
+                  AND decided_at >= $2 AND decided_at <= $3
+                GROUP BY 1,status ORDER BY 1,status
+            """, owner_id, start, db_time, legacy_owner_inferred)]
             account = dict(await conn.fetchrow("""
-                SELECT (SELECT count(*) FROM portfolio_snapshots WHERE owner_chat_id=$1
+                SELECT (SELECT count(*) FROM portfolio_snapshots
+                          WHERE (owner_chat_id=$1 OR ($4::boolean AND owner_chat_id IS NULL))
                           AND scraped_at >= $2 AND scraped_at <= $3) AS snapshots,
-                       (SELECT count(*) FROM broker_fills WHERE owner_chat_id=$1
+                       (SELECT count(*) FROM broker_fills
+                          WHERE (owner_chat_id=$1 OR ($4::boolean AND owner_chat_id IS NULL))
                           AND executed_at >= $2 AND executed_at <= $3) AS raw_fills
-            """, owner_id, start, db_time))
+            """, owner_id, start, db_time, legacy_owner_inferred))
         if len(rows)>25000 or len(candles)>250000 or len(events)>10000:
             raise ValueError('Extraccion excede el limite; reducir la ventana')
         return dict(rows=[dict(r) for r in rows], candles=[dict(r) for r in candles],
                     events=[dict(r) for r in events], events_available=registry_available,
                     as_of=db_time, start=start, plans=plans, counts=counts,
-                    decisions=decisions, account=account, readonly=readonly)
+                    decisions=decisions, account=account, readonly=readonly,
+                    legacy_owner_inferred=legacy_owner_inferred)
     finally:
         await conn.close()
 
@@ -112,6 +146,8 @@ async def stats(owner_id, days=180, cost=75):
                   cost_bps=cost, raw_candles=len(data['candles']), plans=data['plans'],
                   raw_intents=len(data['rows']), sql_counts=c, counts_reconciled=reconciled,
                   readonly=data['readonly'], decision_sources=data['decisions'], account=data['account'],
+                  legacy_owner_inferred=data['legacy_owner_inferred'],
+                  owner_scope=('EXPLICIT_PLUS_VERIFIED_LEGACY_NULL' if data['legacy_owner_inferred'] else 'EXPLICIT_ONLY'),
                   corporate_events=len(data['events']), corporate_registry_available=data['events_available'],
                   account_realized_pnl=None, account_pnl_status='No medido: requiere conciliacion de lotes, costos y flujos; los fills no son PnL.')
     return result

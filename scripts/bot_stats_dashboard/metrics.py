@@ -164,6 +164,14 @@ def compute(rows, candles, *, as_of, cost_bps=75.0, events=(), events_available=
         if s['returns']['5'] is not None:
             d = date.fromisoformat(s['date'])
             weekly[(d-timedelta(days=d.weekday())).isoformat()].append(s['returns']['5'])
+    signal_sides = Counter(s['side'] for s in results)
+    evaluated_sources = Counter(
+        detail['source']
+        for s in results
+        for detail in s['details'].values()
+        if detail['status'] == 'evaluated'
+    )
     return {'metrics': metrics, 'quality': dict(quality), 'signals': list(reversed(results)),
             'weekly_5d': [{'week': w, 'n': len(v), 'mean_pct': 100*mean(v)} for w,v in sorted(weekly.items())],
+            'signal_sides': dict(signal_sides), 'evaluated_price_sources': dict(evaluated_sources),
             'price_cutoff': cutoff.isoformat(), 'calendar_verified_through': CALENDAR_THROUGH.isoformat()}

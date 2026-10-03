@@ -17,18 +17,23 @@ async def audit():
     db=await asyncpg.connect(dsn,server_settings={'default_transaction_read_only':'on','statement_timeout':'15000'})
     try:
         async with db.transaction(readonly=True,isolation='repeatable_read'):
+            legacy=bool(result['legacy_owner_inferred'])
             profile=await db.fetch("""
                 SELECT m.source,m.currency,m.venue,m.interval,count(*) AS n,
                        min(m.ts) AS first,max(m.ts) AS last,
                        array_agg(DISTINCT extract(hour FROM m.ts AT TIME ZONE 'UTC')) AS utc_hours
                 FROM market_candles m
-                WHERE m.ticker IN (SELECT DISTINCT ticker FROM decision_log WHERE owner_chat_id=$1)
+                WHERE m.ticker IN (SELECT DISTINCT i.ticker
+                    FROM order_intents i JOIN execution_plans p ON p.id=i.execution_plan_id
+                    WHERE p.owner_chat_id=$1 OR ($2::boolean AND p.owner_chat_id IS NULL))
                 GROUP BY m.source,m.currency,m.venue,m.interval ORDER BY n DESC
-            """,owner)
-            bot=await db.fetchval("SELECT count(*) FROM execution_plans WHERE owner_chat_id=$1",owner)
+            """,owner,legacy)
+            bot=await db.fetchval("""SELECT count(*) FROM execution_plans
+                WHERE owner_chat_id=$1 OR ($2::boolean AND owner_chat_id IS NULL)""",owner,legacy)
             result['independent_audit']={
                 'all_owner_plan_rows':bot,
-                'market_scope':'Tickers in this owner decision_log, all history. Context only, NOT bot sample.',
+                'market_scope':'Tickers in explicit plus strictly verified legacy plans, all history.',
+                'owner_scope':result['owner_scope'],
                 'market_profile':[dict(x) for x in profile],
                 'transaction_read_only':await db.fetchval("SELECT current_setting('transaction_read_only')"),
                 'audited_at':str(await db.fetchval('SELECT NOW()'))}
