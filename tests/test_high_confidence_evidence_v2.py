@@ -381,13 +381,6 @@ def test_postgres_success_is_complete_immutable_and_reconstructible(evidence_pos
                 for statement in (f"UPDATE {table} SET {column}={column}", f"DELETE FROM {table}"):
                     with pytest.raises(asyncpg.RaiseError, match="immutable|append-only"):
                         await conn.execute(statement)
-            before = await conn.fetch("SELECT * FROM decision_log ORDER BY id")
-            # Repeating a run appends a new plan and fresh auxiliary rows, leaving
-            # all previous plan/intent links and decision evidence untouched.
-            next_ids = await save_formal_plan(url)
-            assert set(ids).isdisjoint(next_ids)
-            assert await conn.fetch("SELECT * FROM decision_log WHERE id=ANY($1::bigint[]) ORDER BY id", ids) == before
-            assert await bundle_counts(conn) == [2, 8, 8, 4, 1]
 
     asyncio.run(scenario())
 
@@ -412,4 +405,66 @@ def test_postgres_empty_plan_still_has_both_captures(evidence_postgres_url, monk
             plan.pending_buys = []
             assert await save_formal_plan(url, execution_plan=plan) == []
             assert await bundle_counts(conn) == [1, 0, 0, 2, 0]
+    asyncio.run(scenario())
+
+
+def test_postgres_execution_plan_decisions_are_scoped_to_owner_and_run(evidence_postgres_url, monkeypatch):
+    async def scenario():
+        async with evidence_database(evidence_postgres_url, monkeypatch) as (conn, url):
+            first_ids = await save_formal_plan(url)
+            other_run = uuid4()
+            second_ids = await save_formal_plan(
+                url, owner_chat_id=456, run_id=str(other_run),
+                portfolio_snapshot={"owner_chat_id": 456, "positions": []},
+            )
+            assert set(first_ids).isdisjoint(second_ids)
+            rows = await conn.fetch("""
+                SELECT d.id, d.owner_chat_id AS owner, d.run_id AS run,
+                    p.owner_chat_id AS plan_owner, p.run_id AS plan_run,
+                    c.owner_chat_id AS capture_owner, c.payload->>'run_id' AS capture_run
+                FROM decision_log d JOIN order_intents i ON i.decision_log_id=d.id
+                JOIN execution_plans p ON p.id=i.execution_plan_id
+                JOIN decision_lab_plan_captures c ON c.plan_id=p.id::text
+            """)
+            assert len(rows) == 16
+            for row in rows:
+                owner, run = (123, RUN_ID) if row["id"] in first_ids else (456, other_run)
+                assert row["owner"] == row["plan_owner"] == row["capture_owner"] == owner
+                assert row["run"] == row["plan_run"] == run
+                assert row["capture_run"] == str(run)
+    asyncio.run(scenario())
+
+
+def test_postgres_new_plan_preserves_previous_decisions_and_derived_outcomes(evidence_postgres_url, monkeypatch):
+    from src.decision_lab import capture as capture_module
+
+    async def scenario():
+        async with evidence_database(evidence_postgres_url, monkeypatch) as (conn, url):
+            ids = await save_formal_plan(url)
+            await conn.execute("""
+                UPDATE decision_log SET outcome_5d=0.01, outcome_10d=0.02,
+                    outcome_20d=0.03, outcome_40d=0.04, outcome_basis='canonical_cocos',
+                    outcome_basis_ratio=1, outcome_filled_at=NOW(), was_correct=TRUE
+            """)
+            before = await conn.fetch("SELECT * FROM decision_log ORDER BY id")
+            # Even a repeated run appends fresh auxiliary rows and keeps the
+            # previous plan's linkage and already-matured outcomes intact.
+            next_ids = await save_formal_plan(url)
+            assert set(ids).isdisjoint(next_ids)
+            assert await conn.fetch("SELECT * FROM decision_log WHERE id=ANY($1::bigint[]) ORDER BY id", ids) == before
+            fresh = await conn.fetch("SELECT * FROM decision_log WHERE id=ANY($1::bigint[])", next_ids)
+            for row in fresh:
+                for field in ("outcome_5d", "outcome_10d", "outcome_20d", "outcome_40d",
+                              "outcome_basis", "outcome_basis_ratio", "outcome_filled_at", "was_correct"):
+                    assert row[field] is None
+            assert await bundle_counts(conn) == [2, 8, 8, 4, 1]
+            all_before = await conn.fetch("SELECT * FROM decision_log ORDER BY id")
+
+            async def fail_capture(*args, **kwargs):
+                raise RuntimeError("injected capture failure")
+            monkeypatch.setattr(capture_module, "capture_plan", fail_capture)
+            with pytest.raises(RuntimeError, match="injected capture failure"):
+                await save_formal_plan(url)
+            assert await bundle_counts(conn) == [2, 8, 8, 4, 1]
+            assert await conn.fetch("SELECT * FROM decision_log ORDER BY id") == all_before
     asyncio.run(scenario())

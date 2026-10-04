@@ -9,27 +9,9 @@ def test_scheduler_passes_configured_owner_to_analysis():
     assert 'cfg.scraper.telegram_chat_id' in source
 
 
-def test_execution_plan_decisions_are_scoped_to_run():
-    source = (ROOT / "scripts" / "run_analysis.py").read_text(encoding="utf-8")
-    assert "AND run_id = $5::uuid" in source
-    assert "owner_chat_id IS NOT DISTINCT FROM $3::bigint" in source
-
-
-def test_replacing_decision_clears_all_derived_outcomes():
-    source = (ROOT / "scripts" / "run_analysis.py").read_text(encoding="utf-8")
-    for field in (
-        "outcome_5d = NULL",
-        "outcome_10d = NULL",
-        "outcome_20d = NULL",
-        "outcome_40d = NULL",
-        "executable_outcome_5d = NULL",
-        "executable_outcome_10d = NULL",
-        "executable_outcome_20d = NULL",
-        "executable_outcome_40d = NULL",
-        "outcome_basis = NULL",
-        "outcome_basis_ratio = NULL",
-    ):
-        assert field in source
+# Formal-plan lineage and preservation of existing outcomes are exercised against
+# PostgreSQL in test_high_confidence_evidence_v2.py. The former source-text tests
+# required destructive UPDATE behavior that is no longer part of this writer.
 
 
 def test_candle_upsert_preserves_provenance_metadata():
