@@ -41,6 +41,9 @@ async def capture_plan(
             "status": "INSUFFICIENT",
             "reason": "EXPLICIT_OWNER_AND_PORTFOLIO_REQUIRED",
         }
+    portfolio_owner = portfolio.get("owner_chat_id")
+    if portfolio_owner is not None and int(portfolio_owner) != int(owner):
+        raise ValueError("portfolio owner does not match capture owner")
     if not await conn.fetchval(
         "SELECT to_regclass('public.decision_lab_plan_captures')"
     ):
@@ -94,7 +97,7 @@ async def capture_plan(
         "scope": "RECORDED_PROPOSAL_NOT_FULL_HISTORICAL_POLICY_RECONSTRUCTION",
     }
     key = digest(payload)
-    await conn.execute(
+    inserted = await conn.execute(
         """INSERT INTO decision_lab_plan_captures(capture_hash,owner_chat_id,plan_id,captured_at,payload)
         VALUES($1,$2,$3,$4,$5::jsonb) ON CONFLICT DO NOTHING""",
         key,
@@ -103,6 +106,8 @@ async def capture_plan(
         captured_at,
         canonical(payload),
     )
+    if inserted != "INSERT 0 1":
+        raise RuntimeError("full-context capture insert did not persist one row")
     return {
         "status": "CAPTURED",
         "capture_hash": key,

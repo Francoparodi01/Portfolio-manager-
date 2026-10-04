@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -246,17 +247,30 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
             self.insert_args = None
             self.executions = []
 
+        @asynccontextmanager
+        async def transaction(self):
+            yield
+
         async def fetchval(self, _statement, *_args):
+            if "to_regclass" in _statement:
+                return "decision_lab_plan_captures"
             return None
 
         async def fetchrow(self, statement, *args):
+            if "FROM execution_plans" in statement:
+                return {
+                    "owner_chat_id": 1,
+                    "run_id": "11111111-2222-3333-4444-555555555555",
+                    "created_at": datetime.now(timezone.utc),
+                    "payload_version": "execution-plan-v2-immutable",
+                }
             assert "INSERT INTO decision_log" in statement
             self.insert_args = args
             return {"id": 463}
 
         async def execute(self, statement, *args):
             self.executions.append((statement, args))
-            return "OK"
+            return "INSERT 0 1"
 
         async def close(self):
             return None
@@ -322,6 +336,8 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
             total_ars=1_694_700,
             positions=[],
             owner_chat_id=1,
+            run_id="11111111-2222-3333-4444-555555555555",
+            portfolio_snapshot={"owner_chat_id": 1, "positions": []},
             upcoming_earnings_events=[upcoming_event],
         )
     )
