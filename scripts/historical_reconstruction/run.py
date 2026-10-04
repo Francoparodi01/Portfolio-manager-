@@ -428,6 +428,7 @@ async def build_report(owner: int, *, days: int = 180, cost_bps: float = 75.0) -
             "optimizer_in_primary_sample": False,
             "low_in_primary_metrics": False,
             "unrecoverable_in_primary_metrics": False,
+            "decision_log_used_as_formal_signal_source": False,
         },
         "inventory": {
             "plans": raw["plan_inventory"],
@@ -444,6 +445,7 @@ async def build_report(owner: int, *, days: int = 180, cost_bps: float = 75.0) -
             "decision_log_groups": raw["decision_sources"],
             "decision_source_counts": _context_source_counts(raw["decision_sources"]),
             "formal_sample_source": "execution_plans + order_intents only",
+            "decision_log_role": "compatibility/audit evidence only",
             "account_context_is_not_bot_outcome": True,
         },
         "reconstruction": reconstruction,
@@ -458,7 +460,7 @@ async def build_report(owner: int, *, days: int = 180, cost_bps: float = 75.0) -
         "legacy_comparison": {
             "historical_outcome_columns_used": False,
             "comparison_basis": (
-                "Counts, lineage contradictions and reconstructed raw-price outcomes only; "
+                "Counts, formal-plan lineage diagnostics and reconstructed raw-price outcomes only; "
                 "stored outcome_* values are intentionally ignored."
             ),
             "primary_reconstructed_intents": len(primary_rows),
@@ -468,10 +470,11 @@ async def build_report(owner: int, *, days: int = 180, cost_bps: float = 75.0) -
             ],
         },
         "limitations": [
-            "HIGH requires an immutable formal-plan capture plus coherent explicit-owner lineage.",
-            "MEDIUM uses coherent explicit-owner plan/order rows whose original pre-mutation version is not independently frozen.",
-            "Strict single-owner NULL inference is always LOW and never enters primary metrics.",
-            "Historical decision rows that contradict owner/source/ticker/run lineage are UNRECOVERABLE.",
+            "HIGH requires an immutable owner-scoped formal-plan capture; the capture can prove ownership even when the mutable legacy plan row has NULL owner.",
+            "MEDIUM uses an explicit-owner execution_plan/order_intent whose original version is not independently frozen.",
+            "Strict single-owner NULL inference without an immutable capture is always LOW and never enters primary metrics.",
+            "Broken or missing decision_log compatibility links are reported separately and are not used to derive ticker, side or outcome of a formal plan.",
+            "UNRECOVERABLE is reserved for a formal plan that cannot itself be safely attributed/evaluated, not merely for a corrupted decision_log mirror.",
             "Outcomes are nominal price counterfactuals, not realized portfolio PnL.",
             "Corporate-action coverage remains fail-closed through the audited dashboard calculator.",
         ],
