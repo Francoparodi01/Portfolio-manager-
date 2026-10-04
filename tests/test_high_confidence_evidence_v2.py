@@ -5,7 +5,11 @@ from uuid import UUID
 
 import pytest
 
-from src.collector.schema_migrations import EXECUTION_EVIDENCE_V2_SQL
+from src.collector.schema_migrations import (
+    EXECUTION_EVIDENCE_V2_SQL,
+    EXECUTION_PLAN_PERSISTENCE_SQL,
+    ensure_execution_plan_persistence,
+)
 from src.decision_lab.capture import capture_plan
 
 
@@ -42,6 +46,15 @@ class FakeCaptureConnection:
         return "INSERT 0 1"
 
 
+class FakeMigrationConnection:
+    def __init__(self):
+        self.executed = []
+
+    async def execute(self, sql, *args):
+        self.executed.append(sql)
+        return "OK"
+
+
 def test_schema_requires_owner_and_run_before_formal_plan_insert():
     sql = EXECUTION_EVIDENCE_V2_SQL
     assert "formal execution plan requires explicit owner_chat_id" in sql
@@ -72,6 +85,12 @@ def test_schema_does_not_rewrite_legacy_rows():
     assert "OLD.payload_version = 'execution-plan-v2-immutable'" in sql
     assert "UPDATE execution_plans SET" not in sql
     assert "UPDATE order_intents SET" not in sql
+
+
+def test_ensure_execution_plan_persistence_installs_base_then_evidence_v2():
+    conn = FakeMigrationConnection()
+    asyncio.run(ensure_execution_plan_persistence(conn))
+    assert conn.executed == [EXECUTION_PLAN_PERSISTENCE_SQL, EXECUTION_EVIDENCE_V2_SQL]
 
 
 def test_full_context_capture_binds_owner_and_run_to_persisted_plan():
