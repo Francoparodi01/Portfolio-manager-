@@ -105,3 +105,26 @@ def test_owner_inference_requires_exact_single_explicit_owner():
     verified, owners = asyncio.run(audit_run._owner_state(db, 123))
     assert verified is False
     assert owners == [123, 456]
+
+
+def test_report_declares_formal_signal_source_separately_from_decision_log():
+    assert "decision_log_used_as_formal_signal_source" not in audit_run.REQUIRED_DECISION_COLUMNS
+    # The reconstruction module derives ticker/side from execution plan intents.
+    from reconstruct import rows_for_confidence
+
+    raw = [{
+        "plan_id": "p1",
+        "plan_run_id": "r1",
+        "created_at": datetime(2026, 9, 1, 20, tzinfo=UTC),
+        "plan_source": "execution_plan",
+        "feasible": True,
+        "intent_id": 1,
+        "ticker": "NVDA",
+        "side": "BUY",
+        "is_executable": True,
+        "was_blocked": False,
+    }]
+    episodes = [{"intent_id": 1, "confidence": "MEDIUM"}]
+    selected = rows_for_confidence(raw, episodes, {"HIGH", "MEDIUM"})
+    assert selected[0]["ticker"] == "NVDA"
+    assert selected[0]["side"] == "BUY"
