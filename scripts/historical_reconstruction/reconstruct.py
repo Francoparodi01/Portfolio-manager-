@@ -166,10 +166,11 @@ def classify_episode(
         or _changed_after_creation(row.get("intent_created_at"), row.get("intent_updated_at"))
     )
     if mutated and str(row.get("plan_id")) not in immutable_plan_ids:
+        # Legacy rows are mutable evidence, but a later updated_at alone does not
+        # prove semantic corruption. Record the caveat; MEDIUM already reflects
+        # the absence of an immutable historical version.
         reasons.append(REASON_MUTABLE_ROW)
-        row_level = "LOW"
-    else:
-        row_level = "MEDIUM"
+    row_level = "MEDIUM"
 
     plan_id = str(row.get("plan_id"))
     immutable = plan_id in immutable_plan_ids
