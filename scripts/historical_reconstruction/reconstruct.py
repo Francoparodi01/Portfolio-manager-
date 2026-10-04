@@ -3,6 +3,11 @@
 This module never connects to the database. It classifies already-extracted
 formal-plan evidence and delegates price-return math to the audited dashboard
 calculator from PR #16.
+
+Important lineage rule: execution_plans + order_intents are the source of truth
+for a recorded formal plan. decision_log is compatibility/audit evidence. A
+corrupted legacy decision_log link is therefore reported as a lineage defect,
+but it does not erase an otherwise self-contained formal plan signal.
 """
 from __future__ import annotations
 
@@ -13,17 +18,18 @@ CONFIDENCE_LEVELS = ("HIGH", "MEDIUM", "LOW", "UNRECOVERABLE")
 PRIMARY_LEVELS = {"HIGH", "MEDIUM"}
 
 REASON_IMMUTABLE_CAPTURE = "IMMUTABLE_PLAN_CAPTURE"
+REASON_CAPTURE_OWNER_PROOF = "IMMUTABLE_CAPTURE_OWNER_PROOF"
 REASON_EXPLICIT_OWNER = "EXPLICIT_OWNER"
 REASON_LEGACY_OWNER = "LEGACY_OWNER_INFERRED"
 REASON_OWNER_MISMATCH = "OWNER_MISMATCH"
 REASON_DECISION_MISSING = "DECISION_LINK_MISSING"
-REASON_DECISION_OWNER = "CROSS_OWNER_DECISION_LINK"
-REASON_DECISION_SOURCE = "CROSS_DOMAIN_DECISION_LINK"
-REASON_TICKER_MISMATCH = "DECISION_TICKER_MISMATCH"
+REASON_DECISION_OWNER = "BROKEN_DECISION_OWNER_LINK"
+REASON_DECISION_SOURCE = "BROKEN_DECISION_DOMAIN_LINK"
+REASON_TICKER_MISMATCH = "BROKEN_DECISION_TICKER_LINK"
 REASON_RUN_MISMATCH = "MUTATED_CROSS_RUN_DECISION_LINK"
 REASON_REUSED_DECISION = "DECISION_LINK_REUSED_ACROSS_PLANS"
 REASON_SUPERSEDED = "DECISION_SUPERSEDED"
-REASON_MUTABLE_ROW = "MUTABLE_LEGACY_ROW"
+REASON_ROW_UPDATED = "ROW_UPDATED_AFTER_CREATION"
 
 
 def _upper(value: Any) -> str:
@@ -69,12 +75,19 @@ def classify_episode(
     immutable_plan_ids: set[str] | None = None,
     reused_links: dict[int, set[str]] | None = None,
 ) -> dict[str, Any]:
-    """Classify one evaluable formal-plan intent without inventing lineage.
+    """Classify one formal-plan intent without inventing historical evidence.
 
-    HIGH requires an immutable plan capture, explicit ownership and a coherent
-    decision link. MEDIUM allows coherent mutable formal-plan rows with explicit
-    ownership. NULL-owner inference is always LOW. Cross-owner/source/run/ticker
-    contradictions are UNRECOVERABLE.
+    Confidence is about whether the recorded PLAN SIGNAL can be defended:
+
+    HIGH: matching immutable capture exists for the requested owner.
+    MEDIUM: explicit requested owner on a self-contained formal plan/order intent.
+    LOW: strict single-owner NULL inference is required.
+    UNRECOVERABLE: the formal plan itself cannot be attributed to the owner or
+    is not an evaluable formal signal.
+
+    decision_log is never used to decide ticker/side/outcome for the episode.
+    Its contradictions are lineage diagnostics, not reasons to discard an intact
+    execution_plan/order_intent record.
     """
     immutable_plan_ids = immutable_plan_ids or set()
     reused_links = reused_links or {}
@@ -84,109 +97,91 @@ def classify_episode(
         return {
             "confidence": "UNRECOVERABLE",
             "primary_eligible": False,
+            "decision_link_status": "NOT_APPLICABLE",
             "reason_codes": ["NOT_EVALUABLE_FORMAL_SIGNAL"],
         }
 
+    plan_id = str(row.get("plan_id"))
+    immutable = plan_id in immutable_plan_ids
     plan_owner = row.get("plan_owner_chat_id")
-    if plan_owner == requested_owner:
+
+    if immutable:
+        # immutable_plan_ids is loaded from decision_lab_plan_captures filtered by
+        # owner_chat_id=requested_owner, so the capture itself is owner proof.
+        reasons.extend([REASON_IMMUTABLE_CAPTURE, REASON_CAPTURE_OWNER_PROOF])
+        owner_confidence = "CAPTURE_PROVEN"
+    elif plan_owner == requested_owner:
         reasons.append(REASON_EXPLICIT_OWNER)
-        owner_level = "MEDIUM"
+        owner_confidence = "EXPLICIT"
     elif plan_owner is None and legacy_owner_verified:
         reasons.append(REASON_LEGACY_OWNER)
-        owner_level = "LOW"
+        owner_confidence = "LEGACY_INFERRED"
     else:
         return {
             "confidence": "UNRECOVERABLE",
             "primary_eligible": False,
+            "decision_link_status": "NOT_TRUSTED",
             "reason_codes": [REASON_OWNER_MISMATCH],
         }
 
+    decision_link_status = "HEALTHY"
     decision_id = row.get("decision_log_id")
-    coherent_link = True
-    link_level = "MEDIUM"
-    if decision_id is None:
-        coherent_link = False
-        link_level = "LOW"
+    if decision_id is None or row.get("decision_exists") is False:
+        decision_link_status = "MISSING"
         reasons.append(REASON_DECISION_MISSING)
     else:
-        if row.get("decision_exists") is False:
-            return {
-                "confidence": "UNRECOVERABLE",
-                "primary_eligible": False,
-                "reason_codes": [REASON_DECISION_MISSING],
-            }
-
+        broken = False
         decision_owner = row.get("decision_owner_chat_id")
         if decision_owner not in (None, requested_owner):
-            return {
-                "confidence": "UNRECOVERABLE",
-                "primary_eligible": False,
-                "reason_codes": [REASON_DECISION_OWNER],
-            }
-        if decision_owner is None:
-            link_level = "LOW"
-            reasons.append(REASON_LEGACY_OWNER)
+            broken = True
+            reasons.append(REASON_DECISION_OWNER)
 
         decision_source = _text(row.get("decision_source"))
         if decision_source and decision_source != "execution_plan":
-            return {
-                "confidence": "UNRECOVERABLE",
-                "primary_eligible": False,
-                "reason_codes": [REASON_DECISION_SOURCE],
-            }
+            broken = True
+            reasons.append(REASON_DECISION_SOURCE)
 
         decision_ticker = _upper(row.get("decision_ticker"))
         if decision_ticker and decision_ticker != _upper(row.get("ticker")):
-            return {
-                "confidence": "UNRECOVERABLE",
-                "primary_eligible": False,
-                "reason_codes": [REASON_TICKER_MISMATCH],
-            }
+            broken = True
+            reasons.append(REASON_TICKER_MISMATCH)
 
         plan_run = row.get("plan_run_id")
         decision_run = row.get("decision_run_id")
         if plan_run and decision_run and str(plan_run) != str(decision_run):
-            return {
-                "confidence": "UNRECOVERABLE",
-                "primary_eligible": False,
-                "reason_codes": [REASON_RUN_MISMATCH],
-            }
+            broken = True
+            reasons.append(REASON_RUN_MISMATCH)
 
         plans = reused_links.get(int(decision_id), set())
         if len(plans) > 1:
-            link_level = "LOW"
+            broken = True
             reasons.append(REASON_REUSED_DECISION)
 
         if row.get("superseded_by_id") is not None:
-            link_level = "LOW"
+            broken = True
             reasons.append(REASON_SUPERSEDED)
 
-    mutated = (
+        if broken:
+            decision_link_status = "BROKEN"
+
+    if (
         _changed_after_creation(row.get("created_at"), row.get("plan_updated_at"))
         or _changed_after_creation(row.get("intent_created_at"), row.get("intent_updated_at"))
-    )
-    if mutated and str(row.get("plan_id")) not in immutable_plan_ids:
-        # Legacy rows are mutable evidence, but a later updated_at alone does not
-        # prove semantic corruption. Record the caveat; MEDIUM already reflects
-        # the absence of an immutable historical version.
-        reasons.append(REASON_MUTABLE_ROW)
-    row_level = "MEDIUM"
+    ):
+        # Diagnostic only: persistence can legitimately update timestamps.
+        reasons.append(REASON_ROW_UPDATED)
 
-    plan_id = str(row.get("plan_id"))
-    immutable = plan_id in immutable_plan_ids
     if immutable:
-        reasons.append(REASON_IMMUTABLE_CAPTURE)
-
-    if owner_level == "LOW" or link_level == "LOW" or row_level == "LOW":
-        confidence = "LOW"
-    elif immutable and coherent_link:
         confidence = "HIGH"
-    else:
+    elif owner_confidence == "EXPLICIT":
         confidence = "MEDIUM"
+    else:
+        confidence = "LOW"
 
     return {
         "confidence": confidence,
         "primary_eligible": confidence in PRIMARY_LEVELS,
+        "decision_link_status": decision_link_status,
         "reason_codes": sorted(set(reasons)),
     }
 
@@ -225,9 +220,13 @@ def reconstruct_episodes(
 
     confidence = Counter(e["confidence"] for e in episodes)
     reasons = Counter(code for e in episodes for code in e["reason_codes"])
+    link_status = Counter(e["decision_link_status"] for e in episodes)
     return {
         "episodes": episodes,
-        "confidence_counts": {level: confidence.get(level, 0) for level in CONFIDENCE_LEVELS},
+        "confidence_counts": {
+            level: confidence.get(level, 0) for level in CONFIDENCE_LEVELS
+        },
+        "decision_link_status_counts": dict(sorted(link_status.items())),
         "reason_counts": dict(sorted(reasons.items())),
         "raw_intents": len(rows),
         "evaluable_intents": len(eligible),
@@ -284,7 +283,8 @@ def attach_outcomes(
 
 
 def reconstruction_summary(report: dict[str, Any]) -> str:
-    conf = report["reconstruction"]["confidence_counts"]
+    rec = report["reconstruction"]
+    conf = rec["confidence_counts"]
     primary = report["outcomes"]["primary"]["metrics"]
     low = report["outcomes"]["low"]["metrics"]
 
@@ -292,10 +292,11 @@ def reconstruction_summary(report: dict[str, Any]) -> str:
         parts = []
         for horizon in ("5", "10", "20", "40"):
             m = metrics[horizon]
-            mean = "N/D" if m["mean_pct"] is None else f'{m["mean_pct"]:.2f}%'
-            parts.append(f"{horizon}D n={m['n']} EV={mean}")
+            avg = "N/D" if m["mean_pct"] is None else f'{m["mean_pct"]:.2f}%'
+            parts.append(f"{horizon}D n={m['n']} EV={avg}")
         return f"- {label}: " + " | ".join(parts)
 
+    link_counts = rec.get("decision_link_status_counts", {})
     return "\n".join(
         [
             "# Historical Reconstruction v1",
@@ -306,8 +307,11 @@ def reconstruction_summary(report: dict[str, Any]) -> str:
             f"- MEDIUM: {conf['MEDIUM']}",
             f"- LOW: {conf['LOW']}",
             f"- UNRECOVERABLE: {conf['UNRECOVERABLE']}",
-            f"- Intenciones no evaluables: {report['reconstruction']['excluded_non_evaluable']}",
-            f"- Links de decision reutilizados: {report['reconstruction']['reused_decision_links']}",
+            f"- Intenciones no evaluables: {rec['excluded_non_evaluable']}",
+            f"- Links de decision reutilizados: {rec['reused_decision_links']}",
+            f"- Decision links HEALTHY: {link_counts.get('HEALTHY', 0)}",
+            f"- Decision links BROKEN: {link_counts.get('BROKEN', 0)}",
+            f"- Decision links MISSING: {link_counts.get('MISSING', 0)}",
             "",
             "## Outcomes recalculados desde precios crudos",
             metric_line("PRIMARY (HIGH+MEDIUM)", primary),
@@ -315,6 +319,8 @@ def reconstruction_summary(report: dict[str, Any]) -> str:
             "",
             "## Invariantes",
             "- No usa outcome_* ni executable_outcome_* historicos.",
+            "- La señal formal sale de execution_plans + order_intents; decision_log es evidencia auxiliar.",
+            "- Un decision_log cross-run/reutilizado se marca BROKEN, pero no borra un plan formal autocontenido.",
             "- Radar/optimizer no entran en la muestra formal.",
             "- LOW nunca entra en metricas primarias.",
             "- UNRECOVERABLE no recibe outcomes primarios.",
