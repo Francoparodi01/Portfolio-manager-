@@ -28,6 +28,13 @@ def clean(value):
 async def capture_plan(
     conn, *, plan_id, owner, decision_at, plan, portfolio, signals, macro, events=()
 ):
+    """Persist an immutable full-context capture linked to the stored plan/run.
+
+    The execution-plan v2 database trigger already creates a minimal immutable
+    identity capture atomically with the plan INSERT. This richer capture adds the
+    portfolio, signals, macro and event context, but it must agree with the owner
+    and run lineage already persisted in ``execution_plans``.
+    """
     owner = owner or (portfolio or {}).get("owner_chat_id")
     if not owner or not portfolio:
         return {
@@ -38,6 +45,24 @@ async def capture_plan(
         "SELECT to_regclass('public.decision_lab_plan_captures')"
     ):
         return {"status": "INSUFFICIENT", "reason": "CAPTURE_SCHEMA_NOT_INITIALIZED"}
+
+    persisted = await conn.fetchrow(
+        """
+        SELECT owner_chat_id, run_id, created_at, payload_version
+        FROM execution_plans
+        WHERE id=$1::uuid
+        """,
+        str(plan_id),
+    )
+    if not persisted:
+        return {"status": "INSUFFICIENT", "reason": "PLAN_NOT_PERSISTED"}
+
+    persisted_owner = persisted["owner_chat_id"]
+    if persisted_owner is None or int(persisted_owner) != int(owner):
+        raise ValueError("capture owner does not match persisted execution plan")
+    if persisted["run_id"] is None:
+        return {"status": "INSUFFICIENT", "reason": "PERSISTED_RUN_ID_REQUIRED"}
+
     captured_at = datetime.now(timezone.utc)
     root = Path(__file__).resolve().parents[2]
     sources = (
@@ -50,11 +75,14 @@ async def capture_plan(
         "src/analysis/macro.py",
     )
     payload = {
-        "schema": "decision-lab-plan-capture-v1",
+        "schema": "decision-lab-plan-capture-v2",
+        "capture_kind": "FULL_CONTEXT",
         "plan_id": str(plan_id),
         "owner": int(owner),
-        "decision_at": decision_at,
+        "run_id": str(persisted["run_id"]),
+        "decision_at": decision_at or persisted["created_at"],
         "captured_at": captured_at,
+        "payload_version": persisted["payload_version"],
         "plan": clean(plan),
         "portfolio": clean(portfolio),
         "signals": clean(signals),
@@ -75,4 +103,8 @@ async def capture_plan(
         captured_at,
         canonical(payload),
     )
-    return {"status": "CAPTURED", "capture_hash": key}
+    return {
+        "status": "CAPTURED",
+        "capture_hash": key,
+        "run_id": str(persisted["run_id"]),
+    }
