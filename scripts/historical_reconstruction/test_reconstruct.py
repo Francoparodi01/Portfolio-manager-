@@ -38,6 +38,7 @@ def test_explicit_coherent_plan_is_medium_without_immutable_capture():
     result = classify_episode(row(), requested_owner=123, legacy_owner_verified=True)
     assert result["confidence"] == "MEDIUM"
     assert result["primary_eligible"] is True
+    assert result["decision_link_status"] == "HEALTHY"
 
 
 def test_immutable_capture_with_coherent_explicit_lineage_is_high():
@@ -50,6 +51,20 @@ def test_immutable_capture_with_coherent_explicit_lineage_is_high():
     assert result["confidence"] == "HIGH"
     assert result["primary_eligible"] is True
     assert "IMMUTABLE_PLAN_CAPTURE" in result["reason_codes"]
+    assert "IMMUTABLE_CAPTURE_OWNER_PROOF" in result["reason_codes"]
+
+
+def test_immutable_capture_repairs_null_mutable_plan_owner_without_db_backfill():
+    result = classify_episode(
+        row(plan_owner_chat_id=None, decision_owner_chat_id=None),
+        requested_owner=123,
+        legacy_owner_verified=False,
+        immutable_plan_ids={"plan-1"},
+    )
+    assert result["confidence"] == "HIGH"
+    assert result["primary_eligible"] is True
+    assert "LEGACY_OWNER_INFERRED" not in result["reason_codes"]
+    assert "IMMUTABLE_CAPTURE_OWNER_PROOF" in result["reason_codes"]
 
 
 def test_verified_null_owner_is_low_and_never_primary():
@@ -63,7 +78,7 @@ def test_verified_null_owner_is_low_and_never_primary():
     assert "LEGACY_OWNER_INFERRED" in result["reason_codes"]
 
 
-def test_null_owner_without_single_owner_proof_is_unrecoverable():
+def test_null_owner_without_single_owner_or_capture_proof_is_unrecoverable():
     result = classify_episode(
         row(plan_owner_chat_id=None),
         requested_owner=123,
@@ -73,39 +88,55 @@ def test_null_owner_without_single_owner_proof_is_unrecoverable():
     assert result["primary_eligible"] is False
 
 
-def test_cross_run_decision_link_is_unrecoverable():
+def test_cross_run_decision_link_is_broken_but_formal_plan_survives():
     result = classify_episode(
         row(decision_run_id="another-run"),
         requested_owner=123,
         legacy_owner_verified=True,
     )
-    assert result["confidence"] == "UNRECOVERABLE"
-    assert result["reason_codes"] == ["MUTATED_CROSS_RUN_DECISION_LINK"]
+    assert result["confidence"] == "MEDIUM"
+    assert result["primary_eligible"] is True
+    assert result["decision_link_status"] == "BROKEN"
+    assert "MUTATED_CROSS_RUN_DECISION_LINK" in result["reason_codes"]
 
 
-def test_radar_or_optimizer_decision_cannot_enter_formal_sample():
+def test_radar_or_optimizer_compatibility_link_cannot_reclassify_formal_plan():
     for source in ("radar", "optimizer"):
         result = classify_episode(
             row(decision_source=source),
             requested_owner=123,
             legacy_owner_verified=True,
         )
-        assert result["confidence"] == "UNRECOVERABLE"
-        assert result["reason_codes"] == ["CROSS_DOMAIN_DECISION_LINK"]
+        assert result["confidence"] == "MEDIUM"
+        assert result["primary_eligible"] is True
+        assert result["decision_link_status"] == "BROKEN"
+        assert "BROKEN_DECISION_DOMAIN_LINK" in result["reason_codes"]
 
 
-def test_reused_decision_link_across_plans_is_low():
+def test_reused_decision_link_is_diagnostic_not_signal_destruction():
     rows = [
         row(plan_id="plan-1", intent_id=10, decision_log_id=20),
         row(plan_id="plan-2", intent_id=11, decision_log_id=20),
     ]
     result = reconstruct_episodes(rows, requested_owner=123, legacy_owner_verified=True)
     assert result["reused_decision_links"] == 1
-    assert result["confidence_counts"]["LOW"] == 2
+    assert result["confidence_counts"]["MEDIUM"] == 2
+    assert result["decision_link_status_counts"]["BROKEN"] == 2
     assert all(
         "DECISION_LINK_REUSED_ACROSS_PLANS" in e["reason_codes"]
         for e in result["episodes"]
     )
+
+
+def test_missing_decision_link_keeps_explicit_formal_plan_medium():
+    result = classify_episode(
+        row(decision_log_id=None, decision_exists=False),
+        requested_owner=123,
+        legacy_owner_verified=True,
+    )
+    assert result["confidence"] == "MEDIUM"
+    assert result["decision_link_status"] == "MISSING"
+    assert "DECISION_LINK_MISSING" in result["reason_codes"]
 
 
 def test_blocked_and_non_executable_intents_are_inventory_not_episodes():
@@ -142,4 +173,4 @@ def test_only_high_and_medium_can_be_selected_for_primary_outcomes():
         reconstructed["episodes"],
         {"HIGH", "MEDIUM"},
     )
-    assert [r["intent_id"] for r in primary] == [1]
+    assert [r["intent_id"] for r in primary] == [1, 3]
