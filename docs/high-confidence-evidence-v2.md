@@ -66,6 +66,20 @@ el comportamiento de nuevas inserciones.
 `decision_log` sigue siendo compatibilidad/auditoría auxiliar. La señal formal se
 define desde `execution_plans + order_intents`.
 
+### Alcance de atomicidad
+
+La garantía atómica cubre `execution_plan + PERSISTENCE_IDENTITY`: ambos nacen o
+ninguno nace. El pipeline actual inserta los `order_intents` posteriormente en
+sentencias separadas. Por eso, un fallo posterior podría dejar un plan v2 con
+menos intents de los esperados; no puede, sin embargo, convertir un intent ya
+persistido en evidencia mutable o LOW.
+
+En otras palabras: **cada señal formal efectivamente persistida queda HIGH por
+construcción**, pero este PR no promete todavía una transacción all-or-nothing de
+todo el conjunto plan + N intents. Ese endurecimiento transaccional es una mejora
+separada y no debe confundirse con la calidad de evidencia de los intents que sí
+quedaron registrados.
+
 ## Qué significa HIGH
 
 `HIGH` significa que podemos demostrar de forma inmutable:
@@ -73,7 +87,7 @@ define desde `execution_plans + order_intents`.
 - qué plan formal se guardó;
 - a qué owner pertenecía;
 - qué run lo originó;
-- qué intents formales pertenecían a ese plan.
+- qué intents formales quedaron efectivamente persistidos bajo ese plan.
 
 No significa que exista un backtest point-in-time perfecto de toda la política.
 Las vintages históricas completas de configuración, universo, macro y fuentes
