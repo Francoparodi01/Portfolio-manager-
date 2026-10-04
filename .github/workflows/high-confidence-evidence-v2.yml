@@ -1,0 +1,58 @@
+name: High Confidence Evidence V2
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/run_analysis.py'
+      - 'src/collector/schema_migrations.py'
+      - 'src/decision_lab/**'
+      - 'tests/test_high_confidence_evidence_v2.py'
+      - 'tests/test_execution_nominals_and_rotation.py'
+      - 'scripts/historical_reconstruction/**'
+      - 'scripts/bot_stats_dashboard/**'
+      - '.github/workflows/high-confidence-evidence-v2.yml'
+  push:
+    branches: ['feature/high-confidence-evidence-v2']
+
+permissions:
+  contents: read
+
+jobs:
+  transactional-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: quantia_pr19_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quantia_pr19_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      QUANTIA_EVIDENCE_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/quantia_pr19_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install project test dependencies
+        run: python -m pip install -r requirements.txt pytest
+      - name: Verify all-or-nothing persistence in PostgreSQL
+        run: python -m pytest tests/test_high_confidence_evidence_v2.py -q
+      - name: Verify execution nominals and rotation
+        run: python -m pytest tests/test_execution_nominals_and_rotation.py -q
+      - name: Verify Historical Reconstruction v1
+        run: python -m pytest scripts/historical_reconstruction -q
+      - name: Verify bot stats dashboard
+        run: python -m pytest scripts/bot_stats_dashboard -q
+      - name: Check diff whitespace
+        run: git diff --check origin/main...HEAD

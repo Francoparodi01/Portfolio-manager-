@@ -16,6 +16,8 @@ analysis_run_id único
         ↓
 owner_chat_id explícito
         ↓
+BEGIN (una conexión asyncpg)
+        ↓
 INSERT execution_plans
         ↓
 DB valida owner + run_id + source
@@ -24,11 +26,13 @@ payload_version = execution-plan-v2-immutable
         ↓
 misma sentencia crea PERSISTENCE_IDENTITY capture owner-scoped
         ↓
-order_intents del plan quedan append-only
+decision_log auxiliar nuevo + order_intents inmutables + HOLD audit
         ↓
 FULL_CONTEXT capture agrega portfolio/signals/macro/events
         ↓
-Historical Reconstruction => HIGH
+COMMIT (sólo si todas las escrituras y capturas tuvieron éxito)
+        ↓
+Historical Reconstruction => HIGH para intents ejecutables elegibles
 ```
 
 ## Garantías
@@ -51,9 +55,10 @@ la misma sentencia/transacción que crea el plan. Si esa captura falla, el INSER
 del plan también falla. Por lo tanto no puede existir un plan v2 persistido sin
 una captura owner-scoped.
 
-La captura `FULL_CONTEXT` es adicional: conserva plan serializado, snapshot de
-portfolio, señales, macro, eventos y hashes de código. Si esta segunda captura no
-está disponible, la identidad formal ya quedó congelada por la captura obligatoria.
+La captura `FULL_CONTEXT` es obligatoria en el escritor formal del pipeline:
+conserva plan serializado, snapshot de portfolio, señales, macro, eventos y hashes
+de código. Una excepción o un resultado `INSUFFICIENT` aborta la transacción
+completa. Un snapshot con owner explícito distinto del plan también se rechaza.
 
 ### Inmutabilidad
 
@@ -68,17 +73,30 @@ define desde `execution_plans + order_intents`.
 
 ### Alcance de atomicidad
 
-La garantía atómica cubre `execution_plan + PERSISTENCE_IDENTITY`: ambos nacen o
-ninguno nace. El pipeline actual inserta los `order_intents` posteriormente en
-sentencias separadas. Por eso, un fallo posterior podría dejar un plan v2 con
-menos intents de los esperados; no puede, sin embargo, convertir un intent ya
-persistido en evidencia mutable o LOW.
+`_save_execution_plan_events` usa una sola conexión y una sola transacción para:
 
-En otras palabras: **cada señal formal efectivamente persistida queda HIGH por
-construcción**, pero este PR no promete todavía una transacción all-or-nothing de
-todo el conjunto plan + N intents. Ese endurecimiento transaccional es una mejora
-separada y no debe confundirse con la calidad de evidencia de los intents que sí
-quedaron registrados.
+- `execution_plans` y la captura automática `PERSISTENCE_IDENTITY`;
+- filas nuevas de `decision_log`, siempre auxiliares;
+- todos los `order_intents`: ventas, compras, bloqueados y pendientes representables;
+- observaciones HOLD;
+- captura `FULL_CONTEXT`.
+
+Un fallo de SQL, serialización, captura insuficiente, cancelación o COMMIT hace
+rollback del conjunto. Los IDs se devuelven sólo después del COMMIT. También se
+rechazan INSERTs que no escriben una fila. Un plan vacío válido conserva ambas
+capturas y cero intents.
+
+Cada plan recibe un UUID nuevo y filas auxiliares nuevas: no hay UPSERT de planes
+ni intents, ni reutilización o actualización de `decision_log` de planes previos.
+Un reintento con el mismo run no es idempotente: crea otro plan completo, sin
+alterar el anterior. Los runs normales conservan el identificador único del
+pipeline. La deduplicación existente de HOLD por `(run_id, ticker)` se conserva.
+
+La garantía all-or-nothing corresponde al escritor formal del pipeline. Las
+migraciones de esquema se preparan antes de la transacción; no se hace backfill
+nuevo. Un escritor SQL externo debe usar el mismo límite transaccional: los
+triggers por sí solos sólo garantizan identidad e inmutabilidad, no conocen el
+número esperado de intents ni exigen `FULL_CONTEXT` al COMMIT.
 
 ## Qué significa HIGH
 
@@ -102,6 +120,21 @@ python -m pytest scripts/historical_reconstruction -q
 python -m pytest scripts/bot_stats_dashboard -q
 git diff --check origin/main...HEAD
 ```
+
+### Pruebas transaccionales con PostgreSQL aislado
+
+Los tests de integración usan `QUANTIA_EVIDENCE_TEST_DATABASE_URL` y sólo aceptan
+un servidor loopback con base de control `quantia_pr19_test`. Crean y eliminan una
+base descartable propia por caso; no leen `.env` ni conectan a la base operativa.
+Sin esa variable, esos casos se reportan como SKIP, no como una validación real.
+El workflow `High Confidence Evidence V2` siempre la configura con PostgreSQL 17.
+
+Se verifica rollback ante fallos del plan, captura de identidad, `decision_log`,
+primer intent e intents posteriores, bloqueados, pendientes, HOLD, captura rica,
+serialización, owner incorrecto, contexto insuficiente, cancelación y COMMIT.
+También se comprueba invisibilidad desde otra conexión antes del COMMIT,
+inmutabilidad, reintento append-only y clasificación HIGH de BUY/SELL elegibles
+con el clasificador sin cambios de Historical Reconstruction v1.
 
 ## Smoke test posterior al deploy
 
@@ -130,8 +163,7 @@ Esperado para cada plan nuevo:
 - `owner_chat_id` no NULL;
 - `run_id` no NULL;
 - `payload_version = execution-plan-v2-immutable`;
-- al menos una captura (`PERSISTENCE_IDENTITY`), normalmente también una
-  `FULL_CONTEXT`;
+- ambas capturas: `PERSISTENCE_IDENTITY` y `FULL_CONTEXT`;
 - intents presentes si el plan generó órdenes formales.
 
 Luego volver a correr:
