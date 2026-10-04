@@ -101,6 +101,9 @@ python -m pytest scripts/bot_stats_dashboard -q
 git diff --check origin/main...HEAD
 ```
 
+Después de cambios de reglas de linaje, volver a ejecutar tanto los tests como el
+reporte contra la DB real antes de considerar el PR listo para merge.
+
 ## Cómo interpretar el resultado
 
 El JSON separa:
