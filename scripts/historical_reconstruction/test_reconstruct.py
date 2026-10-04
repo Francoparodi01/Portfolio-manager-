@@ -122,14 +122,15 @@ def test_blocked_and_non_executable_intents_are_inventory_not_episodes():
 
 def test_only_high_and_medium_can_be_selected_for_primary_outcomes():
     rows = [
-        row(plan_id="p1", intent_id=1),
+        row(plan_id="p1", intent_id=1, decision_log_id=21),
         row(
             plan_id="p2",
             intent_id=2,
+            decision_log_id=22,
             plan_owner_chat_id=None,
             decision_owner_chat_id=None,
         ),
-        row(plan_id="p3", intent_id=3, decision_run_id="wrong"),
+        row(plan_id="p3", intent_id=3, decision_log_id=23, decision_run_id="wrong"),
     ]
     reconstructed = reconstruct_episodes(
         rows,
