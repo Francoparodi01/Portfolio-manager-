@@ -107,6 +107,20 @@ def test_snapshot_replay_keeps_first_payload_immutable():
             calls.append(statement)
             return None  # Existing snapshot_id.
 
+        async def fetch(self, _statement, *_args):
+            return []
+
+        async def fetchrow(self, _statement, *_args):
+            return {
+                "snapshot_id": snapshot.snapshot_id,
+                "scraped_at": snapshot.scraped_at,
+                "total_value_ars": snapshot.total_value_ars,
+                "cash_ars": snapshot.cash_ars,
+                "confidence_score": snapshot.confidence_score,
+                "dom_hash": snapshot.dom_hash,
+                "raw_html_hash": snapshot.raw_html_hash,
+            }
+
         async def execute(self, statement, *_args):
             calls.append(statement)
 

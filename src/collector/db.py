@@ -72,6 +72,7 @@ from src.analysis.plan_follow_attribution import (
     sync_plan_execution_attributions as sync_plan_execution_attributions_derived,
 )
 from src.core.credentials import CredentialCipher, UserCredentials
+from src.core.market_calendar import is_trading_day
 
 try:
     import asyncpg
@@ -95,6 +96,35 @@ SUPERSEDED_BROKER_FILL_REASON = "cocos_ticket_replaced_provisional_movement"
 
 
 SCHEMA_PATH = Path(__file__).resolve().parents[2] / "init.sql"
+
+
+def _candle_session_day(candle: Mapping[str, Any]) -> date:
+    """Return the UTC-labelled daily session for one persisted candle."""
+    timestamp = candle["ts"]
+    if isinstance(timestamp, datetime):
+        if timestamp.tzinfo is None:
+            return timestamp.date()
+        return timestamp.astimezone(timezone.utc).date()
+    if isinstance(timestamp, date):
+        return timestamp
+    raise TypeError("market candle ts must be a date or datetime")
+
+
+def _session_after(start_day: date, count: int) -> date:
+    """Return the exact BYMA trading session `count` sessions after start_day."""
+    if count < 0:
+        raise ValueError("count must be non-negative")
+    target = start_day
+    remaining = count
+    while remaining:
+        target += timedelta(days=1)
+        if is_trading_day(target):
+            remaining -= 1
+    return target
+
+
+def _candle_for_session(candles: Sequence[Mapping[str, Any]], session: date) -> Mapping[str, Any] | None:
+    return next((candle for candle in candles if _candle_session_day(candle) == session), None)
 
 
 def _schema_sql() -> str:
@@ -2167,30 +2197,46 @@ class PortfolioDatabase:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                WITH ranked AS (
+                WITH daily AS (
                     SELECT
                         ts, ticker, long_ticker, asset_type, currency, venue, interval,
-                        open_price, high_price, low_price, close_price, volume, source,
+                        open_price, high_price, low_price, close_price, volume, source, scraped_at,
                         ROW_NUMBER() OVER (
-                            PARTITION BY (ts AT TIME ZONE 'UTC')::date
-                            ORDER BY
-                                CASE
-                                    WHEN source = 'COCOS' THEN 0
-                                    WHEN source = 'TRADINGVIEW_BYMA' THEN 1
-                                    WHEN source = 'internal_snapshot' THEN 2
-                                    ELSE 3
-                                END,
-                                scraped_at DESC,
-                                ts DESC
-                        ) AS source_rank
+                            PARTITION BY source, long_ticker, (ts AT TIME ZONE 'UTC')::date
+                            ORDER BY scraped_at DESC, ts DESC
+                        ) AS daily_rank
                     FROM market_candles
                     WHERE {' AND '.join(filters)}
+                ), series AS (
+                    SELECT
+                        source,
+                        long_ticker,
+                        COUNT(*) AS session_coverage,
+                        MAX(scraped_at) AS latest_scraped_at,
+                        MIN(CASE
+                            WHEN source = 'COCOS' THEN 0
+                            WHEN source = 'TRADINGVIEW_BYMA' THEN 1
+                            WHEN source = 'internal_snapshot' THEN 2
+                            ELSE 3
+                        END) AS source_priority
+                    FROM daily
+                    WHERE daily_rank = 1
+                    GROUP BY source, long_ticker
+                ), selected_series AS (
+                    SELECT source, long_ticker
+                    FROM series
+                    ORDER BY session_coverage DESC, source_priority, latest_scraped_at DESC,
+                             source, long_ticker
+                    LIMIT 1
                 )
                 SELECT
-                    ts, ticker, long_ticker, asset_type, currency, venue, interval,
-                    open_price, high_price, low_price, close_price, volume, source
-                FROM ranked
-                WHERE source_rank = 1
+                    daily.ts, daily.ticker, daily.long_ticker, daily.asset_type,
+                    daily.currency, daily.venue, daily.interval, daily.open_price,
+                    daily.high_price, daily.low_price, daily.close_price, daily.volume,
+                    daily.source
+                FROM daily
+                JOIN selected_series USING (source, long_ticker)
+                WHERE daily_rank = 1
                 ORDER BY ts DESC
                 {limit_sql}
                 """,
@@ -3638,6 +3684,7 @@ class PortfolioDatabase:
     ) -> dict[str, float]:
         outcomes: dict[str, float] = {}
         decided_day = decided_at.astimezone(ART_TZ).date()
+        known_through = now.astimezone(timezone.utc).date()
 
         for horizon, col in [
             (5, "outcome_5d"),
@@ -3645,16 +3692,13 @@ class PortfolioDatabase:
             (20, "outcome_20d"),
             (40, "outcome_40d"),
         ]:
-            target_day = decided_day + timedelta(days=horizon)
-            if target_day > now.astimezone(ART_TZ).date():
+            target_day = _session_after(decided_day, horizon)
+            if target_day > known_through:
                 continue
-            eligible = [
-                candle for candle in candles
-                if candle["ts"].date() >= target_day
-            ]
-            if not eligible:
+            candle = _candle_for_session(candles, target_day)
+            if candle is None or candle.get("close_price") is None:
                 continue
-            price_at_horizon = float(eligible[0]["close_price"])
+            price_at_horizon = float(candle["close_price"])
             # CONVENTION: SELL returns are positive-up.
             outcomes[col] = directional_return(
                 entry_price,
@@ -3685,21 +3729,17 @@ class PortfolioDatabase:
         if not after_close:
             return decided_at, float(entry_price), decided_day
 
-        eligible = [
-            candle for candle in candles
-            if candle["ts"].date() > decided_day
-            and (candle.get("open_price") is not None or candle.get("close_price") is not None)
-        ]
-        if not eligible:
+        entry_session = _session_after(decided_day, 1)
+        candle = _candle_for_session(candles, entry_session)
+        if candle is None:
             return None, None, None
 
-        candle = eligible[0]
         px = candle.get("open_price")
         if px is None or float(px) <= 0:
             px = candle.get("close_price")
         if px is None or float(px) <= 0:
             return None, None, None
-        return candle["ts"], float(px), candle["ts"].date()
+        return candle["ts"], float(px), _candle_session_day(candle)
 
     async def _compute_executable_outcomes(
         self,
@@ -3711,6 +3751,7 @@ class PortfolioDatabase:
         candles: list[dict],
     ) -> dict[str, float]:
         outcomes: dict[str, float] = {}
+        known_through = now.astimezone(timezone.utc).date()
 
         for horizon, col in [
             (5, "executable_outcome_5d"),
@@ -3718,17 +3759,15 @@ class PortfolioDatabase:
             (20, "executable_outcome_20d"),
             (40, "executable_outcome_40d"),
         ]:
-            target_day = start_day + timedelta(days=horizon)
-            if target_day > now.astimezone(ART_TZ).date():
+            # start_day is the entry session. A 5D holding exits on its fifth
+            # session, four sessions after the entry date.
+            target_day = _session_after(start_day, horizon - 1)
+            if target_day > known_through:
                 continue
-            eligible = [
-                candle for candle in candles
-                if candle["ts"].date() >= target_day
-                and candle.get("close_price") is not None
-            ]
-            if not eligible:
+            candle = _candle_for_session(candles, target_day)
+            if candle is None or candle.get("close_price") is None:
                 continue
-            price_at_horizon = float(eligible[0]["close_price"])
+            price_at_horizon = float(candle["close_price"])
             outcomes[col] = directional_return(
                 entry_price,
                 price_at_horizon,
@@ -3755,7 +3794,8 @@ class PortfolioDatabase:
         eligible = [
             candle
             for candle in candles
-            if candle["ts"].date() >= decided_day and candle.get("close_price") is not None
+            if _candle_session_day(candle) >= decided_day
+            and candle.get("close_price") is not None
         ]
         if not eligible or entry_price <= 0:
             return LEGACY_EXTERNAL_OUTCOME_BASIS, None
@@ -3867,7 +3907,7 @@ class PortfolioDatabase:
                           AND decided_at <= $1
                           AND decided_at >= $2
                           AND decision != 'HOLD'
-                        ORDER BY decided_at DESC
+                        ORDER BY decided_at ASC
                         LIMIT 200
                         """,
                         maturity_cutoff,
@@ -3901,7 +3941,7 @@ class PortfolioDatabase:
                           AND decided_at <= $1
                           AND decided_at >= $2
                           AND decision != 'HOLD'
-                        ORDER BY decided_at DESC
+                        ORDER BY decided_at ASC
                         LIMIT 200
                         """,
                         maturity_cutoff,

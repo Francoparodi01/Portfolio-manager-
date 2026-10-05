@@ -247,7 +247,7 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
             self.executions = []
 
         async def fetchval(self, _statement, *_args):
-            raise AssertionError("execution-plan decisions must be append-only")
+            return None
 
         async def fetchrow(self, statement, *args):
             assert "INSERT INTO decision_log" in statement

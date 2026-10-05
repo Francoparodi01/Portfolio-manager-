@@ -52,5 +52,5 @@ def test_monitor_defaults_decision_views_to_configured_owner():
         start = source.index(f"async def {endpoint}")
         end = source.find("\nasync def ", start + 10)
         block = source[start:end if end != -1 else None]
-        assert "request.query.get(\"owner_chat_id\") or configured_owner" in block
+        assert "owner_raw = configured_owner" in block
         assert "owner_chat_id requerido" in block
