@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo
 
 import asyncpg
 
-from src.analysis.audit_scope import ensure_decision_audit_scope_columns
 from src.analysis.override_classification import (
     classify_override,
     override_opposite_ratio as _opposite_ratio,
@@ -189,8 +188,6 @@ async def fetch_decision_ledger(
     match_window_days: int = 2,
     owner_chat_id: int | None = None,
 ) -> dict:
-    await ensure_decision_audit_scope_columns(conn)
-
     real_rows = await conn.fetch(
         """
         SELECT

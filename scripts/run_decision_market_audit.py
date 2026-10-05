@@ -27,6 +27,11 @@ from src.analysis.decision_market_audit import (  # noqa: E402
 from src.core.config import get_config  # noqa: E402
 
 
+def _configured_owner_chat_id(cfg) -> int | None:
+    value = str(cfg.scraper.telegram_chat_id or "").strip()
+    return int(value) if value.isdigit() else None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Auditoria read-only decision vs market")
     parser.add_argument("--days", type=int, default=180, help="Ventana de decision_log en dias")
@@ -50,12 +55,17 @@ def parse_args() -> argparse.Namespace:
 async def main() -> int:
     args = parse_args()
     cfg = get_config()
+    owner_chat_id = args.owner_chat_id if args.owner_chat_id is not None else _configured_owner_chat_id(cfg)
+    if owner_chat_id is None:
+        raise SystemExit("Se necesita --owner-chat-id o TELEGRAM_CHAT_ID numérico para esta auditoría.")
+    include_legacy_null = bool(owner_chat_id is not None and not cfg.multiuser_enabled)
     report = await load_decision_market_audit(
         DecisionMarketAuditConfig(
             database_url=cfg.database.url,
             days=args.days,
             cost_bps=args.cost_bps,
-            owner_chat_id=args.owner_chat_id,
+            owner_chat_id=owner_chat_id,
+            include_legacy_null=include_legacy_null,
             benchmarks=tuple(args.benchmarks),
         )
     )

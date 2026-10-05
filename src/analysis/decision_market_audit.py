@@ -27,6 +27,7 @@ class DecisionMarketAuditConfig:
     days: int = 180
     cost_bps: float = 75.0
     owner_chat_id: int | None = None
+    include_legacy_null: bool = False
     benchmarks: tuple[str, ...] = DEFAULT_BENCHMARKS
 
 
@@ -106,6 +107,7 @@ class DecisionMarketAuditReport:
     generated_at: str
     days: int
     cost_bps: float
+    owner_scope: str
     benchmarks: tuple[str, ...]
     quality: list[QualityRow]
     summary: list[CohortHorizonMetric]
@@ -144,10 +146,14 @@ WITH base AS (
         dl.executed_amount_ars,
         dl.was_blocked,
         dl.block_reason,
-        COALESCE(dl.executable_outcome_5d, dl.outcome_5d) AS eff_5d,
-        COALESCE(dl.executable_outcome_10d, dl.outcome_10d) AS eff_10d,
-        COALESCE(dl.executable_outcome_20d, dl.outcome_20d) AS eff_20d,
-        COALESCE(dl.executable_outcome_40d, dl.outcome_40d) AS eff_40d,
+        CASE WHEN dl.outcome_basis = 'canonical_cocos'
+             THEN COALESCE(dl.executable_outcome_5d, dl.outcome_5d) END AS eff_5d,
+        CASE WHEN dl.outcome_basis = 'canonical_cocos'
+             THEN COALESCE(dl.executable_outcome_10d, dl.outcome_10d) END AS eff_10d,
+        CASE WHEN dl.outcome_basis = 'canonical_cocos'
+             THEN COALESCE(dl.executable_outcome_20d, dl.outcome_20d) END AS eff_20d,
+        CASE WHEN dl.outcome_basis = 'canonical_cocos'
+             THEN COALESCE(dl.executable_outcome_40d, dl.outcome_40d) END AS eff_40d,
         dl.outcome_basis,
         dl.outcome_basis_ratio,
         EXISTS (
@@ -167,7 +173,8 @@ WITH base AS (
         ) AS superseded_only
     FROM decision_log dl
     WHERE dl.decided_at >= NOW() - ($1::int * INTERVAL '1 day')
-      AND ($2::bigint IS NULL OR dl.owner_chat_id = $2)
+      AND ($2::bigint IS NULL OR dl.owner_chat_id = $2
+           OR ($3::boolean AND dl.owner_chat_id IS NULL))
 ), scoped AS (
     SELECT *,
         CASE
@@ -175,8 +182,8 @@ WITH base AS (
             WHEN source = 'execution_plan' AND status = 'APPROVED' AND decision_type = 'executable' THEN 'execution_plan_approved'
             WHEN source = 'execution_plan' AND status = 'BLOCKED' THEN 'execution_plan_blocked'
             WHEN source IN ('broker_fill','broker_movement') AND status IN ('EXECUTED','EXECUTED_MANUAL') THEN 'manual_or_broker_real'
-            WHEN source = 'optimizer' OR status = 'THEORETICAL' OR decision_type = 'theoretical' THEN 'optimizer_theoretical'
             WHEN source = 'radar' THEN 'radar_idea'
+            WHEN source = 'optimizer' OR status = 'THEORETICAL' OR decision_type = 'theoretical' THEN 'optimizer_theoretical'
             ELSE 'other_audit'
         END AS cohort
     FROM base
@@ -215,11 +222,20 @@ ORDER BY cohort, CASE horizon WHEN '5d' THEN 1 WHEN '10d' THEN 2 WHEN '20d' THEN
 
 
 QUALITY_SQL = r"""
-SELECT 'decision_log' AS table_name, COUNT(*) AS rows, MIN(decided_at) AS min_ts, MAX(decided_at) AS max_ts FROM decision_log
+SELECT 'decision_log' AS table_name, COUNT(*) AS rows, MIN(decided_at) AS min_ts, MAX(decided_at) AS max_ts
+FROM decision_log
+WHERE ($1::bigint IS NULL OR owner_chat_id = $1
+       OR ($2::boolean AND owner_chat_id IS NULL))
 UNION ALL
-SELECT 'broker_fills', COUNT(*), MIN(executed_at), MAX(executed_at) FROM broker_fills
+SELECT 'broker_fills', COUNT(*), MIN(executed_at), MAX(executed_at)
+FROM broker_fills
+WHERE ($1::bigint IS NULL OR owner_chat_id = $1
+       OR ($2::boolean AND owner_chat_id IS NULL))
 UNION ALL
-SELECT 'plan_execution_attributions', COUNT(*), MIN(executed_at), MAX(executed_at) FROM plan_execution_attributions
+SELECT 'plan_execution_attributions', COUNT(*), MIN(executed_at), MAX(executed_at)
+FROM plan_execution_attributions
+WHERE ($1::bigint IS NULL OR owner_chat_id = $1
+       OR ($2::boolean AND owner_chat_id IS NULL))
 """
 
 
@@ -238,7 +254,8 @@ SELECT
     COUNT(DISTINCT ticker) AS tickers
 FROM plan_execution_attributions
 WHERE executed_at >= NOW() - ($1::int * INTERVAL '1 day')
-  AND ($2::bigint IS NULL OR owner_chat_id = $2)
+  AND ($2::bigint IS NULL OR owner_chat_id = $2
+       OR ($3::boolean AND owner_chat_id IS NULL))
   AND eligible_for_viability = TRUE
 GROUP BY follow_status, temporal_quality
 ORDER BY n DESC
@@ -251,12 +268,16 @@ WITH rows AS (
            COALESCE(source, layers->>'source','') AS source,
            COALESCE(status,'') AS status,
            COALESCE(decision_type,'') AS decision_type,
-           COALESCE(executable_outcome_5d, outcome_5d) AS outcome_5d,
-           COALESCE(executable_outcome_10d, outcome_10d) AS outcome_10d,
-           COALESCE(executable_outcome_20d, outcome_20d) AS outcome_20d
+           CASE WHEN outcome_basis = 'canonical_cocos'
+                THEN COALESCE(executable_outcome_5d, outcome_5d) END AS outcome_5d,
+           CASE WHEN outcome_basis = 'canonical_cocos'
+                THEN COALESCE(executable_outcome_10d, outcome_10d) END AS outcome_10d,
+           CASE WHEN outcome_basis = 'canonical_cocos'
+                THEN COALESCE(executable_outcome_20d, outcome_20d) END AS outcome_20d
     FROM decision_log dl
     WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
-      AND ($2::bigint IS NULL OR owner_chat_id = $2)
+      AND ($2::bigint IS NULL OR owner_chat_id = $2
+           OR ($3::boolean AND owner_chat_id IS NULL))
       AND COALESCE(source, layers->>'source','') = 'execution_plan'
       AND COALESCE(status,'') IN ('APPROVED','EXECUTED','BLOCKED','EXECUTED_MANUAL')
       AND decision IN ('BUY','SELL','SELL_PARTIAL','SELL_FULL')
@@ -291,8 +312,8 @@ WITH decisions AS (
             WHEN COALESCE(dl.source, dl.layers->>'source','') = 'execution_plan' AND COALESCE(dl.status,'') = 'APPROVED' AND COALESCE(dl.decision_type,'') = 'executable' THEN 'execution_plan_approved'
             WHEN COALESCE(dl.source, dl.layers->>'source','') = 'execution_plan' AND COALESCE(dl.status,'') = 'BLOCKED' THEN 'execution_plan_blocked'
             WHEN COALESCE(dl.source, dl.layers->>'source','') IN ('broker_fill','broker_movement') AND COALESCE(dl.status,'') IN ('EXECUTED','EXECUTED_MANUAL') THEN 'manual_or_broker_real'
-            WHEN COALESCE(dl.source, dl.layers->>'source','') = 'optimizer' OR COALESCE(dl.status,'') = 'THEORETICAL' OR COALESCE(dl.decision_type,'') = 'theoretical' THEN 'optimizer_theoretical'
             WHEN COALESCE(dl.source, dl.layers->>'source','') = 'radar' THEN 'radar_idea'
+            WHEN COALESCE(dl.source, dl.layers->>'source','') = 'optimizer' OR COALESCE(dl.status,'') = 'THEORETICAL' OR COALESCE(dl.decision_type,'') = 'theoretical' THEN 'optimizer_theoretical'
             ELSE 'other_audit'
         END AS cohort,
         h.horizon,
@@ -300,13 +321,14 @@ WITH decisions AS (
         h.outcome
     FROM decision_log dl
     CROSS JOIN LATERAL (VALUES
-        ('5d', 5, COALESCE(dl.executable_outcome_5d, dl.outcome_5d)),
-        ('10d', 10, COALESCE(dl.executable_outcome_10d, dl.outcome_10d)),
-        ('20d', 20, COALESCE(dl.executable_outcome_20d, dl.outcome_20d)),
-        ('40d', 40, COALESCE(dl.executable_outcome_40d, dl.outcome_40d))
+        ('5d', 5, CASE WHEN dl.outcome_basis = 'canonical_cocos' THEN COALESCE(dl.executable_outcome_5d, dl.outcome_5d) END),
+        ('10d', 10, CASE WHEN dl.outcome_basis = 'canonical_cocos' THEN COALESCE(dl.executable_outcome_10d, dl.outcome_10d) END),
+        ('20d', 20, CASE WHEN dl.outcome_basis = 'canonical_cocos' THEN COALESCE(dl.executable_outcome_20d, dl.outcome_20d) END),
+        ('40d', 40, CASE WHEN dl.outcome_basis = 'canonical_cocos' THEN COALESCE(dl.executable_outcome_40d, dl.outcome_40d) END)
     ) h(horizon, horizon_n, outcome)
     WHERE dl.decided_at >= NOW() - ($1::int * INTERVAL '1 day')
-      AND ($2::bigint IS NULL OR dl.owner_chat_id = $2)
+      AND ($2::bigint IS NULL OR dl.owner_chat_id = $2
+           OR ($3::boolean AND dl.owner_chat_id IS NULL))
       AND UPPER(dl.decision) IN ('BUY','SELL','SELL_PARTIAL','SELL_FULL')
       AND h.outcome IS NOT NULL
       AND NOT EXISTS (
@@ -327,15 +349,15 @@ WITH decisions AS (
         row_number() OVER (PARTITION BY ticker ORDER BY (ts AT TIME ZONE 'America/Argentina/Buenos_Aires')::date) AS rn
     FROM market_candles
     WHERE interval='1d'
-      AND ticker = ANY($3::text[])
-      AND long_ticker = ANY($4::text[])
+      AND ticker = ANY($4::text[])
+      AND long_ticker = ANY($5::text[])
 ), matched AS (
     SELECT
         d.*,
         bt.benchmark,
         ((b1.close_price - b0.close_price) / NULLIF(b0.close_price,0)) AS benchmark_return
     FROM decisions d
-    CROSS JOIN unnest($3::text[]) bt(benchmark)
+    CROSS JOIN unnest($4::text[]) bt(benchmark)
     JOIN LATERAL (
         SELECT * FROM bench b
         WHERE b.ticker = bt.benchmark AND b.day >= d.decision_day
@@ -490,40 +512,103 @@ def _warnings(summary: list[CohortHorizonMetric], followed: list[FollowedMetric]
     return warnings
 
 
+async def _verify_legacy_single_owner(conn: asyncpg.Connection, owner_chat_id: int | None) -> bool:
+    """Allow NULL-owner history only when the requested owner is the sole owner."""
+    if owner_chat_id is None:
+        return False
+    requested_owner_exists = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM portfolio_snapshots WHERE owner_chat_id = $1
+            UNION ALL SELECT 1 FROM decision_log WHERE owner_chat_id = $1
+            UNION ALL SELECT 1 FROM broker_fills WHERE owner_chat_id = $1
+            UNION ALL SELECT 1 FROM execution_plans WHERE owner_chat_id = $1
+        )
+        """,
+        owner_chat_id,
+    )
+    other_owner_exists = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM portfolio_snapshots WHERE owner_chat_id IS NOT NULL AND owner_chat_id <> $1
+            UNION ALL SELECT 1 FROM decision_log WHERE owner_chat_id IS NOT NULL AND owner_chat_id <> $1
+            UNION ALL SELECT 1 FROM broker_fills WHERE owner_chat_id IS NOT NULL AND owner_chat_id <> $1
+            UNION ALL SELECT 1 FROM execution_plans WHERE owner_chat_id IS NOT NULL AND owner_chat_id <> $1
+        )
+        """,
+        owner_chat_id,
+    )
+    return bool(requested_owner_exists and not other_owner_exists)
+
+
 async def load_decision_market_audit(config: DecisionMarketAuditConfig) -> DecisionMarketAuditReport:
+    if config.owner_chat_id is None:
+        raise ValueError("owner_chat_id is required for the decision-market audit")
     dsn = config.database_url.replace("postgresql+asyncpg://", "postgresql://")
     benchmarks = tuple(b.upper() for b in config.benchmarks)
     benchmark_long_tickers = tuple(f"TV:BYMA:{b}" for b in benchmarks)
-    conn = await asyncpg.connect(dsn)
+    conn = await asyncpg.connect(
+        dsn,
+        timeout=15,
+        server_settings={
+            "default_transaction_read_only": "on",
+            "statement_timeout": "15000",
+        },
+    )
     try:
-        generated_at = await conn.fetchval("SELECT NOW()")
-        quality_rows = [_quality(row) for row in await conn.fetch(QUALITY_SQL)]
-        summary = [
-            _cohort_metric(row, config.cost_bps)
-            for row in await conn.fetch(SUMMARY_SQL, config.days, config.owner_chat_id)
-        ]
-        benchmark_summary = [
-            _benchmark_metric(row)
-            for row in await conn.fetch(
-                BENCHMARK_SQL,
-                config.days,
-                config.owner_chat_id,
-                list(benchmarks),
-                list(benchmark_long_tickers),
+        async with conn.transaction(readonly=True, isolation="repeatable_read"):
+            include_legacy_null = bool(
+                config.include_legacy_null
+                and await _verify_legacy_single_owner(conn, config.owner_chat_id)
             )
-        ]
-        followed_summary = [
-            _followed_metric(row)
-            for row in await conn.fetch(FOLLOWED_SQL, config.days, config.owner_chat_id)
-        ]
-        worst = [
-            _extreme(row)
-            for row in await conn.fetch(EXTREMES_SQL.replace("__DIRECTION__", "ASC"), config.days, config.owner_chat_id)
-        ]
-        best = [
-            _extreme(row)
-            for row in await conn.fetch(EXTREMES_SQL.replace("__DIRECTION__", "DESC"), config.days, config.owner_chat_id)
-        ]
+            generated_at = await conn.fetchval("SELECT NOW()")
+            quality_rows = [
+                _quality(row)
+                for row in await conn.fetch(
+                    QUALITY_SQL, config.owner_chat_id, include_legacy_null
+                )
+            ]
+            summary = [
+                _cohort_metric(row, config.cost_bps)
+                for row in await conn.fetch(
+                    SUMMARY_SQL, config.days, config.owner_chat_id, include_legacy_null
+                )
+            ]
+            benchmark_summary = [
+                _benchmark_metric(row)
+                for row in await conn.fetch(
+                    BENCHMARK_SQL,
+                    config.days,
+                    config.owner_chat_id,
+                    include_legacy_null,
+                    list(benchmarks),
+                    list(benchmark_long_tickers),
+                )
+            ]
+            followed_summary = [
+                _followed_metric(row)
+                for row in await conn.fetch(
+                    FOLLOWED_SQL, config.days, config.owner_chat_id, include_legacy_null
+                )
+            ]
+            worst = [
+                _extreme(row)
+                for row in await conn.fetch(
+                    EXTREMES_SQL.replace("__DIRECTION__", "ASC"),
+                    config.days,
+                    config.owner_chat_id,
+                    include_legacy_null,
+                )
+            ]
+            best = [
+                _extreme(row)
+                for row in await conn.fetch(
+                    EXTREMES_SQL.replace("__DIRECTION__", "DESC"),
+                    config.days,
+                    config.owner_chat_id,
+                    include_legacy_null,
+                )
+            ]
     finally:
         await conn.close()
 
@@ -531,6 +616,11 @@ async def load_decision_market_audit(config: DecisionMarketAuditConfig) -> Decis
         generated_at=_iso(generated_at) or "",
         days=config.days,
         cost_bps=config.cost_bps,
+        owner_scope=(
+            "EXPLICIT_PLUS_VERIFIED_LEGACY_NULL"
+            if include_legacy_null
+            else "EXPLICIT_ONLY"
+        ),
         benchmarks=benchmarks,
         quality=quality_rows,
         summary=summary,

@@ -247,7 +247,7 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
             self.executions = []
 
         async def fetchval(self, _statement, *_args):
-            return None
+            raise AssertionError("execution-plan decisions must be append-only")
 
         async def fetchrow(self, statement, *args):
             assert "INSERT INTO decision_log" in statement
@@ -443,7 +443,7 @@ def test_daily_analysis_scheduler_matches_operational_analysis_scope(monkeypatch
 
     cfg = SimpleNamespace(
         database=SimpleNamespace(url="postgresql://unused"),
-        scraper=SimpleNamespace(telegram_bot_token="token", telegram_chat_id="chat"),
+        scraper=SimpleNamespace(telegram_bot_token="token", telegram_chat_id="123"),
     )
     monkeypatch.setattr(runner, "_is_business_day", lambda: True)
     monkeypatch.setattr(runner, "get_config", lambda: cfg)
@@ -459,6 +459,8 @@ def test_daily_analysis_scheduler_matches_operational_analysis_scope(monkeypatch
             "scripts/run_analysis.py",
             "--no-llm",
             "--skip-radar",
+            "--owner-chat-id",
+            "123",
         )
     ]
     assert verified == [True]

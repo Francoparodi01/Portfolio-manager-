@@ -15,7 +15,6 @@ import asyncpg
 import pyotp
 from aiohttp import web
 
-from src.analysis.audit_scope import ensure_decision_audit_scope_columns
 from src.analysis.corporate_actions import (
     CorporateActionEffect,
     corporate_action_effect_from_row,
@@ -25,10 +24,6 @@ from src.analysis.corporate_actions import (
 )
 from src.analysis.decision_ledger import fetch_decision_ledger
 from src.analysis.decision_timeline import fetch_decision_timeline
-from src.analysis.inferred_activity import (
-    fetch_inferred_activity,
-    mark_inferred_activity_types,
-)
 from src.analysis.override_classification import (
     attach_inferred_activity,
     classify_override as _classify_override,
@@ -37,8 +32,6 @@ from src.analysis.override_classification import (
     override_opposite_ratio as _override_opposite_ratio,
     override_same_ratio as _override_same_ratio,
 )
-from src.analysis.plan_follow_attribution import ensure_plan_execution_attribution_schema
-from src.analysis.position_hold_audit import ensure_position_hold_audit_schema
 from src.analysis.thesis_shadow_store import MAX_ABS_REALIZED_RETURN_FOR_METRICS
 from src.core.config import get_config
 from src.core.logger import get_logger, redact_secrets
@@ -49,7 +42,6 @@ from src.core.market_calendar import (
     market_session_note,
 )
 from src.core.redis_client import client as redis_client
-from src.collector.schema_migrations import ensure_execution_plan_persistence
 
 
 ART_TZ = ZoneInfo("America/Argentina/Buenos_Aires")
@@ -717,7 +709,7 @@ async def candles(request: web.Request) -> web.Response:
 async def decisions(request: web.Request) -> web.Response:
     days = max(1, min(int(request.query.get("days", "90")), 365))
     configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
-    owner_raw = request.query.get("owner_chat_id") or configured_owner
+    owner_raw = configured_owner
     try:
         owner_chat_id = int(owner_raw) if owner_raw else None
     except ValueError:
@@ -726,7 +718,6 @@ async def decisions(request: web.Request) -> web.Response:
         return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
-        await ensure_decision_audit_scope_columns(conn)
         summary = await conn.fetchrow("""
             SELECT
                 COUNT(*) AS total,
@@ -785,7 +776,7 @@ async def decisions(request: web.Request) -> web.Response:
 async def portfolio_view(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
     configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
-    owner_raw = request.query.get("owner_chat_id") or configured_owner
+    owner_raw = configured_owner
     try:
         owner_chat_id = int(owner_raw) if owner_raw else None
     except ValueError:
@@ -916,7 +907,7 @@ async def portfolio_view(request: web.Request) -> web.Response:
 async def performance_view(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "180")), 365))
     configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
-    owner_raw = request.query.get("owner_chat_id") or configured_owner
+    owner_raw = configured_owner
     try:
         owner_chat_id = int(owner_raw) if owner_raw else None
     except ValueError:
@@ -925,10 +916,6 @@ async def performance_view(request: web.Request) -> web.Response:
         return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
-        await ensure_decision_audit_scope_columns(conn)
-        await ensure_plan_execution_attribution_schema(conn)
-        await ensure_execution_plan_persistence(conn)
-        await ensure_position_hold_audit_schema(conn)
         perf_base_cte = """
             WITH fill_link AS (
                 SELECT
@@ -1660,9 +1647,12 @@ async def performance_view(request: web.Request) -> web.Response:
 async def override_audit(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
     match_window_days = max(1, min(int(request.query.get("match_window_days", "2")), 10))
+    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    if not configured_owner.isdigit():
+        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
+    owner_chat_id = int(configured_owner)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
-        await ensure_decision_audit_scope_columns(conn)
         rows = await conn.fetch("""
             WITH decision_base AS (
                 SELECT
@@ -1701,6 +1691,7 @@ async def override_audit(request: web.Request) -> web.Response:
                     layers->>'reason' AS reason
                 FROM decision_log
                 WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
+                  AND owner_chat_id = $3
                   AND COALESCE(source, layers->>'source') = 'execution_plan'
                   AND COALESCE(run_intent, 'formal_plan') = 'formal_plan'
                   AND COALESCE(metric_scope, 'planner_audit') IN ('planner_audit', 'primary')
@@ -1815,12 +1806,8 @@ async def override_audit(request: web.Request) -> web.Response:
                   AND bm.price IS NOT NULL
             ) opposite_fill ON TRUE
             ORDER BY d.decided_at DESC
-        """, days, match_window_days)
-        inferred_activity = await fetch_inferred_activity(
-            conn,
-            days=min(days, 30),
-        )
-        await mark_inferred_activity_types(conn, inferred_activity)
+        """, days, match_window_days, owner_chat_id)
+        inferred_activity: list[dict] = []
 
     items = [_row(r) for r in rows]
     attach_inferred_activity(
@@ -1885,8 +1872,10 @@ async def override_audit(request: web.Request) -> web.Response:
 async def decision_ledger(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
     match_window_days = max(1, min(int(request.query.get("match_window_days", "2")), 10))
-    owner_chat_id = request.query.get("owner_chat_id")
-    owner = int(owner_chat_id) if owner_chat_id else None
+    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    if not configured_owner.isdigit():
+        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
+    owner = int(configured_owner)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         data = await fetch_decision_ledger(
@@ -1902,11 +1891,13 @@ async def audit_timeline(request: web.Request) -> web.Response:
     try:
         days = max(1, min(int(request.query.get("days", "90")), 365))
         limit = max(1, min(int(request.query.get("limit", "120")), 1000))
-        owner_raw = request.query.get("owner_chat_id")
-        owner_chat_id = int(owner_raw) if owner_raw else None
     except (TypeError, ValueError):
         return _json({"ok": False, "error": "Parametros numericos invalidos"}, status=400)
 
+    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    if not configured_owner.isdigit():
+        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
+    owner_chat_id = int(configured_owner)
     ticker = str(request.query.get("ticker") or "").strip().upper() or None
     run_id = str(request.query.get("run_id") or "").strip() or None
     pool: asyncpg.Pool = request.app["pool"]
@@ -1936,7 +1927,7 @@ async def audit_timeline(request: web.Request) -> web.Response:
 async def radar_audit(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
     configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
-    owner_raw = request.query.get("owner_chat_id") or configured_owner
+    owner_raw = configured_owner
     try:
         owner_chat_id = int(owner_raw) if owner_raw else None
     except ValueError:
@@ -1945,7 +1936,6 @@ async def radar_audit(request: web.Request) -> web.Response:
         return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
-        await ensure_decision_audit_scope_columns(conn)
         rows = await conn.fetch("""
             WITH radar AS (
                 SELECT
@@ -3321,6 +3311,10 @@ async def create_app() -> web.Application:
         cfg.database.url.replace("postgresql+asyncpg://", "postgresql://"),
         min_size=1,
         max_size=4,
+        server_settings={
+            "default_transaction_read_only": "on",
+            "statement_timeout": "15000",
+        },
     )
 
     app = web.Application(

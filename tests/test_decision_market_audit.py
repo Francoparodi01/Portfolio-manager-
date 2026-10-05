@@ -13,6 +13,8 @@ from src.analysis.decision_market_audit import (
     render_decision_market_audit,
     report_to_json,
 )
+import asyncio
+import pytest
 
 
 def _metric(cohort: str, horizon: str, *, avg_return: float, score_corr: float | None):
@@ -41,6 +43,7 @@ def _report():
         generated_at="2026-09-02T22:01:34+00:00",
         days=180,
         cost_bps=75.0,
+        owner_scope="EXPLICIT_ONLY",
         benchmarks=("SPY", "QQQ"),
         quality=[
             QualityRow("decision_log", 926, "2026-04-09T18:00:00+00:00", "2026-09-02T19:50:26+00:00"),
@@ -100,3 +103,23 @@ def test_audit_sql_fragments_are_read_only():
 
     for forbidden in (" insert ", " update ", " delete ", " alter ", " drop ", " truncate ", " create "):
         assert forbidden not in sql
+
+
+def test_audit_sql_keeps_owner_scope_and_rejects_noncanonical_outcomes():
+    sql = "\n".join([SUMMARY_SQL, FOLLOWED_SQL, EXTREMES_SQL, BENCHMARK_SQL])
+
+    assert "$3::boolean" in sql
+    assert "outcome_basis = 'canonical_cocos'" in sql
+    assert sql.index("source = 'radar'") < sql.index("source = 'optimizer'")
+
+
+def test_quality_sql_is_owner_scoped():
+    assert "owner_chat_id = $1" in QUALITY_SQL
+    assert "$2::boolean" in QUALITY_SQL
+
+
+def test_audit_requires_an_owner_before_connecting():
+    from src.analysis.decision_market_audit import DecisionMarketAuditConfig, load_decision_market_audit
+
+    with pytest.raises(ValueError, match="owner_chat_id"):
+        asyncio.run(load_decision_market_audit(DecisionMarketAuditConfig(database_url="postgresql://unused")))

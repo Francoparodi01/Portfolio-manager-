@@ -173,8 +173,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.log_message('Read failed: %s', type(exc).__name__)
                 self.send_error(503, 'No se pudo verificar la base de datos'); return
-        elif uri.path == '/report.pdf' and (ROOT/'output/pdf/quantia-bot-stats.pdf').exists():
-            body, kind = (ROOT/'output/pdf/quantia-bot-stats.pdf').read_bytes(), 'application/pdf'
         else:
             self.send_error(404); return
         self.send_response(200)
