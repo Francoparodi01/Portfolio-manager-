@@ -22,6 +22,7 @@ from src.analysis.plan_follow_attribution import (
     fetch_canonical_outcome_candles,
     fetch_outcome_corporate_effects,
 )
+from src.analysis.raw_bot_signal_metrics import compact_summary, load_raw_bot_signal_stats
 from src.core.telegram_format import (
     header as tg_header,
     note as tg_note,
@@ -188,6 +189,16 @@ async def fetch_decision_ledger(
     match_window_days: int = 2,
     owner_chat_id: int | None = None,
 ) -> dict:
+    if owner_chat_id is None:
+        raise ValueError("owner_chat_id is required for the decision ledger")
+    canonical_bot_signals = compact_summary(
+        await load_raw_bot_signal_stats(
+            conn,
+            owner_chat_id=owner_chat_id,
+            days=days,
+            cost_bps=75.0,
+        )
+    )
     real_rows = await conn.fetch(
         """
         SELECT
@@ -724,6 +735,7 @@ async def fetch_decision_ledger(
     return {
         "days": days,
         "match_window_days": match_window_days,
+        "canonical_bot_signals": canonical_bot_signals,
         "summary": {
             "real_total": len(real),
             "real_closed_5d": len(real_closed_5d),
@@ -772,6 +784,11 @@ def render_decision_ledger(data: dict) -> str:
     radar = data.get("radar") or []
     pending = data.get("pending_mark") or []
     pending_by_id = {row.get("id"): row for row in pending}
+    canonical = data.get("canonical_bot_signals") or {}
+    canonical_5d = (canonical.get("metrics") or {}).get("5") or {}
+
+    def canonical_pct(value) -> str:
+        return "N/A" if value is None else f"{float(value):+.2f}%"
 
     lines = tg_header(
         "📒 Decision Ledger",
@@ -787,6 +804,18 @@ def render_decision_ledger(data: dict) -> str:
             f"   PnL direccional: {_result_icon(summary.get('real_pnl_5d_ars'))} "
             f"<b>{_signed_money(summary.get('real_pnl_5d_ars'))}</b>"
         ),
+        "",
+        "🤖 <b>Señales formales crudas</b> <code>RAW_FORMAL_SIGNAL_BYMA_V1</code>",
+        (
+            f"   {canonical_5d.get('n', 0)}/{canonical.get('unique_signals', 0)} maduras · "
+            f"{canonical_pct(canonical_5d.get('win_pct'))} acierto"
+        ),
+        (
+            f"   EV neto {canonical_pct(canonical_5d.get('mean_pct'))} · "
+            f"costo {canonical.get('cost_bps', 75):.0f} pb · "
+            f"scope {canonical.get('owner_scope', 'N/A')}"
+        ),
+        "   Retorno hipotético de precio; no es ejecución real ni PnL de cuenta.",
         "",
         "🧭 <b>Planes seguidos</b> <code>NORMALIZADO</code>",
         (

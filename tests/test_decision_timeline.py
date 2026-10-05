@@ -232,17 +232,26 @@ def test_monitor_registers_read_only_audit_timeline_route():
 
 
 def test_pending_marks_lookup_latest_price_per_decision(monkeypatch):
-    async def _schema_ready(_conn):
-        return None
+    async def _raw_signal_stats(*_args, **_kwargs):
+        return {
+            "metric_contract": "RAW_FORMAL_SIGNAL_BYMA_V1",
+            "metric_note": "test",
+            "owner_scope": "EXPLICIT_ONLY",
+            "legacy_owner_inferred": False,
+            "as_of": "2026-10-05T00:00:00+00:00",
+            "price_cutoff": "2026-10-02",
+            "days": 90,
+            "cost_bps": 75.0,
+            "raw_intents": 0,
+            "quality": {"unique_signals": 0},
+            "counts_reconciled": True,
+            "metrics": {str(horizon): {} for horizon in (5, 10, 20, 40)},
+        }
 
-    monkeypatch.setattr(
-        decision_ledger,
-        "ensure_decision_audit_scope_columns",
-        _schema_ready,
-    )
+    monkeypatch.setattr(decision_ledger, "load_raw_bot_signal_stats", _raw_signal_stats)
     conn = _FakeConn()
 
-    asyncio.run(decision_ledger.fetch_decision_ledger(conn))
+    asyncio.run(decision_ledger.fetch_decision_ledger(conn, owner_chat_id=123))
 
     pending_query = conn.queries[-1]
     assert "JOIN LATERAL" in pending_query

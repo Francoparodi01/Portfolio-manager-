@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from src.analysis.raw_bot_signal_metrics import compact_summary, load_raw_bot_signal_stats
+
 
 def _to_float(value: Any) -> float | None:
     if value is None:
@@ -38,6 +40,14 @@ async def fetch_normalized_bot_counterfactual(
     account PnL and it does not use actual human execution attribution.
     """
     days = max(1, min(365, int(days)))
+    raw_signal_reference = compact_summary(
+        await load_raw_bot_signal_stats(
+            conn,
+            owner_chat_id=int(owner_chat_id),
+            days=days,
+            cost_bps=75.0,
+        )
+    )
     row = await conn.fetchrow(
         """
         WITH run_events AS (
@@ -199,6 +209,13 @@ async def fetch_normalized_bot_counterfactual(
         "avg_return_10d": _to_float(values.get("avg_return_10d")),
         "avg_return_20d": _to_float(values.get("avg_return_20d")),
         "scope": "FORMAL_PLAN_DIRECTIONAL_GROSS_EPISODE_DEDUPLICATED",
+        "raw_signal_reference": raw_signal_reference,
+        "comparison_note": (
+            "raw_signal_reference usa RAW_FORMAL_SIGNAL_BYMA_V1 y es la métrica comparable con "
+            "el dashboard, Ledger y Decision Market Audit. Este resultado por episodios usa "
+            "decision_log, notional persistido y outcome almacenado; no debe compararse como si "
+            "fuera la misma población."
+        ),
         "episode_definition": (
             "Same ticker + same BUY/SELL across consecutive formal runs is one episode; "
             "a side change or an intervening formal run without that recommendation starts a new episode. "

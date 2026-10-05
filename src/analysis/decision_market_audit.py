@@ -9,12 +9,14 @@ state, thresholds, orders, or shadow outputs.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import asyncpg
+
+from src.analysis.raw_bot_signal_metrics import compact_summary, load_raw_bot_signal_stats
 
 
 DEFAULT_BENCHMARKS = ("SPY", "QQQ")
@@ -117,6 +119,7 @@ class DecisionMarketAuditReport:
     best_execution_plan_5d: list[ExtremeDecision]
     warnings: list[str]
     timesfm3_shadow_next_step: str
+    canonical_bot_signals: dict[str, Any] = field(default_factory=dict)
 
 
 READONLY_SQL_FRAGMENTS = (
@@ -562,6 +565,14 @@ async def load_decision_market_audit(config: DecisionMarketAuditConfig) -> Decis
                 and await _verify_legacy_single_owner(conn, config.owner_chat_id)
             )
             generated_at = await conn.fetchval("SELECT NOW()")
+            canonical_bot_signals = compact_summary(
+                await load_raw_bot_signal_stats(
+                    conn,
+                    owner_chat_id=config.owner_chat_id,
+                    days=config.days,
+                    cost_bps=config.cost_bps,
+                )
+            )
             quality_rows = [
                 _quality(row)
                 for row in await conn.fetch(
@@ -633,6 +644,7 @@ async def load_decision_market_audit(config: DecisionMarketAuditConfig) -> Decis
             "Agregar timesfm3_tminus1_shadow como consumidor de snapshots point-in-time; "
             "sus deltas solo comparan contra la heuristica y no escriben decisiones reales."
         ),
+        canonical_bot_signals=canonical_bot_signals,
     )
 
 
@@ -680,6 +692,27 @@ def _summary_table(summary: list[CohortHorizonMetric]) -> str:
                 hit20=_pct(m20.hit_rate if m20 else None),
                 ret20=_pct(m20.net_avg_return if m20 else None),
                 corr5=_num(m5.score_corr if m5 else None),
+            )
+        )
+    return "\n".join(lines)
+
+
+def _canonical_signal_table(canonical: dict[str, Any]) -> str:
+    """Render the shared raw-signal contract without conflating it with cohorts."""
+    metrics = canonical.get("metrics") or {}
+    lines = [
+        "| Horizonte | n maduro | Cobertura | EV neto | Acierto |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for horizon in ("5", "10", "20", "40"):
+        metric = metrics.get(horizon) or {}
+        lines.append(
+            "| {horizon}D | {n} | {coverage} | {mean} | {win} |".format(
+                horizon=horizon,
+                n=metric.get("n", 0),
+                coverage=_pct((metric.get("coverage_pct") or 0) / 100) if metric.get("coverage_pct") is not None else "N/A",
+                mean=_pct((metric.get("mean_pct") or 0) / 100) if metric.get("mean_pct") is not None else "N/A",
+                win=_pct((metric.get("win_pct") or 0) / 100) if metric.get("win_pct") is not None else "N/A",
             )
         )
     return "\n".join(lines)
@@ -742,10 +775,11 @@ def render_decision_market_audit(report: DecisionMarketAuditReport) -> str:
     executed_5d = _metric(report.summary, "execution_plan_executed", "5d")
     executed_20d = _metric(report.summary, "execution_plan_executed", "20d")
     blocked_5d = _metric(report.summary, "execution_plan_blocked", "5d")
+    canonical = report.canonical_bot_signals or {}
 
-    verdict = "Evidencia prometedora, no promovible automaticamente."
+    verdict = "Cohortes operativas: evidencia no promovible automaticamente."
     if executed_5d and executed_5d.matured >= 30 and executed_5d.net_avg_return and executed_5d.net_avg_return > 0:
-        verdict = "Plan ejecutado positivo neto a 5d; requiere estabilidad y calibracion de score."
+        verdict = "Cohorte de planes ejecutados positiva neta a 5d; requiere estabilidad y calibracion de score."
     if blocked_5d and blocked_5d.net_avg_return and blocked_5d.net_avg_return < 0:
         guard_note = "Los bloqueos capturaron una cohorte con retorno neto negativo; no aflojar guards."
     else:
@@ -758,7 +792,21 @@ def render_decision_market_audit(report: DecisionMarketAuditReport) -> str:
             f"Generado: {report.generated_at}",
             f"Ventana: {report.days} dias; costo usado para neto: {report.cost_bps:.0f} bps.",
             "",
-            "## Lectura ejecutiva",
+            "## Señales formales crudas normalizadas",
+            "",
+            (
+                f"Contrato: `{canonical.get('contract', 'RAW_FORMAL_SIGNAL_BYMA_V1')}` · "
+                f"scope: {canonical.get('owner_scope', 'N/A')} · "
+                f"señales únicas: {canonical.get('unique_signals', 0)} · "
+                f"conteos reconciliados: {canonical.get('counts_reconciled', False)}."
+            ),
+            "",
+            _canonical_signal_table(canonical),
+            "",
+            "Esta es la única tabla comparable con el dashboard: usa planes e intenciones crudos, "
+            "sesiones BYMA, una sola serie de velas y no lee outcome_*. No es PnL realizado.",
+            "",
+            "## Lectura de cohortes operativas · no comparable con señales crudas",
             "",
             f"- Veredicto: {verdict}",
             f"- Plan ejecutado 5d: n={executed_5d.matured if executed_5d else 0}, hit={_pct(executed_5d.hit_rate if executed_5d else None)}, neto={_pct(executed_5d.net_avg_return if executed_5d else None)}.",
@@ -772,7 +820,7 @@ def render_decision_market_audit(report: DecisionMarketAuditReport) -> str:
             f"- broker_fills: {fills.rows if fills else 0} filas ({fills.min_ts if fills else 'N/A'} a {fills.max_ts if fills else 'N/A'}).",
             f"- plan_execution_attributions: {attributions.rows if attributions else 0} filas ({attributions.min_ts if attributions else 'N/A'} a {attributions.max_ts if attributions else 'N/A'}).",
             "",
-            "## Cohortes principales",
+            "## Cohortes operativas · outcome persistido",
             "",
             _summary_table(report.summary),
             "",

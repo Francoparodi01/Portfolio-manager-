@@ -34,9 +34,9 @@ python -m pytest scripts/bot_stats_dashboard -q
 python scripts/bot_stats_dashboard/audit.py --env-file C:\ruta\al\checkout\Quantia\.env
 ```
 
-`audit.py` guarda `output/bot-stats/raw-audit.json`, sin owner ID ni credenciales. El perfil de mercado usa exclusivamente tickers presentes en el `decision_log` del mismo owner y queda etiquetado como contexto, no como muestra bot. Es una consulta adicional posterior al snapshot del dashboard y registra su propio corte. Los SELECT de reconciliación de denominadores están en `server.py`; se ejecutan en el mismo snapshot transaccional que los datos del cálculo.
+`audit.py` guarda `output/bot-stats/raw-audit.json`, sin owner ID ni credenciales. El perfil de mercado usa exclusivamente tickers presentes en el `decision_log` del mismo owner y queda etiquetado como contexto, no como muestra bot. Es una consulta adicional posterior al snapshot del dashboard y registra su propio corte. Los SELECT de reconciliación de denominadores se ejecutan en el mismo snapshot transaccional que los datos del cálculo.
 
-En el navegador: ventanas 90/180/365 días, costo editable, descarga JSON completa de la vista y “Imprimir / guardar vista en PDF”. La exportación usa el mismo HTML y sus estilos de impresión. Si existe `output/pdf/quantia-bot-stats.pdf`, `/report.pdf` sirve ese informe auditado fijo, identificado con su fecha/ventana/costo; no cambia al mover filtros. Para un PDF nuevo, imprimir la vista actual. Conservar las evidencias de cuenta localmente; no agregarlas al commit.
+En el navegador: ventanas 90/180/365 días, costo editable, descarga JSON completa de la vista y “Imprimir / guardar vista en PDF”. La exportación usa el mismo HTML y sus estilos de impresión. Para un PDF nuevo, imprimir la vista actual: el servidor no expone un informe fijo que pueda quedar desactualizado. Conservar las evidencias de cuenta localmente; no agregarlas al commit.
 
 ## Resultado de validación del 02/10/2026
 

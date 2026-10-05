@@ -29,14 +29,28 @@ from src.core.config import get_config
 async def async_main(args: argparse.Namespace) -> int:
     cfg = get_config()
     dsn = cfg.database.url.replace("postgresql+asyncpg://", "postgresql://")
-    conn = await asyncpg.connect(dsn)
+    configured_owner = str(cfg.scraper.telegram_chat_id or "").strip()
+    owner_chat_id = args.owner_chat_id
+    if owner_chat_id is None and configured_owner.isdigit():
+        owner_chat_id = int(configured_owner)
+    if owner_chat_id is None:
+        raise SystemExit("Se necesita un owner_chat_id configurado o --owner-chat-id.")
+    conn = await asyncpg.connect(
+        dsn,
+        timeout=15,
+        server_settings={
+            "default_transaction_read_only": "on",
+            "statement_timeout": "15000",
+        },
+    )
     try:
-        data = await fetch_decision_ledger(
-            conn,
-            days=args.days,
-            match_window_days=args.match_window_days,
-            owner_chat_id=args.owner_chat_id,
-        )
+        async with conn.transaction(readonly=True, isolation="repeatable_read"):
+            data = await fetch_decision_ledger(
+                conn,
+                days=args.days,
+                match_window_days=args.match_window_days,
+                owner_chat_id=owner_chat_id,
+            )
     finally:
         await conn.close()
 
