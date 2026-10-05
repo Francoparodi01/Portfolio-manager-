@@ -69,6 +69,16 @@ def _now_art() -> datetime:
     return datetime.now(tz=ART_TZ)
 
 
+def _configured_owner_chat_id() -> int | None:
+    """Return the configured owner or fail closed for account-scoped reads."""
+    raw_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    try:
+        owner_chat_id = int(raw_owner)
+    except (TypeError, ValueError):
+        return None
+    return owner_chat_id if owner_chat_id > 0 else None
+
+
 def _is_market_hours(now: datetime | None = None) -> bool:
     now = now or _now_art()
     current = time(now.hour, now.minute)
@@ -708,14 +718,12 @@ async def candles(request: web.Request) -> web.Response:
 
 async def decisions(request: web.Request) -> web.Response:
     days = max(1, min(int(request.query.get("days", "90")), 365))
-    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
-    owner_raw = configured_owner
-    try:
-        owner_chat_id = int(owner_raw) if owner_raw else None
-    except ValueError:
-        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+    owner_chat_id = _configured_owner_chat_id()
     if owner_chat_id is None:
-        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
+        return _json({
+            "ok": False,
+            "error": "TELEGRAM_CHAT_ID numerico requerido para lecturas owner-scoped",
+        }, status=503)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         summary = await conn.fetchrow("""
@@ -767,6 +775,7 @@ async def decisions(request: web.Request) -> web.Response:
     return _json({
         "ok": True,
         "days": days,
+        "owner_chat_id": owner_chat_id,
         "summary": _row(summary),
         "groups": [_row(r) for r in groups],
         "recent": [_row(r) for r in recent],
@@ -775,14 +784,12 @@ async def decisions(request: web.Request) -> web.Response:
 
 async def portfolio_view(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
-    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
-    owner_raw = configured_owner
-    try:
-        owner_chat_id = int(owner_raw) if owner_raw else None
-    except ValueError:
-        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+    owner_chat_id = _configured_owner_chat_id()
     if owner_chat_id is None:
-        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
+        return _json({
+            "ok": False,
+            "error": "TELEGRAM_CHAT_ID numerico requerido para lecturas owner-scoped",
+        }, status=503)
     pool: asyncpg.Pool = request.app["pool"]
     corporate_applications = []
     async with pool.acquire() as conn:
@@ -792,7 +799,7 @@ async def portfolio_view(request: web.Request) -> web.Response:
             WHERE owner_chat_id = $1
             ORDER BY scraped_at DESC
             LIMIT 1
-        """)
+        """, owner_chat_id)
         positions = []
         allocation = []
         if latest_snapshot:
@@ -883,6 +890,7 @@ async def portfolio_view(request: web.Request) -> web.Response:
     return _json({
         "ok": True,
         "days": days,
+        "owner_chat_id": owner_chat_id,
         "snapshot": snapshot_payload,
         "positions": [_row(r) for r in positions],
         "allocation": [_row(r) for r in allocation],
@@ -906,14 +914,12 @@ async def portfolio_view(request: web.Request) -> web.Response:
 
 async def performance_view(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "180")), 365))
-    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
-    owner_raw = configured_owner
-    try:
-        owner_chat_id = int(owner_raw) if owner_raw else None
-    except ValueError:
-        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+    owner_chat_id = _configured_owner_chat_id()
     if owner_chat_id is None:
-        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
+        return _json({
+            "ok": False,
+            "error": "TELEGRAM_CHAT_ID numerico requerido para performance owner-scoped",
+        }, status=503)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         perf_base_cte = """
@@ -1628,6 +1634,12 @@ async def performance_view(request: web.Request) -> web.Response:
     return _json({
         "ok": True,
         "days": days,
+        "owner_chat_id": owner_chat_id,
+        "scope": {
+            "owner_scoped": True,
+            "legacy_null_owner_excluded": True,
+            "note": "Metricas de este owner; no incluyen evidencia legacy sin owner.",
+        },
         "summary": summary_dict,
         "by_ticker": [_row(r) for r in by_ticker],
         "score_points": [_row(r) for r in score_points],
@@ -1926,14 +1938,12 @@ async def audit_timeline(request: web.Request) -> web.Response:
 
 async def radar_audit(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
-    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
-    owner_raw = configured_owner
-    try:
-        owner_chat_id = int(owner_raw) if owner_raw else None
-    except ValueError:
-        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+    owner_chat_id = _configured_owner_chat_id()
     if owner_chat_id is None:
-        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
+        return _json({
+            "ok": False,
+            "error": "TELEGRAM_CHAT_ID numerico requerido para lecturas owner-scoped",
+        }, status=503)
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         rows = await conn.fetch("""

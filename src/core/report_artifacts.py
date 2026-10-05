@@ -104,7 +104,7 @@ async def read_report_inputs(
                 SELECT snapshot_id::text AS snapshot_id, scraped_at
                 FROM portfolio_snapshots
                 WHERE owner_chat_id = $1 OR owner_chat_id IS NULL
-                ORDER BY (owner_chat_id = $1) DESC, scraped_at DESC
+                ORDER BY (owner_chat_id = $1) DESC NULLS LAST, scraped_at DESC
                 LIMIT 1
             )
             SELECT

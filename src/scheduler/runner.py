@@ -1540,7 +1540,7 @@ async def run_verify_decision_prices() -> None:
 
 
 async def run_daily_analysis() -> None:
-    """Corre el analisis principal despues de construir velas internas EOD."""
+    """Refresh the closure report without creating formal decision evidence."""
     if not _is_business_day():
         logger.info("daily_analysis omitido: %s", market_closed_reason() or "mercado cerrado")
         return
@@ -1548,9 +1548,23 @@ async def run_daily_analysis() -> None:
     cfg = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
     owner_chat_id = str(cfg.scraper.telegram_chat_id or "").strip()
-    cmd = [sys.executable, "scripts/run_analysis.py", "--no-llm", "--skip-radar"]
-    if owner_chat_id.isdigit():
-        cmd.extend(["--owner-chat-id", owner_chat_id])
+    if not owner_chat_id.isdigit() or int(owner_chat_id) <= 0:
+        message = "TELEGRAM_CHAT_ID numerico requerido para scopear daily_analysis"
+        logger.error("daily_analysis omitido: %s", message)
+        notifier.notify_critical_error("daily_analysis", message)
+        return
+
+    cmd = [
+        sys.executable,
+        "scripts/run_analysis.py",
+        "--no-llm",
+        "--skip-radar",
+        "--no-persist",
+        "--run-intent",
+        "exploratory",
+        "--owner-chat-id",
+        owner_chat_id,
+    ]
     logger.info("daily_analysis iniciando: %s", " ".join(cmd))
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1579,7 +1593,6 @@ async def run_daily_analysis() -> None:
             len(out),
             len(err),
         )
-        owner_chat_id = str(cfg.scraper.telegram_chat_id or "").strip()
         if owner_chat_id.isdigit() and len(out.strip()) >= 80:
             try:
                 await save_report_artifact(

@@ -1,7 +1,9 @@
 import asyncio
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.analysis import decision_ledger
 from src.analysis.decision_timeline import (
@@ -302,6 +304,74 @@ def test_performance_hold_filter_reads_deduplicated_planner_observations():
     assert "PARTITION BY COALESCE(hold.owner_chat_id, 0)" in source
     assert "hold.daily_rank = 1" in source
     assert "'hold_audit'" in source
+
+
+def test_monitor_owner_scope_binds_every_endpoint_query(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pyotp", SimpleNamespace(TOTP=object))
+    from src.monitor import api as monitor_api
+
+    class _Connection:
+        def __init__(self):
+            self.calls = []
+
+        async def fetchrow(self, query, *args):
+            self.calls.append((query, args))
+            return {}
+
+        async def fetch(self, query, *args):
+            self.calls.append((query, args))
+            return []
+
+    class _Acquire:
+        def __init__(self, conn):
+            self.conn = conn
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class _Pool:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def acquire(self):
+            return _Acquire(self.conn)
+
+    monkeypatch.setattr(
+        monitor_api,
+        "get_config",
+        lambda: SimpleNamespace(scraper=SimpleNamespace(telegram_chat_id="77")),
+    )
+
+    decisions_conn = _Connection()
+    response = asyncio.run(monitor_api.decisions(SimpleNamespace(
+        query={"days": "90"}, app={"pool": _Pool(decisions_conn)},
+    )))
+    assert response.status == 200
+    assert len(decisions_conn.calls) == 3
+    assert all(args == (90, 77) for _, args in decisions_conn.calls)
+
+    portfolio_conn = _Connection()
+    response = asyncio.run(monitor_api.portfolio_view(SimpleNamespace(
+        query={"days": "90"}, app={"pool": _Pool(portfolio_conn)},
+    )))
+    assert response.status == 200
+    assert portfolio_conn.calls[0][1] == (77,)
+    assert portfolio_conn.calls[-1][1] == (90, 77)
+
+    performance_conn = _Connection()
+    response = asyncio.run(monitor_api.performance_view(SimpleNamespace(
+        query={"days": "180"}, app={"pool": _Pool(performance_conn)},
+    )))
+    assert response.status == 200
+    assert len(performance_conn.calls) == 13
+    assert all(args == (180, 77) for _, args in performance_conn.calls)
+
+    source = (Path(__file__).resolve().parents[1] / "src" / "monitor" / "static" / "index.html").read_text(encoding="utf-8")
+    assert "Operaciones a favor 5D" in source
+    assert "No mide acierto del bot ni PnL neto realizado." in source
 
 
 def test_performance_recent_rows_are_balanced_by_scope_and_used_by_frontend():

@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.analysis.enums import DecisionType
 from src.analysis.execution_planner import (
     DecisionIntent,
@@ -245,6 +247,7 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
         def __init__(self):
             self.insert_args = None
             self.executions = []
+            self.connect_url = None
 
         async def fetchval(self, _statement, *_args):
             return None
@@ -263,7 +266,8 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
 
     conn = _Connection()
 
-    async def _connect(_url):
+    async def _connect(url):
+        conn.connect_url = url
         return conn
 
     async def _ensure_scope(_conn):
@@ -297,7 +301,7 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
         pending_buys=[],
         gate="NORMAL",
     )
-    cfg = SimpleNamespace(database=SimpleNamespace(url="postgresql://unused"))
+    cfg = SimpleNamespace(database=SimpleNamespace(url="postgresql+asyncpg://unused"))
     today = datetime.now(run_analysis.ART_TZ).date()
     upcoming_event = UpcomingEarningsEvent(
         observation_key=f"YAHOO:EARNINGS:UPST:{today.isoformat()}",
@@ -327,6 +331,7 @@ def test_external_radar_order_persists_reference_price(monkeypatch):
     )
 
     assert saved == [463]
+    assert conn.connect_url == "postgresql://unused"
     assert conn.insert_args is not None
     assert conn.insert_args[7] == 10_040
     layers = json.loads(conn.insert_args[6])
@@ -459,11 +464,61 @@ def test_daily_analysis_scheduler_matches_operational_analysis_scope(monkeypatch
             "scripts/run_analysis.py",
             "--no-llm",
             "--skip-radar",
+            "--no-persist",
+            "--run-intent",
+            "exploratory",
             "--owner-chat-id",
             "123",
         )
     ]
     assert verified == [True]
+
+
+def test_daily_analysis_fails_closed_without_numeric_owner(monkeypatch):
+    from src.scheduler import runner
+
+    commands = []
+    critical = []
+
+    async def _create_subprocess_exec(*cmd, **_kwargs):
+        commands.append(cmd)
+        raise AssertionError("daily_analysis must not launch without an owner")
+
+    class _Notifier:
+        def __init__(self, *_args):
+            pass
+
+        def notify_critical_error(self, *args):
+            critical.append(args)
+
+    cfg = SimpleNamespace(
+        scraper=SimpleNamespace(telegram_bot_token="token", telegram_chat_id="invalid"),
+    )
+    monkeypatch.setattr(runner, "_is_business_day", lambda: True)
+    monkeypatch.setattr(runner, "get_config", lambda: cfg)
+    monkeypatch.setattr(runner, "TelegramNotifier", _Notifier)
+    monkeypatch.setattr(runner.asyncio, "create_subprocess_exec", _create_subprocess_exec)
+
+    asyncio.run(runner.run_daily_analysis())
+
+    assert commands == []
+    assert critical == [(
+        "daily_analysis",
+        "TELEGRAM_CHAT_ID numerico requerido para scopear daily_analysis",
+    )]
+
+
+def test_execution_plan_persistence_rejects_missing_owner_before_connecting():
+    with pytest.raises(ValueError, match="owner-chat-id"):
+        asyncio.run(run_analysis._save_execution_plan_events(
+            cfg=SimpleNamespace(database=SimpleNamespace(url="postgresql+asyncpg://unused")),
+            execution_plan=SimpleNamespace(),
+            results=[],
+            macro_snap=SimpleNamespace(vix=None),
+            macro_regime={},
+            total_ars=1,
+            owner_chat_id=None,
+        ))
 
 
 def test_radar_audit_capture_persists_without_sending_telegram(monkeypatch):

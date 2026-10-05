@@ -1152,7 +1152,18 @@ async def _save_execution_plan_events(
     if not execution_plan:
         return []
 
-    db_url = cfg.database.url
+    try:
+        owner_chat_id = int(owner_chat_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "ExecutionPlan persistence requires a positive --owner-chat-id"
+        ) from exc
+    if owner_chat_id <= 0:
+        raise ValueError("ExecutionPlan persistence requires a positive --owner-chat-id")
+
+    # asyncpg accepts PostgreSQL URIs, while application settings use
+    # SQLAlchemy's async-driver URI scheme.
+    db_url = str(cfg.database.url).replace("postgresql+asyncpg://", "postgresql://")
     saved_ids: list[int] = []
     execution_plan_id = uuid4()
     plan_created_at = datetime.now(timezone.utc)

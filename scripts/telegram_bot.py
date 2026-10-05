@@ -257,7 +257,12 @@ def _user_session_file(chat_id: int) -> str:
 
 
 def _owner_cli_args(chat_id: int) -> list[str]:
-    return ["--owner-chat-id", str(chat_id)] if _multiuser_enabled() else []
+    """Scope every child report to the Telegram chat that requested it."""
+    try:
+        owner_chat_id = int(chat_id)
+    except (TypeError, ValueError):
+        return []
+    return ["--owner-chat-id", str(owner_chat_id)] if owner_chat_id > 0 else []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -383,6 +383,7 @@ def test_telegram_owner_full_artifact_and_cleanup(failure):
 
 
 def test_telegram_menu_alias_and_authorization(monkeypatch):
+    pytest.importorskip("telegram", reason="telegram handlers are validated in the bot image")
     from scripts import telegram_bot as bot
     from pathlib import Path
     assert dict(bot.BOT_COMMAND_SPECS)["agente"]
