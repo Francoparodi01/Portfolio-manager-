@@ -165,6 +165,7 @@ class SkillRouter:
         self,
         skill: SkillDefinition | None,
         evidence: Iterable[EvidenceObject],
+        task: TaskSpec | None = None,
     ) -> list[str]:
         if skill is None:
             return []
@@ -186,6 +187,15 @@ class SkillRouter:
             signals = payload.get("signals") if isinstance(payload, dict) else None
             if not isinstance(signals, list) or not signals:
                 failures.append("skill_missing_decision_signals")
+            elif task is not None and task.entities:
+                observed_symbols = {
+                    str(row.get("ticker") or "").upper()
+                    for row in signals
+                    if isinstance(row, dict)
+                }
+                missing_symbols = [symbol for symbol in task.entities if symbol not in observed_symbols]
+                if missing_symbols:
+                    failures.append("skill_missing_signal_entities:" + ",".join(missing_symbols))
 
         if skill.name == "audit-decision-consistency":
             payload = decision_item.payload if decision_item is not None else None
@@ -193,6 +203,15 @@ class SkillRouter:
             decisions = plan.get("decisions") if isinstance(plan, dict) else None
             if not isinstance(decisions, list) or not decisions:
                 failures.append("skill_missing_planner_decisions")
+            elif task is not None and task.entities:
+                planner_symbols = {
+                    str(row.get("ticker") or "").upper()
+                    for row in decisions
+                    if isinstance(row, dict)
+                }
+                missing_symbols = [symbol for symbol in task.entities if symbol not in planner_symbols]
+                if missing_symbols:
+                    failures.append("skill_missing_planner_entities:" + ",".join(missing_symbols))
 
         return list(dict.fromkeys(failures))
 
@@ -201,8 +220,9 @@ class SkillRouter:
         skill: SkillDefinition | None,
         report: VerificationReport,
         evidence: Iterable[EvidenceObject],
+        task: TaskSpec | None = None,
     ) -> VerificationReport:
-        failures = self.verification_failures(skill, evidence)
+        failures = self.verification_failures(skill, evidence, task)
         if not failures:
             return report
         return report.model_copy(update={
