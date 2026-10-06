@@ -23,6 +23,7 @@ from src.agentic.tools import (
 from src.agentic.conversation.session import ConversationSessionStore
 
 from .context import ContextSelector
+from .skills import SkillRouter
 from .models import ModelRoles
 from .permissions import PermissionPolicy
 from .schemas import (
@@ -95,6 +96,7 @@ class ConversationalHarness:
         )
         self.parser = TaskParser()
         self.selector = ContextSelector()
+        self.skill_router = SkillRouter(repo_root)
         self.permissions = PermissionPolicy()
         self.verifier = HarnessVerifier()
         self.roles = ModelRoles.from_env()
@@ -135,10 +137,13 @@ class ConversationalHarness:
         )
         registry = register_harness_tools(build_default_registry(tool_context), tool_context)
         safe_names = self.permissions.filter(registry, [spec.name for spec in registry.specs()])
+        skill = self.skill_router.select(task)
         plan = self.selector.select(task, set(safe_names))
+        plan = self.skill_router.constrain(plan, skill)
         plan.allowed_tools = self.permissions.filter(registry, plan.allowed_tools)
         plan.required_tools = [name for name in plan.required_tools if name in plan.allowed_tools]
         view = _RegistryView(registry, plan.allowed_tools)
+        skill_instructions = self.skill_router.load_instructions(skill) if skill is not None else ""
 
         state = HarnessState(task=task.intent, status="RUNNING", pending_steps=list(plan.required_tools))
         store = AgentRunStore(self.database_url) if self.database_url else None
@@ -161,6 +166,7 @@ class ConversationalHarness:
             "conversation_id": session.conversation_id,
             "context_namespace": "conversational-harness-v1",
             "task": task.model_dump(mode="json"),
+            "skill": self.skill_router.metadata(skill),
             "context_plan": plan.model_dump(mode="json"),
             "read_only": True,
             "legacy_single_owner": self.legacy_single_owner,
@@ -292,16 +298,23 @@ class ConversationalHarness:
             if not fallback:
                 fallback = self._insufficient_answer(state)
 
-            answer = await synthesizer.synthesize(task=task, evidence=evidence, fallback=fallback)
+            answer = await synthesizer.synthesize(
+                task=task,
+                evidence=evidence,
+                fallback=fallback,
+                skill=skill,
+                skill_instructions=skill_instructions,
+            )
             verification = self.verifier.verify(
                 task=task,
                 answer=answer,
                 evidence=evidence,
                 required_tools=plan.required_tools,
             )
+            verification = self.skill_router.apply_verification(skill, verification, evidence, task)
             high_stakes_numeric = task.intent in {
                 "performance", "bot_follow_pnl", "decision_history", "decision_lab",
-                "position_analysis", "position_comparison"
+                "position_analysis", "position_comparison", "decision_consistency_audit"
             }
             if not verification.passed or (high_stakes_numeric and not verification.numeric_consistency):
                 answer = fallback
@@ -311,6 +324,7 @@ class ConversationalHarness:
                     evidence=evidence,
                     required_tools=plan.required_tools,
                 )
+                verification = self.skill_router.apply_verification(skill, verification, evidence, task)
             if not verification.passed:
                 answer = self._insufficient_answer(state)
                 state.status = "PARTIAL" if evidence else "FAILED"
@@ -364,6 +378,7 @@ class ConversationalHarness:
                         "evidence_refs": state.evidence_refs,
                         "routing_source": task.routing_source,
                         "routing_confidence": task.routing_confidence,
+                        "skill": skill.name if skill is not None else None,
                     },
                 )
             return HarnessResponse(
@@ -378,7 +393,11 @@ class ConversationalHarness:
                 tool_calls=state.tool_calls,
                 model=self.roles.reasoning,
                 latency_ms=int((time.monotonic() - started) * 1000),
-                metadata={"llm_calls": llm_calls, "context_plan": plan.model_dump(mode="json")},
+                metadata={
+                    "llm_calls": llm_calls,
+                    "context_plan": plan.model_dump(mode="json"),
+                    "skill": self.skill_router.metadata(skill),
+                },
             )
         except Exception as exc:
             state.status = "FAILED"

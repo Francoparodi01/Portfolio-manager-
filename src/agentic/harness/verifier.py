@@ -18,6 +18,7 @@ _NUMERIC_INTENTS = {
     "portfolio_review",
     "position_analysis",
     "position_comparison",
+    "decision_consistency_audit",
     "opportunities",
     "performance",
     "bot_follow_pnl",
