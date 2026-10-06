@@ -82,6 +82,24 @@ def _source_card(tool: str, content: str) -> tuple[str, list[str]]:
     if not isinstance(data, dict):
         data = {}
 
+    if data.get("schema_version") == "quantia-source-search-v1":
+        results = data.get("results") if isinstance(data.get("results"), list) else []
+        cards = []
+        for item in results[:3]:
+            if not isinstance(item, dict):
+                continue
+            cards.append(
+                f"{item.get('path') or 'archivo'}:{item.get('start_line') or '?'} "
+                f"— {str(item.get('snippet') or '').strip()[:1100]}"
+            )
+        if not cards:
+            return "No se encontraron coincidencias en las rutas de código permitidas.", [
+                "La búsqueda cubre scripts/ y módulos Python seleccionados; no demuestra ausencia en otros archivos."
+            ]
+        return "\n".join(cards), [
+            "Fragmentos de código fuente versionado; describen implementación, no confirman datos ni ejecución en producción."
+        ]
+
     if data.get("schema_version") == "decision-lab-agent-evidence-v1":
         from src.decision_lab.queries import explain_evidence
         answer, _status = explain_evidence(data)
@@ -493,11 +511,21 @@ def evidence_decision(goal: str, history: list[dict[str, Any]]) -> AgentDecision
     card_budget = min(2600, 7600 // len(cards))
     cards = [_excerpt(card, card_budget) for card in cards]
     limits = list(dict.fromkeys(limits))
+    source_search_succeeded = "search_quantia_source" in observed_tools
+    if source_search_succeeded:
+        opening = (
+            "Hallazgo de implementación para tu pregunta «" + _excerpt(goal, 400) + "»: "
+            "encontré código relacionado abajo. Los fragmentos muestran qué hace el código; "
+            "no confirman por sí solos una ejecución en producción ni resultados de base de datos.\n\n"
+        )
+    else:
+        opening = (
+            "Hallazgos para tu pregunta «" + _excerpt(goal, 400) + "»: "
+            f"obtuve {successful} consulta(s) con resultado. La evidencia y sus límites están abajo.\n\n"
+        )
     answer = (
-        "Resumen: Revisé la evidencia disponible para tu consulta: «" + _excerpt(goal, 400) + "». "
-        f"Consultas con resultado: {successful}. Este cierre describe sus datos y límites; "
-        "no establece una operación ni una rentabilidad validada.\n\n"
-        "Evidencia:\n" + "\n\n".join(cards)
+        opening
+        + "Evidencia:\n" + "\n\n".join(cards)
         + "\n\nFaltantes y límites:\n- " + "\n- ".join(limits)
         + "\n- Sólo se verificó lo consultado. La traza conserva las fuentes; no certifica la calidad económica de sus señales."
     )
