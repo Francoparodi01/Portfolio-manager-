@@ -34,7 +34,7 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
         return
     _active_chats.add(chat_id)
     try:
-        await send_text(context, chat_id, "Consultando evidencia con el agente… Puede demorar hasta cuatro minutos.")
+        await send_text(context, chat_id, "Consultando evidencia con el agente…")
         with tempfile.TemporaryDirectory(prefix="quantia_agent_") as folder:
             artifact = Path(folder) / "quantia_agent_trace.json"
             rc, _out, _err, _elapsed = await run_command(
@@ -57,9 +57,18 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
             steps = result.get("steps", [])
             consultations = sum(step.get("decision", {}).get("kind") == "tool" for step in steps)
             completions = sum(step.get("decision", {}).get("kind") == "final" for step in steps)
+            metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+            progress_events = metadata.get("progress_events") if isinstance(metadata.get("progress_events"), list) else []
+            safe_progress = [
+                escape(str(event))
+                for event in progress_events
+                if isinstance(event, str) and event.strip()
+            ][:8]
+            progress_note = ("\n\n" + "\n".join(safe_progress)) if safe_progress else ""
             limit_note = ("\nLímite de consultas alcanzado: la síntesis puede dejar verificaciones pendientes."
                           if status == "LIMIT_REACHED" else "")
             await send_text(context, chat_id, "<b>Agente de Quantia</b>\n" + escape(answer)
+                            + progress_note
                             + limit_note
                             + f"\n\nResultado: {objective}"
                             + f"\n\nEstado: <code>{escape(status)}</code> · Traza: {audit}"
