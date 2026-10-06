@@ -69,6 +69,7 @@ def test_consistency_skill_fails_closed_without_planner_decisions():
         skill,
         VerificationReport(passed=True, grounded=True),
         evidence,
+        TaskSpec(raw_message="audit GDX", intent="decision_consistency_audit", entities=["GDX"]),
     )
     assert not report.passed
     assert "skill_missing_planner_decisions" in report.failures
@@ -109,3 +110,44 @@ def test_decision_compaction_preserves_signal_and_planner_authority():
     assert compact["plan"]["decisions"][0]["action"] == "BUY"
     assert compact["plan"]["decisions"][0]["target_weight"] == 0.35
     assert compact["buy_policy"]["minimum"] == 0.08
+
+
+def test_consistency_skill_requires_requested_ticker_on_both_sides():
+    router = _router()
+    task = TaskSpec(
+        raw_message="auditá GDX",
+        intent="decision_consistency_audit",
+        entities=["GDX"],
+    )
+    skill = router.select(task)
+    evidence = [
+        EvidenceObject(
+            source="quantia_analysis",
+            tool_name="get_decision_evidence",
+            payload={
+                "schema_version": "agent-decision-evidence-v1",
+                "signals": [{"ticker": "NVDA", "decision": "HOLD", "final_score": 0.02}],
+                "plan": {
+                    "decisions": [{
+                        "ticker": "NVDA",
+                        "action": "HOLD",
+                        "current_weight": 0.15,
+                        "target_weight": 0.15,
+                        "delta_weight": 0.0,
+                    }]
+                },
+            },
+            quality=EvidenceQuality.MEDIUM,
+            mode=EvidenceMode.OBSERVATION,
+            ok=True,
+        )
+    ]
+    report = router.apply_verification(
+        skill,
+        VerificationReport(passed=True, grounded=True),
+        evidence,
+        task,
+    )
+    assert not report.passed
+    assert "skill_missing_signal_entities:GDX" in report.failures
+    assert "skill_missing_planner_entities:GDX" in report.failures
