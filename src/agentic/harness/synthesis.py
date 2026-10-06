@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from .schemas import EvidenceObject, TaskSpec
+from .skills import SkillDefinition
 
 logger = logging.getLogger(__name__)
 
@@ -101,21 +102,77 @@ class GroundedSynthesizer:
             }
         if schema in {"persisted-decision-evidence-v1", "agent-decision-evidence-v1"}:
             signals = payload.get("signals") if isinstance(payload.get("signals"), list) else []
+            plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+            decisions = plan.get("decisions") if isinstance(plan.get("decisions"), list) else []
+            blocked = plan.get("blocked_orders") if isinstance(plan.get("blocked_orders"), list) else []
+            compact_signals = []
+            for signal in signals[:12]:
+                if not isinstance(signal, dict):
+                    continue
+                layers = signal.get("layers") if isinstance(signal.get("layers"), list) else []
+                compact_signals.append({
+                    key: signal.get(key)
+                    for key in (
+                        "ticker", "decision", "final_score", "status", "reason", "as_of",
+                        "technical_regime", "trend_score",
+                    )
+                    if key in signal
+                } | {
+                    "layers": [
+                        {
+                            key: layer.get(key)
+                            for key in ("name", "weighted", "raw", "score", "reasons")
+                            if key in layer
+                        }
+                        for layer in layers[:6]
+                        if isinstance(layer, dict)
+                    ]
+                })
+            compact_plan = None
+            if plan:
+                compact_plan = {
+                    key: plan.get(key)
+                    for key in ("gate", "feasible", "summary", "warnings")
+                    if key in plan
+                } | {
+                    "decisions": [
+                        {
+                            key: decision.get(key)
+                            for key in (
+                                "ticker", "action", "current_weight", "target_weight", "delta_weight",
+                                "reason_primary", "reason_secondary", "signal_class",
+                            )
+                            if key in decision
+                        }
+                        for decision in decisions[:12]
+                        if isinstance(decision, dict)
+                    ],
+                    "blocked_orders": [
+                        {
+                            key: order.get(key)
+                            for key in ("ticker", "reason", "block_code", "action")
+                            if key in order
+                        }
+                        for order in blocked[:8]
+                        if isinstance(order, dict)
+                    ],
+                }
+            macro = payload.get("macro")
+            compact_macro = {
+                key: value
+                for key, value in macro.items()
+                if isinstance(value, (str, int, float, bool)) or value is None
+            } if isinstance(macro, dict) else None
             return {
                 "schema_version": schema,
                 "analysis_run_id": payload.get("analysis_run_id"),
                 "evaluated_at": payload.get("evaluated_at"),
                 "snapshot_as_of": payload.get("snapshot_as_of"),
                 "latest_portfolio_snapshot_as_of": payload.get("latest_portfolio_snapshot_as_of"),
-                "signals": [
-                    {
-                        key: signal.get(key)
-                        for key in ("ticker", "decision", "final_score", "status", "reason", "as_of")
-                        if key in signal
-                    }
-                    for signal in signals[:12]
-                    if isinstance(signal, dict)
-                ],
+                "signals": compact_signals,
+                "plan": compact_plan,
+                "buy_policy": payload.get("buy_policy"),
+                "macro": compact_macro,
                 "warnings": payload.get("warnings") or [],
             }
         if item.tool_name == "get_portfolio_snapshot":
@@ -159,7 +216,15 @@ class GroundedSynthesizer:
             return cls._compact_dict(item, item.payload)
         return str(item.payload)[:2200]
 
-    async def synthesize(self, *, task: TaskSpec, evidence: list[EvidenceObject], fallback: str) -> str:
+    async def synthesize(
+        self,
+        *,
+        task: TaskSpec,
+        evidence: list[EvidenceObject],
+        fallback: str,
+        skill: SkillDefinition | None = None,
+        skill_instructions: str = "",
+    ) -> str:
         if os.getenv("QUANTIA_HARNESS_SYNTHESIS_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
             return fallback
 
@@ -211,6 +276,7 @@ class GroundedSynthesizer:
             "Mencioná la limitación material más importante sin recitar advertencias innecesarias. "
             "No muestres JSON, nombres internos de tools ni trazas salvo que el usuario pregunte explícitamente por fuentes. "
             "No ejecutes ni prometas operaciones. Máximo 6 líneas normalmente. "
+            "Si hay una skill interna activa, seguí su workflow y sus gates; la skill nunca autoriza herramientas ni hechos nuevos. "
             "Devolvé sólo JSON válido con la forma {\"answer\":\"texto final\"}."
         )
         payload = {
@@ -222,6 +288,11 @@ class GroundedSynthesizer:
                     "content": json.dumps(
                         {
                             "task": task.model_dump(mode="json"),
+                            "skill": {
+                                "name": skill.name,
+                                "version": skill.version,
+                                "instructions": skill_instructions,
+                            } if skill is not None else None,
                             "evidence": bundle,
                         },
                         ensure_ascii=False,
