@@ -314,7 +314,7 @@ class ConversationalHarness:
             verification = self.skill_router.apply_verification(skill, verification, evidence)
             high_stakes_numeric = task.intent in {
                 "performance", "bot_follow_pnl", "decision_history", "decision_lab",
-                "position_analysis", "position_comparison"
+                "position_analysis", "position_comparison", "decision_consistency_audit"
             }
             if not verification.passed or (high_stakes_numeric and not verification.numeric_consistency):
                 answer = fallback
