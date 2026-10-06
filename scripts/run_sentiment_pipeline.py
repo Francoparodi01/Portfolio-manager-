@@ -19,7 +19,6 @@ from src.analysis.nlp_scorer import (
     DEFAULT_MODEL_REVISION,
     DEFAULT_OLLAMA_URL,
     rescore_recent_items,
-    score_pending_items,
 )
 from src.analysis.sentiment_fetcher import (
     fetch_raw_sentiment_items,
@@ -27,6 +26,7 @@ from src.analysis.sentiment_fetcher import (
     load_active_portfolio_tickers,
     save_raw_sentiment_items,
 )
+from src.analysis.sentiment_queue import score_active_pending_items
 from src.analysis.sentiment_symbols import expand_news_symbols
 from src.analysis.signal_aggregator import aggregate_sentiment
 from src.collector.db import PortfolioDatabase
@@ -51,6 +51,7 @@ async def main(
 ) -> dict:
     # ollama_url/timeout_seconds are accepted for scheduler/CLI compatibility;
     # the FinBERT scorer intentionally ignores them.
+    del ollama_url, timeout_seconds
     cfg = get_config()
     db = PortfolioDatabase(cfg.database.url)
     ticker_provider = os.getenv("SENTIMENT_TICKER_NEWS_PROVIDER", "marketaux").strip().lower() or "marketaux"
@@ -68,6 +69,7 @@ async def main(
         "score_pending": 0,
         "score_scored": 0,
         "score_failed": 0,
+        "score_queue_policy": "active_only",
         "rescore_candidates": 0,
         "rescored": 0,
         "rescore_failed": 0,
@@ -95,8 +97,6 @@ async def main(
                 result["portfolio_tickers"] = len(active_tickers)
                 result["news_tickers"] = len(news_tickers)
 
-                # Keep broad RSS sources for macro/market context, but never use
-                # legacy per-ticker Yahoo feeds as ticker evidence.
                 general_sources = [
                     source
                     for source in get_sentiment_sources([])
@@ -162,18 +162,17 @@ async def main(
                 logger.info("sentiment FinBERT cutover rescore: %s", stats)
 
             if score:
-                stats = await score_pending_items(
+                stats = await score_active_pending_items(
                     conn,
                     limit=score_limit,
                     model=model,
                     revision=revision,
-                    ollama_url=ollama_url,
-                    timeout_seconds=timeout_seconds,
                 )
                 result["score_pending"] = int(stats.get("pending", 0))
                 result["score_scored"] = int(stats.get("scored", 0))
                 result["score_failed"] = int(stats.get("failed", 0))
-                logger.info("sentiment FinBERT score: %s", stats)
+                result["score_queue_policy"] = str(stats.get("queue_policy") or "active_only")
+                logger.info("sentiment FinBERT active-queue score: %s", stats)
 
             if aggregate:
                 stats = await aggregate_sentiment(conn)
@@ -200,8 +199,6 @@ if __name__ == "__main__":
         default=0,
         help="Cutover/bootstrap: re-score raw evidence from the last N hours with FinBERT.",
     )
-    # Deprecated compatibility flags still used by scheduler deployments built
-    # from older runner.py. They no longer control sentiment scoring.
     parser.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL, help=argparse.SUPPRESS)
     parser.add_argument("--timeout-seconds", type=float, default=5.0, help=argparse.SUPPRESS)
     parser.add_argument("--no-fetch", action="store_true")
