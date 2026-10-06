@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feature/conversational-harness
+      - feature/quantia-agent-skills-v1
   pull_request:
     paths:
       - 'src/agentic/harness/**'
