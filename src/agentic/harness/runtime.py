@@ -311,7 +311,7 @@ class ConversationalHarness:
                 evidence=evidence,
                 required_tools=plan.required_tools,
             )
-            verification = self.skill_router.apply_verification(skill, verification, evidence)
+            verification = self.skill_router.apply_verification(skill, verification, evidence, task)
             high_stakes_numeric = task.intent in {
                 "performance", "bot_follow_pnl", "decision_history", "decision_lab",
                 "position_analysis", "position_comparison", "decision_consistency_audit"
@@ -324,7 +324,7 @@ class ConversationalHarness:
                     evidence=evidence,
                     required_tools=plan.required_tools,
                 )
-                verification = self.skill_router.apply_verification(skill, verification, evidence)
+                verification = self.skill_router.apply_verification(skill, verification, evidence, task)
             if not verification.passed:
                 answer = self._insufficient_answer(state)
                 state.status = "PARTIAL" if evidence else "FAILED"
