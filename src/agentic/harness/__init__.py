@@ -18,6 +18,7 @@ from .schemas import (
 )
 from .task import TaskParser
 from .context import ContextSelector
+from .skills import SkillDefinition, SkillRouter
 from .permissions import Capability, PermissionPolicy
 from .verifier import HarnessVerifier
 
@@ -33,6 +34,8 @@ __all__ = [
     "HarnessState",
     "HarnessVerifier",
     "PermissionPolicy",
+    "SkillDefinition",
+    "SkillRouter",
     "TaskParser",
     "TaskSpec",
     "VerificationReport",
