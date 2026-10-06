@@ -25,6 +25,7 @@ from src.agentic.docs_retriever import register_docs_retriever_tool
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
 from src.agentic.harness.tools_ext import register_harness_tools
 from src.agentic.orchestrator import default_max_steps
+from src.agentic.progress import AgentProgressEvent, AgentProgressState, JsonlProgressWriter
 from src.agentic.prompt_context import load_agent_prompt_context, missing_prompt_context_files
 from src.agentic.sql_explorer import register_sql_explorer_tools
 from src.agentic.tools import verify_single_owner
@@ -48,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=default_max_steps())
     parser.add_argument("--json", action="store_true", help="Print the complete trace as JSON.")
     parser.add_argument("--output-json", type=Path, help="Write the full trace to a new file.")
+    parser.add_argument(
+        "--progress-jsonl",
+        type=Path,
+        help="Append sanitized lifecycle events for a UI adapter. Never includes reasoning or tool arguments.",
+    )
     conversation = parser.add_mutually_exclusive_group()
     conversation.add_argument("--continue-conversation", action="store_true", help="Reuse up to 3 recent user goals from this account, within 24h.")
     conversation.add_argument("--new-conversation", action="store_true", help="Start a new context boundary.")
@@ -61,12 +67,18 @@ def parse_args() -> argparse.Namespace:
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    progress_writer = JsonlProgressWriter(args.progress_jsonl) if getattr(args, "progress_jsonl", None) else None
+    if progress_writer:
+        await progress_writer(AgentProgressEvent(AgentProgressState.RECEIVED))
+
     enabled = _bool_env("QUANTIA_AGENT_ENABLED", False)
     if not enabled and not args.force:
         print(
             "Agentic loop disabled. Set QUANTIA_AGENT_ENABLED=true or use --force for a manual run.",
             file=sys.stderr,
         )
+        if progress_writer:
+            await progress_writer(AgentProgressEvent(AgentProgressState.FAILED))
         return 2
 
     cfg = get_config()
@@ -140,6 +152,7 @@ async def async_main(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         max_identical_calls=1,
         require_audit=require_audit,
+        progress_callback=progress_writer,
     )
 
     timeout_seconds = getattr(args, "timeout_seconds", 600)
@@ -171,8 +184,18 @@ async def async_main(args: argparse.Namespace) -> int:
             timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:
+        if progress_writer:
+            await progress_writer(AgentProgressEvent(AgentProgressState.FAILED))
         print("El agente agotó el tiempo disponible; las herramientas fueron canceladas.", file=sys.stderr)
         return 1
+
+    if progress_writer:
+        terminal_state = (
+            AgentProgressState.COMPLETED
+            if result.status in {"COMPLETE", "LIMIT_REACHED"}
+            else AgentProgressState.FAILED
+        )
+        await progress_writer(AgentProgressEvent(terminal_state))
 
     output_json = getattr(args, "output_json", None)
     if output_json:
