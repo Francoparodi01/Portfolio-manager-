@@ -158,6 +158,14 @@ class TaskParser:
     ) -> tuple[str, str, list[str]]:
         if state and self._is_provenance_question(text):
             return "evidence_provenance", "explain_previous_sources", ["previous_run_trace"]
+        if any(term in text for term in (
+            "inconsistencia", "inconsistente", "coherencia del plan", "coherencia entre",
+            "senal vs planner", "signal vs planner", "optimizador vs planner", "optimizer vs planner",
+            "hold pero buy", "hold y buy", "hold -> buy", "hold a buy",
+        )):
+            return "decision_consistency_audit", "audit_decision_pipeline_consistency", [
+                "decision", "score", "weights", "planner", "guards"
+            ]
         if any(term in text for term in ("a y b", "meta-a", "meta-b", "meta-c", "economic meta", "politica meta")):
             return "meta_policy", "explain_shadow_meta_policy", ["meta_policy", "decision_lab"]
         if any(term in text for term in ("decision lab", "plan vs hold", "plan contra hold", "dva", "contrafactual", "counterfactual")):
