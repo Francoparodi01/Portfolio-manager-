@@ -246,6 +246,23 @@ class GroundedSynthesizer:
         used = 0
         for item in evidence:
             compact = self._compact_payload(item)
+            if task.entities and item.tool_name in {"get_decision_evidence", "get_persisted_decision_evidence"} and isinstance(compact, dict):
+                wanted = set(task.entities)
+                signals = compact.get("signals")
+                if isinstance(signals, list):
+                    focused_signals = [row for row in signals if isinstance(row, dict) and row.get("ticker") in wanted]
+                    if focused_signals:
+                        compact["signals"] = focused_signals
+                plan = compact.get("plan")
+                if isinstance(plan, dict) and isinstance(plan.get("decisions"), list):
+                    focused_decisions = [row for row in plan["decisions"] if isinstance(row, dict) and row.get("ticker") in wanted]
+                    if focused_decisions:
+                        plan["decisions"] = focused_decisions
+                if isinstance(plan, dict) and isinstance(plan.get("blocked_orders"), list):
+                    plan["blocked_orders"] = [
+                        row for row in plan["blocked_orders"]
+                        if isinstance(row, dict) and row.get("ticker") in wanted
+                    ]
             serialized = json.dumps(compact, ensure_ascii=False, default=str)
             remaining = max(0, self.max_chars - used)
             if remaining <= 0:
