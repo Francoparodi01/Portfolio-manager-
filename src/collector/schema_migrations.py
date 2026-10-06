@@ -200,13 +200,196 @@ CREATE INDEX IF NOT EXISTS idx_order_intents_ticker_created_at
 """
 
 
+# Evidence v2 applies only to plans created after this migration is installed.
+# Legacy rows remain untouched. The execution-plan INSERT and its identity capture
+# happen in the same PostgreSQL statement/transaction: a capture failure aborts
+# the plan INSERT, so a new persisted formal plan cannot be born without owner,
+# run lineage and immutable owner-scoped evidence.
+EXECUTION_EVIDENCE_V2_SQL = """
+CREATE TABLE IF NOT EXISTS decision_lab_plan_captures (
+    capture_hash TEXT PRIMARY KEY,
+    owner_chat_id BIGINT NOT NULL,
+    plan_id TEXT NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL,
+    payload JSONB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS decision_lab_captures_owner_time
+    ON decision_lab_plan_captures(owner_chat_id, captured_at);
+
+CREATE OR REPLACE FUNCTION quantia_reject_capture_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'Quantia plan evidence is append-only';
+END;
+$$;
+
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'quantia_plan_capture_immutable'
+          AND tgrelid = 'decision_lab_plan_captures'::regclass
+    ) THEN
+        CREATE TRIGGER quantia_plan_capture_immutable
+        BEFORE UPDATE OR DELETE ON decision_lab_plan_captures
+        FOR EACH ROW EXECUTE FUNCTION quantia_reject_capture_mutation();
+    END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION quantia_prepare_execution_plan_evidence()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.owner_chat_id IS NULL THEN
+        RAISE EXCEPTION 'formal execution plan requires explicit owner_chat_id';
+    END IF;
+    IF NEW.run_id IS NULL THEN
+        RAISE EXCEPTION 'formal execution plan requires run_id';
+    END IF;
+    IF COALESCE(NEW.source, '') <> 'execution_plan' THEN
+        RAISE EXCEPTION 'formal execution plan source must be execution_plan';
+    END IF;
+    NEW.payload_version := 'execution-plan-v2-immutable';
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION quantia_lock_execution_plan_evidence()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.payload_version = 'execution-plan-v2-immutable' THEN
+        RAISE EXCEPTION 'execution-plan-v2 evidence is immutable';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION quantia_capture_execution_plan_identity()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    capture_payload JSONB;
+    capture_key TEXT;
+BEGIN
+    IF NEW.payload_version <> 'execution-plan-v2-immutable' THEN
+        RETURN NEW;
+    END IF;
+
+    capture_payload := jsonb_build_object(
+        'schema', 'decision-lab-plan-capture-v2',
+        'capture_kind', 'PERSISTENCE_IDENTITY',
+        'plan_id', NEW.id::text,
+        'owner', NEW.owner_chat_id,
+        'run_id', NEW.run_id::text,
+        'decision_at', NEW.created_at,
+        'captured_at', NOW(),
+        'payload_version', NEW.payload_version,
+        'plan_record', jsonb_build_object(
+            'source', NEW.source,
+            'gate', NEW.gate,
+            'feasible', NEW.feasible,
+            'cash_before', NEW.cash_before,
+            'gross_sell_ars', NEW.gross_sell_ars,
+            'fee_sell_ars', NEW.fee_sell_ars,
+            'net_sell_ars', NEW.net_sell_ars,
+            'gross_buy_ars', NEW.gross_buy_ars,
+            'fee_buy_ars', NEW.fee_buy_ars,
+            'cash_after', NEW.cash_after,
+            'summary', NEW.summary,
+            'warnings', NEW.warnings
+        ),
+        'scope', 'RECORDED_PLAN_IDENTITY_WITH_IMMUTABLE_FORMAL_INTENTS'
+    );
+    capture_key := md5(
+        'quantia-plan-evidence-v2|' || NEW.id::text || '|' ||
+        NEW.run_id::text || '|' || NEW.owner_chat_id::text
+    );
+
+    INSERT INTO decision_lab_plan_captures(
+        capture_hash, owner_chat_id, plan_id, captured_at, payload
+    ) VALUES (
+        capture_key, NEW.owner_chat_id, NEW.id::text, NOW(), capture_payload
+    )
+    ON CONFLICT (capture_hash) DO NOTHING;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION quantia_lock_order_intent_evidence()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    parent_version TEXT;
+BEGIN
+    SELECT payload_version
+      INTO parent_version
+      FROM execution_plans
+     WHERE id = OLD.execution_plan_id;
+
+    IF parent_version = 'execution-plan-v2-immutable' THEN
+        RAISE EXCEPTION 'order_intent for execution-plan-v2 evidence is immutable';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'quantia_execution_plan_prepare_v2'
+          AND tgrelid = 'execution_plans'::regclass
+    ) THEN
+        CREATE TRIGGER quantia_execution_plan_prepare_v2
+        BEFORE INSERT ON execution_plans
+        FOR EACH ROW EXECUTE FUNCTION quantia_prepare_execution_plan_evidence();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'quantia_execution_plan_immutable_v2'
+          AND tgrelid = 'execution_plans'::regclass
+    ) THEN
+        CREATE TRIGGER quantia_execution_plan_immutable_v2
+        BEFORE UPDATE OR DELETE ON execution_plans
+        FOR EACH ROW EXECUTE FUNCTION quantia_lock_execution_plan_evidence();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'quantia_execution_plan_capture_v2'
+          AND tgrelid = 'execution_plans'::regclass
+    ) THEN
+        CREATE TRIGGER quantia_execution_plan_capture_v2
+        AFTER INSERT ON execution_plans
+        FOR EACH ROW EXECUTE FUNCTION quantia_capture_execution_plan_identity();
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'quantia_order_intent_immutable_v2'
+          AND tgrelid = 'order_intents'::regclass
+    ) THEN
+        CREATE TRIGGER quantia_order_intent_immutable_v2
+        BEFORE UPDATE OR DELETE ON order_intents
+        FOR EACH ROW EXECUTE FUNCTION quantia_lock_order_intent_evidence();
+    END IF;
+END $$;
+"""
+
+
 async def ensure_execution_plan_persistence(conn) -> None:
     await conn.execute(EXECUTION_PLAN_PERSISTENCE_SQL)
+    await conn.execute(EXECUTION_EVIDENCE_V2_SQL)
 
 
 __all__ = [
     "EXECUTION_TIMESTAMP_META_SQL",
     "EXECUTION_PLAN_PERSISTENCE_SQL",
+    "EXECUTION_EVIDENCE_V2_SQL",
     "OUTCOME_HORIZON_SQL",
     "PLAN_EXECUTION_ATTRIBUTION_SQL",
     "ensure_execution_plan_persistence",

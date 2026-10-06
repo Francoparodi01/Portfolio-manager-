@@ -1152,6 +1152,11 @@ async def _save_execution_plan_events(
     if not execution_plan:
         return []
 
+    if owner_chat_id is None:
+        raise ValueError("formal execution plan requires explicit owner_chat_id")
+    if not run_id:
+        raise ValueError("formal execution plan requires run_id")
+
     db_url = cfg.database.url
     saved_ids: list[int] = []
     execution_plan_id = uuid4()
@@ -1340,7 +1345,7 @@ async def _save_execution_plan_events(
         ticker = str(getattr(order, "ticker", "") or "").upper().strip()
 
         if not ticker:
-            return None
+            raise ValueError("formal order intent requires ticker")
 
         r = result_by_ticker.get(ticker)
         d = decision_by_ticker.get(ticker)
@@ -1401,163 +1406,12 @@ async def _save_execution_plan_events(
         layers_payload["decision_stage"] = audit_scope["decision_stage"]
         layers_payload["metric_scope"] = audit_scope["metric_scope"]
 
-        existing_id = await conn.fetchval(
-            """
-            SELECT id
-            FROM decision_log
-            WHERE ticker = $1
-              AND decision = $2
-              AND decision_date = (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date
-              AND COALESCE(source, layers->>'source') = 'execution_plan'
-              AND owner_chat_id IS NOT DISTINCT FROM $3::bigint
-              AND run_id = $5::uuid
-              AND (
-                    ($4::text = 'blocked_corporate_action'
-                     AND COALESCE(decision_type, '') = 'blocked_corporate_action')
-                 OR ($4::text <> 'blocked_corporate_action'
-                     AND COALESCE(decision_type, '') <> 'blocked_corporate_action')
-              )
-            ORDER BY decided_at DESC
-            LIMIT 1
-            """,
-            ticker,
-            decision,
-            owner_chat_id,
-            decision_type,
-            run_id_to_db(run_id),
-        )
-
         size_pct = abs(delta_weight) if delta_weight else (
             _safe_float(amount_ars, 0.0) / total_ars if total_ars else 0.0
         )
 
-        if existing_id:
-            matched_movements = await conn.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM decision_log dl
-                JOIN broker_movements bm
-                  ON bm.ticker = dl.ticker
-                 AND bm.movement_type IN (
-                    dl.decision,
-                    CASE WHEN dl.decision = 'BUY' THEN 'SELL' ELSE 'BUY' END
-                 )
-                 AND bm.executed_at >= (
-                    CASE
-                        WHEN dl.next_executable_at IS NOT NULL THEN dl.next_executable_at
-                        WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time >= TIME '17:00'
-                            THEN ((((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + 1) + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
-                        WHEN (dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::time < TIME '10:30'
-                            THEN (((dl.decided_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date + TIME '10:30') AT TIME ZONE 'America/Argentina/Buenos_Aires')
-                        ELSE dl.decided_at
-                    END
-                 )
-                 AND bm.executed_at < NOW()
-                 AND bm.quantity IS NOT NULL
-                 AND bm.price IS NOT NULL
-                WHERE dl.id = $1
-                """,
-                int(existing_id),
-            )
-            if matched_movements:
-                logger.info(
-                    "ExecutionPlan %s %s already has real movement; creating a new signal",
-                    decision,
-                    ticker,
-                )
-                existing_id = None
-
-        if existing_id:
-            await conn.execute(
-                """
-                UPDATE decision_log SET
-                    decided_at = $2,
-                    final_score = $3,
-                    confidence = $4,
-                    layers = $5::jsonb,
-                    price_at_decision = $6,
-                    vix_at_decision = $7,
-                    regime = $8,
-                    size_pct = $9,
-                    decision_type = $10,
-                    source = $11,
-                    status = $12,
-                    block_reason = $13,
-                    theoretical_amount_ars = $14,
-                    executed_amount_ars = $15,
-                    current_weight = $16,
-                    target_weight = $17,
-                    delta_weight = $18,
-                    is_executable = $19,
-                    was_blocked = $20,
-                    run_id = $21::uuid,
-                    run_intent = $22,
-                    decision_stage = $23,
-                    metric_scope = $24,
-                    is_primary_metric = $25,
-                    outcome_5d = NULL,
-                    outcome_10d = NULL,
-                    outcome_20d = NULL,
-                    outcome_40d = NULL,
-                    executable_outcome_5d = NULL,
-                    executable_outcome_10d = NULL,
-                    executable_outcome_20d = NULL,
-                    executable_outcome_40d = NULL,
-                    was_correct = NULL,
-                    executable_was_correct = NULL,
-                    outcome_basis = NULL,
-                    outcome_basis_ratio = NULL,
-                    outcome_filled_at = NULL,
-                    next_executable_at = NULL,
-                    next_executable_price = NULL
-                WHERE id = $1
-                """,
-                int(existing_id),
-                decided_at,
-                final_score,
-                confidence,
-                _json.dumps(layers_payload),
-                price,
-                vix,
-                str(macro_regime),
-                size_pct,
-                decision_type,
-                "execution_plan",
-                status,
-                block_reason,
-                theoretical_ars,
-                amount_ars if is_executable else 0.0,
-                current_weight,
-                target_weight,
-                delta_weight,
-                bool(is_executable),
-                bool(was_blocked),
-                run_id_to_db(run_id),
-                audit_scope["run_intent"],
-                audit_scope["decision_stage"],
-                audit_scope["metric_scope"],
-                audit_scope["is_primary_metric"],
-            )
-            logger.info(
-                "ExecutionPlan updated: id=%s %s %s status=%s",
-                existing_id,
-                decision,
-                ticker,
-                status,
-            )
-            decision_log_id = int(existing_id)
-            await _persist_order_intent(
-                conn,
-                order=order,
-                sequence_no=sequence_no,
-                decision_log_id=decision_log_id,
-                decision_status=status,
-                is_executable=is_executable,
-                was_blocked=was_blocked,
-                forced_reason=forced_reason,
-            )
-            return decision_log_id
-
+        # Each new plan gets fresh auxiliary evidence; never rewrite an older
+        # plan's decision_log row, even when a caller reuses a run_id.
         row = await conn.fetchrow(
             """
             INSERT INTO decision_log (
@@ -1638,25 +1492,26 @@ async def _save_execution_plan_events(
             audit_scope["is_primary_metric"],
         )
 
-        decision_log_id = int(row["id"]) if row else None
-        if decision_log_id is not None:
-            await _persist_order_intent(
-                conn,
-                order=order,
-                sequence_no=sequence_no,
-                decision_log_id=decision_log_id,
-                decision_status=status,
-                is_executable=is_executable,
-                was_blocked=was_blocked,
-                forced_reason=forced_reason,
-            )
+        if not row:
+            raise RuntimeError("formal decision_log insert returned no row")
+        decision_log_id = int(row["id"])
+        await _persist_order_intent(
+            conn,
+            order=order,
+            sequence_no=sequence_no,
+            decision_log_id=decision_log_id,
+            decision_status=status,
+            is_executable=is_executable,
+            was_blocked=was_blocked,
+            forced_reason=forced_reason,
+        )
         return decision_log_id
 
     async def _persist_execution_plan(conn) -> None:
         def _plan_float(name: str) -> float:
             return _safe_float(getattr(execution_plan, name, 0.0), 0.0)
 
-        await conn.execute(
+        inserted = await conn.execute(
             """
             INSERT INTO execution_plans (
                 id, owner_chat_id, run_id, created_at, updated_at,
@@ -1671,19 +1526,6 @@ async def _save_execution_plan_events(
                 $11, $12, $13,
                 $14, $15::jsonb, 'execution-plan-v1'
             )
-            ON CONFLICT (id) DO UPDATE SET
-                updated_at = EXCLUDED.updated_at,
-                gate = EXCLUDED.gate,
-                feasible = EXCLUDED.feasible,
-                cash_before = EXCLUDED.cash_before,
-                gross_sell_ars = EXCLUDED.gross_sell_ars,
-                fee_sell_ars = EXCLUDED.fee_sell_ars,
-                net_sell_ars = EXCLUDED.net_sell_ars,
-                gross_buy_ars = EXCLUDED.gross_buy_ars,
-                fee_buy_ars = EXCLUDED.fee_buy_ars,
-                cash_after = EXCLUDED.cash_after,
-                summary = EXCLUDED.summary,
-                warnings = EXCLUDED.warnings
             """,
             str(execution_plan_id),
             owner_chat_id,
@@ -1701,6 +1543,8 @@ async def _save_execution_plan_events(
             str(getattr(execution_plan, "summary", "") or ""),
             _json.dumps(list(getattr(execution_plan, "warnings", []) or [])),
         )
+        if inserted != "INSERT 0 1":
+            raise RuntimeError("formal execution_plan insert did not persist one row")
 
     async def _persist_hold_observations(conn) -> int:
         layers_by_ticker: dict[str, dict] = {}
@@ -1787,7 +1631,7 @@ async def _save_execution_plan_events(
         if was_blocked:
             planner_status = "BLOCKED"
 
-        await conn.execute(
+        inserted = await conn.execute(
             """
             INSERT INTO order_intents (
                 execution_plan_id, decision_log_id, sequence_no,
@@ -1802,14 +1646,6 @@ async def _save_execution_plan_events(
                 $11, $12, $13, $14,
                 $15, $16, $17, $18, $19::jsonb
             )
-            ON CONFLICT (execution_plan_id, sequence_no) DO UPDATE SET
-                decision_log_id = EXCLUDED.decision_log_id,
-                planner_status = EXCLUDED.planner_status,
-                decision_status = EXCLUDED.decision_status,
-                is_executable = EXCLUDED.is_executable,
-                was_blocked = EXCLUDED.was_blocked,
-                updated_at = NOW(),
-                metadata = EXCLUDED.metadata
             """,
             str(execution_plan_id),
             decision_log_id,
@@ -1831,126 +1667,133 @@ async def _save_execution_plan_events(
             str(getattr(order, "block_code", "") or "") or None,
             _json.dumps({"decision_override": getattr(order, "decision_override", None)}),
         )
+        if inserted != "INSERT 0 1":
+            raise RuntimeError("formal order_intent insert did not persist one row")
 
     conn = await asyncpg.connect(db_url)
 
     try:
         await ensure_decision_audit_scope_columns(conn)
         await ensure_execution_plan_persistence(conn)
-        await _persist_execution_plan(conn)
-        try:
+        # One connection and one transaction for every formal persistence write.
+        # The identity trigger participates too; exceptions/cancellation roll back
+        # the whole bundle, including auxiliary evidence and HOLD observations.
+        async with conn.transaction():
+            await _persist_execution_plan(conn)
             hold_saved = await _persist_hold_observations(conn)
-            logger.info(
-                "Position HOLD audit: %s observaciones guardadas para run_id=%s",
-                hold_saved,
-                run_id or execution_plan_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Position HOLD audit fallo sin afectar el plan operativo: %s",
-                exc,
-                exc_info=True,
-            )
-        sequence_no = 0
-        for order in (getattr(execution_plan, "sell_orders", []) or []):
-            sequence_no += 1
-            row_id = await _insert_event(
-                conn,
-                order=order,
-                sequence_no=sequence_no,
-                status="APPROVED",
-                decision_type="executable",
-                is_executable=True,
-                was_blocked=False,
-            )
-            if row_id:
-                saved_ids.append(row_id)
+            sequence_no = 0
+            for order in (getattr(execution_plan, "sell_orders", []) or []):
+                sequence_no += 1
+                row_id = await _insert_event(
+                    conn,
+                    order=order,
+                    sequence_no=sequence_no,
+                    status="APPROVED",
+                    decision_type="executable",
+                    is_executable=True,
+                    was_blocked=False,
+                )
+                if row_id:
+                    saved_ids.append(row_id)
 
-        for order in (getattr(execution_plan, "buy_orders", []) or []):
-            sequence_no += 1
-            row_id = await _insert_event(
-                conn,
-                order=order,
-                sequence_no=sequence_no,
-                status="APPROVED",
-                decision_type="executable",
-                is_executable=True,
-                was_blocked=False,
-            )
-            if row_id:
-                saved_ids.append(row_id)
+            for order in (getattr(execution_plan, "buy_orders", []) or []):
+                sequence_no += 1
+                row_id = await _insert_event(
+                    conn,
+                    order=order,
+                    sequence_no=sequence_no,
+                    status="APPROVED",
+                    decision_type="executable",
+                    is_executable=True,
+                    was_blocked=False,
+                )
+                if row_id:
+                    saved_ids.append(row_id)
 
-        for order in (getattr(execution_plan, "blocked_orders", []) or []):
-            sequence_no += 1
-            block_code = str(getattr(order, "block_code", "") or "").upper()
-            row_id = await _insert_event(
-                conn,
-                order=order,
-                sequence_no=sequence_no,
-                status="BLOCKED",
-                decision_type=(
-                    "blocked_corporate_action"
-                    if block_code == "BLOCKED_CORPORATE_ACTION"
-                    else "blocked"
-                ),
-                is_executable=False,
-                was_blocked=True,
-            )
-            if row_id:
-                saved_ids.append(row_id)
+            for order in (getattr(execution_plan, "blocked_orders", []) or []):
+                sequence_no += 1
+                block_code = str(getattr(order, "block_code", "") or "").upper()
+                row_id = await _insert_event(
+                    conn,
+                    order=order,
+                    sequence_no=sequence_no,
+                    status="BLOCKED",
+                    decision_type=(
+                        "blocked_corporate_action"
+                        if block_code == "BLOCKED_CORPORATE_ACTION"
+                        else "blocked"
+                    ),
+                    is_executable=False,
+                    was_blocked=True,
+                )
+                if row_id:
+                    saved_ids.append(row_id)
 
-        # pending_buys suele ser lista de tickers. Lo guardamos como BLOCKED por funding
-        # para que el blocked audit pueda aprender si esos bloqueos fueron correctos.
-        pending_buys = getattr(execution_plan, "pending_buys", []) or []
+            # pending_buys suele ser lista de tickers. Lo guardamos como BLOCKED por funding
+            # para que el blocked audit pueda aprender si esos bloqueos fueron correctos.
+            pending_buys = getattr(execution_plan, "pending_buys", []) or []
 
-        for ticker in pending_buys:
-            ticker = str(ticker or "").upper().strip()
-            if not ticker:
-                continue
+            for ticker in pending_buys:
+                ticker = str(ticker or "").upper().strip()
+                if not ticker:
+                    continue
 
-            d = decision_by_ticker.get(ticker)
+                d = decision_by_ticker.get(ticker)
 
-            if d is None:
-                continue
+                if d is None:
+                    continue
 
-            class _SyntheticPendingOrder:
-                pass
+                class _SyntheticPendingOrder:
+                    pass
 
-            order = _SyntheticPendingOrder()
-            order.ticker = ticker
-            order.side = "BUY"
-            order.amount_ars = 0.0
-            order.theoretical_ars = abs(
-                _safe_float(getattr(d, "delta_weight", 0.0), 0.0)
-            ) * total_ars
-            order.reason = "Compra pendiente por funding/señal"
+                order = _SyntheticPendingOrder()
+                order.ticker = ticker
+                order.side = "BUY"
+                order.amount_ars = 0.0
+                order.theoretical_ars = abs(
+                    _safe_float(getattr(d, "delta_weight", 0.0), 0.0)
+                ) * total_ars
+                order.reason = "Compra pendiente por funding/señal"
 
-            sequence_no += 1
-            row_id = await _insert_event(
-                conn,
-                order=order,
-                sequence_no=sequence_no,
-                status="BLOCKED",
-                decision_type="blocked",
-                is_executable=False,
-                was_blocked=True,
-                forced_reason="Compra pendiente por funding/señal",
-            )
+                sequence_no += 1
+                row_id = await _insert_event(
+                    conn,
+                    order=order,
+                    sequence_no=sequence_no,
+                    status="BLOCKED",
+                    decision_type="blocked",
+                    is_executable=False,
+                    was_blocked=True,
+                    forced_reason="Compra pendiente por funding/señal",
+                )
 
-            if row_id:
-                saved_ids.append(row_id)
+                if row_id:
+                    saved_ids.append(row_id)
 
-        # Additive audit capture; cannot alter the emitted operational plan.
-        try:
             from src.decision_lab.capture import capture_plan
-            capture = await capture_plan(conn, plan_id=execution_plan_id,
-                owner=owner_chat_id, decision_at=plan_created_at, plan=execution_plan,
-                portfolio=portfolio_snapshot, signals=results, macro=macro_snap,
-                events={"manual":manual_market_events,"corporate":corporate_action_effects,"earnings":upcoming_earnings_events})
+
+            capture = await capture_plan(
+                conn,
+                plan_id=execution_plan_id,
+                owner=owner_chat_id,
+                decision_at=plan_created_at,
+                plan=execution_plan,
+                portfolio=portfolio_snapshot,
+                signals=results,
+                macro=macro_snap,
+                events={
+                    "manual": manual_market_events,
+                    "corporate": corporate_action_effects,
+                    "earnings": upcoming_earnings_events,
+                },
+            )
             if capture["status"] != "CAPTURED":
-                logger.warning("Decision Lab capture insufficient: %s", capture["reason"])
-        except Exception:
-            logger.warning("Decision Lab immutable capture failed; operational plan unchanged", exc_info=True)
+                raise RuntimeError(f"Formal plan evidence capture failed: {capture['reason']}")
+
+        logger.info(
+            "ExecutionPlan committed: plan_id=%s run_id=%s events=%s holds=%s",
+            execution_plan_id, run_id, len(saved_ids), hold_saved,
+        )
 
     finally:
         await conn.close()
