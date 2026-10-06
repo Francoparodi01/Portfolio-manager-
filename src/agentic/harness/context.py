@@ -40,6 +40,7 @@ _INTENT_TOOLS = {
     "evidence_provenance": ["get_run_evidence_provenance"],
     "position_analysis": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_macro_context", "get_decision_value_added"],
     "decision_explanation": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_decision_value_added"],
+    "decision_consistency_audit": ["get_decision_evidence"],
     "position_comparison": ["get_portfolio_snapshot", "get_decision_evidence", "analyze_ticker", "get_decision_value_added", "scan_opportunities"],
     "opportunities": ["get_portfolio_snapshot", "get_decision_evidence", "scan_opportunities", "get_decision_value_added"],
     "performance": ["get_decision_ledger"],
@@ -61,6 +62,7 @@ _REQUIRED = {
     "evidence_provenance": ["get_run_evidence_provenance"],
     "position_analysis": ["get_portfolio_snapshot", "get_decision_evidence"],
     "decision_explanation": ["get_decision_evidence"],
+    "decision_consistency_audit": ["get_decision_evidence"],
     "position_comparison": ["get_portfolio_snapshot", "get_decision_evidence"],
     "opportunities": ["get_portfolio_snapshot", "scan_opportunities"],
     "performance": ["get_decision_ledger"],
@@ -117,7 +119,8 @@ class ContextSelector:
             allowed = sorted(available_tools)
 
         complex_task = task.intent in {
-            "position_analysis", "position_comparison", "opportunities", "decision_lab", "meta_policy"
+            "position_analysis", "position_comparison", "opportunities", "decision_lab", "meta_policy",
+            "decision_consistency_audit"
         }
         return ContextPlan(
             allowed_tools=allowed,
