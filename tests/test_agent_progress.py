@@ -227,3 +227,12 @@ def test_telegram_cancellation_reaps_agent_task_and_cleans_active_chat():
 
     asyncio.run(scenario())
     assert 321 not in _active_chats
+
+
+def test_telegram_complex_consistency_queries_get_larger_but_bounded_budget():
+    from src.agentic.telegram import _execution_budget
+
+    assert _execution_budget("Revisá mi cartera") == (4, 240, 300)
+    assert _execution_budget(
+        "Analizá GDX, verificá inconsistencia entre señal y planner y contrastá contra HOLD."
+    ) == (6, 360, 420)
