@@ -1,0 +1,196 @@
+{
+  "scope": "RECORDED_E1_PLAN_WITH_E2_SHADOW_ATTACHMENT_NOT_ECONOMIC_REPLAY",
+  "plan_id": "8444cd7f-f2ef-44f5-b834-5b805bc234e1",
+  "run_id": "18457bc9-b17f-4599-9cd2-d444cb351d5b",
+  "owner": 1259412316,
+  "equal": {
+    "scores": true,
+    "signals": true,
+    "orders": true,
+    "quantities": true,
+    "cash": true,
+    "decisions": true
+  },
+  "baseline_productive_hash": "023079e4d50b97151ef08c735be8f028a07b4fd58f660a5ec4b30d12e73ad081",
+  "shadow_productive_hash": "023079e4d50b97151ef08c735be8f028a07b4fd58f660a5ec4b30d12e73ad081",
+  "snapshot_status": {
+    "NVDA": {
+      "snapshot_id": "context:6c1145cce5b01769138c35e2",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "AMD": {
+      "snapshot_id": "context:35c6486df8f61897aa811e3e",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "MU": {
+      "snapshot_id": "context:d14ebbf955de665d2cc4252e",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "VIST": {
+      "snapshot_id": "context:7c95e97bfd05ef902f65cf66",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "IREN": {
+      "snapshot_id": "context:1e961ee51a107012352bd59b",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "GDX": {
+      "snapshot_id": "context:0f35ce776baf3ec4d4a89ec3",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "SNDK": {
+      "snapshot_id": "context:8fb0a122635fcfa9cca2d9a3",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "MSFT": {
+      "snapshot_id": "context:db4a63b7bef6c50ed433c09f",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "TQQQ": {
+      "snapshot_id": "context:d59a90fd49c590a8e4dbfa04",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "YPFD": {
+      "snapshot_id": "context:cc9f32089b5c1216dffd7a4b",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    },
+    "AVGO": {
+      "snapshot_id": "context:573fe744cb3a186c341b806f",
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      },
+      "missingness": [
+        "GENERAL_BENCHMARK_NOT_PROVIDED:SPY",
+        "UNKNOWN_AVAILABLE_AT",
+        "UNKNOWN_BAR_END",
+        "UNKNOWN_IS_CLOSED"
+      ]
+    }
+  },
+  "baseline_capture_unchanged": true,
+  "evidence_sha256": "de00204c185eb821216182b1fbf8ae9c00eba5f39f936b0c1999c1c794b66d5c"
+}

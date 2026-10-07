@@ -133,6 +133,8 @@ La prueba `test_new_contextual_run_roundtrips_all_e1_contracts_in_timescale` usa
 
 La evidencia se obtiene sin órdenes, red de broker, migraciones productivas ni escritura fuera de la base descartable.
 
+La ejecución final quedó vinculada a `code_version=a528bc69a85324c5c2f2d2c2a452dff4517f3163`, plan `9105757b-2324-44ca-b43f-a3984f1b9d90` y feature snapshot `features:58bd6923aa7d6ed2`. El contenedor reportó TimescaleDB 2.26.4 y fue eliminado al terminar.
+
 ## Ejemplos
 
 ### Corrida controlada reproducible
@@ -165,6 +167,16 @@ La tabla real todavía no contiene `available_at`, `bar_end`, `is_closed`, unida
 
 La integración PostgreSQL de G1 valida la persistencia/relectura. Los tests E1 existentes se mantienen para NaN/infinito, volumen, identidad, autoridad shadow y snapshot v3.
 
+Resultados ejecutados:
+
+- focalizada E1/E2/evidencia: `61 passed, 24 skipped`;
+- integración G1 con Timescale opt-in: `1 passed`;
+- suite completa E2: `792 passed, 7 failed, 24 skipped`;
+- suite completa E1 previa: `721 passed, 7 failed, 23 skipped`;
+- baseline anterior a E1: `684 passed, 7 failed, 23 skipped`.
+
+Las siete fallas son las mismas del baseline: tres expectativas de menú/ayuda y dos de radar compacto en Telegram, un mock de radar exploratorio y la dependencia local ausente `pypfopt`. E2 no agregó una falla nueva.
+
 ## No regresión contra E1
 
 `scripts/compare_contextual_e2.py` toma la captura E1 grabada, adjunta snapshots E2 a una copia y compara sólo campos productivos. Los hashes productivos baseline/shadow son iguales y la evidencia declara igualdad de:
@@ -175,6 +187,8 @@ La integración PostgreSQL de G1 valida la persistencia/relectura. Los tests E1 
 - órdenes;
 - cantidades;
 - cash.
+
+Ambos hashes son `023079e4d50b97151ef08c735be8f028a07b4fd58f660a5ec4b30d12e73ad081` para el plan E1 `8444cd7f-f2ef-44f5-b834-5b805bc234e1`.
 
 Esto es una comparación de neutralidad sobre el plan grabado, no un replay económico ni una recalibración.
 

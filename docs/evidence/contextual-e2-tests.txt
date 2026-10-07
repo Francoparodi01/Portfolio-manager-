@@ -1,0 +1,44 @@
+Contextual Analysis E2 verification
+Date: 2026-10-07 America/Buenos_Aires
+Implementation commit: a528bc69a85324c5c2f2d2c2a452dff4517f3163
+
+Focused command:
+python -m pytest tests/test_contextual_e1.py tests/test_contextual_e2.py tests/test_feature_snapshot.py tests/test_high_confidence_evidence_v2.py tests/test_contextual_g1_postgres.py -q
+Result: 61 passed, 24 skipped in 3.65s
+
+Opt-in Timescale integration:
+QUANTIA_CONTEXTUAL_G1_TEST_DATABASE_URL=<disposable loopback database>
+python -m pytest tests/test_contextual_g1_postgres.py -q
+Result: 1 passed in 2.45s
+Container: timescale/timescaledb:latest-pg16, TimescaleDB 2.26.4, tmpfs storage, removed after test.
+
+Full suite:
+python -m pytest -q
+Result: 792 passed, 7 failed, 24 skipped, 4 warnings in 35.47s
+
+Previous E1 suite:
+Result: 721 passed, 7 failed, 23 skipped, 4 warnings in 34.39s
+
+Pre-E1 baseline:
+Result: 684 passed, 7 failed, 23 skipped, 4 warnings in 38.03s
+
+The seven failures are unchanged from the E1 and pre-E1 baseline:
+- tests/test_analysis_telegram_output.py::test_native_command_menu_keeps_only_primary_workflows
+- tests/test_optimizer_challenger_v2.py::test_shadow_challenger_runs_same_context_and_has_no_capital_authority
+- tests/test_radar_exploratory.py::test_followed_watchlist_combines_sources_and_keeps_latest_per_ticker
+- tests/test_telegram_output_quality.py::test_compact_radar_parses_header_with_cash_lines
+- tests/test_telegram_output_quality.py::test_help_text_is_mobile_compact_and_scope_safe
+- tests/test_telegram_output_quality.py::test_main_menu_prioritizes_common_actions_and_groups_secondary_views
+- tests/test_telegram_radar_compact.py::test_compact_radar_preserves_shadow_context_line
+
+Recorded E1 plan comparison:
+Plan: 8444cd7f-f2ef-44f5-b834-5b805bc234e1
+Run: 18457bc9-b17f-4599-9cd2-d444cb351d5b
+Baseline productive hash: 023079e4d50b97151ef08c735be8f028a07b4fd58f660a5ec4b30d12e73ad081
+Shadow productive hash:   023079e4d50b97151ef08c735be8f028a07b4fd58f660a5ec4b30d12e73ad081
+Scores equal: true
+Signals equal: true
+Decisions equal: true
+Orders equal: true
+Quantities equal: true
+Cash equal: true

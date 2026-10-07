@@ -1,0 +1,337 @@
+{
+  "evidence_kind": "CONTROLLED_GENERATED_FIXTURE",
+  "not_market_observation": true,
+  "definition": "Reproducible diagnostic rendering; values are not claimed as historical market data.",
+  "snapshot": {
+    "snapshot_id": "context:de2a021bd310ab702a4816d0",
+    "schema_version": "contextual-market-snapshot-v1",
+    "definition_version": "contextual-market-v1",
+    "mode": "SHADOW_ONLY",
+    "affects_analysis": false,
+    "affects_execution": false,
+    "cutoff": "2025-09-18T20:15:00+00:00",
+    "identity": {
+      "ticker": "G1TEST",
+      "asset_type": "CEDEAR",
+      "currency": "ARS",
+      "venue": "BYMA",
+      "interval": "1d",
+      "volume_unit": "units",
+      "calendar": "G1_CONTROLLED_SESSIONS_V1",
+      "adjustment_policy": "unadjusted_controlled_fixture_v1",
+      "depositary_ratio": "1:1",
+      "instrument_id": "BYMA:CEDEAR:G1TEST:ARS"
+    },
+    "sources": {
+      "asset": [
+        "G1_CONTROLLED_FIXTURE"
+      ],
+      "provider_symbols": [
+        "G1TEST-0001-C-CT-ARS"
+      ],
+      "benchmarks": {
+        "general": {
+          "name": "SPY",
+          "identity": {
+            "ticker": "SPY",
+            "asset_type": "CEDEAR",
+            "currency": "ARS",
+            "venue": "BYMA",
+            "interval": "1d",
+            "volume_unit": "units",
+            "calendar": "G1_CONTROLLED_SESSIONS_V1",
+            "adjustment_policy": "unadjusted_controlled_fixture_v1",
+            "depositary_ratio": "1:1",
+            "instrument_id": "BYMA:CEDEAR:SPY:ARS"
+          },
+          "sources": [
+            "G1_CONTROLLED_FIXTURE"
+          ]
+        }
+      }
+    },
+    "timestamps": {
+      "cutoff": "2025-09-18T20:15:00+00:00",
+      "last_asset_bar": "2025-09-18T14:00:00+00:00",
+      "last_weekly_bar": "2025-09-12T00:00:00+00:00",
+      "last_available_at": "2025-09-18T20:05:00+00:00",
+      "last_scraped_at": "2025-09-18T20:10:00+00:00"
+    },
+    "quality": {
+      "version": "contextual-e1-v1",
+      "series_digest": "4ebf11d7d2b5805dc69ed5ec678c3f85c4291993704a387aa2da87aada1b202b",
+      "provider_symbols": [
+        "G1TEST-0001-C-CT-ARS"
+      ],
+      "selection_policy": "source_priority_v1",
+      "duplicate_rows_resolved": 0,
+      "price_status": "VALID",
+      "volume_status": "VALID",
+      "provenance_status": "VALID",
+      "price_reasons": [],
+      "volume_reasons": [],
+      "provenance_reasons": [],
+      "volume_quality_20": 1.0,
+      "series_identity": {
+        "ticker": "G1TEST",
+        "asset_type": "CEDEAR",
+        "currency": "ARS",
+        "venue": "BYMA",
+        "interval": "1d",
+        "volume_unit": "units",
+        "calendar": "G1_CONTROLLED_SESSIONS_V1",
+        "adjustment_policy": "unadjusted_controlled_fixture_v1",
+        "depositary_ratio": "1:1",
+        "instrument_id": "BYMA:CEDEAR:G1TEST:ARS"
+      },
+      "cutoff": "2025-09-18T20:15:00+00:00",
+      "bar_count": 260,
+      "last_bar": "2025-09-18 14:00:00+00:00",
+      "last_candle_timestamp": "2025-09-18 14:00:00+00:00",
+      "last_bar_start": "2025-09-18T14:00:00+00:00",
+      "last_bar_end": "2025-09-18T20:00:00+00:00",
+      "last_available_at": "2025-09-18T20:05:00+00:00",
+      "last_scraped_at": "2025-09-18T20:10:00+00:00",
+      "last_is_closed": true,
+      "volume_ratio_definition": "legacy_current_volume_over_inclusive_sma20",
+      "missing_features": [],
+      "volume_provenance": {
+        "G1_CONTROLLED_FIXTURE": 260
+      }
+    },
+    "components": {
+      "trend_daily": "UPTREND",
+      "trend_weekly": "UPTREND",
+      "structure_daily": {
+        "trend": "UPTREND",
+        "structure": "HH_HL",
+        "swing_window": 2,
+        "lookback_bars": 120,
+        "confirmed_swing_highs": [
+          {
+            "timestamp": "2025-06-17T14:00:00+00:00",
+            "value": 117.21202753717678
+          },
+          {
+            "timestamp": "2025-07-18T14:00:00+00:00",
+            "value": 119.73464995564242
+          },
+          {
+            "timestamp": "2025-08-18T14:00:00+00:00",
+            "value": 122.23670027223507
+          }
+        ],
+        "confirmed_swing_lows": [
+          {
+            "timestamp": "2025-05-31T14:00:00+00:00",
+            "value": 107.92305458515915
+          },
+          {
+            "timestamp": "2025-07-01T14:00:00+00:00",
+            "value": 110.42466343967065
+          },
+          {
+            "timestamp": "2025-08-01T14:00:00+00:00",
+            "value": 112.94684914447993
+          },
+          {
+            "timestamp": "2025-09-02T14:00:00+00:00",
+            "value": 115.45343815056445
+          }
+        ],
+        "support": {
+          "timestamp": "2025-09-02T14:00:00+00:00",
+          "value": 115.45343815056445
+        },
+        "resistance": {
+          "timestamp": "2025-08-18T14:00:00+00:00",
+          "value": 122.23670027223507
+        },
+        "close": 123.71802599124393,
+        "distance_support": 0.06680180818003355,
+        "distance_resistance": -0.011973402478258947,
+        "as_of": "2025-09-18T14:00:00+00:00",
+        "status": "VALID"
+      },
+      "structure_weekly": {
+        "trend": "UPTREND",
+        "structure": "HH_HL",
+        "swing_window": 2,
+        "lookback_bars": 37,
+        "confirmed_swing_highs": [
+          {
+            "timestamp": "2025-05-16T00:00:00+00:00",
+            "value": 114.70605331473467
+          },
+          {
+            "timestamp": "2025-06-20T00:00:00+00:00",
+            "value": 117.21202753717678
+          },
+          {
+            "timestamp": "2025-07-18T00:00:00+00:00",
+            "value": 119.73464995564242
+          },
+          {
+            "timestamp": "2025-08-22T00:00:00+00:00",
+            "value": 122.23670027223507
+          }
+        ],
+        "confirmed_swing_lows": [
+          {
+            "timestamp": "2025-05-02T00:00:00+00:00",
+            "value": 105.39925332563806
+          },
+          {
+            "timestamp": "2025-06-06T00:00:00+00:00",
+            "value": 107.92305458515915
+          },
+          {
+            "timestamp": "2025-07-04T00:00:00+00:00",
+            "value": 110.42466343967065
+          },
+          {
+            "timestamp": "2025-08-01T00:00:00+00:00",
+            "value": 112.94684914447993
+          }
+        ],
+        "support": {
+          "timestamp": "2025-08-01T00:00:00+00:00",
+          "value": 112.94684914447993
+        },
+        "resistance": {
+          "timestamp": "2025-08-22T00:00:00+00:00",
+          "value": 122.23670027223507
+        },
+        "close": 121.22494048155421,
+        "distance_support": 0.06828703156454752,
+        "distance_resistance": 0.00834613559438956,
+        "as_of": "2025-09-12T00:00:00+00:00",
+        "status": "VALID"
+      },
+      "relative_strength": {
+        "general": {
+          "benchmark": "SPY",
+          "benchmark_identity": {
+            "ticker": "SPY",
+            "asset_type": "CEDEAR",
+            "currency": "ARS",
+            "venue": "BYMA",
+            "interval": "1d",
+            "volume_unit": "units",
+            "calendar": "G1_CONTROLLED_SESSIONS_V1",
+            "adjustment_policy": "unadjusted_controlled_fixture_v1",
+            "depositary_ratio": "1:1",
+            "instrument_id": "BYMA:CEDEAR:SPY:ARS"
+          },
+          "definition": "aligned_session_relative_price_change_and_excess_simple_return",
+          "windows": {
+            "20": {
+              "sessions": 20,
+              "relative_price_change": 0.050365155683208096,
+              "asset_return": 0.05523001860677401,
+              "benchmark_return": 0.00463159206799979,
+              "excess_return": 0.05059842653877422,
+              "status": "VALID",
+              "reason": null,
+              "start": "2025-08-29T00:00:00+00:00",
+              "end": "2025-09-18T00:00:00+00:00"
+            },
+            "60": {
+              "sessions": 60,
+              "relative_price_change": 0.006488518721100345,
+              "asset_return": 0.043961012473522354,
+              "benchmark_return": 0.037230920229509135,
+              "excess_return": 0.006730092244013219,
+              "status": "VALID",
+              "reason": null,
+              "start": "2025-07-20T00:00:00+00:00",
+              "end": "2025-09-18T00:00:00+00:00"
+            },
+            "120": {
+              "sessions": 120,
+              "relative_price_change": 0.025521255224868256,
+              "asset_return": 0.0998112216915421,
+              "benchmark_return": 0.0724411767071409,
+              "excess_return": 0.02737004498440121,
+              "status": "VALID",
+              "reason": null,
+              "start": "2025-05-21T00:00:00+00:00",
+              "end": "2025-09-18T00:00:00+00:00"
+            }
+          },
+          "status": "VALID",
+          "reason": null
+        }
+      },
+      "rvol": 1.1919191919191918,
+      "volume": {
+        "definition": "current_closed_daily_volume / arithmetic_mean(previous_20_closed_daily_volumes)",
+        "window": 20,
+        "current_volume": 1475.0,
+        "expected_volume": 1237.5,
+        "rvol": 1.1919191919191918,
+        "state": "NORMAL",
+        "status": "VALID",
+        "reason": null
+      },
+      "volume_state": "NORMAL",
+      "breakout_state": "IN_RANGE",
+      "breakout": {
+        "state": "IN_RANGE",
+        "reference_high": 124.55664737091362,
+        "reference_low": 115.45343815056445,
+        "lookback": 20,
+        "status": "VALID",
+        "reason": null,
+        "close": 123.71802599124393
+      },
+      "distance_support": 0.06680180818003355,
+      "distance_resistance": -0.011973402478258947,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      }
+    },
+    "invalidators": [
+      {
+        "code": "BREAKOUT_VOLUME",
+        "status": "PASS",
+        "reason": "NO_UNCONFIRMED_BREAKOUT",
+        "observed": "IN_RANGE"
+      },
+      {
+        "code": "BUY_WEEKLY_STRUCTURE",
+        "status": "PASS",
+        "reason": "SIGNAL_IS_NOT_BUY",
+        "observed": "UPTREND"
+      },
+      {
+        "code": "RELATIVE_STRENGTH",
+        "status": "PASS",
+        "reason": "RS20_NOT_DETERIORATING",
+        "observed": 0.050365155683208096
+      },
+      {
+        "code": "STRUCTURAL_SUPPORT",
+        "status": "PASS",
+        "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT",
+        "observed": 0.06680180818003355
+      },
+      {
+        "code": "VOLUME_CONFIRMATION",
+        "status": "PASS",
+        "reason": "NO_BUY_VOLUME_WARNING",
+        "observed": 1.1919191919191918
+      }
+    ],
+    "input_digests": {
+      "asset": "8e862c912dce23eef9a57681a3998d3b474c017edba45f8b9df4623b30aadc7e",
+      "benchmark_general": "3ee7de548650b427e01c387dbae77b0e9aba723338f5e76dd5cec7a0222f6e4d"
+    },
+    "missingness": []
+  },
+  "diagnostic": "docs\\evidence\\contextual-e2-diagnostic.png"
+}

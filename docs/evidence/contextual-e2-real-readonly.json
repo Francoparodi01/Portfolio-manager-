@@ -1,0 +1,301 @@
+{
+  "audit_mode": "READ_ONLY",
+  "decision": {
+    "id": 1273,
+    "owner": 1259412316,
+    "run_id": "18457bc9-b17f-4599-9cd2-d444cb351d5b",
+    "plan_id": "8444cd7f-f2ef-44f5-b834-5b805bc234e1",
+    "decided_at": "2026-10-06T16:47:10.532332+00:00",
+    "ticker": "IREN",
+    "signal": "SELL",
+    "score": -0.0569,
+    "conviction": 0.75
+  },
+  "series": {
+    "asset_provider_symbol": "TV:BYMA:IREN",
+    "benchmark_ticker": "SPY",
+    "benchmark_provider_symbol": "TV:BYMA:SPY",
+    "asset_rows_known_at_cutoff": 183,
+    "benchmark_rows_known_at_cutoff": 313
+  },
+  "database_capabilities": {
+    "market_candle_columns": [
+      "asset_type",
+      "close_price",
+      "currency",
+      "high_price",
+      "interval",
+      "long_ticker",
+      "low_price",
+      "open_price",
+      "scraped_at",
+      "source",
+      "ticker",
+      "ts",
+      "venue",
+      "volume"
+    ],
+    "missing_context_columns": [
+      "adjustment_policy",
+      "available_at",
+      "bar_end",
+      "bar_start",
+      "calendar",
+      "calendar_validation",
+      "depositary_ratio",
+      "is_closed",
+      "volume_unit"
+    ]
+  },
+  "snapshot": {
+    "snapshot_id": "context:df8815eb0380162f50d5f275",
+    "schema_version": "contextual-market-snapshot-v1",
+    "definition_version": "contextual-market-v1",
+    "mode": "SHADOW_ONLY",
+    "affects_analysis": false,
+    "affects_execution": false,
+    "cutoff": "2026-10-06T16:47:10.532332+00:00",
+    "identity": {
+      "ticker": "IREN",
+      "asset_type": "CEDEAR",
+      "currency": "ARS",
+      "venue": "BYMA",
+      "interval": "1d",
+      "volume_unit": null,
+      "calendar": null,
+      "adjustment_policy": null,
+      "depositary_ratio": null,
+      "instrument_id": "BYMA:CEDEAR:IREN:ARS"
+    },
+    "sources": {
+      "asset": [
+        "TRADINGVIEW_BYMA"
+      ],
+      "provider_symbols": [
+        "TV:BYMA:IREN"
+      ],
+      "benchmarks": {
+        "general": {
+          "name": "SPY",
+          "identity": {
+            "ticker": "SPY",
+            "asset_type": "CEDEAR",
+            "currency": "ARS",
+            "venue": "BYMA",
+            "interval": "1d",
+            "volume_unit": null,
+            "calendar": null,
+            "adjustment_policy": null,
+            "depositary_ratio": null,
+            "instrument_id": "BYMA:CEDEAR:SPY:ARS"
+          },
+          "sources": [
+            "TRADINGVIEW_BYMA"
+          ]
+        }
+      }
+    },
+    "timestamps": {
+      "cutoff": "2026-10-06T16:47:10.532332+00:00",
+      "last_asset_bar": null,
+      "last_weekly_bar": null,
+      "last_available_at": null,
+      "last_scraped_at": null
+    },
+    "quality": {
+      "version": "contextual-e1-v1",
+      "price_status": "INVALID",
+      "volume_status": "PARTIAL",
+      "provenance_status": "PARTIAL",
+      "price_reasons": [
+        "NO_PIT_ELIGIBLE_BARS"
+      ],
+      "volume_reasons": [
+        "NO_PIT_ELIGIBLE_BARS"
+      ],
+      "provenance_reasons": [
+        "NO_PIT_ELIGIBLE_BARS"
+      ],
+      "bar_count": 0
+    },
+    "components": {
+      "trend_daily": "UNKNOWN",
+      "trend_weekly": "UNKNOWN",
+      "structure_daily": {
+        "trend": "UNKNOWN",
+        "structure": "UNKNOWN_UNKNOWN",
+        "swing_window": 2,
+        "lookback_bars": 0,
+        "confirmed_swing_highs": [],
+        "confirmed_swing_lows": [],
+        "support": null,
+        "resistance": null,
+        "close": null,
+        "distance_support": null,
+        "distance_resistance": null,
+        "as_of": null,
+        "status": "UNKNOWN"
+      },
+      "structure_weekly": {
+        "trend": "UNKNOWN",
+        "structure": "UNKNOWN_UNKNOWN",
+        "swing_window": 2,
+        "lookback_bars": 0,
+        "confirmed_swing_highs": [],
+        "confirmed_swing_lows": [],
+        "support": null,
+        "resistance": null,
+        "close": null,
+        "distance_support": null,
+        "distance_resistance": null,
+        "as_of": null,
+        "status": "UNKNOWN"
+      },
+      "relative_strength": {
+        "general": {
+          "benchmark": "SPY",
+          "benchmark_identity": {
+            "ticker": "SPY",
+            "asset_type": "CEDEAR",
+            "currency": "ARS",
+            "venue": "BYMA",
+            "interval": "1d",
+            "volume_unit": null,
+            "calendar": null,
+            "adjustment_policy": null,
+            "depositary_ratio": null,
+            "instrument_id": "BYMA:CEDEAR:SPY:ARS"
+          },
+          "definition": "aligned_session_relative_price_change_and_excess_simple_return",
+          "windows": {
+            "20": {
+              "sessions": 20,
+              "relative_price_change": null,
+              "asset_return": null,
+              "benchmark_return": null,
+              "excess_return": null,
+              "status": "UNKNOWN",
+              "reason": "INSUFFICIENT_ALIGNED_SESSIONS"
+            },
+            "60": {
+              "sessions": 60,
+              "relative_price_change": null,
+              "asset_return": null,
+              "benchmark_return": null,
+              "excess_return": null,
+              "status": "UNKNOWN",
+              "reason": "INSUFFICIENT_ALIGNED_SESSIONS"
+            },
+            "120": {
+              "sessions": 120,
+              "relative_price_change": null,
+              "asset_return": null,
+              "benchmark_return": null,
+              "excess_return": null,
+              "status": "UNKNOWN",
+              "reason": "INSUFFICIENT_ALIGNED_SESSIONS"
+            }
+          },
+          "status": "UNKNOWN",
+          "reason": "NO_VALID_RELATIVE_STRENGTH_WINDOW"
+        }
+      },
+      "rvol": null,
+      "volume": {
+        "definition": "current_closed_daily_volume / arithmetic_mean(previous_20_closed_daily_volumes)",
+        "window": 20,
+        "current_volume": null,
+        "expected_volume": null,
+        "rvol": null,
+        "state": "UNKNOWN",
+        "status": "UNKNOWN",
+        "reason": "INSUFFICIENT_COMPARABLE_VOLUME"
+      },
+      "volume_state": "UNKNOWN",
+      "breakout_state": "UNKNOWN",
+      "breakout": {
+        "state": "UNKNOWN",
+        "reference_high": null,
+        "reference_low": null,
+        "lookback": 20,
+        "status": "UNKNOWN",
+        "reason": "INSUFFICIENT_BREAKOUT_LOOKBACK"
+      },
+      "distance_support": null,
+      "distance_resistance": null,
+      "context_confidence": {
+        "value": 0.0,
+        "status": "LOW",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 0,
+        "components_required": 5
+      }
+    },
+    "invalidators": [
+      {
+        "code": "BREAKOUT_VOLUME",
+        "status": "UNKNOWN",
+        "reason": "BREAKOUT_VOLUME_UNKNOWN",
+        "observed": "UNKNOWN"
+      },
+      {
+        "code": "BUY_WEEKLY_STRUCTURE",
+        "status": "PASS",
+        "reason": "SIGNAL_IS_NOT_BUY",
+        "observed": "UNKNOWN"
+      },
+      {
+        "code": "RELATIVE_STRENGTH",
+        "status": "UNKNOWN",
+        "reason": "RS20_UNKNOWN",
+        "observed": null
+      },
+      {
+        "code": "STRUCTURAL_SUPPORT",
+        "status": "UNKNOWN",
+        "reason": "SUPPORT_UNKNOWN",
+        "observed": null
+      },
+      {
+        "code": "VOLUME_CONFIRMATION",
+        "status": "PASS",
+        "reason": "NO_BUY_VOLUME_WARNING",
+        "observed": null
+      }
+    ],
+    "input_digests": {
+      "asset": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "benchmark_general": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "missingness": [
+      "GENERAL_UNKNOWN_AVAILABLE_AT",
+      "GENERAL_UNKNOWN_BAR_END",
+      "GENERAL_UNKNOWN_IS_CLOSED",
+      "UNKNOWN_AVAILABLE_AT",
+      "UNKNOWN_BAR_END",
+      "UNKNOWN_IS_CLOSED"
+    ]
+  },
+  "diagnostic": {
+    "status": "NOT_GENERATED",
+    "reason": "NO_PIT_ELIGIBLE_BARS"
+  },
+  "gaps": [
+    "GENERAL_UNKNOWN_AVAILABLE_AT",
+    "GENERAL_UNKNOWN_BAR_END",
+    "GENERAL_UNKNOWN_IS_CLOSED",
+    "MISSING_MARKET_CANDLE_COLUMN:adjustment_policy",
+    "MISSING_MARKET_CANDLE_COLUMN:available_at",
+    "MISSING_MARKET_CANDLE_COLUMN:bar_end",
+    "MISSING_MARKET_CANDLE_COLUMN:bar_start",
+    "MISSING_MARKET_CANDLE_COLUMN:calendar",
+    "MISSING_MARKET_CANDLE_COLUMN:calendar_validation",
+    "MISSING_MARKET_CANDLE_COLUMN:depositary_ratio",
+    "MISSING_MARKET_CANDLE_COLUMN:is_closed",
+    "MISSING_MARKET_CANDLE_COLUMN:volume_unit",
+    "NO_PIT_ELIGIBLE_ASSET_BAR",
+    "UNKNOWN_AVAILABLE_AT",
+    "UNKNOWN_BAR_END",
+    "UNKNOWN_IS_CLOSED"
+  ]
+}
