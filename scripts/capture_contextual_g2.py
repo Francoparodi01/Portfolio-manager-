@@ -132,7 +132,10 @@ async def capture_real_g2(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     import asyncpg
 
-    conn = await asyncpg.connect(database_url.replace("postgresql+asyncpg://", "postgresql://", 1))
+    direct_database_url = database_url.replace(
+        "postgresql+asyncpg://", "postgresql://", 1
+    )
+    conn = await asyncpg.connect(direct_database_url)
     run_id = str(uuid4())
     version = code_version()
     try:
@@ -182,7 +185,7 @@ async def capture_real_g2(
 
         # The productive pipeline never consumes the G2 tables.  It persists a
         # normal formal plan and returns its in-memory artifact for audit only.
-        os.environ["DATABASE_URL"] = database_url
+        os.environ["DATABASE_URL"] = direct_database_url
         os.environ["TELEGRAM_BOT_TOKEN"] = ""
         from src.core import config as config_module
         config_module._config = None
