@@ -111,3 +111,7 @@ backup_*.sql
 *.db
 
 !tests/test_agentic_diagnostics.py
+
+# Private bounded E0 evidence
+output/contextual-e1/
+!tests/test_contextual_e1.py
