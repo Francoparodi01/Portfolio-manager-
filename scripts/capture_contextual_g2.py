@@ -75,6 +75,7 @@ def _pit_role(rows: list[dict[str, Any]], used: list[dict[str, Any]], cutoff: da
         )
         for row in rows
     })
+    last = used[-1] if used else None
     return {
         "observations_known_at_cutoff": len(rows),
         "closed_observations_used": len(used),
@@ -83,6 +84,19 @@ def _pit_role(rows: list[dict[str, Any]], used: list[dict[str, Any]], cutoff: da
         "first_candle_timestamp": used[0]["candle_timestamp"].isoformat() if used else None,
         "last_candle_timestamp": used[-1]["candle_timestamp"].isoformat() if used else None,
         "last_bar_end": used[-1]["bar_end"].isoformat() if used else None,
+        "last_used_candle": ({
+            "candle_timestamp": last["candle_timestamp"].isoformat(),
+            "bar_start": last["bar_start"].isoformat(),
+            "bar_end": last["bar_end"].isoformat(),
+            "available_at": last["available_at"].isoformat(),
+            "scraped_at": last["scraped_at"].isoformat(),
+            "is_closed": last["is_closed"],
+            "source": last["source"],
+            "price_unit": last["price_unit"],
+            "volume_unit": last["volume_unit"],
+            "quality": _json(last["quality"]),
+            "missingness": _json(last["missingness"]),
+        } if last else None),
         "violations": {
             "candle_after_cutoff": sum(row["candle_timestamp"] > cutoff for row in used),
             "available_after_cutoff": sum(row["available_at"] > cutoff for row in used),
@@ -358,7 +372,9 @@ async def capture_real_g2(
                 "score": decision["final_score"],
                 "conviction": decision["confidence"],
                 "feature_snapshot_v3_id": feature["feature_snapshot_id"],
+                "feature_snapshot_v3_schema": feature["schema_version"],
                 "contextual_snapshot_id": contextual.snapshot_id,
+                "contextual_snapshot_schema": contextual.schema_version,
                 "mode": contextual.mode,
                 "affects_analysis": contextual.affects_analysis,
                 "affects_execution": contextual.affects_execution,

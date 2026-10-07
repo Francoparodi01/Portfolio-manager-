@@ -1,0 +1,23 @@
+{
+  "schema": "contextual-g2-non-regression-v1",
+  "run_id": "74db5161-562c-428a-b1cd-4620b9ee106b",
+  "plan_id": "286f2ca7-d363-49a2-9fa4-cf5cee550dc9",
+  "comparison": "RECORDED_PRODUCTIVE_CAPTURE_VS_SAME_CAPTURE_WITH_E2_ATTACHMENT",
+  "equal": {
+    "scores": true,
+    "signals": true,
+    "decisions": true,
+    "orders": true,
+    "quantities": true,
+    "cash": true
+  },
+  "baseline_productive_hash": "55f962067ac48c83a8597f7792f4b9d71b11ca85474f72eacb76545f6202373a",
+  "shadow_productive_hash": "55f962067ac48c83a8597f7792f4b9d71b11ca85474f72eacb76545f6202373a",
+  "shadow_contract": {
+    "mode": "SHADOW_ONLY",
+    "affects_analysis": false,
+    "affects_execution": false
+  },
+  "broker_order_api_calls": 0,
+  "broker_orders_executed": 0
+}

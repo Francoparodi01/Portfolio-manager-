@@ -1,0 +1,69 @@
+{
+  "schema": "contextual-g2-real-run-v1",
+  "captured_at": "2026-10-07T18:07:55.440988+00:00",
+  "run_id": "74db5161-562c-428a-b1cd-4620b9ee106b",
+  "plan_id": "286f2ca7-d363-49a2-9fa4-cf5cee550dc9",
+  "owner": 1259412316,
+  "timestamp": "2026-10-07T18:07:54.432215+00:00",
+  "code_version": "42957aa3a04eed391d3941548b4b7310b38709fd",
+  "portfolio_snapshot_id": "8a4276c1-3d4a-4e29-862b-6cf01450f91d",
+  "portfolio": {
+    "total_value_ars": 3493988.259977386,
+    "cash_ars": 9798.2599773857,
+    "asset_ticker": "IREN",
+    "asset_type": "CEDEAR"
+  },
+  "analysis": {
+    "decision_log_id": 1286,
+    "signal": "SELL",
+    "score": -0.1246,
+    "conviction": 1.0,
+    "feature_snapshot_v3_id": "features:c1c245e2fc7b7f66",
+    "feature_snapshot_v3_schema": "feature_snapshot_v3",
+    "contextual_snapshot_id": "context:85b8a976a2a47748184fac50",
+    "contextual_snapshot_schema": "contextual-market-snapshot-v1",
+    "mode": "SHADOW_ONLY",
+    "affects_analysis": false,
+    "affects_execution": false
+  },
+  "candles": {
+    "asset": {
+      "ticker": "IREN",
+      "provider_symbol": "BYMA:IREN",
+      "fetched": 224,
+      "used": 223,
+      "observation_ids_sha256": "5f956a2dbf586f8a9dbc2f4d666c1aae28a43452b306564418bfa859ef20d7e3"
+    },
+    "general_benchmark": {
+      "ticker": "SPY",
+      "provider_symbol": "BYMA:SPY",
+      "fetched": 260,
+      "used": 259,
+      "observation_ids_sha256": "4ec3aa621f3505f2a452f655e4d0ec7c725bdf4e81b318a781c37d26bd14ada2"
+    }
+  },
+  "hashes": {
+    "context_inputs": {
+      "asset": "24a87d743b15e77fb9fd04fbcd3bc772acc176c588cd8ec2ae6819a227f4dc76",
+      "benchmark_general": "c1ded6db6789d5f80e31760852ef1a649fb6178e43ad3446256b3d89f92cfbfb"
+    },
+    "baseline_productive": "55f962067ac48c83a8597f7792f4b9d71b11ca85474f72eacb76545f6202373a",
+    "shadow_productive": "55f962067ac48c83a8597f7792f4b9d71b11ca85474f72eacb76545f6202373a",
+    "full_context_capture": "e9f62f400473f22acaf3d7905260dc333b8746a670a8ed5bdb6c20931aa36097"
+  },
+  "persistence": {
+    "plan_payload_version": "execution-plan-v2-immutable",
+    "capture_hashes": [
+      "2bc074af66970df8cabe0dc582eba31c",
+      "37196a2a2dd563c35493a9fb8ace658c959277ee6c2090013adcb79aa4e7d0b5"
+    ],
+    "contextual_snapshot_reread": true,
+    "reread_candle_links": 482
+  },
+  "execution_safety": {
+    "telegram_sent": false,
+    "broker_order_api_calls": 0,
+    "broker_orders_executed": 0,
+    "plan_only": true
+  }
+}
