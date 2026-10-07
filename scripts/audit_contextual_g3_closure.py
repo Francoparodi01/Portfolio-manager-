@@ -59,6 +59,8 @@ def _observation_evidence(row: dict[str, Any], *, effective: bool) -> dict[str, 
     return {
         "observation_id": str(row["observation_id"]),
         "observation_identity": {
+            "definition": "owner + capture_id + bar_identity + scraped_at + source + digest",
+            "owner": int(row["owner_chat_id"]),
             "capture_id": str(row["ingestion_run_id"]),
             "scraped_at": row["scraped_at"].isoformat(),
             "source": row["source"],
@@ -361,6 +363,12 @@ async def audit_g3_closure(
                 "code_version": snapshot["code_version"],
                 "cutoff": cutoff.isoformat(),
                 "contextual_snapshot_id": snapshot["snapshot_id"],
+                "analysis": {
+                    "asset_ticker": runner_evidence["portfolio"]["asset_ticker"],
+                    "signal": snapshot["signal"],
+                    "score": runner_evidence["analysis"]["score"],
+                    "conviction": snapshot["conviction"],
+                },
                 "market_lifecycle": capture_lifecycle,
                 "analysis_lifecycle": run_lifecycle,
                 "roles": roles_evidence,
