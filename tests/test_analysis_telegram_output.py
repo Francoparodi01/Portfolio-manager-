@@ -271,6 +271,7 @@ def test_native_command_menu_keeps_only_primary_workflows():
         "help",
         "portfolio",
         "analisis",
+        "analisis_contextual",
         "events",
         "ticker",
         "radar",

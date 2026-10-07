@@ -28,6 +28,11 @@ G3_MIGRATION_PATH = (
     / "migrations"
     / "20261008_contextual_g3.sql"
 )
+TELEGRAM_SHADOW_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "migrations"
+    / "20261009_telegram_contextual_shadow.sql"
+)
 
 
 def migration_sql() -> str:
@@ -45,6 +50,15 @@ def g3_migration_sql() -> str:
 async def ensure_contextual_g3_schema(conn: Any) -> None:
     await ensure_contextual_g2_schema(conn)
     await conn.execute(g3_migration_sql())
+
+
+def telegram_shadow_migration_sql() -> str:
+    return TELEGRAM_SHADOW_MIGRATION_PATH.read_text(encoding="utf-8")
+
+
+async def ensure_contextual_telegram_schema(conn: Any) -> None:
+    await ensure_contextual_g3_schema(conn)
+    await conn.execute(telegram_shadow_migration_sql())
 
 
 def instrument_id(*, market: str, asset_type: str, ticker: str, currency: str) -> str:
@@ -767,4 +781,6 @@ __all__ = [
     "read_contextual_snapshot",
     "read_market_evidence_as_of",
     "record_capture_event",
+    "ensure_contextual_telegram_schema",
+    "telegram_shadow_migration_sql",
 ]

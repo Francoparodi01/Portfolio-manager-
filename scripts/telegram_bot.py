@@ -139,6 +139,7 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("help", "Cómo leer Quantia"),
     ("portfolio", "Cartera actual"),
     ("analisis", "Plan operativo"),
+    ("analisis_contextual", "Contexto PIT experimental (shadow)"),
     ("events", "Próximos balances"),
     ("ticker", "Análisis por ticker"),
     ("radar", "Oportunidades experimentales"),
@@ -835,6 +836,7 @@ def help_text() -> str:
         "<b>Cartera y análisis</b>\n"
         "<code>/portfolio</code>: cartera actual y concentración.\n"
         "<code>/analisis</code>: plan operativo compacto y auditable.\n"
+        "<code>/analisis_contextual</code>: mismo pipeline con contexto PIT shadow; no ejecuta ni cambia el plan.\n"
         "<code>/analisis_test</code>: simulación compacta sin guardar.\n"
         "<code>/analisis_full</code>: simulación completa sin guardar.\n"
         "<code>/analisis_debug</code>: diagnóstico técnico sin guardar.\n"
@@ -1243,6 +1245,24 @@ async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> N
         time.perf_counter() - started,
     )
     await _save_cached_report("analysis", chat_id, report)
+    await send_text(context, chat_id, sync_note + report)
+
+
+async def action_contextual_analysis(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+) -> None:
+    """Create a real G3 capture while keeping the productive pipeline read-only."""
+    sync_note = await sync_operational_state(
+        full=False,
+        owner_chat_id=chat_id,
+    )
+    report = await run_python_script(
+        "scripts/run_contextual_shadow.py",
+        "--owner-chat-id",
+        str(chat_id),
+        timeout=600,
+    )
     await send_text(context, chat_id, sync_note + report)
 
 
@@ -2926,6 +2946,8 @@ CALLBACK_ALIASES: dict[str, str] = {
     "weekly_analysis":  "analysis",
     "analysis":         "analysis",
     "analisis":         "analysis",
+    "analisis_contextual": "contextual_analysis",
+    "contextual_analysis": "contextual_analysis",
     "run_analysis":     "analysis",
     "analisis_semanal": "analysis",
     "analysis_test":    "analysis_test",
@@ -3024,6 +3046,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "ticker_analysis": "Preparando analisis por accion...",
     "portfolio":     "💼 Leyendo último portfolio...",
     "analysis":      "🧠 Generando plan de cartera...",
+    "contextual_analysis": "🧪 Capturando evidencia PIT y contexto shadow...",
     "weekly_summary":"📅 Generando resumen semanal...",
     "performance":   "📊 Calculando performance y outcomes...",
     "net_decisions": "Calculando neto por corrida y decisión...",
@@ -3050,6 +3073,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "analytics_v2":   action_analytics_v2,
         "portfolio":      action_portfolio,
         "analysis":       action_analysis,
+        "contextual_analysis": action_contextual_analysis,
         "analysis_test":  action_analysis_test,
         "analysis_full":  action_analysis_full,
         "analysis_debug": action_analysis_debug,
@@ -3145,6 +3169,9 @@ async def portfolio_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def analysis_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "analysis")
+
+async def contextual_analysis_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "contextual_analysis")
 
 async def analysis_test_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "analysis_test")
@@ -3771,6 +3798,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("analisis",         analysis_handler))
     app.add_handler(CommandHandler("analysis",         analysis_handler))
     app.add_handler(CommandHandler("analisis_semanal", analysis_handler))
+    app.add_handler(CommandHandler("analisis_contextual", contextual_analysis_handler))
     app.add_handler(CommandHandler("analisis_test",    analysis_test_handler))
     app.add_handler(CommandHandler("analysis_test",    analysis_test_handler))
     app.add_handler(CommandHandler("analysis_full",    analysis_full_handler))
