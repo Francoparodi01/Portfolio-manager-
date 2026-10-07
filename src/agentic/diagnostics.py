@@ -129,9 +129,8 @@ def diagnostic_decision(goal: str, history: list[dict], plan: QuestionPlan,
             for row in [*signals, *decisions]
             if row.get("ticker")
         }
-        requested_tokens = set(re.findall(r"\b[A-Z][A-Z0-9.=-]{1,9}\b", goal.upper()))
-        requested = sorted(available.intersection(requested_tokens))
-        scope = requested or sorted(available)
+        requested_ticker = decision_lab_arguments(goal).get("ticker")
+        scope = [str(requested_ticker).upper()] if requested_ticker else sorted(available)
 
         run_id = evidence.get("analysis_run_id") or "N/D"
         snapshot = evidence.get("snapshot_as_of") or "N/D"
