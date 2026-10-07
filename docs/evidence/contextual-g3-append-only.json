@@ -1,0 +1,42 @@
+{
+  "schema": "contextual-g3-append-only-v1",
+  "result": "PASS",
+  "database": {
+    "engine": "PostgreSQL/TimescaleDB",
+    "timescaledb_version": "2.30.2"
+  },
+  "bar_identity": {
+    "instrument_id": "BYMA:CEDEAR:G3ASSET:ARS",
+    "market": "BYMA",
+    "provider_symbol": "BYMA:G3ASSET",
+    "interval": "1d",
+    "bar_start": "2026-06-19T14:00:00+00:00"
+  },
+  "observation_identity": {
+    "definition": "owner + capture_id + bar_identity + scraped_at + source + observation_digest",
+    "version_a": {
+      "observation_id": "0e1c0592-ba57-5b59-8989-ada8e8e6e734",
+      "digest": "fabb3844bef9545046f4820aad01a08d11716e919d27f1fe8486ff8d23187576"
+    },
+    "version_b": {
+      "observation_id": "6fe6dbc8-80b1-54de-8012-b7749f5224ca",
+      "digest": "1192c2233578099d8f285dcd2a5bd9dc76d972057621a7a44bee4025d0f54628"
+    }
+  },
+  "correction": {
+    "version_a_still_exists": true,
+    "version_b_exists": true,
+    "same_bar_identity": true,
+    "different_observation_id": true,
+    "different_digest": true,
+    "different_close": true
+  },
+  "versions_for_corrected_bar": 2,
+  "immutability": {
+    "update_observation": true,
+    "delete_observation": true,
+    "update_capture_event": true,
+    "delete_snapshot_link": true,
+    "truncate_observations": true
+  }
+}

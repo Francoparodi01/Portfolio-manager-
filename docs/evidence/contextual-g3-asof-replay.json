@@ -1,0 +1,26 @@
+{
+  "schema": "contextual-g3-asof-replay-v1",
+  "result": "PASS",
+  "cutoff_before_correction": "2026-10-07T21:54:30.421174+00:00",
+  "cutoff_after_correction": "2026-10-07T22:04:30.421174+00:00",
+  "selected_before": {
+    "observation_id": "0e1c0592-ba57-5b59-8989-ada8e8e6e734",
+    "digest": "fabb3844bef9545046f4820aad01a08d11716e919d27f1fe8486ff8d23187576",
+    "close": 120.69442164
+  },
+  "selected_after": {
+    "observation_id": "6fe6dbc8-80b1-54de-8012-b7749f5224ca",
+    "digest": "1192c2233578099d8f285dcd2a5bd9dc76d972057621a7a44bee4025d0f54628",
+    "close": 123.94442164
+  },
+  "before_selects_a": true,
+  "after_selects_b": true,
+  "past_replay_unchanged_after_correction": true,
+  "open_bars_excluded": true,
+  "available_at_respected": true,
+  "scraped_at_respected": true,
+  "future_observations_excluded": true,
+  "aborted_capture_excluded": true,
+  "future_complete_event_excluded": true,
+  "observation_selected_after_complete_event": true
+}

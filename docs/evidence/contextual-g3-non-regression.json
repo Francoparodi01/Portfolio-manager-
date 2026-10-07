@@ -1,0 +1,20 @@
+{
+  "schema": "contextual-g3-non-regression-v1",
+  "result": "PASS",
+  "equal": {
+    "scores": true,
+    "signals": true,
+    "decisions": true,
+    "orders": true,
+    "quantities": true,
+    "cash": true
+  },
+  "baseline_productive_hash": "1061c5b89afd75811c53728c6c402d6cc5c44f3cafb38555aa987f95a5dfc6e1",
+  "shadow_productive_hash": "1061c5b89afd75811c53728c6c402d6cc5c44f3cafb38555aa987f95a5dfc6e1",
+  "shadow_contract": {
+    "mode": "SHADOW_ONLY",
+    "affects_analysis": false,
+    "affects_execution": false
+  },
+  "orders_executed": 0
+}
