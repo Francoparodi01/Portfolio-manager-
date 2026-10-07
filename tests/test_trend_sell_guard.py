@@ -49,3 +49,10 @@ def test_strong_uptrend_allows_clearly_negative_or_structural_exit():
     )
     assert negative_action == DecisionType.SELL_PARTIAL
     assert structural_action == DecisionType.SELL_PARTIAL
+
+
+def test_buy_guard_rejects_nonfinite_scores_without_changing_valid_threshold():
+    from src.analysis.execution_planner import _buy_guard
+    for score in (None, float("nan"), float("inf"), -float("inf"), 1.1, -1.1):
+        assert _buy_guard(score, .1, .2, 100000)[0] == DecisionType.BLOCKED
+    assert _buy_guard(.09, .1, .2, 100000)[0] == DecisionType.BUY

@@ -448,7 +448,7 @@ def _buy_guard(
     Devuelve:
       action, reason_primary, reason_secondary
     """
-    if score is None:
+    if score is None or not math.isfinite(score) or not -1 <= score <= 1:
         return (
             DecisionType.BLOCKED,
             "Compra bloqueada: score no disponible",
