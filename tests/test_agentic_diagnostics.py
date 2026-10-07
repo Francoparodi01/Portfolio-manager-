@@ -177,3 +177,101 @@ def test_telegram_context_reset_flags_and_useful_status(goal,new):
     context = SimpleNamespace(bot=SimpleNamespace(send_document=AsyncMock()))
     asyncio.run(run_report(context,123,goal,run_command=command,send_text=send))
     assert "Resultado: Respuesta parcial" in send.call_args.args[-1]
+
+
+def _consistency_evidence():
+    return {
+        "schema_version": "agent-decision-evidence-v1",
+        "analysis_run_id": "run-gdx-current",
+        "evaluated_at": "2026-10-06T21:30:00Z",
+        "snapshot_as_of": "2026-10-06T21:02:00Z",
+        "signals": [{
+            "ticker": "GDX",
+            "decision": "HOLD",
+            "final_score": 0.142,
+            "technical_regime": "RANGE",
+            "layers": [
+                {"name": "technical", "weighted": 0.057, "reasons": ["fixture"]},
+                {"name": "macro", "weighted": 0.072, "reasons": ["fixture"]},
+            ],
+        }],
+        "plan": {
+            "decisions": [{
+                "ticker": "GDX",
+                "action": "BUY",
+                "current_weight": 0.126,
+                "target_weight": 0.35,
+                "delta_weight": 0.224,
+                "reason_primary": "fixture",
+            }],
+            "blocked_orders": [],
+        },
+        "buy_policy": {"minimum": 0.08},
+    }
+
+
+def test_consistency_question_forces_current_evidence_then_hold_only_when_requested():
+    plain = question_plan(
+        "Analizá GDX y verificá la inconsistencia entre señal y planner."
+    )
+    assert plain.intent == "decision_consistency_audit"
+    assert plain.required_tools == ("get_decision_evidence",)
+
+    with_hold = question_plan(
+        "Analizá GDX, verificá la inconsistencia entre señal y planner y contrastá contra HOLD con evidencia histórica."
+    )
+    assert with_hold.intent == "decision_consistency_audit"
+    assert with_hold.required_tools == ("get_decision_evidence", "get_decision_value_added")
+
+
+def test_grounded_model_consistency_route_cannot_skip_required_current_evidence():
+    from src.agentic.grounded_model import GroundedQuantiaAgentModel
+
+    model = GroundedQuantiaAgentModel(project_context="fixture")
+    model._call = AsyncMock(side_effect=AssertionError("LLM should not run before required evidence"))
+    specs = [
+        ToolSpec("get_decision_evidence", "fixture", {"type": "object", "properties": {}}),
+        ToolSpec("get_decision_ledger", "fixture", {"type": "object", "properties": {}}),
+        ToolSpec("query_quantia_sql", "fixture", {"type": "object", "properties": {}}),
+    ]
+    decision = asyncio.run(model.decide(
+        goal="¿Hay inconsistencia entre señal HOLD y planner BUY para GDX?",
+        tools=specs,
+        history=[],
+        step_no=1,
+        max_steps=6,
+    ))
+    assert decision.kind == "tool"
+    assert decision.tool_name == "get_decision_evidence"
+    model._call.assert_not_awaited()
+
+
+def test_consistency_diagnostic_flags_observed_hold_to_buy_on_same_run():
+    goal = "¿Hay inconsistencia entre señal HOLD y planner BUY para GDX?"
+    plan = question_plan(goal)
+    result = diagnostic_decision(
+        goal,
+        [observation("get_decision_evidence", _consistency_evidence())],
+        plan,
+    )
+    assert result.objective_status == "EXPLAINED"
+    assert "run-gdx-current" in result.answer
+    assert "señal HOLD" in result.answer
+    assert "planner BUY" in result.answer
+    assert "INCONSISTENCIA OBSERVADA" in result.answer
+    assert "12,6% → objetivo 35,0%" in result.answer
+    assert "22,4 pp" in result.answer
+
+
+def test_consistency_diagnostic_fails_closed_without_requested_planner_side():
+    payload = _consistency_evidence()
+    payload["plan"]["decisions"] = []
+    goal = "¿Hay inconsistencia entre señal HOLD y planner BUY para GDX?"
+    result = diagnostic_decision(
+        goal,
+        [observation("get_decision_evidence", payload)],
+        question_plan(goal),
+    )
+    assert result.objective_status == "INSUFFICIENT"
+    assert "falta planner" in result.answer
+    assert "INCONSISTENCIA OBSERVADA" not in result.answer
