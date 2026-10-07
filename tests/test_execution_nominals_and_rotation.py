@@ -141,6 +141,8 @@ def test_radar_funding_candidate_survives_cash_only_downgrade():
     assert buys == [
         {
             "ticker": "SNOW",
+            "signal_action": "UNKNOWN",
+            "data_quality": {},
             "amount_ars": 100_000,
             "score": 0.20,
             "reference_price": 25_000.0,

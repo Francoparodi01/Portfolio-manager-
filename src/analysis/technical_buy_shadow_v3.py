@@ -6,6 +6,8 @@ change Radar ranking, portfolio analysis, plans, sizing, or execution.
 """
 from __future__ import annotations
 
+from src.analysis.contextual_contracts import finite_number
+
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
@@ -82,7 +84,7 @@ def build_technical_buy_shadow_v3(
     normalized_source_mode = str(source_mode or "unknown").lower()
     normalized_volume_quality = (
         max(0.0, min(1.0, float(volume_quality_20)))
-        if volume_quality_20 is not None
+        if finite_number(volume_quality_20, 0, 1)
         else None
     )
     if normalized_volume_quality is None:

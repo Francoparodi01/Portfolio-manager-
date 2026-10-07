@@ -15,6 +15,7 @@ def _rows(count: int):
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return [
         {
+            "ticker": "T", "asset_type": "CEDEAR", "currency": "ARS", "venue": "BYMA", "interval": "1d",
             "ts": start + timedelta(days=i),
             "open_price": 100 + i,
             "high_price": 101 + i,
@@ -159,6 +160,7 @@ def test_load_shadow_history_uses_source_scoped_volume_overlay():
 
 def test_volume_overlay_preserves_ohlc_and_accepts_compatible_same_day_volume():
     primary = candles_to_frame([{
+        "ticker": "T", "asset_type": "CEDEAR", "currency": "ARS", "venue": "BYMA", "interval": "1d",
         "ts": datetime(2026, 8, 19, tzinfo=timezone.utc),
         "open_price": 100,
         "high_price": 105,
@@ -168,6 +170,7 @@ def test_volume_overlay_preserves_ohlc_and_accepts_compatible_same_day_volume():
         "source": "internal_snapshot",
     }])
     tradingview = candles_to_frame([{
+        "ticker": "T", "asset_type": "CEDEAR", "currency": "ARS", "venue": "BYMA", "interval": "1d",
         "ts": datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc),
         "open_price": 100.5,
         "high_price": 105.5,
@@ -191,6 +194,7 @@ def test_volume_overlay_preserves_ohlc_and_accepts_compatible_same_day_volume():
 
 def test_volume_overlay_rejects_adjusted_or_mismatched_price_series():
     primary = candles_to_frame([{
+        "ticker": "T", "asset_type": "CEDEAR", "currency": "ARS", "venue": "BYMA", "interval": "1d",
         "ts": datetime(2026, 8, 19, tzinfo=timezone.utc),
         "open_price": 100,
         "high_price": 105,
@@ -200,6 +204,7 @@ def test_volume_overlay_rejects_adjusted_or_mismatched_price_series():
         "source": "internal_snapshot",
     }])
     adjusted = candles_to_frame([{
+        "ticker": "T", "asset_type": "CEDEAR", "currency": "ARS", "venue": "BYMA", "interval": "1d",
         "ts": datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc),
         "open_price": 10,
         "high_price": 10.5,

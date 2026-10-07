@@ -5,10 +5,11 @@ from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
 import json
+import math
 from typing import Any, Mapping
 
 
-FEATURE_SNAPSHOT_SCHEMA_VERSION = "feature_snapshot_v2"
+FEATURE_SNAPSHOT_SCHEMA_VERSION = "feature_snapshot_v3"
 FEATURE_HASH_LENGTH = 16
 
 FEATURE_KEYS = (
@@ -29,6 +30,9 @@ FEATURE_KEYS = (
     "reversion_shadow",
     "technical_shadow_v2",
     "technical_buy_shadow_v3",
+    "data_quality",
+    "signal_action",
+    "asset_view",
 )
 
 
@@ -56,6 +60,19 @@ def build_feature_snapshot_from_layers(
         for key in FEATURE_KEYS
         if key in layers_payload
     }
+    invalid = []
+    def check(value, path):
+        if isinstance(value, float) and not math.isfinite(value):
+            invalid.append(path)
+            return None
+        if isinstance(value, dict):
+            return {k: check(v, f"{path}.{k}") for k, v in value.items()}
+        if isinstance(value, list):
+            return [check(v, f"{path}[{i}]") for i, v in enumerate(value)]
+        return value
+    payload = check(payload, "features")
+    if invalid:
+        payload["invalid_values"] = {path: "NONFINITE" for path in invalid}
     encoded = _canonical_json(
         {
             "schema_version": schema_version,
@@ -76,6 +93,7 @@ def _canonical_json(value: Any) -> str:
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
+        allow_nan=False,
     )
 
 

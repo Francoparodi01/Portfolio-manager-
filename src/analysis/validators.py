@@ -12,6 +12,7 @@ Filosofía:
 """
 from __future__ import annotations
 
+from src.analysis.contextual_contracts import finite_number
 import logging
 from typing import Any
 
@@ -41,6 +42,16 @@ def validate_execution_plan(plan: ExecutionPlan) -> None:
       7. Un ticker con target=0 no puede tener action=HOLD
     """
     errors: list[str] = []
+    for name in ("cash_before", "cash_after", "gross_sell_ars", "fee_sell_ars",
+                 "net_sell_ars", "gross_buy_ars", "fee_buy_ars"):
+        if not finite_number(getattr(plan, name), 0):
+            errors.append(f"INVALID_FINITE_NONNEGATIVE_ARS:{name}")
+    for order in plan.sell_orders + plan.buy_orders:
+        for name in ("amount_ars", "theoretical_ars", "quantity_est", "reference_price"):
+            if not finite_number(getattr(order, name), 0):
+                errors.append(f"INVALID_ORDER_NUMBER:{order.ticker}:{name}")
+    if errors:
+        raise PlanValidationError("; ".join(errors))
 
     # 1. Cash accounting
     expected_cash_after = (

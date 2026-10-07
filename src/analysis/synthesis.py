@@ -20,6 +20,7 @@ Position sizing:
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import html
 import logging
 from dataclasses import dataclass, field
@@ -28,6 +29,8 @@ from typing import Optional
 
 import requests
 import numpy as np
+
+from src.analysis.contextual_contracts import finite_number
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,9 @@ class SynthesisResult:
     overbought_momentum: bool = False
     technical_shadow_v2: dict = field(default_factory=dict)
     stop_triggered: bool = False
+    asset_view: str = "UNKNOWN"
+    data_quality: dict = field(default_factory=dict)
+    technical_buy_shadow_v3: dict = field(default_factory=dict)
 
     def to_telegram(self) -> str:
         icons = {"BUY": "🟢🟢", "ACCUMULATE": "🟢", "HOLD": "🟡", "REDUCE": "🔴", "SELL": "🔴🔴"}
@@ -165,6 +171,16 @@ def blend_scores(ticker: str, technical_signal: str, technical_strength: float,
     Risk layer: NO penaliza volatilidad alta en tech stocks (NVDA vol=36% es normal).
     Solo penaliza condiciones extremas: vol>80%, drawdown activo, riesgo sistémico.
     """
+    for name, value, low, high in (
+        ("technical_strength", technical_strength, 0, 1),
+        ("technical_score_raw", technical_score_raw, None, None),
+        ("macro_score", macro_score, -1, 1),
+        ("sentiment_score", sentiment_score, -1, 1),
+    ):
+        if name == "sentiment_score" and skip_sentiment:
+            continue
+        if not finite_number(value, low, high):
+            raise ValueError(f"INVALID_SYNTHESIS_INPUT:{name}")
     layers = []
 
     # ── Técnico ───────────────────────────────────────────────────────────────
@@ -388,3 +404,9 @@ def synthesize_with_llm(result: SynthesisResult, macro_snap,
     except Exception as e:
         logger.warning(f"Claude API falló {result.ticker}: {e}")
     return result
+
+
+def attach_technical_evidence(result: SynthesisResult, signal) -> None:
+    """Copy E1 evidence through both portfolio and universe operational paths."""
+    result.data_quality = deepcopy(getattr(signal, "data_quality", {}) or {})
+    result.technical_buy_shadow_v3 = deepcopy(getattr(signal, "technical_buy_shadow_v3", {}) or {})

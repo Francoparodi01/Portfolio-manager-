@@ -124,6 +124,7 @@ from src.analysis.audit_scope import (
     run_id_to_db,
 )
 from src.analysis.decision_context import build_decision_run_context
+from src.analysis.synthesis import attach_technical_evidence
 from src.analysis.feature_snapshot import build_feature_snapshot_from_layers
 from src.analysis.position_hold_audit import (
     hold_observations_from_plan,
@@ -1074,6 +1075,10 @@ def _layers_payload_for_decision(
             ),
         ).to_dict()
     payload["technical_shadow_v2"] = technical_shadow_v2
+    payload["technical_buy_shadow_v3"] = dict(getattr(result, "technical_buy_shadow_v3", {}) or {})
+    payload["data_quality"] = dict(getattr(result, "data_quality", {}) or {})
+    payload["asset_view"] = str(getattr(result, "asset_view", "UNKNOWN"))
+    payload["signal_action"] = str(getattr(result, "decision", "UNKNOWN"))
 
     return _attach_feature_snapshot_and_context()
 
@@ -1110,11 +1115,8 @@ def _build_position_price_map(positions: list | None) -> dict[str, float]:
 def _portfolio_snapshot_id_from_snapshot(portfolio_snapshot: dict | None) -> str | None:
     if not portfolio_snapshot:
         return None
-    scraped_at = portfolio_snapshot.get("scraped_at")
-    if isinstance(scraped_at, datetime):
-        return scraped_at.isoformat()
-    text = str(scraped_at or "").strip()
-    return text or None
+    value = portfolio_snapshot.get("snapshot_id")
+    return str(value).strip() if value else None
 
 
 async def _save_execution_plan_events(
@@ -1276,6 +1278,7 @@ async def _save_execution_plan_events(
             "reason": str(getattr(order, "reason", "") or ""),
             "block_code": str(getattr(order, "block_code", "") or ""),
             "gate": str(getattr(execution_plan, "gate", "") or ""),
+            "authority_shadow": dict((getattr(execution_plan, "authority_shadow", {}) or {}).get(ticker, getattr(d, "authority_shadow", {})) or {}),
             "execution_plan_id": str(execution_plan_id),
             "current_weight": _safe_float(getattr(d, "current_weight", None), 0.0),
             "target_weight": _safe_float(getattr(d, "target_weight", None), 0.0),
@@ -1665,7 +1668,8 @@ async def _save_execution_plan_events(
             bool(getattr(order, "partial", False)),
             forced_reason or str(getattr(order, "reason", "") or ""),
             str(getattr(order, "block_code", "") or "") or None,
-            _json.dumps({"decision_override": getattr(order, "decision_override", None)}),
+            _json.dumps({"decision_override": getattr(order, "decision_override", None),
+                         "authority_shadow": (getattr(execution_plan, "authority_shadow", {}) or {}).get(ticker, {})}),
         )
         if inserted != "INSERT 0 1":
             raise RuntimeError("formal order_intent insert did not persist one row")
@@ -2197,6 +2201,8 @@ def _radar_buys_for_execution(
 
         buys.append({
             "ticker": ticker,
+            "signal_action": "UNKNOWN",
+            "data_quality": dict(getattr(candidate, "data_quality", {}) or {}),
             "amount_ars": amount_ars,
             "score": float(getattr(candidate, "final_score", 0.0) or 0.0),
             "reference_price": reference_price,
@@ -3617,6 +3623,7 @@ def _ensure_corporate_action_blocks_in_plan(
 async def _load_cocos_history_frames(cfg, positions: list[dict], limit: int = 260) -> dict:
     """Carga historia local de Cocos desde DB para los tickers disponibles."""
     frames: dict = {}
+    cutoff = datetime.now(timezone.utc)
     db = PortfolioDatabase(cfg.database.url)
     await db.connect()
     try:
@@ -3637,9 +3644,12 @@ async def _load_cocos_history_frames(cfg, positions: list[dict], limit: int = 26
                 rows = await db.get_market_candles(
                     ticker,
                     asset_type=position.get("asset_type"),
+                    currency=position.get("currency"),
+                    cutoff=cutoff,
                     limit=limit,
                 )
             frame = candles_to_frame(rows)
+            frame.attrs["cutoff"] = cutoff
             return (ticker, frame) if len(frame) >= 60 else None
 
         loaded = await asyncio.gather(*(_load_one(position) for position in positions))
@@ -3966,6 +3976,7 @@ async def main(
             getattr(tech, "structural_break_confirmed", False)
         )
         result.overbought_momentum = bool(getattr(tech, "overbought_momentum", False))
+        attach_technical_evidence(result, tech)
         result.technical_shadow_v2 = dict(
             getattr(tech, "technical_shadow_v2", {}) or {}
         )
@@ -4133,6 +4144,7 @@ async def main(
                 u_result.overbought_momentum = bool(
                     getattr(u_tech, "overbought_momentum", False)
                 )
+                attach_technical_evidence(u_result, u_tech)
                 u_result.technical_shadow_v2 = dict(
                     getattr(u_tech, "technical_shadow_v2", {}) or {}
                 )

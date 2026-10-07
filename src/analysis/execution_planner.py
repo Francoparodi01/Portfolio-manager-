@@ -24,12 +24,14 @@ Principio MVP:
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from src.analysis.contextual_contracts import evaluate_authority, finite_number
 from src.analysis.enums import DecisionType, DeprecatedEnumMeta
 
 logger = logging.getLogger(__name__)
@@ -152,11 +154,15 @@ SCORE_RANGE_LABELS: dict[ScoreRange, str] = {
 class AssetSignal:
     """Calidad de señal del activo, independiente de la decisión de cartera."""
     ticker: str
-    score: float
-    conviction: float
+    score: Optional[float]
+    conviction: Optional[float]
     technical: float
     macro: float
     sentiment: float
+    signal_action: str = "UNKNOWN"
+    asset_view: str = "UNKNOWN"
+    data_quality: dict = field(default_factory=dict)
+    technical_buy_shadow_v3: dict = field(default_factory=dict)
     explanation: Optional[str] = None
     risk: float = 0.0
     technical_regime: str = "TRANSITIONAL"
@@ -229,6 +235,11 @@ class DecisionIntent:
     theoretical_target_weight: Optional[float] = None
     executable_target_weight: Optional[float] = None
 
+    signal_action: str = "UNKNOWN"
+    asset_view: str = "UNKNOWN"
+    data_quality: dict = field(default_factory=dict)
+    authority_shadow: dict = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         if self.theoretical_target_weight is None:
             self.theoretical_target_weight = float(self.target_weight)
@@ -291,6 +302,7 @@ class ExecutionPlan:
     warnings: list[str] = field(default_factory=list)
 
     pending_buys: list[str] = field(default_factory=list)
+    authority_shadow: dict = field(default_factory=dict)
 
     @property
     def main_action(self) -> Optional[OrderIntent]:
@@ -366,7 +378,7 @@ def classify_score(score: Optional[float]) -> tuple[ScoreRange, str]:
       - señal: interpretación operativa
       - conviction: acuerdo entre capas
     """
-    if score is None:
+    if not finite_number(score, -1, 1):
         return ScoreRange.NEUTRAL, SCORE_RANGE_LABELS[ScoreRange.NEUTRAL]
 
     if score >= SCORE_BUY_STRONG:
@@ -448,10 +460,12 @@ def _buy_guard(
     Devuelve:
       action, reason_primary, reason_secondary
     """
-    if score is None or not math.isfinite(score) or not -1 <= score <= 1:
+    if not finite_number(score, -1, 1) or not all(
+        finite_number(v, 0, 1) for v in (w_cur, w_opt)
+    ) or not finite_number(theoretical_ars, 0):
         return (
             DecisionType.BLOCKED,
-            "Compra bloqueada: score no disponible",
+            "Compra bloqueada: score o unidades inválidas/no disponibles",
             f"Optimizer sugería aumentar {w_cur:.1%} → {w_opt:.1%} "
             f"({theoretical_ars:,.0f} ARS), pero falta señal cuantitativa",
         )
@@ -623,6 +637,8 @@ def derive_decision_intents(
       - SELL con score neutral sin concentración → HOLD
       - SELL con score positivo sin concentración → HOLD
     """
+    if not finite_number(portfolio_value_ars, 0):
+        raise ValueError("INVALID_PORTFOLIO_VALUE_ARS")
     intents: list[DecisionIntent] = []
 
     trades = getattr(rebalance_report, "trades", []) or []
@@ -634,6 +650,8 @@ def derive_decision_intents(
 
         w_cur = float(getattr(trade, "weight_current", 0.0) or 0.0)
         w_opt = float(getattr(trade, "weight_optimal", 0.0) or 0.0)
+        if not all(finite_number(v, 0, 1) for v in (w_cur, w_opt)):
+            raise ValueError(f"INVALID_TARGET_WEIGHT:{ticker}")
         delta = w_opt - w_cur
 
         sig = signals_by_ticker.get(ticker)
@@ -730,6 +748,17 @@ def derive_decision_intents(
 
     intents.sort(key=lambda x: priority_order.get(x.action, 9))
     _link_optimizer_rotations(intents, portfolio_value_ars)
+    for intent in intents:
+        signal = signals_by_ticker.get(intent.ticker)
+        intent.signal_action = signal.signal_action if signal else "UNKNOWN"
+        intent.asset_view = signal.asset_view if signal else "UNKNOWN"
+        intent.data_quality = deepcopy(signal.data_quality) if signal else {}
+        intent.authority_shadow = evaluate_authority(
+            signal_action=intent.signal_action, asset_view=intent.asset_view,
+            current_weight=intent.current_weight, target_weight=intent.theoretical_target_weight,
+            data_quality=intent.data_quality, ticker=intent.ticker,
+            action_reason=("CONCENTRATION" if intent.sell_cause and "concentration" in intent.sell_cause else None),
+        )
     return intents
 
 
@@ -1257,6 +1286,10 @@ def reconcile_funding(
                 ))
                 continue
 
+            if not finite_number(score, -1, 1) or not finite_number(wanted, 0) or not finite_number(ref_price, 0):
+                warnings.append(f"{ticker} (radar): INVALID_NUMERIC_INPUT")
+                pending_buys.append(ticker)
+                continue
             if score < SCORE_BUY_MIN:
                 pending_buys.append(ticker)
                 warnings.append(
@@ -1407,7 +1440,27 @@ def reconcile_funding(
             executable -= sell_amounts.get(d.ticker, 0.0) / portfolio_value_ars
         d.executable_target_weight = round(max(0.0, executable), 4)
 
+    authority_shadow = {d.ticker: deepcopy(d.authority_shadow) for d in decisions}
+    for ext in external_buys or []:
+        ticker = str(ext.get("ticker", "")).upper()
+        if ticker not in authority_shadow:
+            pos = current_positions.get(ticker)
+            current = pos.current_weight if pos else 0.0
+            amount = ext.get("amount_ars")
+            target = (
+                current + float(amount) / portfolio_value_ars
+                if finite_number(amount, 0) and portfolio_value_ars > 0
+                else None
+            )
+            authority_shadow[ticker] = evaluate_authority(
+                signal_action=str(ext.get("signal_action", "UNKNOWN")), current_weight=current,
+                target_weight=target, data_quality=deepcopy(ext.get("data_quality", {})), ticker=ticker)
+    for ticker, evidence in authority_shadow.items():
+        evidence["baseline_executable_buy_ars"] = buy_amounts.get(ticker, 0.0)
+        evidence["baseline_executable_sell_ars"] = sell_amounts.get(ticker, 0.0)
+
     return ExecutionPlan(
+        authority_shadow=authority_shadow,
         decisions=decisions,
         sell_orders=sell_orders,
         buy_orders=buy_orders,
@@ -1443,12 +1496,10 @@ def build_signals_from_synthesis(results: list) -> dict[str, AssetSignal]:
         if not ticker:
             continue
 
-        score = float(getattr(r, "final_score", getattr(r, "score", 0.0)) or 0.0)
-        conv = getattr(r, "conviction", getattr(r, "confidence", 0.0)) or 0.0
-        conv = float(conv)
-
-        if conv > 1.0:
-            conv /= 100.0
+        raw_score = getattr(r, "final_score", getattr(r, "score", None))
+        score = float(raw_score) if finite_number(raw_score, -1, 1) else None
+        raw_conv = getattr(r, "conviction", getattr(r, "confidence", None))
+        conv = float(raw_conv) if finite_number(raw_conv, 0, 1) else None
 
         layers = {}
         for layer in getattr(r, "layers", []) or []:
@@ -1458,8 +1509,12 @@ def build_signals_from_synthesis(results: list) -> dict[str, AssetSignal]:
 
         out[ticker] = AssetSignal(
             ticker=ticker,
-            score=round(score, 4),
-            conviction=round(conv, 4),
+            score=round(score, 4) if score is not None else None,
+            signal_action=str(getattr(r, "decision", "UNKNOWN")),
+            asset_view=str(getattr(r, "asset_view", "UNKNOWN")),
+            data_quality=deepcopy(getattr(r, "data_quality", {})),
+            technical_buy_shadow_v3=deepcopy(getattr(r, "technical_buy_shadow_v3", {})),
+            conviction=round(conv, 4) if conv is not None else None,
             technical=round(layers.get("technical", 0.0), 4),
             macro=round(layers.get("macro", 0.0), 4),
             sentiment=round(layers.get("sentiment", 0.0), 4),

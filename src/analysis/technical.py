@@ -21,9 +21,10 @@ Principios:
 """
 from __future__ import annotations
 
+from src.analysis.contextual_contracts import frame_quality
 from html import escape
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -79,6 +80,7 @@ class Signal:
     overbought_momentum: bool = False
     technical_shadow_v2: dict[str, object] = field(default_factory=dict)
     technical_buy_shadow_v3: dict[str, object] = field(default_factory=dict)
+    data_quality: dict = field(default_factory=dict)
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_telegram(self) -> str:
@@ -120,12 +122,12 @@ class IndicatorSnapshot:
     ticker: str
     close: float
     # Tendencia
-    sma_20: float; sma_50: float; sma_200: float
+    sma_20: float; sma_50: float; sma_200: float | None
     ema_12: float; ema_26: float
     # ADX — fuerza de tendencia (no dirección)
     adx_14: float; di_plus: float; di_minus: float
     # Momentum
-    rsi_14: float
+    rsi_14: float | None
     stoch_k: float; stoch_d: float    # Estocástico
     williams_r: float                  # Williams %R
     # MACD
@@ -136,8 +138,8 @@ class IndicatorSnapshot:
     bb_width: float                    # (upper-lower)/middle — contracción BB
     atr_14: float
     # Volumen
-    obv: float; obv_sma20: float       # OBV y su media (tendencia de volumen)
-    vol_ratio: float                   # last_vol / sma_vol_20
+    obv: float | None; obv_sma20: float | None       # OBV y su media (tendencia de volumen)
+    vol_ratio: float | None                   # last_vol / sma_vol_20
 
 
 # ── Descarga ───────────────────────────────────────────────────────────────────
@@ -243,6 +245,16 @@ def compute_indicators(df: "pd.DataFrame", ticker: str) -> Optional[IndicatorSna
         logger.warning(f"{ticker}: datos insuficientes ({len(df) if df is not None else 0} velas)")
         return None
     try:
+        quality = frame_quality(df, cutoff=df.attrs.get("cutoff"))
+        if quality["price_status"] == "INVALID":
+            logger.warning("%s: invalid price data: %s", ticker, quality["price_reasons"])
+            return None
+        if any(reason.startswith("AFTER_CUTOFF_") for reason in quality["provenance_reasons"]):
+            logger.warning("%s: market evidence after cutoff", ticker)
+            return None
+        df = df.copy()
+        df["Volume"] = pd.to_numeric(df.get("Volume", pd.Series(index=df.index, dtype=float)), errors="coerce")
+        df["Volume"] = df["Volume"].where(np.isfinite(df["Volume"]) & (df["Volume"] > 0))
         close  = df["Close"].squeeze()
         volume = df["Volume"].squeeze()
 
@@ -272,16 +284,18 @@ def compute_indicators(df: "pd.DataFrame", ticker: str) -> Optional[IndicatorSna
         obv_s    = _obv(df)
         obv_ma   = _sma(obv_s, 20)
         vol_sma  = _sma(volume, 20)
-        last_vol = _last(volume)
-        v_sma    = _last(vol_sma)
-        v_ratio  = last_vol / v_sma if v_sma > 0 else 1.0
+        last_vol = float(volume.iloc[-1])
+        v_sma = float(vol_sma.iloc[-1])
+        v_ratio = last_vol / v_sma if np.isfinite(last_vol) and np.isfinite(v_sma) and v_sma > 0 else None
+        if "PARTIAL_SESSION" in quality["provenance_reasons"]:
+            v_ratio = None
 
         return IndicatorSnapshot(
             ticker=ticker, close=_last(close),
-            sma_20=_last(sma20), sma_50=_last(sma50), sma_200=_last(sma200),
+            sma_20=_last(sma20), sma_50=_last(sma50), sma_200=float(sma200.iloc[-1]) if np.isfinite(sma200.iloc[-1]) else None,
             ema_12=_last(ema12), ema_26=_last(ema26),
             adx_14=_last(adx), di_plus=_last(di_p), di_minus=_last(di_m),
-            rsi_14=_last(rsi),
+            rsi_14=float(rsi.iloc[-1]) if np.isfinite(rsi.iloc[-1]) else None,
             stoch_k=_last(sk), stoch_d=_last(sd),
             williams_r=_last(wr),
             macd_line=_last(macd_l), macd_signal=_last(macd_s),
@@ -289,7 +303,8 @@ def compute_indicators(df: "pd.DataFrame", ticker: str) -> Optional[IndicatorSna
             bb_upper=_last(bb_u), bb_middle=_last(bb_m), bb_lower=_last(bb_l),
             bb_width=_last(bb_w),
             atr_14=_last(atr),
-            obv=_last(obv_s), obv_sma20=_last(obv_ma),
+            obv=_last(obv_s) if volume.notna().all() and v_ratio is not None else None,
+            obv_sma20=_last(obv_ma) if volume.notna().all() and v_ratio is not None else None,
             vol_ratio=v_ratio,
         )
     except Exception as e:
@@ -351,7 +366,7 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
             reasons_sell.append("SMA20 < SMA50 — Death Cross activo")
 
     # SMA 200 — tendencia de largo plazo (los institucionales la respetan)
-    if ind.sma_200 > 0:
+    if ind.sma_200 is not None and ind.sma_200 > 0:
         dist_200 = (c - ind.sma_200) / ind.sma_200
         if c > ind.sma_200:
             score += 0.8
@@ -361,22 +376,22 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
             reasons_sell.append(f"Precio {dist_200:+.1%} bajo SMA200 — bear market")
 
     # ── 2. MOMENTUM — RSI ────────────────────────────────────────────────────
-    if rsi < 30:
+    if rsi is not None and rsi < 30:
         score += 2.5
         reversion_raw += 2.5
         reversion_components["rsi"] = 2.5
         reasons_buy.append(f"RSI {rsi:.1f} — sobreventa severa (potencial reversión)")
-    elif rsi < 40:
+    elif rsi is not None and rsi < 40:
         score += 1.5
         reversion_raw += 1.5
         reversion_components["rsi"] = 1.5
         reasons_buy.append(f"RSI {rsi:.1f} — zona de sobreventa")
-    elif rsi > 70:
+    elif rsi is not None and rsi > 70:
         score -= 2.5
         reversion_raw -= 2.5
         reversion_components["rsi"] = -2.5
         reasons_sell.append(f"RSI {rsi:.1f} — sobrecompra severa")
-    elif rsi > 60:
+    elif rsi is not None and rsi > 60:
         score -= 1.5
         reversion_raw -= 1.5
         reversion_components["rsi"] = -1.5
@@ -456,7 +471,7 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
 
     # ── 7. VOLUMEN — OBV ─────────────────────────────────────────────────────
     # OBV tendencia confirma o diverge del precio
-    if ind.obv_sma20 != 0:
+    if ind.obv is not None and ind.obv_sma20 is not None and ind.obv_sma20 != 0:
         obv_trend = (ind.obv - ind.obv_sma20) / abs(ind.obv_sma20 + 1e-9)
         if obv_trend > 0.02:
             if score > 0:
@@ -468,7 +483,7 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
                 reasons_sell.append("OBV bajo su media — distribución institucional")
 
     # Volumen relativo — confirma los movimientos
-    if ind.vol_ratio > 1.5:
+    if ind.vol_ratio is not None and ind.vol_ratio > 1.5:
         vol_note = f"Volumen {ind.vol_ratio:.1f}x su media — movimiento respaldado"
         if score > 0:
             score += 0.5
@@ -536,12 +551,7 @@ def analyze_ticker(ticker: str, period: str = "1y") -> Optional[Signal]:
     df = fetch_history(ticker, period=period)
     if df is None:
         return None
-    ind = compute_indicators(df, ticker)
-    if ind is None:
-        return None
-    signal = generate_signals(ind)
-    logger.info(f"{ticker}: {signal.signal} (fuerza={signal.strength:.0%}, score_reasons={len(signal.reasons)})")
-    return signal
+    return analyze_ticker_from_frame(ticker, df)
 
 
 def analyze_ticker_from_frame(ticker: str, frame: "pd.DataFrame") -> Optional[Signal]:
@@ -549,6 +559,11 @@ def analyze_ticker_from_frame(ticker: str, frame: "pd.DataFrame") -> Optional[Si
     if ind is None:
         return None
     signal = generate_signals(ind)
+    signal.data_quality = frame_quality(frame, cutoff=frame.attrs.get("cutoff"))
+    signal.data_quality["indicator_values"] = asdict(ind)
+    signal.data_quality["indicator_missing_reasons"] = {
+        key: "INSUFFICIENT_LOOKBACK_OR_UNDEFINED" for key, value in asdict(ind).items() if value is None
+    }
     sources = tuple(frame.attrs.get("candle_sources", ()))
     source_counts = dict(frame.attrs.get("candle_source_counts", {}))
     has_reconstructed = bool(frame.attrs.get("has_reconstructed_candles", False))
@@ -580,8 +595,8 @@ def _volume_quality_20(frame: "pd.DataFrame") -> float | None:
     recent = frame["Volume"].tail(20)
     if recent.empty:
         return None
-    numeric = pd.to_numeric(recent, errors="coerce").fillna(0.0)
-    return float((numeric > 0.0).mean())
+    numeric = pd.to_numeric(recent, errors="coerce")
+    return float((np.isfinite(numeric) & (numeric > 0.0)).mean())
 
 
 def analyze_portfolio(tickers: list[str], period: str = "1y") -> list[Signal]:

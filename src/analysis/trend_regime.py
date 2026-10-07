@@ -36,6 +36,7 @@ def classify_regime(indicator) -> TrendRegime:
     if (
         adx > 25.0
         and float(indicator.di_plus) > float(indicator.di_minus)
+        and indicator.sma_200 is not None
         and float(indicator.sma_200) > 0.0
         and float(indicator.close) > float(indicator.sma_200)
     ):
@@ -53,15 +54,15 @@ def calculate_trend_score(indicator) -> tuple[float, dict[str, float]]:
     adx_strength = _clip((float(indicator.adx_14) - 20.0) / 20.0, 0.0, 1.0)
     directional_adx = di_direction * adx_strength
 
-    sma_200 = float(indicator.sma_200)
+    sma_200 = float(indicator.sma_200) if indicator.sma_200 is not None else 0.0
     if sma_200 > 0.0:
         distance_200 = _clip((float(indicator.close) - sma_200) / sma_200 / 0.10)
     else:
         distance_200 = 0.0
 
-    if indicator.sma_20 > indicator.sma_50 > indicator.sma_200 > 0:
+    if indicator.sma_200 is not None and indicator.sma_20 > indicator.sma_50 > indicator.sma_200 > 0:
         moving_average_alignment = 1.0
-    elif 0 < indicator.sma_20 < indicator.sma_50 < indicator.sma_200:
+    elif indicator.sma_200 is not None and 0 < indicator.sma_20 < indicator.sma_50 < indicator.sma_200:
         moving_average_alignment = -1.0
     else:
         moving_average_alignment = 0.0
@@ -92,7 +93,7 @@ def assess_trend(indicator) -> TrendAssessment:
         and float(indicator.macd_hist) < 0.0
     )
     overbought = bool(
-        float(indicator.rsi_14) > 70.0
+        (indicator.rsi_14 is not None and float(indicator.rsi_14) > 70.0)
         or float(indicator.stoch_k) > 80.0
         or float(indicator.williams_r) > -20.0
     )

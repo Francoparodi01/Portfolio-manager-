@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from src.analysis.contextual_contracts import IDENTITY_FIELDS, finite_number
 from urllib.parse import urlparse
 from typing import Iterable
 
@@ -68,10 +69,10 @@ def parse_history_payload(
 
 def merge_candle_batches(batches: Iterable[list[MarketCandle]]) -> list[MarketCandle]:
     """Une lotes históricos solapados conservando una vela por timestamp."""
-    merged: dict[tuple[str, str, datetime], MarketCandle] = {}
+    merged: dict[tuple, MarketCandle] = {}
     for batch in batches:
         for candle in batch:
-            key = (candle.long_ticker, candle.interval, candle.ts)
+            key = (candle.ticker, candle.long_ticker, candle.asset_type, candle.currency, candle.venue, candle.interval, candle.ts)
             merged[key] = candle
     return sorted(merged.values(), key=lambda candle: candle.ts)
 
@@ -115,11 +116,25 @@ def candles_to_frame(candles):
         return frame
 
     rows = []
+    identities = set()
+    provider_symbols = set()
+    native_symbols = set()
+    metadata = {k: set() for k in ("volume_unit", "calendar", "adjustment_policy", "depositary_ratio")}
     for candle in candles:
         if isinstance(candle, dict):
             get = candle.get
         else:
-            get = lambda name: getattr(candle, name)
+            get = lambda name: getattr(candle, name, None)
+        identity = tuple(getattr(get(name), "value", get(name)) for name in IDENTITY_FIELDS)
+        identities.add(identity)
+        for name, values in metadata.items():
+            value = get(name)
+            values.add(str(value) if value is not None else None)
+        symbol = get("long_ticker")
+        if symbol:
+            provider_symbols.add(symbol)
+            if not str(symbol).startswith(("INTERNAL:", "TV:", "YAHOO:")):
+                native_symbols.add(symbol)
         rows.append(
             {
                 "ts": get("ts"),
@@ -127,14 +142,25 @@ def candles_to_frame(candles):
                 "High": float(get("high_price")),
                 "Low": float(get("low_price")),
                 "Close": float(get("close_price")),
-                "Volume": float(get("volume")),
+                "Volume": float(get("volume")) if get("volume") is not None else None,
+                "BarStart": get("bar_start"), "BarEnd": get("bar_end"),
+                "AvailableAt": get("available_at"), "RetrievedAt": get("scraped_at"),
+                "IsClosed": get("is_closed"),
                 "Source": str(get("source") or "UNKNOWN"),
+                "ProviderSymbol": get("long_ticker"),
             }
         )
 
+    if len(identities) != 1 or len(native_symbols) > 1:
+        raise ValueError("AMBIGUOUS_SERIES_IDENTITY: filter instrument, currency, venue and interval")
+    if any(len(values - {None}) > 1 for values in metadata.values()):
+        raise ValueError("INCOMPATIBLE_SERIES_UNITS_OR_ADJUSTMENTS")
+    series_identity = dict(zip(IDENTITY_FIELDS, next(iter(identities))))
+    series_identity.update({k: next(iter(v)) if len(v) == 1 else None for k, v in metadata.items()})
+    series_identity["instrument_id"] = ":".join(str(series_identity[k]) for k in ("venue", "asset_type", "ticker", "currency")) if all(series_identity.get(k) for k in ("venue", "asset_type", "ticker", "currency")) else None
     frame = pd.DataFrame(rows)
     frame["ts"] = pd.to_datetime(frame["ts"], utc=True)
-    frame["candle_day"] = frame["ts"].dt.date
+    frame["candle_day"] = frame["ts"].dt.date if series_identity.get("interval") in (None, "1d") else frame["ts"]
     frame["source_priority"] = frame["Source"].map(
         {
             "COCOS": 0,
@@ -149,6 +175,10 @@ def candles_to_frame(candles):
         .set_index("ts")
         .sort_index()
     )
+    frame.attrs["series_identity"] = series_identity
+    frame.attrs["provider_symbols"] = sorted(provider_symbols)
+    frame.attrs["duplicate_rows_resolved"] = len(rows) - len(frame)
+    frame.attrs["selection_policy"] = "source_priority_v1"
     sources = tuple(sorted(set(frame["Source"])))
     source_counts = {
         str(source): int(count)
@@ -188,13 +218,20 @@ def overlay_compatible_volume(
     rejected_missing_match = 0
 
     if volume_frame is not None and not volume_frame.empty:
+        left = result.attrs.get("series_identity", {})
+        right = volume_frame.attrs.get("series_identity", {})
+        compatible = all(left.get(k) and right.get(k) and left[k] == right[k]
+                         for k in ("ticker", "asset_type", "currency", "venue", "interval"))
+        if not compatible:
+            result.attrs["volume_overlay_rejected_identity"] = True
+            return result
         volume_by_day = {
             index.date(): row
             for index, row in volume_frame.sort_index().iterrows()
         }
         for index, row in result.iterrows():
             current_volume = float(row.get("Volume") or 0.0)
-            if current_volume > 0:
+            if finite_number(current_volume) and current_volume > 0:
                 continue
             fallback = volume_by_day.get(index.date())
             if fallback is None:
@@ -203,7 +240,7 @@ def overlay_compatible_volume(
             fallback_volume = float(fallback.get("Volume") or 0.0)
             primary_close = float(row.get("Close") or 0.0)
             fallback_close = float(fallback.get("Close") or 0.0)
-            if fallback_volume <= 0 or primary_close <= 0 or fallback_close <= 0:
+            if not all(finite_number(v) and v > 0 for v in (fallback_volume, primary_close, fallback_close)):
                 rejected_missing_match += 1
                 continue
             close_difference = abs((fallback_close / primary_close) - 1.0)

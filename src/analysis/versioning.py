@@ -8,7 +8,7 @@ import subprocess
 from typing import Any
 
 OPTIMIZER_VERSION = "optimizer-v1-budget-safe"
-PLANNER_VERSION = "execution-planner-v2-target-contract"
+PLANNER_VERSION = "execution-planner-v3-e1-contract"
 SYNTHESIS_VERSION = "synthesis-v1-legacy-thresholds"
 RISK_POLICY_VERSION = "risk-policy-v1"
 CALIBRATION_VERSION = "calibrated-optimizer-v2-shadow-2"
@@ -90,6 +90,8 @@ def code_version() -> str:
 def version_manifest(config: dict | None = None) -> dict:
     effective_config = analysis_config_snapshot() if config is None else config
     return {
+        "contextual_contract_version": "contextual-e1-v1",
+        "authority_shadow_version": "authority-shadow-v1",
         "optimizer_version": OPTIMIZER_VERSION,
         "planner_version": PLANNER_VERSION,
         "synthesis_version": SYNTHESIS_VERSION,

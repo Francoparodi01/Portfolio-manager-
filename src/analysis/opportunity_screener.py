@@ -222,6 +222,7 @@ class OpportunityCandidate:
     trend_components:    dict[str, float] = field(default_factory=dict)
     technical_shadow_v2: dict[str, object] = field(default_factory=dict)
     technical_buy_shadow_v3: dict[str, object] = field(default_factory=dict)
+    data_quality: dict = field(default_factory=dict)
     shadow_expected_return_20: float | None = None
     shadow_probability_up_20:  float | None = None
     shadow_action:             str = ""
@@ -1305,6 +1306,7 @@ def run_opportunity_analysis(
                 getattr(tech, "technical_shadow_v2", {}) or {}
             ),
             technical_buy_shadow_v3 = technical_buy_v3,
+            data_quality = dict(getattr(tech, "data_quality", {}) or {}),
             shadow_expected_return_20 = shadow_er20,
             shadow_probability_up_20  = shadow_p20,
             shadow_action             = shadow_action,

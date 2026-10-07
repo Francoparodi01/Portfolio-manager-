@@ -2143,6 +2143,10 @@ class PortfolioDatabase:
         asset_type: Optional[str] = None,
         source: Optional[str] = None,
         interval: str = "1d",
+        currency: Optional[str] = None,
+        venue: Optional[str] = None,
+        long_ticker: Optional[str] = None,
+        cutoff: Optional[datetime] = None,
         limit: Optional[int] = None,
     ) -> list[dict]:
         if not self._pool:
@@ -2159,6 +2163,16 @@ class PortfolioDatabase:
             params.append(source.strip())
             filters.append(f"source = ${len(params)}")
 
+        for column, value in (("currency", currency), ("venue", venue), ("long_ticker", long_ticker)):
+            if value:
+                params.append(value)
+                filters.append(f"{column} = ${len(params)}")
+        if cutoff is not None:
+            if cutoff.tzinfo is None:
+                raise ValueError("cutoff requires timezone")
+            params.append(cutoff)
+            filters.extend([f"ts <= ${len(params)}", f"scraped_at <= ${len(params)}"])
+
         limit_sql = ""
         if limit is not None:
             params.append(int(limit))
@@ -2167,12 +2181,22 @@ class PortfolioDatabase:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                WITH ranked AS (
+                WITH candidates AS (
+                    SELECT * FROM market_candles WHERE {' AND '.join(filters)}
+                ), identities AS (
+                    SELECT GREATEST(COUNT(*), (SELECT COUNT(DISTINCT long_ticker) FROM candidates
+                        WHERE long_ticker NOT LIKE 'INTERNAL:%' AND long_ticker NOT LIKE 'TV:%'
+                          AND long_ticker NOT LIKE 'YAHOO:%')) AS identity_count FROM (
+                        SELECT DISTINCT ticker, asset_type, currency, venue, interval FROM candidates
+                    ) i
+                ), ranked AS (
                     SELECT
                         ts, ticker, long_ticker, asset_type, currency, venue, interval,
-                        open_price, high_price, low_price, close_price, volume, source,
+                        open_price, high_price, low_price, close_price, volume, source, scraped_at,
                         ROW_NUMBER() OVER (
-                            PARTITION BY (ts AT TIME ZONE 'UTC')::date
+                            PARTITION BY ticker, asset_type, currency, venue, interval,
+                                CASE WHEN interval = '1d' THEN date_trunc('day', ts AT TIME ZONE 'UTC')
+                                     ELSE ts AT TIME ZONE 'UTC' END
                             ORDER BY
                                 CASE
                                     WHEN source = 'COCOS' THEN 0
@@ -2183,12 +2207,12 @@ class PortfolioDatabase:
                                 scraped_at DESC,
                                 ts DESC
                         ) AS source_rank
-                    FROM market_candles
-                    WHERE {' AND '.join(filters)}
+                    FROM candidates
                 )
                 SELECT
                     ts, ticker, long_ticker, asset_type, currency, venue, interval,
-                    open_price, high_price, low_price, close_price, volume, source
+                    open_price, high_price, low_price, close_price, volume, source, scraped_at,
+                    (SELECT identity_count FROM identities) AS identity_count
                 FROM ranked
                 WHERE source_rank = 1
                 ORDER BY ts DESC
@@ -2197,7 +2221,9 @@ class PortfolioDatabase:
                 *params,
             )
 
-        return [dict(row) for row in reversed(rows)]
+        if rows and rows[0]["identity_count"] > 1:
+            raise ValueError("AMBIGUOUS_SERIES_IDENTITY: specify currency, venue, long_ticker")
+        return [{k: v for k, v in dict(row).items() if k != "identity_count"} for row in reversed(rows)]
 
     async def get_portfolio_history(
         self,
