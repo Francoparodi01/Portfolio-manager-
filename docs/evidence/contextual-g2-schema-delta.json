@@ -1,0 +1,153 @@
+{
+  "schema": "contextual-g2-schema-delta-v1",
+  "audit_mode": "READ_ONLY",
+  "observed_at": "2026-10-07T17:58:50.732098+00:00",
+  "environment": {
+    "engine": "PostgreSQL 17",
+    "database_role": "operational_local",
+    "timescaledb_required_for_existing_schema": false,
+    "secrets_included": false
+  },
+  "existing_contracts": {
+    "market_candles": {
+      "present": [
+        "ts",
+        "ticker",
+        "long_ticker",
+        "asset_type",
+        "currency",
+        "venue",
+        "interval",
+        "open_price",
+        "high_price",
+        "low_price",
+        "close_price",
+        "volume",
+        "source",
+        "scraped_at"
+      ],
+      "semantic_aliases": {
+        "candle_timestamp": "ts",
+        "provider_symbol": "long_ticker",
+        "market": "venue"
+      },
+      "write_semantics": "UPSERT_BY_TS_PROVIDER_SYMBOL_INTERVAL",
+      "revision_history": "NOT_PRESERVED"
+    },
+    "analysis_lineage": {
+      "owner": "execution_plans.owner_chat_id and decision_log.owner_chat_id",
+      "run_id": "execution_plans.run_id and decision_log.run_id",
+      "plan_id": "execution_plans.id and order_intents.execution_plan_id",
+      "portfolio_snapshot_id": "available inside FULL_CONTEXT JSON payload",
+      "feature_snapshot_v3": "available inside decision_log.layers and FULL_CONTEXT JSON payload",
+      "code_version": "available inside layers.versions and FULL_CONTEXT code_hashes",
+      "contextual_snapshot": "NOT_PERSISTED_AS_A_PLAN_LINKED_CONTRACT"
+    },
+    "immutability": {
+      "decision_lab_plan_captures": "append-only trigger present",
+      "execution_plans_v2": "runtime migration exists in branch but prepare/capture/immutability triggers were absent at audit time",
+      "market_candles": "mutable by ON CONFLICT DO UPDATE"
+    }
+  },
+  "required_for_g2": [
+    {
+      "contract": "legacy_market_candle_temporal_columns",
+      "missing": [
+        "bar_start",
+        "bar_end",
+        "available_at",
+        "is_closed",
+        "volume_unit",
+        "calendar",
+        "calendar_validation",
+        "adjustment_policy",
+        "depositary_ratio"
+      ],
+      "reason": "E1/E2 readers already expect these nullable fields. Legacy rows must remain NULL/UNKNOWN."
+    },
+    {
+      "contract": "append_only_candle_observations",
+      "missing": [
+        "observation_id",
+        "instrument_id",
+        "provider_symbol",
+        "market",
+        "candle_timestamp",
+        "bar_start",
+        "bar_end",
+        "available_at",
+        "scraped_at",
+        "is_closed",
+        "price_unit",
+        "volume_unit",
+        "provenance",
+        "quality",
+        "missingness",
+        "ingestion_run_id",
+        "code_version"
+      ],
+      "reason": "A real PIT replay needs versioned observations. Updating market_candles would erase the earlier provider observation."
+    },
+    {
+      "contract": "plan_linked_contextual_snapshots",
+      "missing": [
+        "snapshot_id",
+        "owner_chat_id",
+        "run_id",
+        "plan_id",
+        "portfolio_snapshot_id",
+        "cutoff",
+        "feature_snapshot_v3",
+        "contextual_snapshot",
+        "candle_observation_ids",
+        "input_hashes",
+        "code_version",
+        "affects_analysis",
+        "affects_execution"
+      ],
+      "reason": "E2 is currently attachable in memory but cannot be reread as an immutable plan-scoped artifact."
+    },
+    {
+      "contract": "new_formal_plan_identity_and_immutability",
+      "missing": [
+        "execution plan v2 prepare trigger",
+        "execution plan v2 identity capture trigger",
+        "execution plan v2 immutability trigger",
+        "order intent v2 immutability trigger"
+      ],
+      "reason": "The code contains the additive E1 migration, but the audited operational schema had not installed it."
+    }
+  ],
+  "recommended_later": [
+    {
+      "contract": "normalized_instrument_registry_foreign_key",
+      "reason": "The deterministic instrument_id is sufficient for G2; a shared registry can remove future alias duplication."
+    },
+    {
+      "contract": "versioned_exchange_calendar_catalog",
+      "reason": "G2 can preserve provider sequence evidence, but exact missing-session and close-time validation needs a maintained calendar source."
+    },
+    {
+      "contract": "provider_unit_catalog",
+      "reason": "TradingView exposes volume values but does not declare their unit in the captured websocket payload, so volume_unit must remain UNKNOWN."
+    },
+    {
+      "contract": "configured_sector_benchmark_mapping",
+      "reason": "The repository has no asset-to-sector-benchmark configuration. G2 must not infer one."
+    },
+    {
+      "contract": "timescale_policy_for_observation_history",
+      "reason": "The additive append-only table is sufficient for one G2 run; retention/compression policy needs separate operational review."
+    }
+  ],
+  "migration_policy": {
+    "additive": true,
+    "backward_compatible": true,
+    "legacy_backfill": false,
+    "legacy_unknown_preserved": true,
+    "historical_bar_end_fabricated": false,
+    "historical_available_at_fabricated": false,
+    "historical_is_closed_fabricated": false
+  },
+  "pre_migration_gate": "DELTA_DOCUMENTED"
+}

@@ -1,0 +1,76 @@
+{
+  "schema": "contextual-g2-disposable-validation-v1",
+  "result": "PASS",
+  "database": {
+    "engine": "PostgreSQL/TimescaleDB",
+    "timescaledb_version": "2.30.2",
+    "disposable": true
+  },
+  "migration": {
+    "applied_twice": true,
+    "prior_columns": [
+      "ts",
+      "ticker",
+      "long_ticker",
+      "asset_type",
+      "currency",
+      "venue",
+      "interval",
+      "open_price",
+      "high_price",
+      "low_price",
+      "close_price",
+      "volume",
+      "source",
+      "scraped_at"
+    ],
+    "added_legacy_columns": [
+      "bar_start",
+      "bar_end",
+      "available_at",
+      "is_closed",
+      "volume_unit",
+      "calendar",
+      "calendar_validation",
+      "adjustment_policy",
+      "depositary_ratio"
+    ],
+    "legacy_unknown_preserved": true,
+    "append_only": {
+      "candle": true,
+      "snapshot": true
+    }
+  },
+  "roundtrip": {
+    "asset_observations": 135,
+    "asset_closed": 134,
+    "benchmark_observations": 135,
+    "benchmark_closed": 134,
+    "feature_schema": "feature_snapshot_v3",
+    "context_snapshot_id": "context:a023cb9abfe5b1d3a20791a2",
+    "context_confidence": {
+      "value": 0.8,
+      "status": "HIGH",
+      "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+      "components_available": 4,
+      "components_required": 5
+    },
+    "reread_candle_links": 270
+  },
+  "pit": {
+    "cutoff": "2026-07-13T17:06:00+00:00",
+    "all_available_at_lte_cutoff": true,
+    "all_scraped_at_lte_cutoff": true,
+    "closed_bars_have_bar_end": true,
+    "future_bars": 0
+  },
+  "non_regression": {
+    "scores": true,
+    "signals": true,
+    "decisions": true,
+    "orders": true,
+    "quantities": true,
+    "cash": true
+  },
+  "orders_executed": 0
+}

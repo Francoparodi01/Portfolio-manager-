@@ -47,7 +47,7 @@ import numpy as np
 from datetime import datetime, time, timedelta, timezone
 from html import escape
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from src.core.config import get_config
 from src.core.logger import get_logger
@@ -3677,6 +3677,7 @@ async def main(
     owner_chat_id:    int | None = None,
     run_intent:       str = "formal_plan",
     agent_json:       bool = False,
+    analysis_run_id_override: str | None = None,
 ):
     if agent_json and not (no_persist and no_telegram and no_llm):
         raise ValueError("--agent-json requires --no-persist --no-telegram --no-llm")
@@ -3688,7 +3689,10 @@ async def main(
             owner_chat_id = int(configured_owner)
     if owner_chat_id is None and not no_persist:
         raise ValueError("owner_chat_id is required for persisted analysis")
-    analysis_run_id = str(uuid4())
+    if analysis_run_id_override is not None:
+        analysis_run_id = str(UUID(str(analysis_run_id_override)))
+    else:
+        analysis_run_id = str(uuid4())
     no_persist, run_intent, off_market_context = _analysis_run_policy(
         no_persist,
         run_intent,
@@ -4412,6 +4416,21 @@ async def main(
         logger.info("Reporte enviado")
     else:
         logger.info("Telegram omitido")
+
+    # Internal callers can retain exact run lineage without changing the CLI,
+    # report, scores, plan construction or Telegram behavior.
+    return {
+        "analysis_run_id": analysis_run_id,
+        "results": results,
+        "execution_plan": execution_plan,
+        "portfolio_snapshot": portfolio_snapshot,
+        "positions": positions,
+        "total_ars": total_ars,
+        "cash_ars": cash_ars,
+        "no_persist": no_persist,
+        "run_intent": run_intent,
+        "off_market_context": off_market_context,
+    }
 
 
 if __name__ == "__main__":

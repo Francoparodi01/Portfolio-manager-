@@ -151,7 +151,7 @@ async def fetch_tv_candles(
                             continue
                         try:
                             ts, open_, high, low, close = values[:5]
-                            volume = values[5] if len(values) > 5 else 0.0
+                            volume = values[5] if len(values) > 5 else None
                             candles.append(
                                 MarketCandle(
                                     ticker=ticker.upper(),
@@ -165,7 +165,7 @@ async def fetch_tv_candles(
                                     high_price=float(high),
                                     low_price=float(low),
                                     close_price=float(close),
-                                    volume=float(volume or 0),
+                                    volume=float(volume) if volume is not None else None,
                                     source=SOURCE,
                                 )
                             )
