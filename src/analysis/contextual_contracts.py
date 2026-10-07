@@ -86,6 +86,12 @@ def frame_quality(frame, *, cutoff=None) -> dict:
     # Exact missing sessions and staleness require a versioned exchange calendar.
     if not frame.attrs.get("calendar_validation"):
         provenance_reasons.append("GAPS_AND_FRESHNESS_NOT_VERIFIED")
+    last = frame.iloc[-1] if len(frame) else None
+    def _last_timestamp(column: str) -> str | None:
+        if last is None or column not in frame or pd.isna(last[column]):
+            return None
+        value = pd.Timestamp(last[column])
+        return value.isoformat()
     return {
         "version": CONTRACT_VERSION,
         "series_digest": sha256(
@@ -107,9 +113,20 @@ def frame_quality(frame, *, cutoff=None) -> dict:
         "cutoff": cutoff_ts.isoformat() if cutoff_ts is not None else None,
         "bar_count": len(frame),
         "last_bar": str(frame.index[-1]) if len(frame) else None,
+        "last_candle_timestamp": str(frame.index[-1]) if len(frame) else None,
+        "last_bar_start": _last_timestamp("BarStart"),
+        "last_bar_end": _last_timestamp("BarEnd"),
+        "last_available_at": _last_timestamp("AvailableAt"),
+        "last_scraped_at": _last_timestamp("RetrievedAt"),
+        "last_is_closed": (bool(last["IsClosed"])
+                           if last is not None and "IsClosed" in frame and pd.notna(last["IsClosed"])
+                           else None),
         "volume_ratio_definition": "legacy_current_volume_over_inclusive_sma20",
         "missing_features": ["sma_200"] if len(frame) < 200 else [],
-        "volume_provenance": dict(frame.attrs.get("volume_source_counts", {})),
+        "volume_provenance": dict(
+            frame.attrs.get("volume_source_counts")
+            or frame.attrs.get("candle_source_counts", {})
+        ),
     }
 
 

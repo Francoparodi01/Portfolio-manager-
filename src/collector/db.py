@@ -1916,6 +1916,16 @@ class PortfolioDatabase:
                 c.close_price,
                 c.volume,
                 c.source,
+                c.scraped_at,
+                c.bar_start,
+                c.bar_end,
+                c.available_at,
+                c.is_closed,
+                c.volume_unit,
+                c.calendar,
+                c.calendar_validation,
+                c.adjustment_policy,
+                c.depositary_ratio,
             )
             for c in candles
         ]
@@ -1925,9 +1935,13 @@ class PortfolioDatabase:
                 """
                 INSERT INTO market_candles (
                     ts, ticker, long_ticker, asset_type, currency, venue, interval,
-                    open_price, high_price, low_price, close_price, volume, source
+                    open_price, high_price, low_price, close_price, volume, source,
+                    scraped_at, bar_start, bar_end, available_at, is_closed,
+                    volume_unit, calendar, calendar_validation, adjustment_policy,
+                    depositary_ratio
                 ) VALUES (
-                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                    COALESCE($14, NOW()),$15,$16,$17,$18,$19,$20,$21,$22,$23
                 )
                 ON CONFLICT (ts, long_ticker, interval) DO UPDATE SET
                     ticker      = EXCLUDED.ticker,
@@ -1940,7 +1954,16 @@ class PortfolioDatabase:
                     close_price = EXCLUDED.close_price,
                     volume      = EXCLUDED.volume,
                     source      = EXCLUDED.source,
-                    scraped_at  = NOW()
+                    scraped_at  = EXCLUDED.scraped_at,
+                    bar_start   = EXCLUDED.bar_start,
+                    bar_end     = EXCLUDED.bar_end,
+                    available_at = EXCLUDED.available_at,
+                    is_closed   = EXCLUDED.is_closed,
+                    volume_unit = EXCLUDED.volume_unit,
+                    calendar    = EXCLUDED.calendar,
+                    calendar_validation = EXCLUDED.calendar_validation,
+                    adjustment_policy = EXCLUDED.adjustment_policy,
+                    depositary_ratio = EXCLUDED.depositary_ratio
                 """,
                 rows,
             )
@@ -2193,6 +2216,8 @@ class PortfolioDatabase:
                     SELECT
                         ts, ticker, long_ticker, asset_type, currency, venue, interval,
                         open_price, high_price, low_price, close_price, volume, source, scraped_at,
+                        bar_start, bar_end, available_at, is_closed, volume_unit, calendar,
+                        calendar_validation, adjustment_policy, depositary_ratio,
                         ROW_NUMBER() OVER (
                             PARTITION BY ticker, asset_type, currency, venue, interval,
                                 CASE WHEN interval = '1d' THEN date_trunc('day', ts AT TIME ZONE 'UTC')
@@ -2212,6 +2237,8 @@ class PortfolioDatabase:
                 SELECT
                     ts, ticker, long_ticker, asset_type, currency, venue, interval,
                     open_price, high_price, low_price, close_price, volume, source, scraped_at,
+                    bar_start, bar_end, available_at, is_closed, volume_unit, calendar,
+                    calendar_validation, adjustment_policy, depositary_ratio,
                     (SELECT identity_count FROM identities) AS identity_count
                 FROM ranked
                 WHERE source_rank = 1

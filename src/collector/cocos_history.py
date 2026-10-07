@@ -119,7 +119,10 @@ def candles_to_frame(candles):
     identities = set()
     provider_symbols = set()
     native_symbols = set()
-    metadata = {k: set() for k in ("volume_unit", "calendar", "adjustment_policy", "depositary_ratio")}
+    metadata = {k: set() for k in (
+        "volume_unit", "calendar", "calendar_validation",
+        "adjustment_policy", "depositary_ratio",
+    )}
     for candle in candles:
         if isinstance(candle, dict):
             get = candle.get
@@ -176,6 +179,7 @@ def candles_to_frame(candles):
         .sort_index()
     )
     frame.attrs["series_identity"] = series_identity
+    frame.attrs["calendar_validation"] = series_identity.pop("calendar_validation", None)
     frame.attrs["provider_symbols"] = sorted(provider_symbols)
     frame.attrs["duplicate_rows_resolved"] = len(rows) - len(frame)
     frame.attrs["selection_policy"] = "source_priority_v1"

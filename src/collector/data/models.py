@@ -121,8 +121,18 @@ class MarketCandle:
     high_price: float
     low_price: float
     close_price: float
-    volume: float
+    volume: Optional[float]
     source: str = "COCOS"
+    scraped_at: Optional[datetime] = None
+    bar_start: Optional[datetime] = None
+    bar_end: Optional[datetime] = None
+    available_at: Optional[datetime] = None
+    is_closed: Optional[bool] = None
+    volume_unit: Optional[str] = None
+    calendar: Optional[str] = None
+    calendar_validation: Optional[str] = None
+    adjustment_policy: Optional[str] = None
+    depositary_ratio: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -137,6 +147,16 @@ class MarketCandle:
             "high_price": float(self.high_price),
             "low_price": float(self.low_price),
             "close_price": float(self.close_price),
-            "volume": float(self.volume),
+            "volume": float(self.volume) if self.volume is not None else None,
             "source": self.source,
+            "scraped_at": self.scraped_at.isoformat() if self.scraped_at else None,
+            "bar_start": self.bar_start.isoformat() if self.bar_start else None,
+            "bar_end": self.bar_end.isoformat() if self.bar_end else None,
+            "available_at": self.available_at.isoformat() if self.available_at else None,
+            "is_closed": self.is_closed,
+            "volume_unit": self.volume_unit,
+            "calendar": self.calendar,
+            "calendar_validation": self.calendar_validation,
+            "adjustment_policy": self.adjustment_policy,
+            "depositary_ratio": self.depositary_ratio,
         }

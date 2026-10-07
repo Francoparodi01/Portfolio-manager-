@@ -115,3 +115,5 @@ backup_*.sql
 # Private bounded E0 evidence
 output/contextual-e1/
 !tests/test_contextual_e1.py
+!tests/test_contextual_g1_postgres.py
+!tests/test_contextual_e2.py

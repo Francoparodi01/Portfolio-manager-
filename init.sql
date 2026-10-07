@@ -102,8 +102,29 @@ CREATE TABLE IF NOT EXISTS market_candles (
     volume         NUMERIC(20,4),
     source         TEXT        NOT NULL DEFAULT 'COCOS',
     scraped_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    bar_start      TIMESTAMPTZ,
+    bar_end        TIMESTAMPTZ,
+    available_at   TIMESTAMPTZ,
+    is_closed      BOOLEAN,
+    volume_unit    TEXT,
+    calendar       TEXT,
+    calendar_validation TEXT,
+    adjustment_policy TEXT,
+    depositary_ratio TEXT,
     UNIQUE (ts, long_ticker, interval)
 );
+
+-- E1 temporal/provenance contract. Existing rows deliberately remain NULL:
+-- absence is evidence and must not be backfilled from assumptions.
+ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS bar_start TIMESTAMPTZ;
+ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS bar_end TIMESTAMPTZ;
+ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ;
+ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS is_closed BOOLEAN;
+ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS volume_unit TEXT;
+ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS calendar TEXT;
+ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS calendar_validation TEXT;
+ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS adjustment_policy TEXT;
+ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS depositary_ratio TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_market_candles_ticker_interval_ts
     ON market_candles(ticker, interval, ts DESC);
