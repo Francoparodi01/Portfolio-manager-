@@ -275,3 +275,18 @@ def test_consistency_diagnostic_fails_closed_without_requested_planner_side():
     assert result.objective_status == "INSUFFICIENT"
     assert "falta planner" in result.answer
     assert "INCONSISTENCIA OBSERVADA" not in result.answer
+
+
+def test_consistency_diagnostic_does_not_fall_back_to_other_tickers_when_requested_ticker_is_absent():
+    payload = _consistency_evidence()
+    payload["signals"][0]["ticker"] = "NVDA"
+    payload["plan"]["decisions"][0]["ticker"] = "NVDA"
+    goal = "¿Hay inconsistencia entre señal HOLD y planner BUY para GDX?"
+    result = diagnostic_decision(
+        goal,
+        [observation("get_decision_evidence", payload)],
+        question_plan(goal),
+    )
+    assert result.objective_status == "INSUFFICIENT"
+    assert "GDX: falta señal y planner" in result.answer
+    assert "NVDA:" not in result.answer
