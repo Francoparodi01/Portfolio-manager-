@@ -1,0 +1,32 @@
+{
+  "schema": "contextual-g3-real-non-regression-v1",
+  "result": "PASS",
+  "capture_id": "29ac8eaa-7c45-4ad4-8324-59919df7ca43",
+  "run_id": "8d1cb9c5-f304-43b2-9955-281ffc723ac4",
+  "equal": {
+    "scores": true,
+    "signals": true,
+    "decisions": true,
+    "orders": true,
+    "quantities": true,
+    "cash": true
+  },
+  "stored_non_regression": {
+    "cash": true,
+    "orders": true,
+    "scores": true,
+    "signals": true,
+    "decisions": true,
+    "quantities": true
+  },
+  "baseline_productive_hash": "676285368efbcd92f2ee363de1277405e22ef320f27f2ba82361077491b6662e",
+  "shadow_productive_hash": "676285368efbcd92f2ee363de1277405e22ef320f27f2ba82361077491b6662e",
+  "shadow_contract": {
+    "mode": "SHADOW_ONLY",
+    "affects_analysis": false,
+    "affects_execution": false
+  },
+  "broker_order_api_calls": 0,
+  "broker_orders_executed": 0,
+  "telegram_sent": false
+}
