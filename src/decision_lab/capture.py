@@ -72,6 +72,7 @@ async def capture_plan(
         "scripts/run_analysis.py",
         "src/analysis/execution_planner.py",
         "src/analysis/contextual_contracts.py",
+        "src/analysis/contextual_market.py",
         "src/analysis/feature_snapshot.py",
         "src/collector/cocos_history.py",
         "src/collector/data/models.py",

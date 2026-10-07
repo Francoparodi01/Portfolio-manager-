@@ -15,5 +15,7 @@ def test_new_contextual_run_roundtrips_all_e1_contracts_in_timescale():
     assert evidence["gaps"] == []
     assert evidence["quality"]["bar_count"] == 260
     assert evidence["analysis"]["feature_snapshot"]["schema_version"] == "feature_snapshot_v3"
+    assert evidence["analysis"]["contextual_snapshot"]["mode"] == "SHADOW_ONLY"
+    assert evidence["analysis"]["feature_snapshot"]["payload"]["contextual_market_shadow"]["snapshot_id"] == evidence["analysis"]["contextual_snapshot"]["snapshot_id"]
     assert evidence["plan"]["intent_executable"] is False
     assert evidence["lineage"]["owner"] == 910001

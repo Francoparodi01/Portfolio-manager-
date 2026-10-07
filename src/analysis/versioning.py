@@ -91,6 +91,7 @@ def version_manifest(config: dict | None = None) -> dict:
     effective_config = analysis_config_snapshot() if config is None else config
     return {
         "contextual_contract_version": "contextual-e1-v1",
+        "contextual_market_version": "contextual-market-v1",
         "authority_shadow_version": "authority-shadow-v1",
         "optimizer_version": OPTIMIZER_VERSION,
         "planner_version": PLANNER_VERSION,

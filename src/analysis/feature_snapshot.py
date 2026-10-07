@@ -33,6 +33,7 @@ FEATURE_KEYS = (
     "data_quality",
     "signal_action",
     "asset_view",
+    "contextual_market_shadow",
 )
 
 

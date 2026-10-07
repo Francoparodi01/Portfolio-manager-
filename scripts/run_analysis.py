@@ -1079,6 +1079,9 @@ def _layers_payload_for_decision(
     payload["data_quality"] = dict(getattr(result, "data_quality", {}) or {})
     payload["asset_view"] = str(getattr(result, "asset_view", "UNKNOWN"))
     payload["signal_action"] = str(getattr(result, "decision", "UNKNOWN"))
+    contextual_market_shadow = dict(getattr(result, "contextual_market_shadow", {}) or {})
+    if contextual_market_shadow:
+        payload["contextual_market_shadow"] = contextual_market_shadow
 
     return _attach_feature_snapshot_and_context()
 

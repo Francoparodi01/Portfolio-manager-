@@ -82,6 +82,7 @@ class SynthesisResult:
     asset_view: str = "UNKNOWN"
     data_quality: dict = field(default_factory=dict)
     technical_buy_shadow_v3: dict = field(default_factory=dict)
+    contextual_market_shadow: dict = field(default_factory=dict)
 
     def to_telegram(self) -> str:
         icons = {"BUY": "🟢🟢", "ACCUMULATE": "🟢", "HOLD": "🟡", "REDUCE": "🔴", "SELL": "🔴🔴"}

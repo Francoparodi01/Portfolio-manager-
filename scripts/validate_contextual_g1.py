@@ -18,6 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from src.analysis.enums import DecisionType
+from src.analysis.contextual_market import attach_contextual_shadow, build_contextual_snapshot
 from src.analysis.execution_planner import DecisionIntent, ExecutionPlan, OrderIntent, OrderSide
 from src.analysis.synthesis import attach_technical_evidence, blend_scores
 from src.analysis.technical import analyze_ticker_from_frame
@@ -177,6 +178,10 @@ async def _run_in_database(url: str) -> dict:
         )
         attach_technical_evidence(result, signal)
         result.asset_view = "FAVORABLE" if result.final_score > 0 else "NEUTRAL"
+        contextual_snapshot = build_contextual_snapshot(
+            frame, cutoff=cutoff, signal_action=result.decision,
+        )
+        attach_contextual_shadow(result, contextual_snapshot)
 
         portfolio = {
             "snapshot_id": str(snapshot_id),
@@ -281,6 +286,7 @@ async def _run_in_database(url: str) -> dict:
                 "technical_regime": persisted_signal["technical_regime"],
                 "trend_shadow": layers["trend_shadow"],
                 "feature_snapshot": layers["feature_snapshot"],
+                "contextual_snapshot": layers["contextual_market_shadow"],
             },
             "versions": layers["versions"],
             "plan": {
