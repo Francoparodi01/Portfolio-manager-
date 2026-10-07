@@ -49,6 +49,21 @@ def test_business_day_preopen_analysis_is_exploratory_and_never_persists():
     )
 
 
+def test_explicit_audit_policy_can_preserve_formal_plan_off_market():
+    post_close = datetime(2026, 8, 4, 18, 8, tzinfo=ART_TZ)
+
+    assert _analysis_run_policy(
+        False,
+        "formal_plan",
+        post_close,
+        allow_off_market_formal_plan_for_audit=True,
+    ) == (
+        False,
+        "formal_plan",
+        True,
+    )
+
+
 def test_post_market_report_is_labeled_as_close_of_session():
     post_close = datetime(2026, 8, 14, 17, 12, tzinfo=ART_TZ)
 

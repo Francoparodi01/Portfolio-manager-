@@ -2119,10 +2119,13 @@ def _analysis_run_policy(
     no_persist: bool,
     run_intent: str,
     now: datetime | None = None,
+    allow_off_market_formal_plan_for_audit: bool = False,
 ) -> tuple[bool, str, bool]:
     """Keep off-market recalculations exploratory while sentiment remains live."""
     current = now or datetime.now(ART_TZ)
     off_market_context = not is_regular_market_session(current)
+    if off_market_context and allow_off_market_formal_plan_for_audit:
+        return bool(no_persist), str(run_intent or "formal_plan"), True
     if off_market_context:
         return True, "exploratory", True
     return bool(no_persist), str(run_intent or "formal_plan"), False
@@ -3678,6 +3681,7 @@ async def main(
     run_intent:       str = "formal_plan",
     agent_json:       bool = False,
     analysis_run_id_override: str | None = None,
+    allow_off_market_formal_plan_for_audit: bool = False,
 ):
     if agent_json and not (no_persist and no_telegram and no_llm):
         raise ValueError("--agent-json requires --no-persist --no-telegram --no-llm")
@@ -3696,11 +3700,28 @@ async def main(
     no_persist, run_intent, off_market_context = _analysis_run_policy(
         no_persist,
         run_intent,
+        allow_off_market_formal_plan_for_audit=allow_off_market_formal_plan_for_audit,
     )
-    if off_market_context:
-        logger.info(
-            "Analisis fuera de rueda: modo exploratory/no-persist; sentiment permanece activo"
+    if allow_off_market_formal_plan_for_audit and not (
+        no_telegram
+        and no_llm
+        and no_sentiment
+        and skip_radar
+        and owner_chat_id is not None
+        and analysis_run_id_override is not None
+        and run_intent == "formal_plan"
+    ):
+        raise ValueError(
+            "off-market formal audit requires no external messaging/models, "
+            "explicit owner/run, skipped radar and formal_plan intent"
         )
+    if off_market_context:
+        if allow_off_market_formal_plan_for_audit:
+            logger.info("Analisis fuera de rueda: formal audit plan, no execution or messaging")
+        else:
+            logger.info(
+                "Analisis fuera de rueda: modo exploratory/no-persist; sentiment permanece activo"
+            )
 
     # ── 1. Posiciones ──────────────────────────────────────────────────────────
     if tickers_override:

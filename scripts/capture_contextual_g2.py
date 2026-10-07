@@ -248,6 +248,7 @@ async def capture_real_g2(
                 skip_radar=True, no_persist=False,
                 owner_chat_id=owner_chat_id, run_intent="formal_plan",
                 agent_json=False, analysis_run_id_override=run_id,
+                allow_off_market_formal_plan_for_audit=True,
             )
         if runtime["no_persist"] or runtime["run_intent"] != "formal_plan":
             raise RuntimeError("REAL_RUN_WAS_NOT_A_PERSISTED_FORMAL_PLAN")
