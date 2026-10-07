@@ -18,13 +18,14 @@ from src.analysis.contextual_market import build_contextual_snapshot
 from src.analysis.feature_snapshot import build_feature_snapshot_from_layers
 from src.analysis.versioning import code_version
 from src.collector.contextual_g2 import (
-    ensure_contextual_g2_schema,
+    ensure_contextual_g3_schema,
     observation_rows_to_candles,
     observations_from_provider_sequence,
     persist_candle_observations,
     persist_contextual_snapshot,
     read_candle_observations,
     read_contextual_snapshot,
+    record_capture_event,
 )
 from src.collector.cocos_history import candles_to_frame
 from src.collector.data.models import AssetType, Currency, MarketCandle
@@ -115,8 +116,8 @@ async def _run(url: str) -> dict:
                 legacy_ts, legacy_ts + timedelta(hours=8),
             )
             prior_columns = await _column_names(conn)
-            await ensure_contextual_g2_schema(conn)
-            await ensure_contextual_g2_schema(conn)
+            await ensure_contextual_g3_schema(conn)
+            await ensure_contextual_g3_schema(conn)
             migrated_columns = await _column_names(conn)
             legacy = await conn.fetchrow(
                 """SELECT bar_start,bar_end,available_at,is_closed,volume_unit,
@@ -141,6 +142,13 @@ async def _run(url: str) -> dict:
                 ) VALUES($1,$2,$3,$4,'execution_plan','G2_TEST',TRUE,250000,250000,
                          'Disposable migration validation; no orders')""",
                 UUID(PLAN_ID), OWNER, UUID(RUN_ID), portfolio_at + timedelta(minutes=1),
+            )
+
+            await record_capture_event(
+                conn, capture_id=RUN_ID, owner_chat_id=OWNER,
+                status="STARTED", occurred_at=portfolio_at,
+                code_version=code_version(),
+                details={"purpose": "DISPOSABLE_G2_VALIDATION"},
             )
 
             observed_at = portfolio_at
@@ -210,6 +218,12 @@ async def _run(url: str) -> dict:
             reread = await read_contextual_snapshot(conn, contextual.snapshot_id)
             if reread is None:
                 raise AssertionError("contextual snapshot was not reread")
+            await record_capture_event(
+                conn, capture_id=RUN_ID, owner_chat_id=OWNER,
+                status="COMPLETE", occurred_at=cutoff + timedelta(minutes=1),
+                code_version=code_version(),
+                details={"contextual_snapshot_id": contextual.snapshot_id},
+            )
             immutable = {"candle": False, "snapshot": False}
             try:
                 await conn.execute(

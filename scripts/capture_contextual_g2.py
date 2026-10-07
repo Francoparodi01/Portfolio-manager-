@@ -23,13 +23,14 @@ from src.analysis.contextual_market import build_contextual_snapshot
 from src.analysis.feature_snapshot import build_feature_snapshot_from_layers
 from src.analysis.versioning import code_version
 from src.collector.contextual_g2 import (
-    ensure_contextual_g2_schema,
+    ensure_contextual_g3_schema,
     observation_rows_to_candles,
     observations_from_provider_sequence,
     persist_candle_observations,
     persist_contextual_snapshot,
     read_candle_observations,
     read_contextual_snapshot,
+    record_capture_event,
 )
 from src.collector.cocos_history import candles_to_frame
 from src.collector.schema_migrations import ensure_execution_plan_persistence
@@ -152,20 +153,31 @@ async def capture_real_g2(
     conn = await asyncpg.connect(direct_database_url)
     run_id = str(uuid4())
     version = code_version()
+    capture_started = False
+    capture_terminal = False
+    capture_phase = "SCHEMA"
     try:
         if apply_migration:
             await ensure_execution_plan_persistence(conn)
-            await ensure_contextual_g2_schema(conn)
+            await ensure_contextual_g3_schema(conn)
         required_tables = await conn.fetchval(
             """SELECT COUNT(*) FROM information_schema.tables
                WHERE table_schema='public'
                  AND table_name IN(
                     'market_candle_observations','contextual_market_snapshots',
-                    'contextual_snapshot_candles'
+                    'contextual_snapshot_candles','market_evidence_capture_events'
                  )"""
         )
-        if int(required_tables or 0) != 3:
+        if int(required_tables or 0) != 4:
             raise RuntimeError("CONTEXTUAL_G2_SCHEMA_NOT_INSTALLED")
+        await record_capture_event(
+            conn, capture_id=run_id, owner_chat_id=owner_chat_id,
+            status="STARTED", occurred_at=datetime.now(UTC),
+            code_version=version,
+            details={"purpose": "REAL_G2_CONTEXTUAL_CAPTURE"},
+        )
+        capture_started = True
+        capture_phase = "MARKET_EVIDENCE"
         portfolio = await _latest_portfolio_asset(conn, owner_chat_id, asset_ticker)
         asset = str(portfolio["ticker"]).upper()
         asset_type = str(portfolio["asset_type"] or "UNKNOWN").upper()
@@ -205,6 +217,7 @@ async def capture_real_g2(
         config_module._config = None
         from scripts.run_analysis import main as run_analysis_main
 
+        capture_phase = "FORMAL_PLAN"
         captured_report = io.StringIO()
         with redirect_stdout(captured_report):
             runtime = await run_analysis_main(
@@ -325,7 +338,10 @@ async def capture_real_g2(
             code_version=version,
             candle_inputs={
                 role: [str(row["observation_id"]) for row in values]
-                for role, values in used_by_role.items()
+                # Link every observation that can affect the snapshot.  The
+                # final open bar is excluded from numeric indicators, but its
+                # incomplete temporal contract contributes to missingness.
+                for role, values in rows_by_role.items()
             },
         )
         reread = await read_contextual_snapshot(conn, contextual.snapshot_id)
@@ -459,7 +475,32 @@ async def capture_real_g2(
             "broker_order_api_calls": 0,
             "broker_orders_executed": 0,
         }
+        capture_phase = "COMPLETE"
+        await record_capture_event(
+            conn, capture_id=run_id, owner_chat_id=owner_chat_id,
+            status="COMPLETE", occurred_at=datetime.now(UTC),
+            code_version=version,
+            details={
+                "plan_id": str(plan["id"]),
+                "contextual_snapshot_id": contextual.snapshot_id,
+                "observation_count": sum(len(values) for values in observations.values()),
+            },
+        )
+        capture_terminal = True
         return real_run, pit_audit, non_regression
+    except Exception as exc:
+        if capture_started and not capture_terminal:
+            try:
+                await record_capture_event(
+                    conn, capture_id=run_id, owner_chat_id=owner_chat_id,
+                    status="FAILED", occurred_at=datetime.now(UTC),
+                    code_version=version,
+                    reason_code=type(exc).__name__.upper(),
+                    details={"phase": capture_phase},
+                )
+            except Exception:
+                pass
+        raise
     finally:
         await conn.close()
 
