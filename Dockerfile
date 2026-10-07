@@ -44,6 +44,9 @@ RUN apt-get update && apt-get install -y \
 
 RUN playwright install chromium
 
+ARG CODE_VERSION=unknown
+ENV CODE_VERSION=${CODE_VERSION}
+
 COPY . .
 
 # Fail the image build instead of silently shipping an ungrounded agent.
