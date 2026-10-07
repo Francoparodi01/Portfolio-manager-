@@ -17,6 +17,7 @@ from .contracts import (
 )
 from .model import AgentModel
 from .persistence import AgentRunStore
+from .progress import AgentProgressEvent, AgentProgressState
 from .tools import ToolRegistry, execute_tool, tool_call_key
 
 
@@ -32,6 +33,7 @@ class AgentOrchestrator:
         max_steps: int = 8,
         max_identical_calls: int = 1,
         require_audit: bool = True,
+        progress_callback=None,
     ) -> None:
         if max_steps < 1 or max_steps > 20:
             raise ValueError("max_steps must be between 1 and 20")
@@ -41,6 +43,25 @@ class AgentOrchestrator:
         self.max_steps = int(max_steps)
         self.max_identical_calls = max(1, int(max_identical_calls))
         self.require_audit = bool(require_audit)
+        self.progress_callback = progress_callback
+
+    async def _emit_progress(
+        self,
+        state: AgentProgressState,
+        *,
+        tool_name: str | None = None,
+        step_no: int | None = None,
+    ) -> None:
+        """Emit sanitized lifecycle telemetry without changing agent semantics."""
+        if self.progress_callback is None:
+            return
+        try:
+            await self.progress_callback(
+                AgentProgressEvent(state=state, tool_name=tool_name, step_no=step_no)
+            )
+        except Exception:
+            # Progress is UX telemetry. A broken sink must never fail analysis.
+            return
 
     @staticmethod
     def _history_payload(steps: list[AgentTraceStep]) -> list[dict[str, Any]]:
@@ -139,6 +160,7 @@ class AgentOrchestrator:
 
         try:
             for step_no in range(1, self.max_steps + 1):
+                await self._emit_progress(AgentProgressState.PLANNING, step_no=step_no)
                 decision = await self.model.decide(
                     goal=goal,
                     tools=self.registry.specs(),
@@ -149,6 +171,7 @@ class AgentOrchestrator:
                 )
 
                 if decision.kind == "final":
+                    await self._emit_progress(AgentProgressState.COMPOSING, step_no=step_no)
                     if not any(s.observation and s.observation.ok for s in steps):
                         raise AgentModelError("no successful tool evidence; cannot substantiate a final answer")
                     decision.answer = validate_answer(decision.answer)
@@ -172,6 +195,11 @@ class AgentOrchestrator:
                 key = tool_call_key(decision.tool_name or "", decision.arguments)
                 call_counts[key] = call_counts.get(key, 0) + 1
 
+                await self._emit_progress(
+                    AgentProgressState.USING_TOOL,
+                    tool_name=decision.tool_name,
+                    step_no=step_no,
+                )
                 if call_counts[key] > self.max_identical_calls:
                     observation = ToolObservation(
                         tool_name=decision.tool_name or "",
@@ -211,6 +239,11 @@ class AgentOrchestrator:
                     cache[key] = observation
 
                 observation.content_sha256 = hashlib.sha256(observation.content.encode("utf-8")).hexdigest()
+                await self._emit_progress(
+                    AgentProgressState.ANALYZING,
+                    tool_name=decision.tool_name,
+                    step_no=step_no,
+                )
                 step = AgentTraceStep(
                     step_no=step_no,
                     decision=decision,
@@ -225,6 +258,10 @@ class AgentOrchestrator:
                         raise
 
             else:
+                await self._emit_progress(
+                    AgentProgressState.COMPOSING,
+                    step_no=self.max_steps + 1,
+                )
                 final_decision = await self.model.decide(
                     goal=goal,
                     tools=self.registry.specs(),

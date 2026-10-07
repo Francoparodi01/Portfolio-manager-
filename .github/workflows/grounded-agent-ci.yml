@@ -10,11 +10,18 @@ on:
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
       - 'src/agentic/grounded_model.py'
+      - 'src/agentic/model.py'
+      - 'src/agentic/orchestrator.py'
+      - 'src/agentic/diagnostics.py'
+      - 'src/agentic/progress.py'
+      - 'src/agentic/telegram.py'
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
       - 'scripts/run_agent.py'
       - 'scripts/run_grounded_agent_evals.py'
       - 'tests/test_grounded_agent_architecture.py'
+      - 'tests/test_agentic_diagnostics.py'
+      - 'tests/test_agent_progress.py'
       - 'evals/agent/**'
       - '.github/workflows/grounded-agent-ci.yml'
   pull_request:
@@ -25,11 +32,18 @@ on:
       - 'docs/agent/**'
       - 'src/agentic/prompt_context.py'
       - 'src/agentic/grounded_model.py'
+      - 'src/agentic/model.py'
+      - 'src/agentic/orchestrator.py'
+      - 'src/agentic/diagnostics.py'
+      - 'src/agentic/progress.py'
+      - 'src/agentic/telegram.py'
       - 'src/agentic/sql_explorer.py'
       - 'src/agentic/docs_retriever.py'
       - 'scripts/run_agent.py'
       - 'scripts/run_grounded_agent_evals.py'
       - 'tests/test_grounded_agent_architecture.py'
+      - 'tests/test_agentic_diagnostics.py'
+      - 'tests/test_agent_progress.py'
       - 'evals/agent/**'
       - '.github/workflows/grounded-agent-ci.yml'
 
@@ -55,6 +69,11 @@ jobs:
           python -m compileall -q \
             src/agentic/prompt_context.py \
             src/agentic/grounded_model.py \
+            src/agentic/model.py \
+            src/agentic/orchestrator.py \
+            src/agentic/diagnostics.py \
+            src/agentic/progress.py \
+            src/agentic/telegram.py \
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
             scripts/run_agent.py \
@@ -64,13 +83,24 @@ jobs:
           ruff check --select E9,F63,F7,F82 \
             src/agentic/prompt_context.py \
             src/agentic/grounded_model.py \
+            src/agentic/model.py \
+            src/agentic/orchestrator.py \
+            src/agentic/diagnostics.py \
+            src/agentic/progress.py \
+            src/agentic/telegram.py \
             src/agentic/sql_explorer.py \
             src/agentic/docs_retriever.py \
             scripts/run_agent.py \
             scripts/run_grounded_agent_evals.py \
-            tests/test_grounded_agent_architecture.py
-      - name: Run architecture and safety tests
-        run: pytest -q tests/test_grounded_agent_architecture.py
+            tests/test_grounded_agent_architecture.py \
+            tests/test_agentic_diagnostics.py \
+            tests/test_agent_progress.py
+      - name: Run architecture, routing and progress safety tests
+        run: |
+          pytest -q \
+            tests/test_grounded_agent_architecture.py \
+            tests/test_agentic_diagnostics.py \
+            tests/test_agent_progress.py
       - name: Validate eval corpus JSON
         run: python -m json.tool evals/agent/grounded_queries_v1.json > /dev/null
       - name: Check eval runner CLI

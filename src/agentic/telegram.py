@@ -1,9 +1,13 @@
 """On-demand Telegram adapter. Account authorization stays in the bot handler."""
+import asyncio
 import json
 import sys
 import tempfile
+import unicodedata
 from html import escape
 from pathlib import Path
+
+from .progress import read_progress_events, render_progress
 
 
 PROMPT = (
@@ -16,6 +20,108 @@ PROMPT = (
     "<code>/agente nuevo &lt;consulta&gt;</code>."
 )
 _active_chats = set()
+
+
+def _execution_budget(goal: str) -> tuple[int, int, int]:
+    """Return step/agent-time/subprocess-time budgets without changing tool permissions."""
+    normalized = "".join(
+        char for char in unicodedata.normalize("NFKD", str(goal or "").lower())
+        if not unicodedata.combining(char)
+    )
+    complex_markers = (
+        "inconsist", "coherencia", "optimizer", "optimizador", "planner",
+        "signal vs", "senal vs", "contra hold", "vs hold", "edge",
+        "evidencia historica",
+    )
+    if any(marker in normalized for marker in complex_markers):
+        return 6, 360, 420
+    return 4, 240, 300
+
+
+async def _start_progress_message(context, chat_id: int) -> tuple[int | None, str]:
+    bot = getattr(context, "bot", None)
+    sender = getattr(bot, "send_message", None)
+    initial = render_progress([])
+    if not callable(sender):
+        return None, initial
+    try:
+        message = await sender(
+            chat_id=chat_id,
+            text=initial,
+            disable_web_page_preview=True,
+        )
+        return getattr(message, "message_id", None), initial
+    except Exception:
+        # Progress is UX telemetry: never block the actual agent response.
+        return None, initial
+
+
+async def _edit_progress_message(
+    context,
+    chat_id: int,
+    message_id: int | None,
+    text: str,
+) -> None:
+    if message_id is None:
+        return
+    editor = getattr(getattr(context, "bot", None), "edit_message_text", None)
+    if not callable(editor):
+        return
+    try:
+        await editor(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        return
+
+
+async def _delete_progress_message(context, chat_id: int, message_id: int | None) -> None:
+    if message_id is None:
+        return
+    deleter = getattr(getattr(context, "bot", None), "delete_message", None)
+    if not callable(deleter):
+        return
+    try:
+        await deleter(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        return
+
+
+async def _follow_progress(
+    context,
+    chat_id: int,
+    message_id: int | None,
+    progress_path: Path,
+    command_task: asyncio.Task,
+    initial_text: str,
+) -> None:
+    """Poll the sanitized process boundary while the existing subprocess runs."""
+    last_text = initial_text
+    while not command_task.done():
+        await asyncio.sleep(0.6)
+        text = render_progress(read_progress_events(progress_path))
+        if text != last_text:
+            await _edit_progress_message(context, chat_id, message_id, text)
+            last_text = text
+
+    # Consume a final event written immediately before subprocess exit.
+    text = render_progress(read_progress_events(progress_path))
+    if text != last_text:
+        await _edit_progress_message(context, chat_id, message_id, text)
+
+
+async def _cancel_command_task(command_task: asyncio.Task | None) -> None:
+    """Preserve cancellation semantics: UI cancellation must reap the agent subprocess."""
+    if command_task is None or command_task.done():
+        return
+    command_task.cancel()
+    try:
+        await command_task
+    except asyncio.CancelledError:
+        pass
 
 
 async def run_report(context, chat_id, goal, *, run_command, send_text):
@@ -33,15 +139,36 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
         await send_text(context, chat_id, "Ya hay una consulta del agente en curso para tu cuenta.")
         return
     _active_chats.add(chat_id)
+    progress_message_id = None
+    command_task = None
     try:
-        await send_text(context, chat_id, "Consultando evidencia con el agente… Puede demorar hasta cuatro minutos.")
         with tempfile.TemporaryDirectory(prefix="quantia_agent_") as folder:
             artifact = Path(folder) / "quantia_agent_trace.json"
-            rc, _out, _err, _elapsed = await run_command(
-                [sys.executable, "scripts/run_agent.py", "--goal", goal,
-                 "--owner-chat-id", str(chat_id), "--max-steps", "4", "--timeout-seconds", "240",
-                 "--new-conversation" if new_conversation else "--continue-conversation",
-                 "--output-json", str(artifact)], timeout=300)
+            progress_path = Path(folder) / "quantia_agent_progress.jsonl"
+            progress_message_id, initial_progress = await _start_progress_message(context, chat_id)
+            max_steps, agent_timeout, process_timeout = _execution_budget(goal)
+            command_task = asyncio.create_task(
+                run_command(
+                    [sys.executable, "scripts/run_agent.py", "--goal", goal,
+                     "--owner-chat-id", str(chat_id), "--max-steps", str(max_steps),
+                     "--timeout-seconds", str(agent_timeout),
+                     "--new-conversation" if new_conversation else "--continue-conversation",
+                     "--output-json", str(artifact),
+                     "--progress-jsonl", str(progress_path)], timeout=process_timeout
+                )
+            )
+            await _follow_progress(
+                context,
+                chat_id,
+                progress_message_id,
+                progress_path,
+                command_task,
+                initial_progress,
+            )
+            rc, _out, _err, _elapsed = await command_task
+            await _delete_progress_message(context, chat_id, progress_message_id)
+            progress_message_id = None
+
             if not artifact.is_file():
                 await send_text(context, chat_id,
                                 "No pude completar la consulta del agente. El servicio puede estar deshabilitado "
@@ -71,4 +198,6 @@ async def run_report(context, chat_id, goal, *, run_command, send_text):
                                                 filename=artifact.name,
                                                 caption="Traza del agente: herramientas, observaciones, límites y estado de auditoría.")
     finally:
+        await _cancel_command_task(command_task)
+        await _delete_progress_message(context, chat_id, progress_message_id)
         _active_chats.discard(chat_id)

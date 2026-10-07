@@ -165,7 +165,7 @@ class GroundedQuantiaAgentModel(OllamaAgentModel):
         force_final: bool = False,
     ) -> AgentDecision:
         plan = question_plan(goal, self.conversation_context)
-        if plan.intent.startswith("decision_lab"):
+        if plan.intent.startswith("decision_lab") or plan.intent == "decision_consistency_audit":
             return await super().decide(
                 goal=goal,
                 tools=tools,
