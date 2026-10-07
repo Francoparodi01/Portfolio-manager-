@@ -150,11 +150,14 @@ async def capture_real_g2(
     direct_database_url = database_url.replace(
         "postgresql+asyncpg://", "postgresql://", 1
     )
+    market_capture_id = str(uuid4())
     conn = await asyncpg.connect(direct_database_url)
     run_id = str(uuid4())
     version = code_version()
-    capture_started = False
-    capture_terminal = False
+    market_capture_started = False
+    market_capture_terminal = False
+    analysis_run_started = False
+    analysis_run_terminal = False
     capture_phase = "SCHEMA"
     try:
         if apply_migration:
@@ -171,12 +174,12 @@ async def capture_real_g2(
         if int(required_tables or 0) != 4:
             raise RuntimeError("CONTEXTUAL_G2_SCHEMA_NOT_INSTALLED")
         await record_capture_event(
-            conn, capture_id=run_id, owner_chat_id=owner_chat_id,
+            conn, capture_id=market_capture_id, owner_chat_id=owner_chat_id,
             status="STARTED", occurred_at=datetime.now(UTC),
             code_version=version,
-            details={"purpose": "REAL_G2_CONTEXTUAL_CAPTURE"},
+            details={"purpose": "REAL_G3_MARKET_CAPTURE", "analysis_run_id": run_id},
         )
-        capture_started = True
+        market_capture_started = True
         capture_phase = "MARKET_EVIDENCE"
         portfolio = await _latest_portfolio_asset(conn, owner_chat_id, asset_ticker)
         asset = str(portfolio["ticker"]).upper()
@@ -196,7 +199,7 @@ async def capture_real_g2(
             observations[role] = observations_from_provider_sequence(
                 fetched,
                 owner_chat_id=owner_chat_id,
-                ingestion_run_id=run_id,
+                ingestion_run_id=market_capture_id,
                 provider_symbol=_tv_symbol(ticker),
                 scraped_at=observed_at,
                 code_version=version,
@@ -208,6 +211,25 @@ async def capture_real_g2(
         )
         if inserted != sum(len(values) for values in observations.values()):
             raise RuntimeError("REAL_OBSERVATION_INSERT_COUNT_MISMATCH")
+        await record_capture_event(
+            conn, capture_id=market_capture_id, owner_chat_id=owner_chat_id,
+            status="COMPLETE", occurred_at=datetime.now(UTC),
+            code_version=version,
+            details={
+                "analysis_run_id": run_id,
+                "observation_count": sum(len(values) for values in observations.values()),
+                "roles": sorted(observations),
+            },
+        )
+        market_capture_terminal = True
+
+        await record_capture_event(
+            conn, capture_id=run_id, owner_chat_id=owner_chat_id,
+            status="STARTED", occurred_at=datetime.now(UTC),
+            code_version=version,
+            details={"purpose": "REAL_G3_ANALYSIS_RUN", "market_capture_id": market_capture_id},
+        )
+        analysis_run_started = True
 
         # The productive pipeline never consumes the G2 tables.  It persists a
         # normal formal plan and returns its in-memory artifact for audit only.
@@ -271,10 +293,16 @@ async def capture_real_g2(
         frames: dict[str, Any] = {}
         for role, ticker, _ in targets:
             rows = await read_candle_observations(
-                conn, owner_chat_id=owner_chat_id, ingestion_run_id=run_id,
+                conn, owner_chat_id=owner_chat_id, ingestion_run_id=market_capture_id,
                 ticker=ticker, cutoff=cutoff,
             )
             rows_by_role[role] = rows
+        used_by_role = {
+            role: _closed_used(rows, cutoff) for role, rows in rows_by_role.items()
+        }
+        if any(not values for values in used_by_role.values()):
+            raise RuntimeError("REAL_CONTEXT_HAS_NO_EFFECTIVE_CLOSED_INPUTS")
+        for role, rows in used_by_role.items():
             frames[role] = candles_to_frame(observation_rows_to_candles(rows))
         benchmarks = {general_benchmark.upper(): frames["general_benchmark"]}
         if sector_benchmark:
@@ -315,9 +343,6 @@ async def capture_real_g2(
         if not all(equality.values()):
             raise RuntimeError("G2_SHADOW_CHANGED_PRODUCTIVE_OUTPUT")
 
-        used_by_role = {
-            role: _closed_used(rows, cutoff) for role, rows in rows_by_role.items()
-        }
         await persist_contextual_snapshot(
             conn,
             snapshot_id=contextual.snapshot_id,
@@ -338,10 +363,7 @@ async def capture_real_g2(
             code_version=version,
             candle_inputs={
                 role: [str(row["observation_id"]) for row in values]
-                # Link every observation that can affect the snapshot.  The
-                # final open bar is excluded from numeric indicators, but its
-                # incomplete temporal contract contributes to missingness.
-                for role, values in rows_by_role.items()
+                for role, values in used_by_role.items()
             },
         )
         reread = await read_contextual_snapshot(conn, contextual.snapshot_id)
@@ -368,8 +390,9 @@ async def capture_real_g2(
             )
 
         real_run = {
-            "schema": "contextual-g2-real-run-v1",
+            "schema": "contextual-g3-real-capture-v1",
             "captured_at": datetime.now(UTC).isoformat(),
+            "capture_id": market_capture_id,
             "run_id": run_id,
             "plan_id": str(plan["id"]),
             "owner": owner_chat_id,
@@ -401,6 +424,7 @@ async def capture_real_g2(
                     "provider_symbol": _tv_symbol(ticker),
                     "fetched": len(observations[role]),
                     "used": len(used_by_role[role]),
+                    "excluded": len(rows_by_role[role]) - len(used_by_role[role]),
                     "observation_ids_sha256": _hash([
                         str(row["observation_id"]) for row in used_by_role[role]
                     ]),
@@ -418,6 +442,8 @@ async def capture_real_g2(
                 "capture_hashes": [str(row["capture_hash"]) for row in captures],
                 "contextual_snapshot_reread": True,
                 "reread_candle_links": len(reread["candles"]),
+                "captured_observations": sum(len(values) for values in rows_by_role.values()),
+                "effective_observation_links": sum(len(values) for values in used_by_role.values()),
             },
             "execution_safety": {
                 "telegram_sent": False,
@@ -483,20 +509,32 @@ async def capture_real_g2(
             details={
                 "plan_id": str(plan["id"]),
                 "contextual_snapshot_id": contextual.snapshot_id,
-                "observation_count": sum(len(values) for values in observations.values()),
+                "market_capture_id": market_capture_id,
+                "effective_observation_count": sum(len(values) for values in used_by_role.values()),
             },
         )
-        capture_terminal = True
+        analysis_run_terminal = True
         return real_run, pit_audit, non_regression
     except Exception as exc:
-        if capture_started and not capture_terminal:
+        if market_capture_started and not market_capture_terminal:
+            try:
+                await record_capture_event(
+                    conn, capture_id=market_capture_id, owner_chat_id=owner_chat_id,
+                    status="FAILED", occurred_at=datetime.now(UTC),
+                    code_version=version,
+                    reason_code=type(exc).__name__.upper(),
+                    details={"phase": capture_phase},
+                )
+            except Exception:
+                pass
+        if analysis_run_started and not analysis_run_terminal:
             try:
                 await record_capture_event(
                     conn, capture_id=run_id, owner_chat_id=owner_chat_id,
                     status="FAILED", occurred_at=datetime.now(UTC),
                     code_version=version,
                     reason_code=type(exc).__name__.upper(),
-                    details={"phase": capture_phase},
+                    details={"phase": capture_phase, "market_capture_id": market_capture_id},
                 )
             except Exception:
                 pass

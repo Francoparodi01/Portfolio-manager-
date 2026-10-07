@@ -8,6 +8,7 @@ from src.collector.contextual_g2 import (
     observations_from_provider_sequence,
 )
 from src.collector.data.models import AssetType, Currency, MarketCandle
+from scripts.capture_contextual_g2 import _closed_used
 
 
 UTC = timezone.utc
@@ -107,3 +108,28 @@ def test_g3_migration_extends_existing_evidence_store_without_parallel_candles()
     assert "CREATE TABLE MARKET_CANDLES" not in sql
     assert "DROP COLUMN" not in sql
     assert "RENAME COLUMN" not in sql
+
+
+def test_effective_snapshot_inputs_exclude_open_provider_bar():
+    observed_at = datetime(2026, 2, 1, 18, tzinfo=UTC)
+    values = _observe(
+        _candles(),
+        run_id="12345678-1234-4234-8234-123456789012",
+        scraped_at=observed_at,
+    )
+    rows = [
+        {
+            **item.__dict__,
+            "observation_id": item.observation_id,
+        }
+        for item in values
+    ]
+
+    effective = _closed_used(rows, observed_at + timedelta(minutes=1))
+
+    assert len(rows) == 3
+    assert len(effective) == 2
+    assert all(row["is_closed"] is True for row in effective)
+    assert values[-1].observation_id not in {
+        row["observation_id"] for row in effective
+    }
