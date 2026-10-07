@@ -28,7 +28,20 @@ def _plain(text: str) -> str:
 
 def question_plan(goal: str, context: list[dict] | None = None) -> QuestionPlan:
     text = _plain(goal)
-    if any(word in text for word in ("decision lab", "contrafactual", "counterfactual", "dva", "plan vs hold", "plan contra hold", "replay", "versiones", "valor agregado", "hubiera mantenido")):
+    consistency_markers = (
+        "inconsistencia", "inconsistente", "coherencia entre", "senal vs planner",
+        "signal vs planner", "optimizador vs planner", "optimizer vs planner",
+        "hold pero buy", "hold y buy", "hold -> buy", "hold a buy",
+    )
+    if any(marker in text for marker in consistency_markers):
+        required_tools = ["get_decision_evidence"]
+        if any(marker in text for marker in (
+            "contra hold", "vs hold", "edge frente a hold", "supera hold",
+            "superar hold", "evidencia historica",
+        )):
+            required_tools.append("get_decision_value_added")
+        intent, required = "decision_consistency_audit", tuple(required_tools)
+    elif any(word in text for word in ("decision lab", "contrafactual", "counterfactual", "dva", "plan vs hold", "plan contra hold", "replay", "versiones", "valor agregado", "hubiera mantenido")):
         tool = "get_decision_value_added"
         if "versiones" in text:
             tool = "compare_strategy_versions"
@@ -86,6 +99,154 @@ def observed_payloads(history: list[dict]) -> dict[str, dict]:
 
 def diagnostic_decision(goal: str, history: list[dict], plan: QuestionPlan,
                         context: list[dict] | None = None) -> AgentDecision:
+    if plan.intent == "decision_consistency_audit":
+        payloads = observed_payloads(history)
+        evidence = payloads.get("get_decision_evidence")
+        if not evidence or evidence.get("schema_version") != "agent-decision-evidence-v1":
+            return AgentDecision(
+                kind="final",
+                answer=(
+                    "Evidencia insuficiente: no obtuve la evidencia estructurada del mismo run "
+                    "con señal y planner. No completo la inconsistencia por inferencia."
+                ),
+                rationale="Falta la fuente primaria requerida para auditar consistencia.",
+                answer_origin="diagnostics_v2",
+                objective_status="INSUFFICIENT",
+            )
+
+        signals = [row for row in evidence.get("signals", []) if isinstance(row, dict)]
+        operational = evidence.get("plan") if isinstance(evidence.get("plan"), dict) else None
+        decisions = [
+            row for row in (operational or {}).get("decisions", [])
+            if isinstance(row, dict)
+        ]
+        blocked = [
+            row for row in (operational or {}).get("blocked_orders", [])
+            if isinstance(row, dict)
+        ]
+        available = {
+            str(row.get("ticker") or "").upper()
+            for row in [*signals, *decisions]
+            if row.get("ticker")
+        }
+        requested_tokens = set(re.findall(r"\b[A-Z][A-Z0-9.=-]{1,9}\b", goal.upper()))
+        requested = sorted(available.intersection(requested_tokens))
+        scope = requested or sorted(available)
+
+        run_id = evidence.get("analysis_run_id") or "N/D"
+        snapshot = evidence.get("snapshot_as_of") or "N/D"
+        parts = [
+            f"Auditoría de consistencia del mismo run {run_id}; snapshot {snapshot}."
+        ]
+        gaps: list[str] = []
+        status = "EXPLAINED"
+
+        if not scope:
+            status = "INSUFFICIENT"
+            gaps.append("No hay tickers identificables en la evidencia estructurada.")
+
+        for ticker in scope[:5]:
+            signal = next(
+                (row for row in signals if str(row.get("ticker") or "").upper() == ticker),
+                None,
+            )
+            decision = next(
+                (row for row in decisions if str(row.get("ticker") or "").upper() == ticker),
+                None,
+            )
+            if signal is None or decision is None:
+                status = "INSUFFICIENT"
+                missing = []
+                if signal is None:
+                    missing.append("señal")
+                if decision is None:
+                    missing.append("planner")
+                gaps.append(f"{ticker}: falta {' y '.join(missing)} del mismo run.")
+                continue
+
+            signal_decision = str(signal.get("decision") or "N/D")
+            planner_action = str(decision.get("action") or "N/D")
+            score = signal.get("final_score")
+            regime = signal.get("technical_regime")
+            current = decision.get("current_weight")
+            target = decision.get("target_weight")
+            delta = decision.get("delta_weight")
+            parts.append(
+                f"{ticker}: señal {signal_decision}; final_score {_number(score, 4)}; "
+                f"régimen {regime or 'N/D'}."
+            )
+            parts.append(
+                f"{ticker}: peso actual {_number(current * 100 if isinstance(current, (int, float)) else None, 1)}% → "
+                f"objetivo {_number(target * 100 if isinstance(target, (int, float)) else None, 1)}%; "
+                f"delta {_number(delta * 100 if isinstance(delta, (int, float)) else None, 1)} pp; "
+                f"planner {planner_action}."
+            )
+            layers = [
+                layer for layer in signal.get("layers", [])
+                if isinstance(layer, dict) and isinstance(layer.get("weighted"), (int, float))
+            ]
+            if layers:
+                ordered_layers = sorted(layers, key=lambda row: -abs(row["weighted"]))
+                parts.append(
+                    f"{ticker}: capas principales: "
+                    + "; ".join(
+                        f"{layer.get('name', 'capa')} {layer['weighted']:+.3f}"
+                        for layer in ordered_layers[:4]
+                    )
+                    + "."
+                )
+
+            ticker_blocks = [
+                row for row in blocked
+                if str(row.get("ticker") or "").upper() == ticker
+            ]
+            if ticker_blocks:
+                parts.append(
+                    f"{ticker}: guard/bloqueo observado: "
+                    + "; ".join(
+                        str(row.get("reason") or row.get("block_code") or "sin detalle")
+                        for row in ticker_blocks[:3]
+                    )
+                    + "."
+                )
+            else:
+                parts.append(f"{ticker}: no hay bloqueo explícito para ese ticker en el plan observado.")
+
+            if signal_decision.upper() == "HOLD" and planner_action.upper().startswith("BUY"):
+                parts.append(
+                    f"{ticker}: INCONSISTENCIA OBSERVADA — la capa de señal dice HOLD y el planner termina en {planner_action}."
+                )
+            else:
+                parts.append(
+                    f"{ticker}: no observo el patrón específico HOLD→BUY entre señal y planner en este run."
+                )
+
+        if "get_decision_value_added" in plan.required_tools:
+            historical = payloads.get("get_decision_value_added")
+            if historical:
+                from src.decision_lab.queries import explain_evidence
+                historical_text, historical_status = explain_evidence(historical)
+                parts.append("Comparación histórica contra HOLD (fuente separada del run actual):\n" + historical_text)
+                if historical_status == "INSUFFICIENT" and status != "INSUFFICIENT":
+                    status = "PARTIAL"
+            else:
+                if status != "INSUFFICIENT":
+                    status = "PARTIAL"
+                gaps.append("Se pidió contraste histórico contra HOLD, pero esa evidencia no estuvo disponible.")
+
+        if gaps:
+            parts.append("Pendiente:\n- " + "\n- ".join(gaps))
+        parts.append(
+            "La auditoría describe coherencia entre capas; no demuestra que una alternativa tenga mayor rentabilidad."
+        )
+        return AgentDecision(
+            kind="final",
+            answer="\n\n".join(parts),
+            rationale="Auditoría determinística de señal, pesos, planner, guards y HOLD cuando fue solicitado.",
+            answer_origin="diagnostics_v2",
+            objective_status=status,
+        )
+
     if plan.intent in {"decision_lab", "decision_lab_mechanism"}:
         from src.decision_lab.queries import TOOLS, explain_evidence
         payloads = observed_payloads(history)
