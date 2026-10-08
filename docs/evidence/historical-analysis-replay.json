@@ -1,0 +1,140 @@
+{
+  "schema": "historical-analysis-replay-evidence-v1",
+  "generated_at": "2026-10-08T11:53:12.545457+00:00",
+  "run": {
+    "run_id": "51ebcbcd-c9f5-4c42-b031-88781b126376",
+    "reconstruction_id": "679932e9-6ce8-553b-b096-e6be28377316",
+    "parent_contextual_run_id": "6075b63f-1a94-4c40-a828-f47be487ef14",
+    "code_version": "ae75d78de7170607e9d4a7250156e8cfb3fcef5c",
+    "method_version": "analisis-current-core-recorded-layers-v1",
+    "period": {
+      "start": "2026-07-01",
+      "end": "2026-10-07"
+    },
+    "data_status": "CURRENT_POLICY_RETROSPECTIVE_NOT_PIT_COMPLETE",
+    "mode": "SHADOW_ONLY",
+    "affects_analysis": false,
+    "affects_execution": false,
+    "orders_executable": false,
+    "content_hash": "e397f03e7d5a0888635ad0cab15bda1743bb6292bad09c02545146d8c34d0c0c"
+  },
+  "lifecycle": [
+    {
+      "status": "STARTED",
+      "occurred_at": "2026-10-08T11:53:11.837433+00:00"
+    },
+    {
+      "status": "COMPLETE",
+      "occurred_at": "2026-10-08T11:53:12.545457+00:00"
+    }
+  ],
+  "population": {
+    "canonical_rows": 1088,
+    "observed_dates": 93,
+    "complete_analysis_dates": 57,
+    "unavailable_analysis_dates": 36,
+    "decision_rows": 632,
+    "evaluated_5d_decisions": 571,
+    "simulated_order_intents": 90
+  },
+  "unavailable_reasons": {
+    "NO_ANALYSIS_VINTAGE_AFTER_SNAPSHOT": 26,
+    "FULL_LAYER_COVERAGE_MISSING": 10
+  },
+  "owner_scope": {
+    "OWNER_EXACT_complete_dates": 2,
+    "LEGACY_UNSCOPED_complete_dates": 55
+  },
+  "signals": {
+    "HOLD": 534,
+    "ACCUMULATE": 62,
+    "REDUCE": 36
+  },
+  "planner_actions": {
+    "HOLD": 370,
+    "WATCH": 139,
+    "SELL_PARTIAL": 62,
+    "BLOCKED": 33,
+    "BUY": 28
+  },
+  "context": {
+    "PASS": 291,
+    "WARN": 112,
+    "FAIL": 229,
+    "UNKNOWN": 0,
+    "confidence_HIGH": 632
+  },
+  "planner_5d": {
+    "all": {
+      "n": 571,
+      "mean": -0.00007486238524731898,
+      "median": -0.0008058017727639033,
+      "positive_rate": 0.4921190893169877
+    },
+    "by_action": {
+      "BLOCKED": {"n": 30, "mean": -0.002981384005022525, "median": -0.0008367403657745798, "positive_rate": 0.4666666666666667},
+      "BUY": {"n": 26, "mean": 0.00515925124132851, "median": -0.003477912256507343, "positive_rate": 0.46153846153846156},
+      "HOLD": {"n": 338, "mean": 0.0024303168708218257, "median": 0.00045579704926912434, "positive_rate": 0.5029585798816568},
+      "SELL_PARTIAL": {"n": 52, "mean": 0.0145937266128159, "median": 0.02552672918248211, "positive_rate": 0.5769230769230769},
+      "WATCH": {"n": 125, "mean": -0.013342130562434308, "median": -0.004993757802746579, "positive_rate": 0.44}
+    }
+  },
+  "integrity": {
+    "content_hash_recomputed": true,
+    "decision_row_hashes_valid": 632,
+    "decision_row_hashes_total": 632,
+    "complete_day_hashes_valid": 57,
+    "complete_day_hashes_total": 57,
+    "persisted_days": 93,
+    "persisted_decisions": 632,
+    "productive_execution_plans_for_run": 0,
+    "productive_decision_log_rows_for_run": 0,
+    "productive_order_intents_for_run": 0
+  },
+  "non_regression": {
+    "productive_hashes_equal_after_context": true,
+    "scores_equal": true,
+    "signals_equal": true,
+    "decisions_equal": true,
+    "orders_equal": true,
+    "quantities_equal": true,
+    "cash_equal": true,
+    "context_has_authority": false
+  },
+  "schema_validation": {
+    "migration": "migrations/20261011_historical_analysis_replay.sql",
+    "disposable_postgresql_applied_twice": true,
+    "schema_objects": 5,
+    "triggers": 11,
+    "update_blocked": true,
+    "delete_blocked": true,
+    "truncate_blocked": true
+  },
+  "tests": {
+    "focused": "59 passed",
+    "full": "824 passed, 27 skipped, 7 baseline failures",
+    "new_failures": 0,
+    "frontend_build": "PASS",
+    "frontend_lint": "PASS"
+  },
+  "local_dashboard_deployment": {
+    "url": "http://127.0.0.1:5173/replay-historico",
+    "frontend_http_status": 200,
+    "authenticated_api_http_status": 200,
+    "api_full_analysis_run_id": "51ebcbcd-c9f5-4c42-b031-88781b126376",
+    "api_days_returned": 93,
+    "api_decisions_returned": 632,
+    "monitor_api_image": "sha256:af88c823a403ab36e4bbac9278810f0a1f2167d667b77b9a0d599951b9323319",
+    "frontend_image": "sha256:1b18a02292b90564ea89483f71289d2df971afa5605cfd86545dd5dcae7c00c7",
+    "recreated_services": ["monitor_api", "frontend"],
+    "untouched_services": ["scheduler", "telegram_bot", "cocos_db"],
+    "env_sha256_before": "289d0f4eee2d6cd413c46df51f85c311599295ac2c2fa3be1a22c8cc5c6af570",
+    "env_sha256_after": "289d0f4eee2d6cd413c46df51f85c311599295ac2c2fa3be1a22c8cc5c6af570"
+  },
+  "artifacts": {
+    "historical_analysis_replay.json": "fefb0e8c1bf3e3aee1b80842168fec636d9de3e40daa97dad0ec14014c6ffb7e",
+    "historical_analysis_replay_decisions.csv": "a66fd801b8d10493976719227951941d9ed164b2c5b4247697f1115aa7d6df34",
+    "historical_analysis_replay_report.md": "178e650f2a45d4f72e305a46fa4c2f6ab8aadf6e1e99a08c20e9e408f430a4bb",
+    "historical_analysis_replay_manifest.json": "546980494bdb59901fdb32e4265962306beff8eecc4ab197f290a68647237771"
+  }
+}
