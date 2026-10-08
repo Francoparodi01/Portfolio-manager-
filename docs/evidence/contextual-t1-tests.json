@@ -1,0 +1,39 @@
+{
+  "schema": "telegram-contextual-shadow-tests-v1",
+  "result": "PASS_WITH_BASELINE_FAILURES",
+  "focused_e1_e2_t1": {
+    "passed": 81,
+    "skipped": 1,
+    "failed": 0
+  },
+  "disposable_postgres_combined": {
+    "passed": 33,
+    "failed": 0,
+    "database": "loopback TimescaleDB / quantia_contextual_t1_test"
+  },
+  "runner_after_minimum_history_fix": {
+    "passed": 21,
+    "failed": 0
+  },
+  "final_t1_with_postgres": {
+    "passed": 9,
+    "failed": 0,
+    "duration_seconds": 3.1
+  },
+  "full_suite": {
+    "passed": 814,
+    "skipped": 27,
+    "failed": 7,
+    "duration_seconds": 50.69,
+    "new_t1_failures": 0,
+    "known_baseline_failures": [
+      "tests/test_analysis_telegram_output.py::test_native_command_menu_keeps_only_primary_workflows",
+      "tests/test_optimizer_challenger_v2.py::test_shadow_challenger_runs_same_context_and_has_no_capital_authority",
+      "tests/test_radar_exploratory.py::test_followed_watchlist_combines_sources_and_keeps_latest_per_ticker",
+      "tests/test_telegram_output_quality.py::test_compact_radar_parses_header_with_cash_lines",
+      "tests/test_telegram_output_quality.py::test_help_text_is_mobile_compact_and_scope_safe",
+      "tests/test_telegram_output_quality.py::test_main_menu_prioritizes_common_actions_and_groups_secondary_views",
+      "tests/test_telegram_radar_compact.py::test_compact_radar_preserves_shadow_context_line"
+    ]
+  }
+}

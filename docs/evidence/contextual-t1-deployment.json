@@ -1,0 +1,45 @@
+{
+  "schema": "telegram-contextual-shadow-deployment-v1",
+  "result": "PASS",
+  "verified_at": "2026-10-08T02:43:07.5173359Z",
+  "branch": "feature/contextual-e1-contracts",
+  "head": "13160516920a0a5e4d8b336bd1bfef15c087e3a1",
+  "main_head": "f3c6bbeacda4f96226f98c40fb50861068b7abbe",
+  "main_modified": false,
+  "push_performed": false,
+  "merge_performed": false,
+  "service": "cocos_telegram_bot",
+  "service_status": "running",
+  "restart_count": 0,
+  "image_id": "sha256:63d87dd52f5fdb38e534bf76d2a0a2affb37fb4293ed794d1315617609887a96",
+  "image_code_version": "13160516920a0a5e4d8b336bd1bfef15c087e3a1",
+  "command_registered": "/analisis_contextual",
+  "existing_command_unchanged": "/analisis",
+  "native_menu_configured": true,
+  "migration": {
+    "name": "20261009_telegram_contextual_shadow.sql",
+    "operational_database_applied": true,
+    "idempotence_application_count": 2,
+    "additive_or_protective_only": true,
+    "columns": [
+      "authority_mode",
+      "affects_analysis",
+      "affects_execution"
+    ],
+    "shadow_plan_constraint": true,
+    "shadow_order_intent_trigger": true,
+    "productive_insert_contract_validated": true,
+    "rollback_guard_test_passed": true,
+    "backfill_invented": false
+  },
+  "environment": {
+    "env_modified": false,
+    "env_sha256_before_and_after": "87CB1E68EFA555F40A7B3CC6809F0A8EE1620A99EC158A5B8FE8F8A347AC5309"
+  },
+  "services_not_redeployed": [
+    "cocos_scheduler",
+    "cocos_monitor_api",
+    "quantia_frontend"
+  ],
+  "telegram_message_sent_during_validation": false
+}

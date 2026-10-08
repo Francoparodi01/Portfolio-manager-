@@ -1,0 +1,96 @@
+{
+  "schema": "telegram-contextual-shadow-real-audit-v1",
+  "result": "PASS",
+  "capture_id": "169c66eb-ba5f-45b0-9f4d-1b5cf8052b0a",
+  "run_id": "409da5c5-49af-45e0-a8a9-0d500277b78c",
+  "plan_id": "b4539d2a-f66a-4833-8b6c-d0757750b1e3",
+  "portfolio_snapshot_id": "043b3c1a-ac6f-4a6d-ad59-6c228e4a0dc6",
+  "code_version": "13160516920a0a5e4d8b336bd1bfef15c087e3a1",
+  "counts": {
+    "captured_observations": 2916,
+    "effective_unique_observations": 2904,
+    "linked_unique_observations": 2904,
+    "snapshot_links": 5494,
+    "contextual_snapshots": 11,
+    "excluded_open_observations": 12
+  },
+  "identity": {
+    "distinct_bar_identities": 2916,
+    "ambiguous_bar_identities": 0
+  },
+  "pit": {
+    "cutoff": "2026-10-08T02:39:08.702030+00:00",
+    "violations": {
+      "candle_after_cutoff": 0,
+      "bar_end_after_cutoff": 0,
+      "available_after_cutoff": 0,
+      "scraped_after_cutoff": 0,
+      "open_bar_linked": 0
+    },
+    "no_lookahead": true,
+    "payload_ids_equal_effective_ids": true,
+    "linked_ids_equal_effective_ids": true
+  },
+  "digests": {
+    "all_observation_digests_valid": true,
+    "inputs_hash_recorded": "a1ddfdf9d0cfeb38e6f672cafabf3426f35a2d32adf8f658fe63bab85c577a15",
+    "inputs_hash_rebuilt": "a1ddfdf9d0cfeb38e6f672cafabf3426f35a2d32adf8f658fe63bab85c577a15",
+    "inputs_hash_match": true,
+    "snapshot_hashes_match": true
+  },
+  "lifecycle": {
+    "169c66eb-ba5f-45b0-9f4d-1b5cf8052b0a": [
+      "STARTED",
+      "COMPLETE"
+    ],
+    "409da5c5-49af-45e0-a8a9-0d500277b78c": [
+      "STARTED",
+      "COMPLETE"
+    ]
+  },
+  "plan_envelope": {
+    "source": "execution_plan",
+    "authority_mode": "SHADOW_ONLY",
+    "gate": "SHADOW_ONLY",
+    "feasible": false,
+    "affects_analysis": false,
+    "affects_execution": false,
+    "order_intents": 0,
+    "decision_log_rows": 0,
+    "cash_unchanged": true,
+    "zero_notional": true
+  },
+  "telegram": {
+    "full_html_valid": true,
+    "full_html_errors": [],
+    "utf8_bytes": 9533,
+    "characters": 9096,
+    "chunk_count": 3,
+    "max_chunk_characters": 3878,
+    "chunks_within_telegram_limit": true,
+    "all_chunks_html_valid": true,
+    "chunk_errors": {},
+    "message_sent_by_smoke": false
+  },
+  "non_regression": {
+    "scores": true,
+    "signals": true,
+    "decisions": true,
+    "order_intents": true,
+    "quantities": true,
+    "cash": true
+  },
+  "unknown_preserved": [
+    "SECTOR_BENCHMARK_NOT_CONFIGURED",
+    "VOLUME_UNIT_UNKNOWN",
+    "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+    "DEPOSITARY_RATIO_UNKNOWN"
+  ],
+  "prior_failed_capture_preserved": true,
+  "read_only": true,
+  "audit_correction": {
+    "classification": "VALIDATOR_WRAPPER_BUG",
+    "detail": "The first wrapper compared validate_telegram_html tuple to None. The validator returns (bool, errors). Full output and every split chunk validate.",
+    "product_code_changed": false
+  }
+}

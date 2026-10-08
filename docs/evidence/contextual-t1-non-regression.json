@@ -1,0 +1,28 @@
+{
+  "schema": "telegram-contextual-shadow-non-regression-v1",
+  "result": "PASS",
+  "capture_id": "169c66eb-ba5f-45b0-9f4d-1b5cf8052b0a",
+  "run_id": "409da5c5-49af-45e0-a8a9-0d500277b78c",
+  "plan_id": "b4539d2a-f66a-4833-8b6c-d0757750b1e3",
+  "code_version": "13160516920a0a5e4d8b336bd1bfef15c087e3a1",
+  "productive_view_hash_before_context": "1f0f87096c301cf5f57a59529cfedb48434c212f30cf02c1fb56e3d6b8a6ac80",
+  "productive_view_hash_after_context": "1f0f87096c301cf5f57a59529cfedb48434c212f30cf02c1fb56e3d6b8a6ac80",
+  "checks": {
+    "scores": true,
+    "signals": true,
+    "decisions": true,
+    "order_intents": true,
+    "quantities": true,
+    "cash": true
+  },
+  "mode": "SHADOW_ONLY",
+  "affects_analysis": false,
+  "affects_execution": false,
+  "broker_order_api_calls": 0,
+  "broker_orders_executed": 0,
+  "decision_log_writes": 0,
+  "order_intent_writes": 0,
+  "productive_plan_persisted": false,
+  "cash_before": 9797.0,
+  "cash_after": 1124265.0
+}

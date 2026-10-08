@@ -1,0 +1,758 @@
+{
+  "schema": "telegram-contextual-shadow-real-capture-v1",
+  "result": "PASS",
+  "mode": "SHADOW_ONLY",
+  "affects_analysis": false,
+  "affects_execution": false,
+  "capture_id": "169c66eb-ba5f-45b0-9f4d-1b5cf8052b0a",
+  "run_id": "409da5c5-49af-45e0-a8a9-0d500277b78c",
+  "plan_id": "b4539d2a-f66a-4833-8b6c-d0757750b1e3",
+  "portfolio_snapshot_id": "043b3c1a-ac6f-4a6d-ad59-6c228e4a0dc6",
+  "contextual_snapshot_ids": [
+    "context:ed0d64979d3ff94ac69e772d",
+    "context:8357265175ad1624cbfbef10",
+    "context:71d84148cfa7efee0258b9e8",
+    "context:5871e25408fa6baace39bf18",
+    "context:73605fae6693d42535898fe0",
+    "context:4cb2910e6e7c8a2da8a40dc4",
+    "context:a646e4f5f9945f507e1e57ed",
+    "context:88c1abde44ce80788778123f",
+    "context:3741a97d7b8b659f025e96ab",
+    "context:ca341b457c7d17fe6b478771",
+    "context:e3c75caf048a0bf016e47f7e"
+  ],
+  "owner": 1259412316,
+  "cutoff": "2026-10-08T02:39:08.702030+00:00",
+  "code_version": "13160516920a0a5e4d8b336bd1bfef15c087e3a1",
+  "portfolio_value_ars": 3505021.6599095426,
+  "cash_ars": 9796.6599095428,
+  "captured_observation_count": 2916,
+  "effective_observation_count": 2904,
+  "excluded_open_observation_count": 12,
+  "observation_ids_hash": "742194df7b8d77477b21fc1436dd0f48b0b38967cb1ab449371a674404feacc4",
+  "inputs_hash": "a1ddfdf9d0cfeb38e6f672cafabf3426f35a2d32adf8f658fe63bab85c577a15",
+  "exact_observation_linkage": {
+    "registered": true,
+    "authoritative_tables": [
+      "market_candle_observations",
+      "contextual_snapshot_candles"
+    ],
+    "runtime_artifact_contains_all_effective_observation_ids": true,
+    "database_contains_observation_digest_per_id": true
+  },
+  "snapshot_hashes": {
+    "NVDA": "579c45747f4e08798aad2524f617070cae4ac3f4646d2b845029500e3d7fbed1",
+    "AMD": "1b3902127e1d9e893b19760c339fb32e906639101be22715a079a26c128ae4ef",
+    "MU": "090f2fd9d7882a20eab5193e4066a1f5952ed7e258d95e5a1d21fb31b6cbda66",
+    "VIST": "cd35fb82a84e13cad5915112a14a375e9a04827bd5ad16108a696aac05d007e7",
+    "IREN": "17d9427649a71e7b3504a18f68d490a9cf63153450036b4881785f82f40ff34d",
+    "GDX": "7a29148856d62510b7c025426c399ce770cfa46f31bae09bb42cebbbb1fb9078",
+    "SNDK": "21873718b2e13b1e899065997c6871a94f5fb58fbbbb0a944670fb20f745d0fc",
+    "AVGO": "522bc416fe31fd6013efac01b4eb08c8d20fb0e76b36b5a71ea56f870f3c20e3",
+    "MSFT": "0d2b19f6d86583d25a597ec0b7a3354f6c8385b3b5eff05992b429a91aa503d5",
+    "TQQQ": "2b313e1ab515257c6d55a8ab963e373710b7c140c076ef53b466510695105a0c",
+    "YPFD": "896cbb5de62e330fefc79c2383c9cd7e084af8c389a786944b3d3dc0b4cfd8a8"
+  },
+  "context_confidence": "HIGH",
+  "context_confidence_value": 0.9818181818181819,
+  "assets": [
+    {
+      "ticker": "NVDA",
+      "productive_action": "WATCH",
+      "signal": "HOLD",
+      "score": 0.053,
+      "conviction": 0.3333,
+      "feature_snapshot_v3_id": "features:0f4bc0ba5cafbcd3",
+      "contextual_snapshot_id": "context:ed0d64979d3ff94ac69e772d",
+      "contextual_snapshot_hash": "579c45747f4e08798aad2524f617070cae4ac3f4646d2b845029500e3d7fbed1",
+      "trend_daily": "UPTREND",
+      "trend_weekly": "UPTREND",
+      "rvol": 2.8556948939392734,
+      "volume_state": "EXPANSION",
+      "breakout_state": "IN_RANGE",
+      "rs20_status": "VALID",
+      "rs20": 0.04430014788591974,
+      "rs60_status": "VALID",
+      "rs60": 0.1296997695154105,
+      "rs120_status": "VALID",
+      "rs120": 0.08997084138559508,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "PASS",
+          "reason": "RS20_NOT_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "PASS",
+          "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "AMD",
+      "productive_action": "HOLD",
+      "signal": "HOLD",
+      "score": 0.0519,
+      "conviction": 0.5,
+      "feature_snapshot_v3_id": "features:0e1e3e9f23281adb",
+      "contextual_snapshot_id": "context:8357265175ad1624cbfbef10",
+      "contextual_snapshot_hash": "1b3902127e1d9e893b19760c339fb32e906639101be22715a079a26c128ae4ef",
+      "trend_daily": "UPTREND",
+      "trend_weekly": "UPTREND",
+      "rvol": 0.7636029856481119,
+      "volume_state": "NORMAL",
+      "breakout_state": "IN_RANGE",
+      "rs20_status": "VALID",
+      "rs20": 0.18830184552824591,
+      "rs60_status": "VALID",
+      "rs60": 0.1012756826414698,
+      "rs120_status": "VALID",
+      "rs120": 1.1298084400716335,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "PASS",
+          "reason": "RS20_NOT_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "PASS",
+          "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "MU",
+      "productive_action": "SELL_PARTIAL",
+      "signal": "HOLD",
+      "score": -0.0635,
+      "conviction": 0.75,
+      "feature_snapshot_v3_id": "features:5b4cce5060ae2c82",
+      "contextual_snapshot_id": "context:71d84148cfa7efee0258b9e8",
+      "contextual_snapshot_hash": "090f2fd9d7882a20eab5193e4066a1f5952ed7e258d95e5a1d21fb31b6cbda66",
+      "trend_daily": "UPTREND",
+      "trend_weekly": "MIXED",
+      "rvol": 0.6987301500913992,
+      "volume_state": "CONTRACTION",
+      "breakout_state": "IN_RANGE",
+      "rs20_status": "VALID",
+      "rs20": 0.03106730900427168,
+      "rs60_status": "VALID",
+      "rs60": 0.07520320308437456,
+      "rs120_status": "VALID",
+      "rs120": 1.0182795944495258,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "PASS",
+          "reason": "RS20_NOT_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "PASS",
+          "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "VIST",
+      "productive_action": "WATCH",
+      "signal": "HOLD",
+      "score": 0.0649,
+      "conviction": 0.5,
+      "feature_snapshot_v3_id": "features:a378d96da2a6ca03",
+      "contextual_snapshot_id": "context:5871e25408fa6baace39bf18",
+      "contextual_snapshot_hash": "cd35fb82a84e13cad5915112a14a375e9a04827bd5ad16108a696aac05d007e7",
+      "trend_daily": "DOWNTREND",
+      "trend_weekly": "MIXED",
+      "rvol": 0.9316076574157776,
+      "volume_state": "NORMAL",
+      "breakout_state": "IN_RANGE",
+      "rs20_status": "VALID",
+      "rs20": -0.14083524379047996,
+      "rs60_status": "VALID",
+      "rs60": -0.02582957712651568,
+      "rs120_status": "VALID",
+      "rs120": -0.0872515170776541,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "FAIL",
+          "reason": "RS20_AND_RS60_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "PASS",
+          "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "IREN",
+      "productive_action": "SELL_PARTIAL",
+      "signal": "HOLD",
+      "score": -0.0751,
+      "conviction": 0.6667,
+      "feature_snapshot_v3_id": "features:03c5e0883b9b9d2c",
+      "contextual_snapshot_id": "context:73605fae6693d42535898fe0",
+      "contextual_snapshot_hash": "17d9427649a71e7b3504a18f68d490a9cf63153450036b4881785f82f40ff34d",
+      "trend_daily": "DOWNTREND",
+      "trend_weekly": "MIXED",
+      "rvol": 1.4453988829734388,
+      "volume_state": "NORMAL",
+      "breakout_state": "IN_RANGE",
+      "rs20_status": "VALID",
+      "rs20": -0.1304171673290816,
+      "rs60_status": "VALID",
+      "rs60": 0.01624760405608905,
+      "rs120_status": "VALID",
+      "rs120": -0.21854847235741182,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "WARN",
+          "reason": "RS20_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "PASS",
+          "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "GDX",
+      "productive_action": "HOLD",
+      "signal": "HOLD",
+      "score": 0.0124,
+      "conviction": 0.5,
+      "feature_snapshot_v3_id": "features:b3817d1cd23d9e45",
+      "contextual_snapshot_id": "context:4cb2910e6e7c8a2da8a40dc4",
+      "contextual_snapshot_hash": "7a29148856d62510b7c025426c399ce770cfa46f31bae09bb42cebbbb1fb9078",
+      "trend_daily": "MIXED",
+      "trend_weekly": "MIXED",
+      "rvol": 0.9237469903833067,
+      "volume_state": "NORMAL",
+      "breakout_state": "IN_RANGE",
+      "rs20_status": "VALID",
+      "rs20": -0.11778365694163451,
+      "rs60_status": "VALID",
+      "rs60": 0.15854241427494364,
+      "rs120_status": "VALID",
+      "rs120": -0.221307498968365,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "WARN",
+          "reason": "RS20_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "FAIL",
+          "reason": "PRICE_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "SNDK",
+      "productive_action": "SELL_PARTIAL",
+      "signal": "HOLD",
+      "score": -0.1151,
+      "conviction": 1.0,
+      "feature_snapshot_v3_id": "features:b4f0e403e6c9295b",
+      "contextual_snapshot_id": "context:a646e4f5f9945f507e1e57ed",
+      "contextual_snapshot_hash": "21873718b2e13b1e899065997c6871a94f5fb58fbbbb0a944670fb20f745d0fc",
+      "trend_daily": "MIXED",
+      "trend_weekly": "UNKNOWN",
+      "rvol": 1.119396404928649,
+      "volume_state": "NORMAL",
+      "breakout_state": "IN_RANGE",
+      "rs20_status": "VALID",
+      "rs20": -0.05643616996250134,
+      "rs60_status": "VALID",
+      "rs60": -0.044986475965744455,
+      "rs120_status": "UNKNOWN",
+      "rs120": null,
+      "context_confidence": {
+        "value": 0.8,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 4,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "FAIL",
+          "reason": "RS20_AND_RS60_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "FAIL",
+          "reason": "PRICE_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "AVGO",
+      "productive_action": "SELL_PARTIAL",
+      "signal": "HOLD",
+      "score": -0.112,
+      "conviction": 0.6667,
+      "feature_snapshot_v3_id": "features:5f587d6b57000291",
+      "contextual_snapshot_id": "context:88c1abde44ce80788778123f",
+      "contextual_snapshot_hash": "522bc416fe31fd6013efac01b4eb08c8d20fb0e76b36b5a71ea56f870f3c20e3",
+      "trend_daily": "MIXED",
+      "trend_weekly": "DOWNTREND",
+      "rvol": 3.5878167427802374,
+      "volume_state": "EXPANSION",
+      "breakout_state": "BREAKOUT_CONFIRMED",
+      "rs20_status": "VALID",
+      "rs20": 0.006610733603205965,
+      "rs60_status": "VALID",
+      "rs60": -0.057102409273832366,
+      "rs120_status": "VALID",
+      "rs120": -0.11744051536329925,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "PASS",
+          "reason": "RS20_NOT_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "PASS",
+          "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "MSFT",
+      "productive_action": "WATCH",
+      "signal": "HOLD",
+      "score": 0.0547,
+      "conviction": 0.5,
+      "feature_snapshot_v3_id": "features:a358e41ba67d113b",
+      "contextual_snapshot_id": "context:3741a97d7b8b659f025e96ab",
+      "contextual_snapshot_hash": "0d2b19f6d86583d25a597ec0b7a3354f6c8385b3b5eff05992b429a91aa503d5",
+      "trend_daily": "UPTREND",
+      "trend_weekly": "MIXED",
+      "rvol": 0.8603822932565729,
+      "volume_state": "NORMAL",
+      "breakout_state": "IN_RANGE",
+      "rs20_status": "VALID",
+      "rs20": 0.06191488518875521,
+      "rs60_status": "VALID",
+      "rs60": 0.3049829805317479,
+      "rs120_status": "VALID",
+      "rs120": 0.19824239197707727,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "PASS",
+          "reason": "RS20_NOT_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "PASS",
+          "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "TQQQ",
+      "productive_action": "HOLD",
+      "signal": "HOLD",
+      "score": -0.0326,
+      "conviction": 1.0,
+      "feature_snapshot_v3_id": "features:71e6c28348e57cd9",
+      "contextual_snapshot_id": "context:ca341b457c7d17fe6b478771",
+      "contextual_snapshot_hash": "2b313e1ab515257c6d55a8ab963e373710b7c140c076ef53b466510695105a0c",
+      "trend_daily": "MIXED",
+      "trend_weekly": "DOWNTREND",
+      "rvol": 0.9134510195722372,
+      "volume_state": "NORMAL",
+      "breakout_state": "BREAKOUT_WITHOUT_VOLUME",
+      "rs20_status": "VALID",
+      "rs20": 0.14600279249978665,
+      "rs60_status": "VALID",
+      "rs60": 0.10974880820265898,
+      "rs120_status": "VALID",
+      "rs120": 0.4085914115772191,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "FAIL",
+          "reason": "BREAKOUT_WITHOUT_VOLUME"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "PASS",
+          "reason": "RS20_NOT_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "PASS",
+          "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    },
+    {
+      "ticker": "YPFD",
+      "productive_action": "SELL_PARTIAL",
+      "signal": "HOLD",
+      "score": -0.1007,
+      "conviction": 0.6667,
+      "feature_snapshot_v3_id": "features:3b9e417901348a33",
+      "contextual_snapshot_id": "context:e3c75caf048a0bf016e47f7e",
+      "contextual_snapshot_hash": "896cbb5de62e330fefc79c2383c9cd7e084af8c389a786944b3d3dc0b4cfd8a8",
+      "trend_daily": "DOWNTREND",
+      "trend_weekly": "UPTREND",
+      "rvol": 0.6375648297165377,
+      "volume_state": "CONTRACTION",
+      "breakout_state": "IN_RANGE",
+      "rs20_status": "VALID",
+      "rs20": -0.05130053840146631,
+      "rs60_status": "VALID",
+      "rs60": 0.0009080814296882345,
+      "rs120_status": "VALID",
+      "rs120": 0.07921262799416517,
+      "context_confidence": {
+        "value": 1.0,
+        "status": "HIGH",
+        "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
+        "components_available": 5,
+        "components_required": 5
+      },
+      "invalidators": [
+        {
+          "code": "BREAKOUT_VOLUME",
+          "status": "PASS",
+          "reason": "NO_UNCONFIRMED_BREAKOUT"
+        },
+        {
+          "code": "BUY_WEEKLY_STRUCTURE",
+          "status": "PASS",
+          "reason": "SIGNAL_IS_NOT_BUY"
+        },
+        {
+          "code": "RELATIVE_STRENGTH",
+          "status": "WARN",
+          "reason": "RS20_DETERIORATING"
+        },
+        {
+          "code": "STRUCTURAL_SUPPORT",
+          "status": "PASS",
+          "reason": "PRICE_NOT_BELOW_STRUCTURAL_SUPPORT"
+        },
+        {
+          "code": "VOLUME_CONFIRMATION",
+          "status": "PASS",
+          "reason": "NO_BUY_VOLUME_WARNING"
+        }
+      ],
+      "missingness": [
+        "DEPOSITARY_RATIO_UNKNOWN",
+        "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+        "SECTOR_BENCHMARK_NOT_CONFIGURED",
+        "VOLUME_UNIT_UNKNOWN"
+      ]
+    }
+  ],
+  "unknown_preserved": [
+    "SECTOR_BENCHMARK_NOT_CONFIGURED",
+    "VOLUME_UNIT_UNKNOWN",
+    "EXCHANGE_CALENDAR_VERSION_UNKNOWN",
+    "DEPOSITARY_RATIO_UNKNOWN"
+  ],
+  "safety": {
+    "broker_order_api_calls": 0,
+    "broker_orders_executed": 0,
+    "decision_log_writes": 0,
+    "order_intent_writes": 0,
+    "productive_plan_persisted": false,
+    "shadow_plan_source": "execution_plan",
+    "shadow_plan_authority_mode": "SHADOW_ONLY",
+    "shadow_plan_feasible": false,
+    "shadow_plan_payload_version": "execution-plan-v2-immutable"
+  },
+  "lifecycle": {
+    "market_capture": [
+      "STARTED",
+      "COMPLETE"
+    ],
+    "analysis_run": [
+      "STARTED",
+      "COMPLETE"
+    ]
+  }
+}
