@@ -1,0 +1,158 @@
+{
+  "schema": "historical-contextual-replay-evidence-v1",
+  "captured_at": "2026-10-08T04:40:13Z",
+  "run": {
+    "run_id": "6075b63f-1a94-4c40-a828-f47be487ef14",
+    "reconstruction_id": "679932e9-6ce8-553b-b096-e6be28377316",
+    "code_version": "af4cfba22f992af1d7942ca04671616a9deb3776",
+    "content_hash": "77aea46b4440842c332bd029d0391db748eef3a0fe1ecd7c31df56bea8686a18",
+    "window_start": "2026-07-01",
+    "window_end": "2026-10-07",
+    "owner_scoped": true,
+    "data_status": "RETROSPECTIVE_MARKET_HISTORY_NOT_PIT",
+    "mode": "SHADOW_ONLY",
+    "affects_analysis": false,
+    "affects_execution": false,
+    "lifecycle": [
+      {
+        "status": "STARTED",
+        "occurred_at": "2026-10-08T04:36:14.150172Z"
+      },
+      {
+        "status": "COMPLETE",
+        "occurred_at": "2026-10-08T04:36:18.485797Z"
+      }
+    ]
+  },
+  "source": {
+    "canonical_sha256": "16c40a9db087b0e68afb185fdfd86aa7694e345b443e390f245f78cfaa7eeabd",
+    "events_sha256": "4090ab5d4f25b4ca6cda71bb16b7ad79a9e835d700c9586efbaabcdb70787830",
+    "market_table": "market_candles",
+    "market_query_read_only": true,
+    "market_rows_read": 16182,
+    "primary_series_policy": "TRADINGVIEW_BYMA per ticker; no provider-series merge"
+  },
+  "coverage": {
+    "canonical_rows": 1088,
+    "persisted_positions": 1088,
+    "persisted_events": 134,
+    "persisted_results": 1088,
+    "complete_rows": 1048,
+    "metric_eligible_rows": 762,
+    "evaluated_5d_rows": 701,
+    "observed_dates": 93,
+    "market_sessions": 69,
+    "tickers_preserved": 33,
+    "tickers_analyzed": 32,
+    "analysis_status": {
+      "COMPLETE": 1048,
+      "EXCLUDED_NON_SECURITY_LABEL": 16,
+      "INSUFFICIENT_TECHNICAL_HISTORY": 24
+    },
+    "outcome_5d_status": {
+      "EVALUATED": 701,
+      "IMMATURE": 58,
+      "MISSING_EXACT_SESSION_PRICE": 3
+    }
+  },
+  "baseline_analysis_5d": {
+    "all_directional_or_hold": {
+      "n": 701,
+      "mean": 0.0011928899241142384,
+      "median": -0.001890359168241984,
+      "positive_rate": 0.48074179743223966
+    },
+    "action_only_buy_sell": {
+      "n": 152,
+      "mean": 0.0021324903183974355,
+      "median": 0.0018459120719914734,
+      "positive_rate": 0.506578947368421
+    },
+    "by_signal": {
+      "BUY": {
+        "n": 129,
+        "mean": -0.00039558982046017637,
+        "positive_rate": 0.49612403100775193
+      },
+      "SELL_AVOIDANCE": {
+        "n": 23,
+        "mean": 0.016311722401555345,
+        "positive_rate": 0.5652173913043478
+      },
+      "HOLD_EXPOSURE": {
+        "n": 549,
+        "mean": 0.0009327455526551381,
+        "positive_rate": 0.47358834244080145
+      }
+    }
+  },
+  "contextual_shadow_5d": {
+    "PASS": {
+      "n": 280,
+      "mean_asset_return": 0.0014951944801478041,
+      "positive_rate": 0.46785714285714286
+    },
+    "WARN": {
+      "n": 174,
+      "mean_asset_return": -0.010197952953574223,
+      "positive_rate": 0.41954022988505746
+    },
+    "FAIL": {
+      "n": 244,
+      "mean_asset_return": 0.006079588399941086,
+      "positive_rate": 0.5286885245901639
+    },
+    "UNKNOWN": {
+      "n": 3,
+      "mean_asset_return": -0.013917867924186736,
+      "positive_rate": 0.3333333333333333
+    },
+    "decision_uplift_measurable": false,
+    "reason": "The contextual layer is descriptive SHADOW_ONLY and preserves the baseline signal."
+  },
+  "non_regression": {
+    "scores_equal": true,
+    "signals_equal": true,
+    "signal_changes": 0,
+    "score_change_contract_failures": 0,
+    "decisions_changed": 0,
+    "orders_created": 0,
+    "quantities_changed": 0,
+    "cash_changed": false,
+    "authority_contract_failures": 0
+  },
+  "reconstruction_checks": {
+    "ypfd_2026_08_03": "CORPORATE_ACTION_SPLIT",
+    "ypfd_split_confidence": "MEDIUM",
+    "non_security_labels_preserved_and_excluded": true,
+    "duplicate_ticker_market_sessions_preserved_but_not_double_counted": 286
+  },
+  "migration_validation": {
+    "disposable_timescaledb": "PASS",
+    "applied_twice": true,
+    "additive_objects": 7,
+    "append_only_triggers": 12,
+    "update_blocked": true,
+    "delete_blocked": true,
+    "truncate_blocked": true,
+    "result_after_terminal_blocked": true,
+    "invalid_result_hashes": 0
+  },
+  "dashboard": {
+    "api_path": "/api/historical-contextual-replay",
+    "page_path": "/replay-historico",
+    "api_live_check": "PASS",
+    "frontend_live_check": "PASS",
+    "production_services_changed": [
+      "monitor_api",
+      "frontend"
+    ]
+  },
+  "limitations": [
+    "Historical candles were often ingested after the dates they describe, so the replay is not PIT eligible.",
+    "The current technical and contextual code was replayed; historical code/configuration vintages were not available.",
+    "Historical macro, sentiment, optimizer and planner were not replayed.",
+    "Outcomes exclude fees, taxes, dividends and external cash flows and are not realized account PnL.",
+    "Five-session windows overlap and must not be treated as independent trades."
+  ]
+}
