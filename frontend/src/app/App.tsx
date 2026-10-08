@@ -11,6 +11,7 @@ const AnalysisPage = lazy(() => import("../pages/AnalysisPage"));
 const OpportunitiesPage = lazy(() => import("../pages/OpportunitiesPage"));
 const DecisionsPage = lazy(() => import("../pages/DecisionsPage"));
 const PerformancePage = lazy(() => import("../pages/PerformancePage"));
+const HistoricalReplayPage = lazy(() => import("../pages/HistoricalReplayPage"));
 const HumanBenchmarkPage = lazy(() => import("../pages/HumanBenchmarkPage"));
 const AuditPage = lazy(() => import("../pages/AuditPage"));
 const DataPage = lazy(() => import("../pages/DataPage"));
@@ -29,6 +30,7 @@ export default function App() {
           <Route element={<OpportunitiesPage />} path="/oportunidades" />
           <Route element={<DecisionsPage />} path="/decisiones" />
           <Route element={<PerformancePage />} path="/performance" />
+          <Route element={<HistoricalReplayPage />} path="/replay-historico" />
           <Route element={<HumanBenchmarkPage />} path="/bot-vs-humano" />
           <Route element={<AuditPage />} path="/auditoria" />
           <Route element={<DataPage />} path="/datos" />

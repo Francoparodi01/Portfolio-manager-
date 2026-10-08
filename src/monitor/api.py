@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
 import re
 import time as time_module
@@ -252,6 +253,17 @@ def _float(value, default: float = 0.0) -> float:
             return default
         return float(value)
     except Exception:
+        return default
+
+
+def _json_value(value, default):
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
         return default
 
 
@@ -3089,6 +3101,133 @@ async def shadow_view(request: web.Request) -> web.Response:
     })
 
 
+async def historical_contextual_replay_view(request: web.Request) -> web.Response:
+    """Latest immutable historical holdings replay, kept outside live metrics."""
+    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    owner_raw = request.query.get("owner_chat_id") or configured_owner
+    try:
+        owner_chat_id = int(owner_raw) if owner_raw else None
+    except (TypeError, ValueError):
+        return _json({"ok": False, "error": "owner_chat_id invalido"}, status=400)
+    if owner_chat_id is None:
+        return _json({"ok": False, "error": "owner_chat_id requerido"}, status=400)
+
+    empty = {
+        "ok": True,
+        "available": False,
+        "owner_chat_id": owner_chat_id,
+        "run": None,
+        "reconstruction": None,
+        "summary": {},
+        "rows": [],
+    }
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        schema_ready = await conn.fetchval(
+            """
+            SELECT
+                to_regclass('public.historical_portfolio_reconstructions') IS NOT NULL
+                AND to_regclass('public.historical_portfolio_reconstruction_positions') IS NOT NULL
+                AND to_regclass('public.historical_contextual_replay_runs') IS NOT NULL
+                AND to_regclass('public.historical_contextual_replay_run_events') IS NOT NULL
+                AND to_regclass('public.historical_contextual_replay_results') IS NOT NULL
+                AND to_regclass('public.historical_contextual_replay_state') IS NOT NULL
+            """
+        )
+        if not schema_ready:
+            return _json({
+                **empty,
+                "note": "El replay historico contextual todavia no fue inicializado.",
+            })
+
+        latest_run = await conn.fetchrow(
+            """
+            SELECT
+                run.run_id, run.reconstruction_id, run.owner_chat_id,
+                run.evaluated_at, run.window_start, run.window_end,
+                run.code_version, run.method_version, run.data_status,
+                run.mode, run.affects_analysis, run.affects_execution,
+                run.summary, run.content_hash, state.status,
+                state.occurred_at AS completed_at
+            FROM historical_contextual_replay_runs run
+            JOIN historical_contextual_replay_state state USING (run_id)
+            WHERE run.owner_chat_id = $1
+              AND state.status = 'COMPLETE'
+            ORDER BY state.occurred_at DESC, run.created_at DESC
+            LIMIT 1
+            """,
+            owner_chat_id,
+        )
+        if not latest_run:
+            return _json({
+                **empty,
+                "note": "No hay un replay historico COMPLETE para este owner.",
+            })
+
+        reconstruction = await conn.fetchrow(
+            """
+            SELECT
+                reconstruction.reconstruction_id,
+                reconstruction.window_start, reconstruction.window_end,
+                reconstruction.canonical_rows, reconstruction.canonical_sha256,
+                reconstruction.events_sha256, reconstruction.content_hash,
+                reconstruction.code_version, reconstruction.created_at,
+                COUNT(position.*)::integer AS persisted_positions,
+                COUNT(DISTINCT position.observed_date)::integer AS observed_dates,
+                COUNT(DISTINCT position.ticker)::integer AS tickers
+            FROM historical_portfolio_reconstructions reconstruction
+            LEFT JOIN historical_portfolio_reconstruction_positions position
+              ON position.reconstruction_id = reconstruction.reconstruction_id
+            WHERE reconstruction.reconstruction_id = $1
+            GROUP BY reconstruction.reconstruction_id
+            """,
+            latest_run["reconstruction_id"],
+        )
+        rows = await conn.fetch(
+            """
+            SELECT
+                observed_date, ticker, market_session, portfolio_snapshot_id,
+                analysis_status, metric_eligible, metric_exclusion_reason,
+                portfolio_confidence, old_signal, old_score_raw, old_strength,
+                new_signal, context_severity, context_confidence,
+                context_confidence_value, asset_return_5d,
+                directional_or_hold_return_5d, outcome_5d_status,
+                asset_return_10d, directional_or_hold_return_10d,
+                outcome_10d_status, asset_return_20d,
+                directional_or_hold_return_20d, outcome_20d_status
+            FROM historical_contextual_replay_results
+            WHERE run_id = $1
+            ORDER BY observed_date DESC, ticker
+            LIMIT 1500
+            """,
+            latest_run["run_id"],
+        )
+
+    run_payload = _row(latest_run)
+    run_payload["summary"] = _json_value(latest_run["summary"], {})
+    return _json({
+        "ok": True,
+        "available": True,
+        "owner_chat_id": owner_chat_id,
+        "run": run_payload,
+        "reconstruction": _row(reconstruction),
+        "summary": run_payload["summary"],
+        "rows": [_row(row) for row in rows],
+        "boundary": {
+            "evidence": "RETROSPECTIVE_MARKET_HISTORY_NOT_PIT",
+            "mode": "SHADOW_ONLY",
+            "affects_analysis": False,
+            "affects_execution": False,
+            "outcomes_are_realized_pnl": False,
+            "old_and_new_signals_are_identical": True,
+        },
+        "note": (
+            "Replay retrospectivo del codigo actual sobre tenencias observadas. "
+            "No reconstruye una corrida PIT ni modifica decisiones u ordenes."
+        ),
+    })
+
+
 async def shadow_calibration_view(request: web.Request) -> web.Response:
     """Read-only v3 calibration gates and out-of-sample evidence."""
     try:
@@ -3343,6 +3482,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/decisions", decisions)
     app.router.add_get("/api/portfolio", portfolio_view)
     app.router.add_get("/api/performance", performance_view)
+    app.router.add_get("/api/historical-contextual-replay", historical_contextual_replay_view)
     app.router.add_get("/api/override-audit", override_audit)
     app.router.add_get("/api/decision-ledger", decision_ledger)
     app.router.add_get("/api/audit-timeline", audit_timeline)

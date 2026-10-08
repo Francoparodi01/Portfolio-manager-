@@ -11,6 +11,7 @@ import type {
   DecisionsPayload,
   FillsPayload,
   HealthPayload,
+  HistoricalReplayPayload,
   HumanActivityPayload,
   IngestionPayload,
   LogsPayload,
@@ -53,6 +54,7 @@ export const useShadowQuery = () => useMonitorQuery<ShadowPayload>("shadow", mon
 export const useShadowCalibrationQuery = () => useMonitorQuery<ShadowCalibrationPayload>("calibration", monitorApi.calibration);
 export const useLearningShadowQuery = (days = 365) => useMonitorQuery<LearningShadowPayload>("learning", (session) => monitorApi.learning(session, days), [days]);
 export const useLogsQuery = () => useMonitorQuery<LogsPayload>("logs", monitorApi.logs);
+export const useHistoricalReplayQuery = () => useMonitorQuery<HistoricalReplayPayload>("historical-replay", monitorApi.historicalReplay);
 
 export function usePortfolioQuery(days = 90) {
   return useMonitorQuery<PortfolioPayload>("portfolio", (session) => monitorApi.portfolio(session, days), [days]);

@@ -407,6 +407,30 @@ def _invalidators(signal_action: str, daily: Mapping[str, Any], weekly: Mapping[
     return result
 
 
+def evaluate_contextual_invalidators(
+    signal_action: str,
+    daily: Mapping[str, Any],
+    weekly: Mapping[str, Any],
+    volume: Mapping[str, Any],
+    breakout: Mapping[str, Any],
+    relative: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Expose the shared E2 invalidator contract to read-only replay tooling.
+
+    The wrapper deliberately returns the same descriptive PASS/WARN/FAIL/UNKNOWN
+    records used by ``build_contextual_snapshot``.  It does not derive a score,
+    change a signal or grant execution authority.
+    """
+    return _invalidators(
+        signal_action,
+        daily,
+        weekly,
+        volume,
+        breakout,
+        relative,
+    )
+
+
 def build_contextual_snapshot(
     asset_frame: pd.DataFrame,
     *,
@@ -469,7 +493,14 @@ def build_contextual_snapshot(
         "definition": "available_required_components / 5; descriptive coverage, not directional conviction",
         "components_available": sum(coverage), "components_required": len(coverage),
     }
-    invalidators = _invalidators(signal_action, daily, weekly, volume, breakout, relative)
+    invalidators = evaluate_contextual_invalidators(
+        signal_action,
+        daily,
+        weekly,
+        volume,
+        breakout,
+        relative,
+    )
     quality = frame_quality(asset, cutoff=cutoff_ts) if len(asset) else {
         "version": "contextual-e1-v1", "price_status": "INVALID",
         "volume_status": "PARTIAL", "provenance_status": "PARTIAL",
@@ -565,6 +596,7 @@ __all__ = [
     "BREAKOUT_CONFIRMATION_RVOL", "CONTEXTUAL_MARKET_VERSION",
     "CONTEXTUAL_SNAPSHOT_SCHEMA", "ContextIdentityError", "ContextualSnapshot",
     "attach_contextual_shadow", "breakout_context", "build_contextual_snapshot",
+    "evaluate_contextual_invalidators",
     "market_structure", "relative_strength", "render_contextual_diagnostic",
     "rvol_context", "weekly_bars",
 ]

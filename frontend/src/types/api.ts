@@ -17,6 +17,7 @@ export type EndpointKey =
   | "decisions"
   | "portfolio"
   | "performance"
+  | "historical-replay"
   | "override"
   | "ledger"
   | "timeline"
@@ -95,6 +96,18 @@ export type PerformancePayload = {
   evitable_loss?: RowRecord;
   bot_prediction_recent?: RowRecord[];
   performance_recent?: RowRecord[];
+};
+
+export type HistoricalReplayPayload = {
+  ok: boolean;
+  available: boolean;
+  owner_chat_id?: number;
+  note?: string;
+  run?: RowRecord | null;
+  reconstruction?: RowRecord | null;
+  summary?: RowRecord;
+  rows?: RowRecord[];
+  boundary?: RowRecord;
 };
 
 export type OverrideAuditPayload = {

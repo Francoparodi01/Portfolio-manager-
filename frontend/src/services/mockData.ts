@@ -4,6 +4,7 @@ import type {
   DecisionsPayload,
   FillsPayload,
   HealthPayload,
+  HistoricalReplayPayload,
   HumanActivityPayload,
   IngestionPayload,
   LogsPayload,
@@ -306,6 +307,66 @@ export const demoTimeline: AuditTimelinePayload = {
   summary: { event_count: 5, gaps: ["missing_decision_link", "missing_order_id"], tickers: ["V"] },
 };
 
+export const demoHistoricalReplay: HistoricalReplayPayload = {
+  available: true,
+  boundary: {
+    affects_analysis: false,
+    affects_execution: false,
+    evidence: "RETROSPECTIVE_MARKET_HISTORY_NOT_PIT",
+    mode: "SHADOW_ONLY",
+    outcomes_are_realized_pnl: false,
+  },
+  note: "Replay retrospectivo del codigo actual sobre tenencias observadas.",
+  ok: true,
+  reconstruction: {
+    canonical_rows: 1088,
+    observed_dates: 93,
+    persisted_positions: 1088,
+    tickers: 33,
+    window_end: "2026-10-07",
+    window_start: "2026-07-01",
+  },
+  rows: [
+    { observed_date: "2026-09-30", ticker: "IREN", old_signal: "SELL", new_signal: "SELL", old_score_raw: -4.2, context_severity: "FAIL", context_confidence: "HIGH", asset_return_5d: -0.028, directional_or_hold_return_5d: 0.028, outcome_5d_status: "EVALUATED", metric_eligible: true },
+    { observed_date: "2026-09-30", ticker: "SPY", old_signal: "HOLD", new_signal: "HOLD", old_score_raw: 0.4, context_severity: "PASS", context_confidence: "HIGH", asset_return_5d: 0.011, directional_or_hold_return_5d: 0.011, outcome_5d_status: "EVALUATED", metric_eligible: true },
+  ],
+  run: {
+    code_version: "demo",
+    completed_at: now(),
+    data_status: "RETROSPECTIVE_MARKET_HISTORY_NOT_PIT",
+    mode: "SHADOW_ONLY",
+    run_id: "demo-historical-replay",
+    status: "COMPLETE",
+  },
+  summary: {
+    contextual_analysis: {
+      by_severity: {
+        FAIL: { asset_return: { mean: 0.0061, n: 244, positive_rate: 0.529 } },
+        PASS: { asset_return: { mean: 0.0015, n: 280, positive_rate: 0.468 } },
+        UNKNOWN: { asset_return: { mean: -0.0139, n: 3, positive_rate: 0.333 } },
+        WARN: { asset_return: { mean: -0.0102, n: 174, positive_rate: 0.42 } },
+      },
+    },
+    daily_static_hold_5d: [
+      { market_session: "2026-07-01", static_hold_return_5d: -0.0917 },
+      { market_session: "2026-08-03", static_hold_return_5d: 0.0285 },
+      { market_session: "2026-09-15", static_hold_return_5d: 0.0817 },
+      { market_session: "2026-09-30", static_hold_return_5d: 0.0134 },
+    ],
+    non_regression: { cash_changed: false, decisions_changed: 0, orders_created: 0, scores_equal: true, signals_equal: true },
+    old_analysis: {
+      action_only_directional_5d: { mean: 0.0021, n: 152, positive_rate: 0.507 },
+      all_directional_or_hold_5d: { mean: 0.0012, n: 701, positive_rate: 0.481 },
+      by_signal: {
+        BUY: { directional_or_hold: { mean: -0.0004, n: 129, positive_rate: 0.496 } },
+        HOLD: { directional_or_hold: { mean: 0.0009, n: 549, positive_rate: 0.474 } },
+        SELL: { directional_or_hold: { mean: 0.0163, n: 23, positive_rate: 0.565 } },
+      },
+    },
+    population: { canonical_rows: 1088, evaluated_5d_rows: 701, metric_eligible_rows: 762 },
+  },
+};
+
 export function demoPayloadFor(key: string): unknown {
   return {
     candles: demoCandles,
@@ -314,6 +375,7 @@ export function demoPayloadFor(key: string): unknown {
     fills: demoFills,
     health: demoHealth,
     human: demoHuman,
+    "historical-replay": demoHistoricalReplay,
     ingestion: demoIngestion,
     ledger: demoLedger,
     learning: demoLearningShadow,

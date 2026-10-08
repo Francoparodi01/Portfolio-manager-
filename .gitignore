@@ -118,3 +118,4 @@ output/contextual-e2/
 !tests/test_contextual_e1.py
 !tests/test_contextual_g1_postgres.py
 !tests/test_contextual_e2.py
+!tests/test_historical_contextual_replay.py
