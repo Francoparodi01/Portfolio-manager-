@@ -3202,9 +3202,78 @@ async def historical_contextual_replay_view(request: web.Request) -> web.Respons
             """,
             latest_run["run_id"],
         )
+        full_run = None
+        full_days = []
+        full_decisions = []
+        full_schema_ready = await conn.fetchval(
+            """
+            SELECT
+                to_regclass('public.historical_analysis_replay_runs') IS NOT NULL
+                AND to_regclass('public.historical_analysis_replay_days') IS NOT NULL
+                AND to_regclass('public.historical_analysis_replay_decisions') IS NOT NULL
+                AND to_regclass('public.historical_analysis_replay_state') IS NOT NULL
+            """
+        )
+        if full_schema_ready:
+            full_run = await conn.fetchrow(
+                """
+                SELECT run.run_id, run.reconstruction_id,
+                       run.parent_contextual_run_id, run.owner_chat_id,
+                       run.evaluated_at, run.window_start, run.window_end,
+                       run.code_version, run.method_version, run.data_status,
+                       run.mode, run.affects_analysis, run.affects_execution,
+                       run.orders_executable, run.summary, run.content_hash,
+                       state.status, state.occurred_at AS completed_at
+                FROM historical_analysis_replay_runs run
+                JOIN historical_analysis_replay_state state USING (run_id)
+                WHERE run.owner_chat_id=$1 AND state.status='COMPLETE'
+                ORDER BY state.occurred_at DESC, run.created_at DESC
+                LIMIT 1
+                """,
+                owner_chat_id,
+            )
+            if full_run:
+                full_days = await conn.fetch(
+                    """
+                    SELECT observed_date, portfolio_snapshot_id,
+                           source_analysis_run_id, cutoff, status, reason,
+                           source_owner_scope, positions, signals, decisions,
+                           order_intents, blocked_orders, gate, feasible,
+                           cash_before, cash_after, productive_hash, contextual_hash
+                    FROM historical_analysis_replay_days
+                    WHERE run_id=$1
+                    ORDER BY observed_date DESC
+                    LIMIT 200
+                    """,
+                    full_run["run_id"],
+                )
+                full_decisions = await conn.fetch(
+                    """
+                    SELECT observed_date, ticker, portfolio_snapshot_id,
+                           source_analysis_run_id, cutoff, signal, score,
+                           conviction, planner_action, portfolio_intent,
+                           current_weight, target_weight, delta_weight,
+                           theoretical_ars, order_side, order_amount_ars,
+                           order_quantity, order_blocked, context_severity,
+                           context_confidence, outcome_5d_status,
+                           asset_return_5d, directional_return_5d,
+                           outcome_10d_status, asset_return_10d,
+                           directional_return_10d, outcome_20d_status,
+                           asset_return_20d, directional_return_20d
+                    FROM historical_analysis_replay_decisions
+                    WHERE run_id=$1
+                    ORDER BY observed_date DESC, ticker
+                    LIMIT 1500
+                    """,
+                    full_run["run_id"],
+                )
 
     run_payload = _row(latest_run)
     run_payload["summary"] = _json_value(latest_run["summary"], {})
+    full_payload = None
+    if full_run:
+        full_payload = _row(full_run)
+        full_payload["summary"] = _json_value(full_run["summary"], {})
     return _json({
         "ok": True,
         "available": True,
@@ -3213,6 +3282,21 @@ async def historical_contextual_replay_view(request: web.Request) -> web.Respons
         "reconstruction": _row(reconstruction),
         "summary": run_payload["summary"],
         "rows": [_row(row) for row in rows],
+        "full_analysis": {
+            "available": bool(full_payload),
+            "run": full_payload,
+            "summary": full_payload["summary"] if full_payload else {},
+            "days": [_row(row) for row in full_days],
+            "decisions": [_row(row) for row in full_decisions],
+            "boundary": {
+                "policy": "CURRENT_POLICY_ON_HISTORICAL_DATA",
+                "pit_complete": False,
+                "orders_executable": False,
+                "mode": "SHADOW_ONLY",
+                "affects_analysis": False,
+                "affects_execution": False,
+            },
+        },
         "boundary": {
             "evidence": "RETROSPECTIVE_MARKET_HISTORY_NOT_PIT",
             "mode": "SHADOW_ONLY",

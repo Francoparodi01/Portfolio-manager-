@@ -58,6 +58,36 @@ const columns: TableColumn<RowRecord>[] = [
   { id: "status", header: "Estado", render: (row) => getString(row, "outcome_5d_status", "-") },
 ];
 
+const fullColumns: TableColumn<RowRecord>[] = [
+  { id: "date", header: "Fecha", render: (row) => getString(row, "observed_date", "-") },
+  { id: "ticker", header: "Ticker", render: (row) => <strong>{getString(row, "ticker", "-")}</strong> },
+  {
+    id: "signal",
+    header: "Señal",
+    render: (row) => {
+      const value = getString(row, "signal", "-");
+      return <StatusBadge tone={signalTone(value)}>{value}</StatusBadge>;
+    },
+  },
+  {
+    id: "planner",
+    header: "Planner",
+    render: (row) => <StatusBadge tone={getString(row, "order_side") ? "theoretical" : "neutral"}>{getString(row, "planner_action", "-")}</StatusBadge>,
+  },
+  { id: "score", header: "Score", align: "right", render: (row) => formatScore(getNumber(row, "score")) },
+  { id: "delta", header: "Δ peso", align: "right", render: (row) => formatPercent(getNumber(row, "delta_weight"), 2, true) },
+  { id: "order", header: "Intent", render: (row) => getString(row, "order_side", "Sin orden") },
+  {
+    id: "context",
+    header: "E2",
+    render: (row) => {
+      const value = getString(row, "context_severity", "UNKNOWN");
+      return <StatusBadge tone={severityTone(value)}>{value}</StatusBadge>;
+    },
+  },
+  { id: "outcome", header: "Outcome 5D", align: "right", render: (row) => formatPercent(getNumber(row, "directional_return_5d"), 2, true) },
+];
+
 export default function HistoricalReplayPage() {
   const query = useHistoricalReplayQuery();
   const [signal, setSignal] = useState<(typeof SIGNALS)[number]>("TODAS");
@@ -76,6 +106,14 @@ export default function HistoricalReplayPage() {
   const nonRegression = getRecord(summary, "non_regression");
   const run = asRecord(query.data.run);
   const reconstruction = asRecord(query.data.reconstruction);
+  const fullAnalysis = getRecord(asRecord(query.data), "full_analysis");
+  const fullAvailable = getBoolean(fullAnalysis, "available") === true;
+  const fullRun = getRecord(fullAnalysis, "run");
+  const fullSummary = getRecord(fullAnalysis, "summary");
+  const fullPopulation = getRecord(fullSummary, "population");
+  const fullPlanner = getRecord(fullSummary, "planner_5d");
+  const fullByAction = getRecord(fullPlanner, "by_action");
+  const fullRows = asRows(fullAnalysis.decisions);
   const allRows = query.data.rows || [];
   const dailyRows = asRows(summary.daily_static_hold_5d);
 
@@ -110,8 +148,8 @@ export default function HistoricalReplayPage() {
     <div className="page-stack">
       <PageHeader
         eyebrow="Replay histórico"
-        title="Análisis base + contexto E2"
-        description="El portfolio observado se conserva y el contexto se adjunta en shadow. Esta vista es retrospectiva y no representa una corrida PIT histórica."
+        title="Pipeline completo /analisis + contexto E2"
+        description="La reconstrucción ejecuta síntesis, riesgo, optimizer y planner actuales. El contexto se adjunta después y toda la superficie permanece no ejecutable."
         action={<StatusBadge tone="theoretical">SHADOW ONLY</StatusBadge>}
       />
 
@@ -119,6 +157,53 @@ export default function HistoricalReplayPage() {
         <StatusBadge tone="warning">No PIT</StatusBadge>
         <span>Las velas históricas fueron ingeridas después de parte de los cortes. Los resultados describen el código actual sobre precios pasados; no son PnL realizado ni alteran decisiones.</span>
       </div>
+
+      {fullAvailable ? (
+        <>
+          <MetricGroup>
+            <Metric label="Fechas /analisis" value={formatNumber(getNumber(fullPopulation, "complete_analysis_dates"))} detail={`de ${formatNumber(getNumber(fullPopulation, "observed_dates"))} fechas`} />
+            <Metric label="Decisiones planner" value={formatNumber(getNumber(fullPopulation, "decision_rows"))} detail="pipeline completo" />
+            <Metric label="Order intents" value={formatNumber(getNumber(fullPopulation, "order_intents"))} detail="simulados · no ejecutables" />
+            <Metric label="Outcomes 5D" value={formatNumber(getNumber(fullPopulation, "evaluated_5d_decisions"))} detail="decisiones maduras" />
+          </MetricGroup>
+
+          <div className="panel-grid two">
+            <Panel kicker="/analisis completo" title="Resultado del planner a cinco ruedas">
+              <HorizontalBars
+                rows={["BUY", "BUY_REBALANCE", "SELL_PARTIAL", "SELL_FULL", "HOLD"].map((action) => {
+                  const metric = getRecord(fullByAction, action);
+                  const value = getNumber(metric, "mean") ?? 0;
+                  return {
+                    display: `${formatPercent(value, 2, true)} · n=${formatNumber(getNumber(metric, "n"))}`,
+                    label: action,
+                    tone: toneForNumber(value),
+                    value,
+                  };
+                })}
+                title="Outcome por acción del planner"
+                description="Retorno direccional desde la rueda siguiente; no es PnL realizado."
+              />
+            </Panel>
+            <Panel kicker="Linaje completo" title="Current policy on historical data">
+              <div className="context-stack">
+                <p><strong>Run:</strong> {getString(fullRun, "run_id", "-")}</p>
+                <p><strong>Estado:</strong> {getString(fullRun, "status", "-")}</p>
+                <p><strong>Órdenes ejecutables:</strong> {getBoolean(fullRun, "orders_executable") ? "sí" : "no"}</p>
+                <p><strong>Autoridad E2:</strong> NONE · SHADOW ONLY</p>
+              </div>
+            </Panel>
+          </div>
+
+          <Panel kicker="Planner histórico" title="Decisiones e intents simulados">
+            <ResponsiveTable columns={fullColumns} emptyLabel="Sin decisiones completas" rowKey={(row, index) => `full-${getString(row, "observed_date")}-${getString(row, "ticker")}-${index}`} rows={fullRows.slice(0, 160)} />
+            <p className="table-note">Se muestran hasta 160 decisiones. Cada fecha vuelve a partir del portfolio observado; los intents no se encadenan ni se enviaron al broker.</p>
+          </Panel>
+        </>
+      ) : (
+        <Panel kicker="/analisis completo" title="Replay todavía no persistido">
+          <p className="table-note">La vista técnica/contextual anterior sigue disponible mientras se incorpora el replay del pipeline completo.</p>
+        </Panel>
+      )}
 
       <MetricGroup>
         <Metric label="Filas preservadas" value={formatNumber(getNumber(population, "canonical_rows"))} detail={`${formatNumber(getNumber(reconstruction, "observed_dates"))} fechas observadas`} />

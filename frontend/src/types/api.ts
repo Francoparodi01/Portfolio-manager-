@@ -108,6 +108,7 @@ export type HistoricalReplayPayload = {
   summary?: RowRecord;
   rows?: RowRecord[];
   boundary?: RowRecord;
+  full_analysis?: RowRecord;
 };
 
 export type OverrideAuditPayload = {
