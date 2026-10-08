@@ -46,7 +46,7 @@ from src.core.config import get_config
 
 
 UTC = timezone.utc
-MIN_PROVIDER_BARS = 125
+MIN_PROVIDER_BARS = 21
 DEFAULT_BARS = 260
 GENERAL_BENCHMARK = "SPY"
 

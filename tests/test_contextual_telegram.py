@@ -12,6 +12,7 @@ from src.analysis.contextual_telegram import (
     productive_view,
     render_contextual_telegram,
 )
+from scripts.run_contextual_shadow import MIN_PROVIDER_BARS
 
 
 def _runtime():
@@ -78,6 +79,10 @@ def test_productive_view_preserves_signal_and_portfolio_decision_separately():
     }]
     assert view["decisions"][0]["action"] == "BUY"
     assert view["orders"]["buy_orders"][0]["quantity_est"] == 10.0
+
+
+def test_context_capture_accepts_shorter_real_history_and_leaves_long_windows_unknown():
+    assert MIN_PROVIDER_BARS == 21
 
 
 def test_shadow_runtime_is_fail_closed_on_persistence_or_wrong_intent():
