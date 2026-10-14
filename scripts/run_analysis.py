@@ -1139,6 +1139,7 @@ async def _save_execution_plan_events(
     corporate_action_effects: list[CorporateActionEffect] | None = None,
     corporate_action_flags: list[PriceQualityFlag] | None = None,
     upcoming_earnings_events: list[UpcomingEarningsEvent] | None = None,
+    qeef_bundle=None,
 ) -> list[int]:
     """
     Guarda el ExecutionPlan, sus OrderIntent y eventos compatibles en decision_log.
@@ -1801,6 +1802,14 @@ async def _save_execution_plan_events(
             "ExecutionPlan committed: plan_id=%s run_id=%s events=%s holds=%s",
             execution_plan_id, run_id, len(saved_ids), hold_saved,
         )
+        # Observability is deliberately outside the operational transaction.
+        # QEEF has no authority over this plan and cannot roll it back.
+        try:
+            from src.analysis.qeef.hooks import capture_plan as capture_qeef_plan
+            await capture_qeef_plan(conn, owner=owner_chat_id, plan_id=execution_plan_id,
+                                    capture_hash=capture['capture_hash'], bundle=qeef_bundle)
+        except Exception:
+            logger.error('qeef_capture_boundary_failed recovery=canonical_source_scan')
 
     finally:
         await conn.close()

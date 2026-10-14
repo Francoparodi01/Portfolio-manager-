@@ -19,10 +19,12 @@ def execution_facts(dataset, links):
 
 def economic_pnl(dataset):
     fills = unique_rows(dataset.executions, lambda f: f.broker_fill_id)
+    charges = unique_rows(dataset.account_costs, lambda c: (c.account_id,c.event_id))
     navs = unique_rows(dataset.nav_points, lambda p: (p.account_id, p.kind, p.at))
     result, curves = [], []
     for period in unique_rows(dataset.economic_periods, lambda p: (p.account_id, p.start, p.end)):
         selected = [f for f in fills if f.account_id == period.account_id and period.start < f.fill_at <= period.end]
+        selected_costs = [c for c in charges if c.account_id == period.account_id and period.start<c.at<=period.end]
         points = sorted([p for p in navs if p.account_id == period.account_id and p.kind == "ACTUAL"
                          and period.start <= p.at <= period.end], key=lambda p: p.at)
         reasons = []
@@ -31,7 +33,7 @@ def economic_pnl(dataset):
             reasons.append("MISSING_FLOWS_OR_COMPONENTS")
         if not period.coverage_confirmed or not period.evidence_ids:
             reasons.append("COVERAGE_NOT_ATTESTED")
-        if any(f.currency != period.currency for f in selected) or any(p.currency != period.currency for p in points):
+        if any(f.currency != period.currency for f in selected) or any(p.currency != period.currency for p in points) or any(c.currency!=period.currency for c in selected_costs):
             reasons.append("CURRENCY_MISMATCH")
         if not points or points[0].at != period.start or points[-1].at != period.end or not all(p.reconciled for p in points):
             reasons.append("MISSING_RECONCILED_NAV_BOUNDARIES")
@@ -39,6 +41,7 @@ def economic_pnl(dataset):
             reasons.append("NAV_BOUNDARY_MISMATCH")
         for component in ("fees", "taxes", "other_costs"):
             values = [getattr(f, component) for f in selected]
+            values.extend(c.amount for c in selected_costs if c.component==component)
             if any(v is None for v in values):
                 reasons.append(f"MISSING_OBSERVED_{component.upper()}")
             elif getattr(period, component) is not None and abs(sum(values) - getattr(period, component)) > .01:
@@ -66,7 +69,7 @@ def economic_pnl(dataset):
                        "average_gross_exposure": sum(p.gross_notional / p.nav * duration for p, duration in intervals) / seconds if complete and seconds else None,
                        "max_gross_exposure": max(p.gross_notional / p.nav for p in points) if complete and points else None,
                        "average_net_exposure": sum(p.net_notional / p.nav * duration for p, duration in intervals) / seconds if complete and seconds else None,
-                       "exposure_weighting": "elapsed_time_between_observed_nav_points", "input_hash": digest([digest(period), [digest(f) for f in selected], [digest(p) for p in points]])})
+                       "exposure_weighting": "elapsed_time_between_observed_nav_points", "input_hash": digest([digest(period), [digest(f) for f in selected], [digest(p) for p in points], [digest(c) for c in selected_costs]])})
     groups = {}
     for point in navs:
         groups.setdefault((point.account_id, point.kind, point.sizing_policy, point.currency, point.cohort or "", point.horizon_days or 0), []).append(point)

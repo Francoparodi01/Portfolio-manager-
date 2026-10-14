@@ -1820,6 +1820,11 @@ class PortfolioDatabase:
                 )
 
         logger.info(f"Snapshot {sid} guardado ({len(snapshot.positions)} posiciones)")
+        try:
+            from src.analysis.qeef.hooks import capture_snapshot
+            await capture_snapshot(snapshot)
+        except Exception:
+            logger.error('qeef_snapshot_capture_failed recovery=canonical_source_scan')
         return sid
 
     async def _market_asset_types_for_tickers(self, conn, tickers: list[str]) -> dict[str, str]:
@@ -2871,6 +2876,13 @@ class PortfolioDatabase:
                 rows,
             )
             superseded = await _mark_superseded_broker_fills_for_saved_rows(conn, rows)
+            try:
+                from src.analysis.qeef.hooks import capture_fills
+                if owner_chat_id is not None:
+                    await capture_fills(conn, owner=owner_chat_id,
+                                        external_ids=[fill.external_fill_id for fill in fills])
+            except Exception:
+                logger.error('qeef_fill_capture_failed recovery=canonical_source_scan')
 
         logger.info(
             "%s broker fills guardados; %s placeholders synthetic superseded",

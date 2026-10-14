@@ -217,6 +217,30 @@ def is_allowed_chat(chat_id: int) -> bool:
     return int(chat_id) in allowed
 
 
+async def qeef_status_handler(update, context):
+    """Optional query only; exact configured owner, no migrations or capture."""
+    if os.getenv('QEEF_TELEGRAM_ENABLED','false').lower()!='true': return
+    if not await ensure_allowed_chat(update,context): return
+    chat_id=int(update.effective_chat.id)
+    if chat_id!=int(os.getenv('TELEGRAM_CHAT_ID','0')):
+        await send_text(context,chat_id,'QEEF: esta evidencia pertenece a otra cuenta.',parse_mode=None)
+        return
+    conn=None
+    try:
+        import asyncpg
+        from datetime import datetime
+        from src.analysis.qeef.monitor import report,markdown
+        conn=await asyncpg.connect(get_config().database.url,timeout=5)
+        start=os.getenv('QEEF_CAPTURE_START_AT')
+        payload=await report(conn,owner=chat_id,start=datetime.fromisoformat(start) if start else None)
+        await send_text(context,chat_id,markdown(payload),parse_mode=None)
+    except Exception as exc:
+        logger.warning('qeef_status_unavailable code=%s',type(exc).__name__)
+        await send_text(context,chat_id,'QEEF: evidencia no disponible. No se calculó rentabilidad.',parse_mode=None)
+    finally:
+        if conn is not None: await conn.close()
+
+
 async def ensure_allowed_chat(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3852,6 +3876,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("regression", regression_audit_handler))
     app.add_handler(CommandHandler("regression_audit", regression_audit_handler))
     app.add_handler(CommandHandler("status",           status_handler))
+    if os.getenv('QEEF_TELEGRAM_ENABLED','false').lower()=='true':
+        app.add_handler(CommandHandler('qeef',qeef_status_handler))
     app.add_handler(CommandHandler("configuracion",    settings_handler))
     app.add_handler(CommandHandler("settings",         settings_handler))
     app.add_handler(CommandHandler("reconfigurar",     reconfigure_settings_handler))
