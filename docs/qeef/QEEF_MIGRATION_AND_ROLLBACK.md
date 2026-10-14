@@ -1,5 +1,38 @@
 # Migración, reproducción y rollback
 
+## Procedimiento Phase 2 — preparado, no ejecutado operativamente
+
+QEEF v1 fue publicado en [PR #22](https://github.com/Francoparodi01/Portfolio-manager-/pull/22), draft hacia main y sin merge. Phase 2 está en la rama `feature/qeef-prospective-evidence-pipeline`, worktree hermano `quantia-qeef-phase2`, basada exactamente en `08623cc9b418d7aef4da89b020ec26737a20d455`. Las secciones v1 siguientes describen el estado de aquella entrega; las frases "sin push" y "colector pendiente" corresponden al cierre v1.
+
+| Configuración | Default / requisito |
+|---|---|
+| QEEF_CAPTURE_ENABLED | false; sólo el valor true habilita hooks/worker |
+| QEEF_TELEGRAM_ENABLED | false; lectura independiente de captura |
+| TELEGRAM_CHAT_ID | Owner exacto; no se acepta seleccionar otro desde HTTP/Telegram |
+| QEEF_CAPTURE_START_AT | ISO-8601 con zona explícita, preregistrado al activar |
+| QEEF_SPOOL_PATH | Ruta absoluta en almacenamiento persistente, con permisos del proceso |
+| DATABASE_URL | Para CLI de status/work; no se muestra en logs/argumentos |
+| Autoridad | RESEARCH_ONLY; affects_analysis/execution/promotion_allowed false, no configurables |
+
+Para una **futura activación expresamente autorizada**:
+
+1. Revisar y aprobar los PRs; verificar árbol, backup, esquema y rol de aplicación sin superuser/BYPASSRLS. La prueba local no sustituye staging.
+2. Aplicar primero `migrations/20261014_qeef_v1.sql` y luego `migrations/20261014_qeef_prospective.sql` en el entorno autorizado. Ambas se probaron dos veces en PostgreSQL descartable. No hay auto-migración en hook/CLI/monitor.
+3. Otorgar sólo SELECT/INSERT sobre evidencia QEEF y SELECT/INSERT/UPDATE sobre qeef_jobs al rol de servicio; permitir las lecturas owner-scoped de fuentes. RLS usa `qeef.owner` transaccional. No otorgar DDL/TRUNCATE a la aplicación.
+4. Preparar spool persistente y clocks/owner/inicio explícitos. Desplegar con flags false y consultar `python scripts/run_qeef_pipeline.py status --output <directorio>`.
+5. Con la autorización de captura, activar únicamente QEEF_CAPTURE_ENABLED. Observar el siguiente flujo normal de Quantia: un plan existente debe producir un CASE sin alterar su contenido; comparar esperados/ausentes, jobs y lag. No emitir una operación para generar evidencia de prueba.
+6. La captura básica será PARTIAL mientras el productor no aporte tesis/bundle ex ante y las fuentes no aporten calendario, ratios, costos y ledger completos. Habilitar captura no certifica rentabilidad. Telegram puede permanecer apagado.
+
+Rollback de uso: poner QEEF_CAPTURE_ENABLED=false y QEEF_TELEGRAM_ENABLED=false; detener el consumidor/CLI y retirar su despliegue de forma controlada. Conservar spool, qeef_events, qeef_jobs y qeef_artifacts. Revocar permisos del servicio si corresponde; no DELETE, DROP ni TRUNCATE. Cambiar payloads inmutables no es recuperación: corregir el productor y agregar otra versión/evidencia, o reintentar metadata de entrega después de investigar la causa.
+
+Reproducción del diagnóstico histórico (sólo archivos, sin DB):
+
+```powershell
+python scripts/audit_qeef_phase2.py --capture <ruta-privada-capture-final-20261014.json> --output <nuevo-phase2-readiness.json>
+```
+
+La ruta histórica original sigue en `quantia-qeef-v1/outputs/qeef/`; no se incluyeron datos privados en Git. El audit verifica que el archivo fuente conserve su SHA y rechaza sobrescribir resultados distintos. La lectura HTTP/Telegram no inicia captura ni migraciones. Los límites de recuperación de movimientos sin owner y extensiones sólo en memoria están declarados en [QEEF_PROSPECTIVE_PIPELINE.md](QEEF_PROSPECTIVE_PIPELINE.md).
+
 ## Estado entregado
 
 Rama local `feature/economic-audit-reengineering-v1`, worktree:

@@ -1,0 +1,55 @@
+{
+  "base_documentation_commit": "08623cc9b418d7aef4da89b020ec26737a20d455",
+  "core": {
+    "failed": 0,
+    "failures": [],
+    "passed": 187,
+    "skipped": 0,
+    "source": "phase2-core-final.xml",
+    "tests": 187,
+    "xml_sha256": "2107dd3a484b28a056eb3d56b0062e13b61e803569eae800c73b708eb5f17207"
+  },
+  "extended_ui": {
+    "failed": 3,
+    "failures": [
+      "test_compact_radar_parses_header_with_cash_lines",
+      "test_help_text_is_mobile_compact_and_scope_safe",
+      "test_main_menu_prioritizes_common_actions_and_groups_secondary_views"
+    ],
+    "passed": 9,
+    "skipped": 0,
+    "source": "phase2-integration-regression.xml",
+    "tests": 12,
+    "xml_sha256": "5cbda033309074e3cce70832600139877f973e7862b42a7d0d6bf41f65ca9f2f"
+  },
+  "implementation_commit": "c25e637862924c519931f8fe932bfd495a7c1637",
+  "integration_regression": {
+    "failed": 0,
+    "failures": [],
+    "passed": 54,
+    "skipped": 0,
+    "source": "phase2-regression-final.xml",
+    "tests": 54,
+    "xml_sha256": "5dd5968b3d6bd1c6a5b87bb0d99651c6d992ba597fcba214dfdde47fda23bfbf"
+  },
+  "live_broker_operations": 0,
+  "live_messages_sent": 0,
+  "new_phase2_tests": 47,
+  "overall_repository_green": false,
+  "preserved_v1_tests": 140,
+  "production_migrations": 0,
+  "telegram_test_transport": "EXISTING_TEST_STUBS_NO_LIVE_GATEWAY",
+  "v1_ui_baseline": {
+    "failed": 3,
+    "failures": [
+      "test_compact_radar_parses_header_with_cash_lines",
+      "test_help_text_is_mobile_compact_and_scope_safe",
+      "test_main_menu_prioritizes_common_actions_and_groups_secondary_views"
+    ],
+    "passed": 9,
+    "skipped": 0,
+    "source": "baseline-telegram.xml",
+    "tests": 12,
+    "xml_sha256": "64d2e6e93bca770aabba301284cc82241c28642648ad2efc5b918020e0c4c7d6"
+  }
+}

@@ -1,5 +1,15 @@
 # QEEF: especificación de métricas v1.0.0
 
+## Extensión Phase 2: denominadores prospectivos
+
+`qeef-prospective-v1` mantiene los estimandos v1 y agrega métricas de captura por owner y corte: fuentes únicas esperadas/ausentes desde activación; versiones capturadas; jobs pendientes, RETRY y DEAD_LETTER; duplicados de entrega; lag; tesis sin vínculo y contratos PIT completos. UNKNOWN no se transforma en cero. Para movimientos históricos sin owner, el denominador recuperable es UNKNOWN.
+
+Cada evaluación usa el Episode congelado de CASE y fija horizontes 5/10/20 sesiones más horizonte propio en sesiones. La diferencia monetaria contrafactual es diferencia de retornos por el capital inicial común. No es PnL realizado. `evaluations_mature` requiere PLAN verificable en todos los horizontes pedidos; las alternativas restantes tienen sus gates propios.
+
+La conciliación separa PnL monetario, realizado bruto, cambio no realizado, fees, cash, cantidades y NAV. Los cargos no asociados a fills usan `Analytics v2.ObservedAccountCost`; se agregan por componente sin inventar trades. Retornos de períodos con flujos intraperíodo requieren valuaciones intermedias incluso si el flujo neto es cero. La atribución FX de PnL multimoneda permanece no identificable. Detalle en [QEEF_ACCOUNTING_RECONCILIATION.md](QEEF_ACCOUNTING_RECONCILIATION.md).
+
+Las versiones de conciliación no son ventanas independientes. No se publican curvas, alpha, probabilidades calibradas ni métricas de promoción a partir de los fixtures sintéticos.
+
 Implementación normativa: [counterfactuals.py](../../src/analysis/qeef/counterfactuals.py), [metrics.py](../../src/analysis/qeef/metrics.py), [historical.py](../../src/analysis/qeef/historical.py), y núcleos reutilizados de Decision Lab/Analytics v2. Los resultados usan fracciones decimales: 0,01 = 1%; diferencias de retornos se expresan en puntos porcentuales al multiplicar por 100. Un punto básico = 0,0001. Moneda contrafactual v1: ARS/BYMA; no se convierte subyacente USD a CEDEAR por inferencia.
 
 ## Identidad del estimando

@@ -1,5 +1,13 @@
 # QEEF: arquitectura implementada
 
+## Extensión Phase 2
+
+Sobre el cierre v1 `08623cc9b418d7aef4da89b020ec26737a20d455`, Phase 2 incorpora captura fail-open en persistencia de planes, snapshots, fills y mercado; spool SQLite; eventos/jobs PostgreSQL; scanner de recuperación; evaluación desde outcomes; monitor JSON/Markdown y `/qeef` opcional. Implementación: `c25e637`.
+
+Los módulos nuevos son `prospective`, `hooks`, `delivery`, `worker`, `recovery`, `transitions`, `market`, `adapters`, `accounting` y `monitor`. Se reutilizan el estado/simulador de Decision Lab y la contabilidad Analytics v2, extendida únicamente para cargos observados no asociados a fills. Migración aditiva: `20261014_qeef_prospective.sql`.
+
+La captura permanece apagada. RESEARCH_ONLY y autoridad económica false son constantes. El flujo, contratos y límites actuales están en [QEEF_PROSPECTIVE_PIPELINE.md](QEEF_PROSPECTIVE_PIPELINE.md) y [QEEF_ACCOUNTING_RECONCILIATION.md](QEEF_ACCOUNTING_RECONCILIATION.md). Las secciones siguientes conservan la arquitectura de cierre v1; la referencia a una sola tabla corresponde a esa versión, no al total Phase 2.
+
 Versión `qeef-v1.0.0`, modo único `RESEARCH_ONLY`. Implementación: `d3cca84c06f631773810b4aec5077c35f157aafb`. No contiene generador de órdenes ni ruta de activación.
 
 ## Composición y flujo

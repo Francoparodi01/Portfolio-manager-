@@ -1,0 +1,22 @@
+{
+  "diagnostic_only": true,
+  "registered_as_prospective": false,
+  "database_writes": 0,
+  "source_full_context_denominator": 2,
+  "case_statuses": {
+    "PARTIAL": 2
+  },
+  "evaluation_statuses": {
+    "NOT_IDENTIFIABLE": 2
+  },
+  "missingness": {
+    "THESIS_DECLARATION_NOT_FROZEN": 2,
+    "TYPED_DECISION_STATE_MISSING": 2,
+    "COST_AND_EXECUTION_CONTRACT_MISSING": 2,
+    "SIGNAL_AVAILABILITY_UNKNOWN": 2
+  },
+  "economic_pnl_net": null,
+  "source_as_of": "2026-10-14T04:53:59.810706+00:00",
+  "implementation": "c25e637862924c519931f8fe932bfd495a7c1637",
+  "validation_id": "063494af4ae2d090ba01035922eb432b8d0854560c3fbc1cbd91cf7e277a0259"
+}

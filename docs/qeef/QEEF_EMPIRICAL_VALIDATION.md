@@ -2,6 +2,18 @@
 
 **Veredicto: EXPERIMENTAL.** Software y contratos verificados con pruebas; capacidad de demostrar valor económico incremental todavía bloqueada por evidencia. No hay PnL/alpha nuevo certificado.
 
+## Revalidación Phase 2
+
+Se volvió a leer la captura privada v1 y se verificó su SHA antes y después. [phase2-readiness.json](evidence/phase2-readiness.json) conserva 301 casos (278 decisiones + 23 HOLD), 72 tickers y 30 episodios legacy separados. No se hizo una captura nueva ni se reescribieron clasificaciones históricas.
+
+Hay 48 vínculos exactos item/HOLD→plan de 301; 22 casos enlazan FULL_CONTEXT, pero 0 tienen contrato prospectivo completo y alternativas congeladas. Los 37 vínculos almacenados decisión→fill no equivalen a atribución formal: esa tabla aporta 0 registros. Los 109 fills tienen fees desconocidas; 0 casos certifican PnL neto o valor económico incremental.
+
+El sondeo adicional sobre 2.233 snapshots encontró 2.166 sumas cantidad×precio coincidentes y 67 gaps. Sobre 2.232 pares adyacentes: 1.872 coincidencias de cantidades visibles, 328 gaps y 32 períodos con timestamps de fills insuficientes. Sin cobertura completa de flujos/acciones/costos, ninguno queda certificado por coincidir aritméticamente.
+
+Las 28.615 observaciones de mercado son PARTIAL bajo el contrato prospectivo. Faltan unidad de volumen, calendario/sesión, versión corporativa y base de precio; 26.275 observaciones CEDEAR carecen de ratio/version verificados, y 120 no confirman cierre.
+
+La misma auditoría se reprodujo sin diferencias: audit_id `88d3efe971fced5e16d9de1a68e5ac2c03516f5c251b827e8234b250add71e7d`. Pruebas nuevas, cobertura de los 32 escenarios pedidos y límites de regresión se documentan en [QEEF_PHASE2_FINAL_REPORT.md](QEEF_PHASE2_FINAL_REPORT.md). Los resultados v1 de las secciones siguientes permanecen como referencia congelada.
+
 ## Corte y procedencia
 
 Captura: **2026-10-14 04:53:59.810706 UTC** (01:53:59.810706 Buenos Aires). Se consultó PostgreSQL mediante el contenedor existente, con `default_transaction_read_only=on`, transacción repeatable-read y owner exacto configurado. No se ejecutaron escrituras operativas ni migraciones en esa base. Se verificó el esquema real; nombres/columnas y conteos están en [validation.json](evidence/validation.json).

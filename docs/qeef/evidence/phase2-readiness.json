@@ -1,0 +1,94 @@
+{
+  "affects_analysis": false,
+  "affects_execution": false,
+  "alpha_claim": null,
+  "audit_id": "88d3efe971fced5e16d9de1a68e5ac2c03516f5c251b827e8234b250add71e7d",
+  "broker_movements_scope": "OWNER_LINKED_FILL_ROWS_ONLY_NOT_COMPLETE_OWNER_LEDGER",
+  "capture_sha256": "814fac6d86339bce6bf31ec2c2053c6fcafb51354b31f01e9866c18170e3c935",
+  "case_missingness": {
+    "EXACT_INITIAL_PORTFOLIO_LINK_MISSING": 279,
+    "EXECUTABLE_PRICE_AND_ACTION_COVERAGE_NOT_LINKED": 301,
+    "FULL_CONTEXT_CAPTURE_MISSING": 279,
+    "NO_EXACT_EXECUTION_LINK": 264,
+    "OBSERVED_FEES_UNKNOWN": 37,
+    "THESIS_NOT_FROZEN_IN_SOURCE": 301
+  },
+  "case_readiness": {
+    "cases_with_all_linked_fees_known": 0,
+    "certified_reconciled_account_path": 0,
+    "complete_prospective_decision_contract": 0,
+    "exact_formal_plan_execution_attributions": 0,
+    "exact_item_or_hold_plan_link": 48,
+    "full_context_case_link": 22,
+    "identifiable_frozen_thesis": 0,
+    "recorded_decision_fill_links": 37,
+    "valid_frozen_economic_alternatives": 0,
+    "verified_economic_cases": 0
+  },
+  "denominator": 301,
+  "economic_pnl_net": null,
+  "fills": {
+    "denominator": 109,
+    "duplicate_source_external_ids": 0,
+    "fees_known": 0,
+    "fees_unknown": 109
+  },
+  "historical_classification_changed": false,
+  "legacy_episodes": 30,
+  "market": {
+    "contract_statuses": {
+      "PARTIAL": 28615
+    },
+    "denominator": 28615,
+    "gaps": {
+      "BAR_NOT_CONFIRMED_CLOSED": 120,
+      "CALENDAR_VERSION_UNKNOWN": 28615,
+      "CEDEAR_RATIO_UNKNOWN": 26275,
+      "CORPORATE_ACTION_VERSION_UNKNOWN": 28615,
+      "PRICE_BASIS_UNKNOWN": 28615,
+      "SESSION_ID_UNKNOWN": 28615,
+      "VOLUME_UNIT_UNKNOWN": 28615
+    }
+  },
+  "mode": "RESEARCH_ONLY",
+  "plans": {
+    "captures": 32,
+    "denominator": 13,
+    "full_context": 2
+  },
+  "promotion_allowed": false,
+  "remaining_contracts": [
+    "EXPLICIT_PROSPECTIVE_THESIS_AND_BUNDLE",
+    "PREDECLARED_COSTS_AND_ALTERNATIVES",
+    "BROKER_ORDER_EXECUTION_IDENTITY",
+    "OBSERVED_FEES_TAXES_OTHER_COSTS",
+    "OWNER_SCOPED_COMPLETE_CASH_LEDGER",
+    "CORPORATE_ACTION_AND_FINANCING_COVERAGE",
+    "PIT_CALENDAR_RATIO_VOLUME_UNITS_AND_EXECUTABLE_PRICES"
+  ],
+  "schema_version": "qeef-phase2-readiness-v1",
+  "snapshots": {
+    "adjacent_pairs_denominator": 2232,
+    "certified_net_periods": 0,
+    "coverage_status": "UNKNOWN_COSTS_FLOWS_ACTIONS_FINANCING",
+    "denominator": 2233,
+    "interpretation": "Arithmetic matches do not prove complete ledger or NAV reconciliation.",
+    "positions": 28503,
+    "quantity_probe": {
+      "FILL_TIME_NOT_EXACT": 32,
+      "VISIBLE_QUANTITIES_MATCH": 1872,
+      "VISIBLE_QUANTITY_GAP": 328
+    },
+    "valuation_probe": {
+      "COMPONENTS_MATCH": 2166,
+      "COMPONENT_GAP": 67
+    }
+  },
+  "source_as_of": "2026-10-14T04:53:59.810706+00:00",
+  "source_cases": {
+    "decision_log": 278,
+    "position_hold_observations": 23
+  },
+  "source_transaction_read_only": "on",
+  "tickers": 72
+}
