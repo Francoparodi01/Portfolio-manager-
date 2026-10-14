@@ -111,6 +111,8 @@ backup_*.sql
 *.db
 
 !tests/test_agentic_diagnostics.py
+!tests/test_qeef.py
+!tests/test_qeef_postgres.py
 
 # Private bounded E0 evidence
 output/contextual-e1/
