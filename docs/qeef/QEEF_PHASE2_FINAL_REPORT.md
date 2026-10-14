@@ -103,6 +103,8 @@ No se modificaron señales/pesos/políticas/umbrales, no se enviaron órdenes ni
 
 Rama: `feature/qeef-prospective-evidence-pipeline`. Worktree: `C:/Users/Franco/OneDrive/Escritorio/backend/.worktrees/quantia-qeef-phase2`. Base: `08623cc9b418d7aef4da89b020ec26737a20d455`. Implementación: **`c25e637862924c519931f8fe932bfd495a7c1637`**. Documentación/evidencias se entregan en un commit separado. El PR se publica hacia main y contiene el antecedente v1 mientras #22 no esté integrado; no se duplica ni se mergea automáticamente.
 
+Publicación confirmada: [PR #23 — QEEF Phase 2](https://github.com/Francoparodi01/Portfolio-manager-/pull/23), abierto en draft hacia main, sin merge. Commit documental: `ee2a520fb917c6796fbf42460978756becdc07d4`; este registro de publicación es un cambio documental posterior. El PR v1 #22 también permanece abierto/draft.
+
 Archivos: 10 módulos nuevos QEEF, migración Phase 2, dos CLIs, dos archivos de tests; hooks mínimos en run_analysis/collector/scheduler; vistas monitor/Telegram; extensión contable Analytics v2. Se actualizaron cuatro documentos v1 y se agregaron pipeline, contabilidad, este informe y evidencias agregadas. Los datos privados y salidas de ejecución no se publican.
 
 ## J. Próximo paso concreto
