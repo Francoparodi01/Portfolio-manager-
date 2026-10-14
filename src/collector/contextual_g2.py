@@ -391,6 +391,12 @@ async def persist_candle_observations(conn: Any, observations: Sequence[CandleOb
             )
             if stored_digest != item.observation_digest:
                 raise RuntimeError("OBSERVATION_ID_COLLISION_OR_DIGEST_MISMATCH")
+    try:
+        from src.analysis.qeef.hooks import capture_market
+        await capture_market(observations)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).error('qeef_market_capture_failed recovery=canonical_source_scan')
     return saved
 
 

@@ -3566,8 +3566,9 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/decisions", decisions)
     app.router.add_get("/api/portfolio", portfolio_view)
     app.router.add_get("/api/performance", performance_view)
-    from src.monitor.qeef import qeef_view
+    from src.monitor.qeef import qeef_view, prospective_view
     app.router.add_get("/api/economic-evaluation", qeef_view)
+    app.router.add_get("/api/qeef-evidence", prospective_view)
     app.router.add_get("/api/historical-contextual-replay", historical_contextual_replay_view)
     app.router.add_get("/api/override-audit", override_audit)
     app.router.add_get("/api/decision-ledger", decision_ledger)

@@ -852,6 +852,11 @@ async def run_full(run_type: str = "FULL") -> dict:
                         )
                         reconciled_fills = await db.reconcile_broker_fills()
                         manual_fills = await db.materialize_unmatched_broker_fills()
+                        try:
+                            from src.analysis.qeef.hooks import capture_broker_batch
+                            await capture_broker_batch(db, movements, owner=fill_owner_chat_id)
+                        except Exception:
+                            logger.error('qeef_broker_boundary_failed')
                         radar_followed_fills = await _reconcile_radar_setup_followed_fills(
                             db,
                             owner_chat_id=fill_owner_chat_id,
@@ -1304,6 +1309,11 @@ async def run_update_outcomes() -> None:
         await db.connect()
         updated = await db.update_outcomes(lookback_days=180)
         logger.info("update_outcomes: %s decisiones actualizadas", updated)
+        try:
+            from src.analysis.qeef.worker import safe_cycle
+            await safe_cycle(await db.get_pool())
+        except Exception:
+            logger.error('qeef_outcome_boundary_failed')
         if RADAR_DISCOVERY_LEDGER_ENABLED:
             try:
                 from src.analysis.radar_discovery import RadarDiscoveryStore
@@ -2567,6 +2577,11 @@ class IntradayManager:
                             )
                             reconciled_fills = await db.reconcile_broker_fills()
                             manual_fills = await db.materialize_unmatched_broker_fills()
+                            try:
+                                from src.analysis.qeef.hooks import capture_broker_batch
+                                await capture_broker_batch(db, movements, owner=fill_owner_chat_id)
+                            except Exception:
+                                logger.error('qeef_broker_boundary_failed')
                             radar_followed_fills = await _reconcile_radar_setup_followed_fills(
                                 db,
                                 owner_chat_id=fill_owner_chat_id,

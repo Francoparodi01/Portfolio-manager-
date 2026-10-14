@@ -118,7 +118,7 @@ def realized_value(dataset, *, owner, evaluated_as_of):
     """Canonical Analytics v2 NAV/flow/component reconciliation, not fill sums."""
     if not owner or evaluated_as_of.tzinfo is None:
         raise ValueError('exact account owner and aware cutoff required')
-    account_rows = dataset.recommendations + dataset.executions + dataset.economic_periods + dataset.nav_points
+    account_rows = dataset.recommendations + dataset.executions + dataset.economic_periods + dataset.nav_points + dataset.account_costs
     if any(r.account_id != str(owner) for r in account_rows):
         raise ValueError('economic dataset contains another owner')
     dataset = dataset.as_of(evaluated_as_of)

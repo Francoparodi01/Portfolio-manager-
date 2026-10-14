@@ -190,6 +190,16 @@ class ExecutionFact(Evidence):
     fill_at: AwareDatetime
 
 
+class ObservedAccountCost(Evidence):
+    """Identified non-trade charge; never a synthetic zero-quantity execution."""
+    account_id: str
+    event_id: str
+    at: AwareDatetime
+    currency: str
+    component: Literal['fees','taxes','other_costs']
+    amount: FiniteFloat = Field(ge=0)
+
+
 class EconomicPeriod(Evidence):
     account_id: str
     currency: str
@@ -243,13 +253,14 @@ class Dataset(Frozen):
     bars: tuple[Bar, ...] = ()
     human_actions: tuple[HumanAction, ...] = ()
     executions: tuple[ExecutionFact, ...] = ()
+    account_costs: tuple[ObservedAccountCost, ...] = ()
     economic_periods: tuple[EconomicPeriod, ...] = ()
     nav_points: tuple[NavPoint, ...] = ()
 
     def as_of(self, cutoff):
         fields = {}
         event_fields = {"recommendations": "decision_as_of", "human_actions": "decision_as_of",
-                        "executions": "fill_at", "economic_periods": "end", "nav_points": "at"}
+                        "executions": "fill_at", "account_costs": "at", "economic_periods": "end", "nav_points": "at"}
         for name in type(self).model_fields:
             if name == "label":
                 continue
