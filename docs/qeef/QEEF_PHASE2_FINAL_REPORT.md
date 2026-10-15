@@ -1,5 +1,7 @@
 # QEEF Phase 2 — informe final
 
+> **Corrección de alcance — 15 de octubre de 2026:** se contrastó el backup histórico aportado con la captura y con claves de la base local. La [conciliación de Supabase](QEEF_SUPABASE_BACKUP_RECONCILIATION.md) verifica cobertura parcial y documenta cohortes excluidas y cambios de contenido. Los resultados siguientes describen únicamente los 301 casos capturados; no representan toda la historia del proyecto.
+
 Implementación research funcional y validada en PostgreSQL descartable, preparada para revisión. La captura permanece desactivada. **No se demostró alpha ni PnL neto histórico: 0 de 301 casos reales alcanzan el contrato económico VERIFIED.** La suite ampliada de UI conserva tres fallos preexistentes, reproducidos en v1; no se declara todo el repositorio verde.
 
 ## A. Estado inicial

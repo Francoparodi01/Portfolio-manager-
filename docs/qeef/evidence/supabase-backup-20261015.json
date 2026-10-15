@@ -1,0 +1,1156 @@
+{
+  "analysis_script_sha256": {
+    "inspect_supabase_backup.py": "7a3480974bb8912303207bb9582f4f811901c94ea001a78b880ed4ff824eb05c",
+    "local_key_inventory.py": "2a23c36c7743d9bdee620322a21fb336efef0cf277b44dc44a8c5748099e2c9c",
+    "reconcile_supabase_backup.py": "9ab65cadffd94980aa68a0b6defefb28a7620b2764d960badbdd4ecb9329aa23"
+  },
+  "attribution_discrepancy_probe": {
+    "interpretation": "KEY_DISCREPANCY_REQUIRES_LINEAGE_REVIEW",
+    "same_attribution_key_matches": 0,
+    "same_representative_decision_ticker_side_matches": 1,
+    "transaction_read_only": "on"
+  },
+  "backup_keys_missing_local_live": 1,
+  "canonical_readiness_replay": {
+    "audit_id": "88d3efe971fced5e16d9de1a68e5ac2c03516f5c251b827e8234b250add71e7d",
+    "cases": 301,
+    "same_result_as_published": true,
+    "verified_economic_cases": 0
+  },
+  "limits": [
+    "Backup snapshot is not live Supabase; filename does not establish timestamp timezone.",
+    "Live-local key inventory is later than immutable QEEF capture.",
+    "All-row reconciliation covers primary keys and owner classes, not complete payload equality.",
+    "Value comparison covers shared fields of exact-owner or parent-scoped rows only.",
+    "NULL and zero owners remain separate legacy cohorts; no ownership was inferred.",
+    "Other dump tables are inventoried but not fully reconciled."
+  ],
+  "live_local_key_inventory_at": "2026-10-15 22:32:07.435851+00:00",
+  "live_local_transaction_read_only": "on",
+  "local_capture_at": "2026-10-14T04:53:59.810706+00:00",
+  "local_capture_sha256": "814fac6d86339bce6bf31ec2c2053c6fcafb51354b31f01e9866c18170e3c935",
+  "normalization": "Compare shared fields after normalizing PostgreSQL COPY escapes, timestamps to UTC, decimal spellings, JSON structure and booleans. This is not byte equality.",
+  "privacy": "Aggregate counts, schema names and dates only; no owner IDs, account payloads, balances, trades or source row identifiers.",
+  "public_copy_tables": 59,
+  "public_table_inventory": {
+    "agent_runs": 110,
+    "agent_steps": 275,
+    "bot_users": 1,
+    "broker_fills": 310,
+    "broker_movements": 499,
+    "corporate_event_applications": 1,
+    "corporate_event_instrument_effects": 2,
+    "corporate_events": 2,
+    "decision_lab_objects": 1499,
+    "decision_lab_plan_captures": 17,
+    "decision_lab_runs": 1,
+    "decision_log": 1206,
+    "execution_plans": 130,
+    "intraday_preclose_alerts": 178,
+    "issuer_event_observations": 61,
+    "issuer_instruments": 26,
+    "issuer_registry": 26,
+    "learning_shadow_cases": 1980,
+    "learning_shadow_cohort_metrics": 108,
+    "learning_shadow_metric_snapshots": 4,
+    "learning_shadow_metric_snapshots_v2": 656,
+    "learning_shadow_policy_versions": 1,
+    "learning_shadow_rule_candidates": 8,
+    "learning_shadow_runs": 44,
+    "manual_market_events": 1,
+    "market_candles": 252085,
+    "market_prices": 1647830,
+    "ml_decision_features": 0,
+    "ml_model_registry": 0,
+    "order_intents": 762,
+    "plan_execution_attribution_movements": 62,
+    "plan_execution_attribution_plans": 80,
+    "plan_execution_attributions": 43,
+    "portfolio_snapshots": 5690,
+    "position_hold_observations": 528,
+    "positions": 56529,
+    "price_quality_flags": 4,
+    "radar_discovery_outcomes": 14393,
+    "radar_discovery_runs": 30,
+    "radar_discovery_snapshots": 8164,
+    "radar_exploratory_candidates": 5,
+    "radar_exploratory_runs": 1,
+    "radar_setup_alerts": 74,
+    "radar_setup_events": 74,
+    "radar_setup_outcomes": 0,
+    "raw_snapshots": 5690,
+    "sentiment_aggregated": 9230,
+    "sentiment_raw": 63831,
+    "sentiment_scored": 60540,
+    "shadow_calibrated_forecasts": 15832,
+    "shadow_calibration_gate_events": 3,
+    "shadow_calibration_gate_state": 2,
+    "shadow_calibration_models": 68,
+    "shadow_calibration_runs": 34,
+    "shadow_thesis_causal_analysis": 0,
+    "shadow_thesis_forecasts": 51654,
+    "shadow_thesis_outcomes": 32264,
+    "shadow_thesis_runs": 71,
+    "telegram_report_artifacts": 2
+  },
+  "reconciled_backup_keys": 149785,
+  "reconciled_key_tables": 20,
+  "schema_version": "qeef-backup-reconciliation-v1",
+  "source_backup": {
+    "compressed_bytes": 55277777,
+    "gzip_integrity": "FULL_STREAM_CRC_CHECK_PASSED",
+    "source_file": "db_cluster-09-10-2026@17-43-09.backup.gz",
+    "source_sha256": "901df029a557ba9147be00e4317e6e334d7579592525e5f7e44176e8e3d41579",
+    "uncompressed_bytes": 411066664
+  },
+  "source_backup_timestamp": "UNKNOWN_NOT_ESTABLISHED_FROM_FILENAME",
+  "tables": [
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 310,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 310,
+      "backup_scope_counts": {
+        "EXACT_OWNER": 93,
+        "OWNER_NULL": 217
+      },
+      "backup_time_ranges": {
+        "created_at": {
+          "first": "2026-05-25T01:32:40.945655+00:00",
+          "last": "2026-10-05T14:51:17.193806+00:00"
+        },
+        "executed_at": {
+          "first": "2026-04-09T03:00:00+00:00",
+          "last": "2026-10-05T14:51:25.345661+00:00"
+        },
+        "reconciled_at": {
+          "first": "2026-05-25T05:22:08.490319+00:00",
+          "last": "2026-10-05T14:51:20.013528+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 93,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "avg_fill_price",
+          "created_at",
+          "decision_log_id",
+          "executed_at",
+          "executed_at_precision",
+          "executed_at_source",
+          "external_fill_id",
+          "fees_ars",
+          "gross_amount_ars",
+          "id",
+          "quantity",
+          "reconciled_at",
+          "side",
+          "source",
+          "ticker"
+        ],
+        "frozen_qeef_n": 109,
+        "frozen_qeef_only_keys": 16,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 93,
+        "shared_keys": 93
+      },
+      "local_live_n": 326,
+      "local_live_only_keys": 16,
+      "local_live_scope_counts": {
+        "EXACT_OWNER": 109,
+        "OWNER_NULL": 217
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "broker_fills"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 499,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 499,
+      "backup_scope_counts": {
+        "NO_OWNER_COLUMN": 499
+      },
+      "backup_time_ranges": {
+        "created_at": {
+          "first": "2026-05-25T01:32:40.596524+00:00",
+          "last": "2026-10-05T14:51:15.492575+00:00"
+        },
+        "executed_at": {
+          "first": "2026-04-09T03:00:00+00:00",
+          "last": "2026-10-05T14:51:25.345661+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 93,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "currency",
+          "executed_at",
+          "external_movement_id",
+          "id",
+          "movement_type"
+        ],
+        "frozen_qeef_n": 109,
+        "frozen_qeef_only_keys": 16,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 93,
+        "shared_keys": 93
+      },
+      "local_live_n": 515,
+      "local_live_only_keys": 16,
+      "local_live_scope_counts": {
+        "NO_OWNER_COLUMN": 515
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "broker_movements"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 1499,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 1499,
+      "backup_scope_counts": {
+        "EXACT_OWNER": 1499
+      },
+      "backup_time_ranges": {},
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 1499,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "kind",
+          "object_hash",
+          "payload"
+        ],
+        "frozen_qeef_n": 1499,
+        "frozen_qeef_only_keys": 0,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 1499,
+        "shared_keys": 1499
+      },
+      "local_live_n": 1499,
+      "local_live_only_keys": 0,
+      "local_live_scope_counts": {
+        "EXACT_OWNER": 1499
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "object_hash"
+      ],
+      "table": "decision_lab_objects"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 17,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 17,
+      "backup_scope_counts": {
+        "EXACT_OWNER": 17
+      },
+      "backup_time_ranges": {
+        "captured_at": {
+          "first": "2026-09-25T13:43:30.614234+00:00",
+          "last": "2026-10-05T14:48:28.662703+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 17,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "capture_hash",
+          "captured_at",
+          "payload",
+          "plan_id"
+        ],
+        "frozen_qeef_n": 32,
+        "frozen_qeef_only_keys": 15,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 17,
+        "shared_keys": 17
+      },
+      "local_live_n": 32,
+      "local_live_only_keys": 15,
+      "local_live_scope_counts": {
+        "EXACT_OWNER": 32
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "capture_hash"
+      ],
+      "table": "decision_lab_plan_captures"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 1,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 1,
+      "backup_scope_counts": {
+        "EXACT_OWNER": 1
+      },
+      "backup_time_ranges": {
+        "created_at": {
+          "first": "2026-09-24T21:44:42.724139+00:00",
+          "last": "2026-09-24T21:44:42.724139+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 1,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "config",
+          "content_hash",
+          "created_at",
+          "evaluated_as_of",
+          "object_refs",
+          "replay_run_id",
+          "summary"
+        ],
+        "frozen_qeef_n": 1,
+        "frozen_qeef_only_keys": 0,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 1,
+        "shared_keys": 1
+      },
+      "local_live_n": 1,
+      "local_live_only_keys": 0,
+      "local_live_scope_counts": {
+        "EXACT_OWNER": 1
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "replay_run_id"
+      ],
+      "table": "decision_lab_runs"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 1206,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 1206,
+      "backup_scope_counts": {
+        "EXACT_OWNER": 211,
+        "OWNER_NULL": 995
+      },
+      "backup_time_ranges": {
+        "decided_at": {
+          "first": "2026-04-09T18:00:00+00:00",
+          "last": "2026-10-05T18:00:00+00:00"
+        },
+        "next_executable_at": {
+          "first": "2026-04-09T18:00:00+00:00",
+          "last": "2026-09-25T19:50:30.859795+00:00"
+        },
+        "outcome_filled_at": {
+          "first": "2026-07-21T00:30:19.316450+00:00",
+          "last": "2026-10-03T00:30:02.020829+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 211,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {
+          "executable_outcome_10d": 50,
+          "executable_outcome_20d": 74,
+          "executable_outcome_40d": 56,
+          "executable_outcome_5d": 32,
+          "executable_was_correct": 32,
+          "layers": 2,
+          "next_executable_at": 32,
+          "next_executable_price": 32,
+          "outcome_10d": 50,
+          "outcome_20d": 74,
+          "outcome_40d": 56,
+          "outcome_5d": 32,
+          "outcome_basis": 32,
+          "outcome_basis_ratio": 32,
+          "outcome_filled_at": 157,
+          "price_at_decision": 2,
+          "was_correct": 32
+        },
+        "compared_fields": [
+          "block_reason",
+          "close_price",
+          "closed_at",
+          "confidence",
+          "current_weight",
+          "decided_at",
+          "decision",
+          "decision_stage",
+          "decision_type",
+          "delta_weight",
+          "executable_outcome_10d",
+          "executable_outcome_20d",
+          "executable_outcome_40d",
+          "executable_outcome_5d",
+          "executable_was_correct",
+          "executed_amount_ars",
+          "exit_reason",
+          "exit_reason_rule",
+          "exit_scope",
+          "final_score",
+          "horizon_days",
+          "id",
+          "is_executable",
+          "is_primary_metric",
+          "layers",
+          "metric_scope",
+          "next_executable_at",
+          "next_executable_price",
+          "outcome_10d",
+          "outcome_20d",
+          "outcome_40d",
+          "outcome_5d",
+          "outcome_basis",
+          "outcome_basis_ratio",
+          "outcome_filled_at",
+          "price_at_decision",
+          "regime",
+          "rr_ratio",
+          "run_id",
+          "run_intent",
+          "signal_strength",
+          "size_pct",
+          "source",
+          "status",
+          "stop_loss_pct",
+          "stop_loss_price",
+          "stop_policy",
+          "stop_source",
+          "superseded_by_id",
+          "target_pct",
+          "target_price",
+          "target_weight",
+          "theoretical_amount_ars",
+          "ticker",
+          "trailing_active",
+          "vix_at_decision",
+          "was_blocked",
+          "was_correct",
+          "was_stopped"
+        ],
+        "frozen_qeef_n": 278,
+        "frozen_qeef_only_keys": 67,
+        "normalized_shared_rows_different": 157,
+        "normalized_shared_rows_equal": 54,
+        "shared_keys": 211
+      },
+      "local_live_n": 1285,
+      "local_live_only_keys": 79,
+      "local_live_scope_counts": {
+        "EXACT_OWNER": 290,
+        "OWNER_NULL": 995
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "decision_log"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 130,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 130,
+      "backup_scope_counts": {
+        "OWNER_NULL": 130
+      },
+      "backup_time_ranges": {
+        "created_at": {
+          "first": "2026-08-10T13:33:42.725964+00:00",
+          "last": "2026-10-05T14:48:26.349059+00:00"
+        },
+        "updated_at": {
+          "first": "2026-08-10T13:33:42.725964+00:00",
+          "last": "2026-10-05T14:48:26.349059+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 0,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [],
+        "frozen_qeef_n": 13,
+        "frozen_qeef_only_keys": 13,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 0,
+        "shared_keys": 0
+      },
+      "local_live_n": 143,
+      "local_live_only_keys": 13,
+      "local_live_scope_counts": {
+        "EXACT_OWNER": 13,
+        "OWNER_NULL": 130
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "execution_plans"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 1980,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 1980,
+      "backup_scope_counts": {
+        "OWNER_ZERO": 1980
+      },
+      "backup_time_ranges": {
+        "decided_at": {
+          "first": "2026-05-07T13:39:56.766687+00:00",
+          "last": "2026-10-02T16:38:30.129919+00:00"
+        },
+        "first_observed_at": {
+          "first": "2026-08-07T04:06:23.780991+00:00",
+          "last": "2026-10-03T00:40:11.442665+00:00"
+        },
+        "last_evaluated_at": {
+          "first": "2026-08-07T04:06:22.608049+00:00",
+          "last": "2026-10-03T00:40:00.215406+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 0,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [],
+        "frozen_qeef_n": 0,
+        "frozen_qeef_only_keys": 0,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 0,
+        "shared_keys": 0
+      },
+      "local_live_n": 1992,
+      "local_live_only_keys": 12,
+      "local_live_scope_counts": {
+        "OWNER_ZERO": 1992
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "learning_shadow_cases"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 4,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 4,
+      "backup_scope_counts": {
+        "OWNER_ZERO": 4
+      },
+      "backup_time_ranges": {
+        "captured_at": {
+          "first": "2026-08-07T04:06:22.608049+00:00",
+          "last": "2026-08-07T04:06:22.608049+00:00"
+        },
+        "snapshot_date": {
+          "first": "2026-08-07T00:00:00",
+          "last": "2026-08-07T00:00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 0,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [],
+        "frozen_qeef_n": 0,
+        "frozen_qeef_only_keys": 0,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 0,
+        "shared_keys": 0
+      },
+      "local_live_n": 4,
+      "local_live_only_keys": 0,
+      "local_live_scope_counts": {
+        "OWNER_ZERO": 4
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "learning_shadow_metric_snapshots"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 656,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 656,
+      "backup_scope_counts": {
+        "OWNER_ZERO": 656
+      },
+      "backup_time_ranges": {
+        "captured_at": {
+          "first": "2026-08-08T00:40:00.217744+00:00",
+          "last": "2026-10-03T00:40:00.215406+00:00"
+        },
+        "snapshot_date": {
+          "first": "2026-08-07T00:00:00",
+          "last": "2026-10-02T00:00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 0,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [],
+        "frozen_qeef_n": 0,
+        "frozen_qeef_only_keys": 0,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 0,
+        "shared_keys": 0
+      },
+      "local_live_n": 784,
+      "local_live_only_keys": 128,
+      "local_live_scope_counts": {
+        "OWNER_ZERO": 784
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "learning_shadow_metric_snapshots_v2"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 762,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 762,
+      "backup_scope_counts": {
+        "NO_OWNER_COLUMN": 762
+      },
+      "backup_time_ranges": {
+        "created_at": {
+          "first": "2026-08-10T13:33:43.289830+00:00",
+          "last": "2026-10-05T14:48:27.248857+00:00"
+        },
+        "updated_at": {
+          "first": "2026-08-10T13:33:43.289830+00:00",
+          "last": "2026-10-05T14:48:27.248857+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 0,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [],
+        "frozen_qeef_n": 25,
+        "frozen_qeef_only_keys": 25,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 0,
+        "shared_keys": 0
+      },
+      "local_live_n": 787,
+      "local_live_only_keys": 25,
+      "local_live_scope_counts": {
+        "NO_OWNER_COLUMN": 787
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "order_intents"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 42,
+      "backup_keys_missing_local_live": 1,
+      "backup_n": 43,
+      "backup_scope_counts": {
+        "OWNER_NULL": 43
+      },
+      "backup_time_ranges": {
+        "created_at": {
+          "first": "2026-08-11T04:34:22.312779+00:00",
+          "last": "2026-10-05T14:47:34.528769+00:00"
+        },
+        "executed_at": {
+          "first": "2026-05-27T03:00:00+00:00",
+          "last": "2026-10-01T15:49:25.888329+00:00"
+        },
+        "outcome_filled_at": {
+          "first": "2026-08-11T22:52:39.611554+00:00",
+          "last": "2026-09-21T16:37:33.254773+00:00"
+        },
+        "plan_decided_at": {
+          "first": "2026-05-26T15:38:28.726597+00:00",
+          "last": "2026-10-01T15:45:22.737350+00:00"
+        },
+        "updated_at": {
+          "first": "2026-10-05T14:51:35.375095+00:00",
+          "last": "2026-10-05T14:51:35.375095+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 0,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [],
+        "frozen_qeef_n": 0,
+        "frozen_qeef_only_keys": 0,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 0,
+        "shared_keys": 0
+      },
+      "local_live_n": 43,
+      "local_live_only_keys": 1,
+      "local_live_scope_counts": {
+        "OWNER_NULL": 43
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "plan_execution_attributions"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 5690,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 5690,
+      "backup_scope_counts": {
+        "EXACT_OWNER": 1868,
+        "OWNER_NULL": 3822
+      },
+      "backup_time_ranges": {
+        "created_at": {
+          "first": "2026-04-15T03:40:27.914800+00:00",
+          "last": "2026-10-05T16:11:24.121347+00:00"
+        },
+        "scraped_at": {
+          "first": "2026-04-15T03:40:27.872231+00:00",
+          "last": "2026-10-05T16:11:24.117577+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 1868,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "cash_ars",
+          "confidence_score",
+          "created_at",
+          "dom_hash",
+          "raw_html_hash",
+          "scraped_at",
+          "snapshot_id",
+          "total_value_ars"
+        ],
+        "frozen_qeef_n": 2233,
+        "frozen_qeef_only_keys": 365,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 1868,
+        "shared_keys": 1868
+      },
+      "local_live_n": 6153,
+      "local_live_only_keys": 463,
+      "local_live_scope_counts": {
+        "EXACT_OWNER": 2331,
+        "OWNER_NULL": 3822
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "snapshot_id"
+      ],
+      "table": "portfolio_snapshots"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 528,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 528,
+      "backup_scope_counts": {
+        "OWNER_NULL": 528
+      },
+      "backup_time_ranges": {
+        "created_at": {
+          "first": "2026-08-20T14:07:18.839899+00:00",
+          "last": "2026-10-05T14:48:26.325515+00:00"
+        },
+        "observed_at": {
+          "first": "2026-08-20T14:07:18.219105+00:00",
+          "last": "2026-10-05T14:48:26.349059+00:00"
+        },
+        "updated_at": {
+          "first": "2026-08-20T14:07:18.839899+00:00",
+          "last": "2026-10-05T14:48:26.325515+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 0,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [],
+        "frozen_qeef_n": 23,
+        "frozen_qeef_only_keys": 23,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 0,
+        "shared_keys": 0
+      },
+      "local_live_n": 551,
+      "local_live_only_keys": 23,
+      "local_live_scope_counts": {
+        "EXACT_OWNER": 23,
+        "OWNER_NULL": 528
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "position_hold_observations"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 56529,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 56529,
+      "backup_scope_counts": {
+        "NO_OWNER_COLUMN": 56529
+      },
+      "backup_time_ranges": {
+        "scraped_at": {
+          "first": "2026-04-15T03:40:27.872231+00:00",
+          "last": "2026-10-05T16:11:24.117577+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 24296,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "asset_type",
+          "avg_cost",
+          "currency",
+          "current_price",
+          "id",
+          "market_value",
+          "quantity",
+          "scraped_at",
+          "sector",
+          "snapshot_id",
+          "ticker",
+          "unrealized_pnl",
+          "unrealized_pnl_pct",
+          "weight_in_portfolio"
+        ],
+        "frozen_qeef_n": 28503,
+        "frozen_qeef_only_keys": 4207,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 24296,
+        "shared_keys": 24296
+      },
+      "local_live_n": 61912,
+      "local_live_only_keys": 5383,
+      "local_live_scope_counts": {
+        "NO_OWNER_COLUMN": 61912
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id",
+        "scraped_at"
+      ],
+      "table": "positions"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 14393,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 14393,
+      "backup_scope_counts": {
+        "NO_OWNER_COLUMN": 14393
+      },
+      "backup_time_ranges": {
+        "resolved_at": {
+          "first": "2026-08-28T00:30:32.599751+00:00",
+          "last": "2026-10-03T00:30:41.963222+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 14393,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {
+          "excess_vs_own_positions": 3,
+          "excess_vs_qqq": 3,
+          "excess_vs_spy": 3,
+          "excess_vs_universe": 8710,
+          "own_positions_benchmark_return": 3,
+          "qqq_benchmark_return": 3,
+          "spy_benchmark_return": 3,
+          "universe_benchmark_return": 8710,
+          "universe_sample_count": 9439
+        },
+        "compared_fields": [
+          "excess_vs_own_positions",
+          "excess_vs_qqq",
+          "excess_vs_spy",
+          "excess_vs_universe",
+          "forward_return",
+          "horizon_sessions",
+          "max_drawdown",
+          "metadata",
+          "outcome_basis",
+          "outcome_price",
+          "own_positions_benchmark_return",
+          "qqq_benchmark_return",
+          "resolved_at",
+          "snapshot_id",
+          "spy_benchmark_return",
+          "target_session_ts",
+          "universe_benchmark_return",
+          "universe_sample_count"
+        ],
+        "frozen_qeef_n": 18722,
+        "frozen_qeef_only_keys": 4329,
+        "normalized_shared_rows_different": 9439,
+        "normalized_shared_rows_equal": 4954,
+        "shared_keys": 14393
+      },
+      "local_live_n": 19040,
+      "local_live_only_keys": 4647,
+      "local_live_scope_counts": {
+        "NO_OWNER_COLUMN": 19040
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "snapshot_id",
+        "horizon_sessions"
+      ],
+      "table": "radar_discovery_outcomes"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 30,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 30,
+      "backup_scope_counts": {
+        "EXACT_OWNER": 30
+      },
+      "backup_time_ranges": {
+        "captured_at": {
+          "first": "2026-08-20T19:50:19.948004+00:00",
+          "last": "2026-10-02T19:50:56.098370+00:00"
+        },
+        "created_at": {
+          "first": "2026-08-20T19:50:23.528364+00:00",
+          "last": "2026-10-02T19:51:14.606623+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 30,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "captured_at",
+          "captured_session",
+          "control_count",
+          "created_at",
+          "eligible_count",
+          "evaluated_count",
+          "parameters",
+          "protocol_version",
+          "run_id",
+          "scoring_version",
+          "selected_count",
+          "status",
+          "universe_count"
+        ],
+        "frozen_qeef_n": 36,
+        "frozen_qeef_only_keys": 6,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 30,
+        "shared_keys": 30
+      },
+      "local_live_n": 38,
+      "local_live_only_keys": 8,
+      "local_live_scope_counts": {
+        "EXACT_OWNER": 38
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "run_id"
+      ],
+      "table": "radar_discovery_runs"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 8164,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 8164,
+      "backup_scope_counts": {
+        "NO_OWNER_COLUMN": 8164
+      },
+      "backup_time_ranges": {
+        "created_at": {
+          "first": "2026-08-20T19:50:23.528364+00:00",
+          "last": "2026-10-02T19:51:14.606623+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 8164,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "acceptance_reason",
+          "asset_type",
+          "comparison_bucket",
+          "composite_shadow_percentile",
+          "composite_shadow_score",
+          "compression_component_score",
+          "created_at",
+          "data_source_counts",
+          "data_source_mode",
+          "discovery_percentile",
+          "discovery_score",
+          "feature_quality_flag",
+          "id",
+          "in_portfolio",
+          "invalidation_price",
+          "metadata",
+          "price_quality_flag",
+          "radar_eligible",
+          "radar_final_score",
+          "radar_status",
+          "rank_percentile",
+          "rank_position",
+          "ranking_score",
+          "readiness_state",
+          "reference_price",
+          "reference_ts",
+          "rejection_reason",
+          "relative_strength_component_score",
+          "reversion_score",
+          "run_id",
+          "screener_passed",
+          "selected_top_n",
+          "setup_component_score",
+          "setup_features",
+          "setup_percentile",
+          "setup_risk_reward",
+          "setup_score",
+          "setup_shadow_version",
+          "setup_warnings",
+          "target_price",
+          "technical_regime",
+          "ticker",
+          "trade_type",
+          "trend_component_score",
+          "trend_score",
+          "trigger_confirmed",
+          "trigger_price",
+          "v2_bias",
+          "v2_percentile",
+          "v2_score",
+          "v2_version",
+          "v3_classification",
+          "v3_eligible",
+          "v3_percentile",
+          "v3_score",
+          "v3_tier",
+          "v3_version"
+        ],
+        "frozen_qeef_n": 9864,
+        "frozen_qeef_only_keys": 1700,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 8164,
+        "shared_keys": 8164
+      },
+      "local_live_n": 10434,
+      "local_live_only_keys": 2270,
+      "local_live_scope_counts": {
+        "NO_OWNER_COLUMN": 10434
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "radar_discovery_snapshots"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 5690,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 5690,
+      "backup_scope_counts": {
+        "NO_OWNER_COLUMN": 5690
+      },
+      "backup_time_ranges": {
+        "scraped_at": {
+          "first": "2026-04-15T03:40:27.872231+00:00",
+          "last": "2026-10-05T16:11:24.117577+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 1868,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [
+          "scraped_at",
+          "snapshot_id"
+        ],
+        "frozen_qeef_n": 2233,
+        "frozen_qeef_only_keys": 365,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 1868,
+        "shared_keys": 1868
+      },
+      "local_live_n": 6153,
+      "local_live_only_keys": 463,
+      "local_live_scope_counts": {
+        "NO_OWNER_COLUMN": 6153
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "snapshot_id",
+        "scraped_at"
+      ],
+      "table": "raw_snapshots"
+    },
+    {
+      "backup_duplicate_keys": 0,
+      "backup_keys_in_local_live": 51654,
+      "backup_keys_missing_local_live": 0,
+      "backup_n": 51654,
+      "backup_scope_counts": {
+        "OWNER_ZERO": 51654
+      },
+      "backup_time_ranges": {
+        "captured_at": {
+          "first": "2026-06-20T23:23:43.929149+00:00",
+          "last": "2026-10-02T20:21:24.805045+00:00"
+        }
+      },
+      "frozen_qeef_comparison": {
+        "backup_owner_scoped_n": 0,
+        "backup_scoped_keys_missing_from_qeef": 0,
+        "changed_fields": {},
+        "compared_fields": [],
+        "frozen_qeef_n": 0,
+        "frozen_qeef_only_keys": 0,
+        "normalized_shared_rows_different": 0,
+        "normalized_shared_rows_equal": 0,
+        "shared_keys": 0
+      },
+      "local_live_n": 57768,
+      "local_live_only_keys": 6114,
+      "local_live_scope_counts": {
+        "OWNER_ZERO": 57768
+      },
+      "owner_scope_differences_on_shared_keys": 0,
+      "primary_key_columns": [
+        "id"
+      ],
+      "table": "shadow_thesis_forecasts"
+    }
+  ]
+}
