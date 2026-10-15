@@ -20,6 +20,7 @@ import type {
   PerformancePayload,
   PortfolioPayload,
   RadarPayload,
+  TopOpportunitiesPayload,
   RowRecord,
   ShadowPayload,
   ShadowCalibrationPayload,
@@ -79,6 +80,8 @@ export function useLedgerQuery(days = 90) {
 export function useAuditTimelineQuery(days = 90, limit = 120) {
   return useMonitorQuery<AuditTimelinePayload>("timeline", (session) => monitorApi.timeline(session, days, limit), [days, limit]);
 }
+
+export const useTopOpportunitiesQuery = () => useMonitorQuery<TopOpportunitiesPayload>("top-opportunities", monitorApi.topOpportunities);
 
 export function useRadarQuery(days = 90) {
   return useMonitorQuery<RadarPayload>("radar", (session) => monitorApi.radar(session, days), [days]);
