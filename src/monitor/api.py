@@ -1959,6 +1959,11 @@ async def opportunities_top10(request: web.Request) -> web.Response:
             "ok": True, "status": "OWNER_NOT_CONFIGURED",
             "research_only": True, "items": [], "count": 0,
         })
+    if owner_chat_id == 0:
+        return _json({
+            "ok": True, "status": "OWNER_NOT_CONFIGURED",
+            "research_only": True, "items": [], "count": 0,
+        })
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
         result = await fetch_top_opportunities(conn, owner_chat_id=owner_chat_id)
