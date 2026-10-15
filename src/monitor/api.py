@@ -1945,6 +1945,26 @@ async def audit_timeline(request: web.Request) -> web.Response:
     })
 
 
+async def opportunities_top10(request: web.Request) -> web.Response:
+    """Research-only: latest frozen discovery ranking; no free-form owner selector."""
+    from src.monitor.opportunities import fetch_top_opportunities
+
+    if "owner_chat_id" in request.query:
+        return _json({"ok": False, "error": "owner_chat_id no se acepta"}, status=400)
+    configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
+    try:
+        owner_chat_id = int(configured_owner)
+    except (ValueError, TypeError):
+        return _json({
+            "ok": True, "status": "OWNER_NOT_CONFIGURED",
+            "research_only": True, "items": [], "count": 0,
+        })
+    pool: asyncpg.Pool = request.app["pool"]
+    async with pool.acquire() as conn:
+        result = await fetch_top_opportunities(conn, owner_chat_id=owner_chat_id)
+    return _json({"ok": True, **result})
+
+
 async def radar_audit(request: web.Request) -> web.Response:
     days = max(7, min(int(request.query.get("days", "90")), 365))
     configured_owner = str(get_config().scraper.telegram_chat_id or "").strip()
@@ -3574,6 +3594,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/decision-ledger", decision_ledger)
     app.router.add_get("/api/audit-timeline", audit_timeline)
     app.router.add_get("/api/radar-audit", radar_audit)
+    app.router.add_get("/api/opportunities/top10", opportunities_top10)
     app.router.add_get("/api/shadow", shadow_view)
     app.router.add_get("/api/shadow-calibration", shadow_calibration_view)
     app.router.add_get("/api/learning-shadow", learning_shadow_v2_view)
