@@ -384,6 +384,7 @@ export function demoPayloadFor(key: string): unknown {
     performance: demoPerformance,
     portfolio: demoPortfolio,
     radar: demoRadar,
+    "top-opportunities": { ok: true, status: "NO_CAPTURE", research_only: true, count: 0, items: [] },
     shadow: demoShadow,
     timeline: demoTimeline,
   }[key];
