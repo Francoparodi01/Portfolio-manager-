@@ -1,8 +1,10 @@
 # QEEF Phase 2: informe en PDF
 
-> **Corrección de alcance — 15 de octubre de 2026:** el PDF refleja la captura utilizada por QEEF, sin conciliación verificada contra el Supabase histórico. Sus 301 casos no representan un inventario demostrado de toda la historia del proyecto. Consultar la [revisión de cobertura de fuentes](QEEF_SOURCE_COVERAGE_REVIEW.md) antes de interpretar sus conclusiones.
+> **Usar el [PDF revisado con la conciliación de Supabase](QUANTIA_QEEF_Phase_2_Informe_Revisado.pdf).** Incorpora los hallazgos del backup y conserva el informe anterior como anexo histórico. Sus 301 casos siguen siendo una población acotada, no toda la historia del proyecto.
 
-[Abrir el PDF](QUANTIA_QEEF_Phase_2_Informe.pdf). En GitHub, usar **Download raw file** para descargarlo.
+La edición revisada tiene 8 páginas: 3 de conciliación y 5 del informe histórico. SHA256: `f7c612e977cc66387bfe859d98ec37842831f2fb2986f5550fcd01b4f4204c47`. La metodología y los límites están en [conciliación del backup](QEEF_SUPABASE_BACKUP_RECONCILIATION.md).
+
+[Abrir la exportación histórica del 14/10](QUANTIA_QEEF_Phase_2_Informe.pdf). En GitHub, usar **Download raw file** para descargar cualquiera de los archivos.
 
 El archivo es la exportación del informe del 14 de octubre de 2026, con 5 páginas y texto seleccionable. Se conserva sin cambios respecto del PDF entregado originalmente.
 
