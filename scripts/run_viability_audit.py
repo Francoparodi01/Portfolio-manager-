@@ -1,10 +1,12 @@
 """
-Run the 180d viability audit.
+Run the 180d retrospective viability audit.
 
-The report separates bot-only, followed-by-user and manual-only execution, measures
-5d/10d/20d/40d independently, and checks positive IC, lower drawdown, and
-better net EV after costs. It refreshes derived plan/movement links but does not
-change thresholds, planner behavior, source movements, or decision_log.
+The report separates bot-only, followed-by-user and manual-only execution and
+measures 5d/10d/20d/40d outcomes after costs. IC is score/outcome correlation.
+Drawdown is a sequential episode diagnostic, not a portfolio-risk estimate;
+passing these historical gates does not validate capital allocation. The job
+refreshes derived plan/movement links but does not change decision thresholds,
+planner behavior, source movements, or decision_log.
 """
 
 from __future__ import annotations

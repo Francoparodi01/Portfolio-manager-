@@ -95,7 +95,9 @@ def test_viability_audit_separates_bot_and_manual_primary_metrics():
     assert bot.max_drawdown is not None and manual.max_drawdown is not None
     assert bot.max_drawdown > manual.max_drawdown
     assert all(g.passed is True for g in report.gates)
-    assert "VIABLE PARA 180D" in report.verdict
+    assert all("drawdown" not in g.name for g in report.gates)
+    assert "EDGE HISTORICO FAVORABLE" in report.verdict
+    assert "NO VALIDADO PARA CAPITAL" in report.verdict
 
 
 def test_viability_audit_reports_followed_scope_without_changing_bot_gates():
@@ -227,6 +229,8 @@ def test_viability_render_is_mobile_compact_and_scope_explicit():
     assert "🧭 Seguido" in text
     assert "👤 Manual" in text
     assert "Gates bot-only" in text
+    assert "IC = correlación" in text
+    assert "no modela capital" in text
     assert "ambiguas excluidas" in text
 
 
