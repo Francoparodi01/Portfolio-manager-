@@ -1,0 +1,529 @@
+{
+  "backup_quantity_fill_checks": {
+    "overlap_candidate_groups": 31,
+    "overlap_groups_equal_amount": 29,
+    "overlap_groups_equal_price": 0,
+    "overlap_order_movement_pairs": 31,
+    "rows_in_overlap_candidates": 62
+  },
+  "base_main_sha": "1687cdcce50895a9dfacb6dae04188fd8d8d5626",
+  "code_hash_contract": "UTF-8 decoded, CRLF normalized to LF; separate from immutable raw artifact hashes",
+  "code_sha256_lf_utf8": {
+    "scripts/capture_phase2a.py": "2ba37d787858215a8de371896de553e12c72fd610971f5cae7a8c2d3271e734c",
+    "scripts/reconstruct_phase2a.py": "433e87705f2329cf9213b3ad61c3a5ab7752a0d27a96359f2694795f5571c590",
+    "tests/test_phase2a_reconstruction.py": "fe1964929a4c8d843f1e2ed4d9dc23b215068e4a57c9f0f658776341a4cfe1a7"
+  },
+  "csv_key_checks": {
+    "broker_fills": {
+      "content_equality": "NOT_ASSERTED_EMPTY_NULL_AMBIGUITY",
+      "duplicate_keys": 0,
+      "keys_in_capture": 320,
+      "n": 320,
+      "scope": "LOCAL_HOLDINGS_ARE_OWNER_BOUNDED; CSV_IS_NOT",
+      "sha256": "03d251af12068ed97f73f21f116531e478c0172fc57c73f62ba3bdd0f9629e10"
+    },
+    "broker_movements": {
+      "content_equality": "NOT_ASSERTED_EMPTY_NULL_AMBIGUITY",
+      "duplicate_keys": 0,
+      "keys_in_capture": 509,
+      "n": 509,
+      "scope": "LOCAL_HOLDINGS_ARE_OWNER_BOUNDED; CSV_IS_NOT",
+      "sha256": "5ae382d86adbca2b86c560c29c0b2e297b47f41bb8fa83d9ce2c660dfaa2dd14"
+    },
+    "portfolio_snapshots": {
+      "content_equality": "NOT_ASSERTED_EMPTY_NULL_AMBIGUITY",
+      "duplicate_keys": 0,
+      "keys_in_capture": 2012,
+      "n": 5834,
+      "scope": "LOCAL_HOLDINGS_ARE_OWNER_BOUNDED; CSV_IS_NOT",
+      "sha256": "6fc76417e4e1229359bbdc7233dc93a93a3c94c5961a7fd7ada2a2a47d2c3b40"
+    },
+    "position_hold_observations": {
+      "content_equality": "NOT_ASSERTED_EMPTY_NULL_AMBIGUITY",
+      "duplicate_keys": 0,
+      "keys_in_capture": 551,
+      "n": 551,
+      "scope": "LOCAL_HOLDINGS_ARE_OWNER_BOUNDED; CSV_IS_NOT",
+      "sha256": "fcd89e1a51882ad21b0a416ea195c7358f602fc0bfb9198a57bcff801f09ad10"
+    },
+    "positions": {
+      "content_equality": "NOT_ASSERTED_EMPTY_NULL_AMBIGUITY",
+      "duplicate_keys": 0,
+      "keys_in_capture": 25921,
+      "n": 58154,
+      "scope": "LOCAL_HOLDINGS_ARE_OWNER_BOUNDED; CSV_IS_NOT",
+      "sha256": "c04e24d1f46e0a07782acb2dbd43accf4ff1f3e0eb70f2c49b404050cf9ec4c6"
+    },
+    "raw_snapshots": {
+      "content_equality": "NOT_ASSERTED_EMPTY_NULL_AMBIGUITY",
+      "duplicate_keys": 0,
+      "keys_in_capture": 2012,
+      "n": 5834,
+      "scope": "LOCAL_HOLDINGS_ARE_OWNER_BOUNDED; CSV_IS_NOT",
+      "sha256": "7dc9b1892284f77c496311f194ddf7fbde62e81843eb093f5d6f915a40dfceff"
+    }
+  },
+  "forensic_checks": {
+    "cash_channel_duplicate_ids": 0,
+    "cash_channel_rows": 192,
+    "cash_channel_types": [
+      {
+        "currency": "ARS",
+        "n": 97,
+        "type": "BUY"
+      },
+      {
+        "currency": "ARS",
+        "n": 11,
+        "type": "DEPOSIT"
+      },
+      {
+        "currency": "ARS",
+        "n": 6,
+        "type": "DIVIDENDOS EN ESPECIE"
+      },
+      {
+        "currency": "ARS",
+        "n": 62,
+        "type": "SELL"
+      },
+      {
+        "currency": "ARS",
+        "n": 16,
+        "type": "WITHDRAWAL"
+      }
+    ],
+    "cash_reconciliation_status": "NOT_IDENTIFIABLE",
+    "cash_trade_ticket_pairs": 160,
+    "explicit_cost_payload_keys_found": {},
+    "raw_quantity_max_abs_difference": "2.66453525910037569701671600341796875E-17",
+    "raw_quantity_precision_differences": 329,
+    "repeated_ticket_currency_conflicts": 1,
+    "rows_in_repeated_ticket_groups": 320,
+    "ticket_link_status": "RECOVERABLE_CHANNEL_IDENTITY_ONLY",
+    "valid_ticket_repeated_groups": 160
+  },
+  "historical_captures": {
+    "baseline": {
+      "captured_at": "2026-10-16T04:05:47.349668+00:00",
+      "sha256": "bc28c4a7e3bd3671e6ea9037fb1a57cc00e1955f7903bddcca6746d7ff92ab91",
+      "tables": {
+        "broker_fills": {
+          "comparison": "KEYS_AND_SELECTED_FINANCIAL_FIELDS_ONLY",
+          "current_n": 109,
+          "financial_fields_changed": 0,
+          "historical_n": 109,
+          "missing_keys": 0
+        },
+        "portfolio_snapshots": {
+          "comparison": "KEYS_AND_SELECTED_FINANCIAL_FIELDS_ONLY",
+          "current_n": 2337,
+          "financial_fields_changed": 0,
+          "historical_n": 2335,
+          "missing_keys": 0
+        },
+        "positions": {
+          "comparison": "KEYS_AND_SELECTED_FINANCIAL_FIELDS_ONLY",
+          "current_n": 29751,
+          "financial_fields_changed": 0,
+          "historical_n": 29727,
+          "missing_keys": 0
+        }
+      }
+    },
+    "qeef_original": {
+      "captured_at": "2026-10-14T04:53:59.810706+00:00",
+      "sha256": "814fac6d86339bce6bf31ec2c2053c6fcafb51354b31f01e9866c18170e3c935",
+      "tables": {
+        "broker_fills": {
+          "comparison": "KEYS_AND_SELECTED_FINANCIAL_FIELDS_ONLY",
+          "current_n": 109,
+          "financial_fields_changed": 0,
+          "historical_n": 109,
+          "missing_keys": 0
+        },
+        "portfolio_snapshots": {
+          "comparison": "KEYS_AND_SELECTED_FINANCIAL_FIELDS_ONLY",
+          "current_n": 2337,
+          "financial_fields_changed": 0,
+          "historical_n": 2233,
+          "missing_keys": 0
+        },
+        "positions": {
+          "comparison": "KEYS_AND_SELECTED_FINANCIAL_FIELDS_ONLY",
+          "current_n": 29751,
+          "financial_fields_changed": 0,
+          "historical_n": 28503,
+          "missing_keys": 0
+        }
+      }
+    }
+  },
+  "input_sha256": {
+    "capture": "ff0c2b1ae71a1607022f94b7b724585402d3ffbc187ff4b4205fa704a55e2020",
+    "manifest": "8c27de6ea11abe4328385991cd8910a2cb3fd28b7b67eeeb86f3f8ec3533b7a5",
+    "supabase_backup": "901df029a557ba9147be00e4317e6e334d7579592525e5f7e44176e8e3d41579"
+  },
+  "missing_attribution_rows_recovered": 5,
+  "private_output_sha256": {
+    "daily-observed-nav-private.csv": "5cb8fa251817e600269699d8b53b0a0be2fd16f1863194d47fb850373a458cf4",
+    "evidence.sqlite": "ef84e48c798276aeaa9d147b4844e466a87c0bfbd72aa14054e03e44176a9675",
+    "missing-attributions-private.json": "18fb056c0e8aaac4bb1070abf775c3dc848ca1480e99cfeed0e02220baa0af72",
+    "reconstruction-private.json": "4f53c94bea3e413fa36c909e74bf25222a99e03f5090b2dec34dc49e35b23eaf"
+  },
+  "published_scope": "AGGREGATES_ONLY; RAW_RECORDS_AND_ACCOUNT_BALANCES_PRIVATE",
+  "reconstruction": {
+    "blockers": [
+      "OPENING_COST_BASIS_UNATTESTED",
+      "OWNER_SCOPED_EXTERNAL_FLOW_COVERAGE_UNKNOWN",
+      "OBSERVED_FEES_TAXES_FINANCING_UNKNOWN",
+      "EVENT_TIME_NOT_EXACT",
+      "INSTRUMENT_AND_CORPORATE_ACTION_COVERAGE_UNKNOWN",
+      "EXECUTION_IDENTITY_OVERLAP_UNRESOLVED",
+      "RAW_ENVELOPES_ARE_NORMALIZED_NOT_BROKER_STATEMENTS"
+    ],
+    "days_observed": 57,
+    "economic_pnl_net": null,
+    "end": "2026-10-16T12:32:42.389976+00:00",
+    "fees_total": null,
+    "fill_checks": {
+      "amount_matches_raw": 109,
+      "amount_product_gap": 42,
+      "decision_EXACT_OWNER": 73,
+      "decision_OWNER_NULL": 36,
+      "derived_price": 65,
+      "explicit_account_anchor": 2,
+      "fees_missing": 109,
+      "movement_abs_quantity_match": 109,
+      "movement_identity_unique": 109,
+      "movement_signed_quantity_diff": 28,
+      "precision_date_only": 3,
+      "precision_observed_after": 106,
+      "raw_explicit_price_matches": 44,
+      "side_BUY": 65,
+      "side_SELL": 44
+    },
+    "fills": 109,
+    "hold_links": {
+      "EXPLICIT_ID": 9,
+      "LEGACY_TIMESTAMP_CANDIDATE": 14
+    },
+    "movement_checks": {
+      "ACCOUNT_ANCHORED_CANDIDATE": 359,
+      "UNSCOPED": 156,
+      "amount_missing": 1,
+      "type_BUY_ARS": 277,
+      "type_DEPOSIT_ARS": 15,
+      "type_DIVIDENDOS EN ESPECIE_ARS": 6,
+      "type_DIVIDEND_ARS": 1,
+      "type_DIVIDEND_EXT": 7,
+      "type_OTHERS_EXT": 6,
+      "type_SELL_ARS": 184,
+      "type_SELL_USD": 1,
+      "type_WITHDRAWAL_ARS": 17,
+      "type_WITHDRAWAL_USD": 1
+    },
+    "movements": 515,
+    "net_pnl_status": "NOT_IDENTIFIABLE",
+    "positions": 29751,
+    "quantity_fill_checks": {
+      "before_first_snapshot": 26,
+      "individual_quantity_delta_matches": 81,
+      "observed_clock_matches_snapshot": 81,
+      "overlap_candidate_groups": 40,
+      "overlap_groups_equal_amount": 38,
+      "overlap_groups_equal_price": 0,
+      "overlap_order_movement_pairs": 40,
+      "rows_in_overlap_candidates": 80,
+      "within_snapshot_window": 83
+    },
+    "raw_envelope_checks": {
+      "cash_ars_within_cent": 2337,
+      "id_equal": 2337,
+      "owner_exact": 2337,
+      "position_keys_equal": 2337,
+      "position_prices_within_cent": 2337,
+      "position_quantities_equal": 2008,
+      "timestamp_equal": 2337,
+      "total_value_ars_within_cent": 2337
+    },
+    "realized_pnl_gross": null,
+    "snapshot_checks": {
+      "intervals_quantity_changed": 42,
+      "intervals_quantity_unchanged": 2294,
+      "missing_valuation_components": 0,
+      "valuation_gap_or_unknown": 85,
+      "valuation_match": 2252
+    },
+    "snapshots": 2337,
+    "start": "2026-08-21T22:22:42.064086+00:00",
+    "status": "PARTIAL"
+  },
+  "schema_version": "phase2a-reconstruction-v1",
+  "source_as_of": "2026-10-16 12:50:27.619735+00:00",
+  "source_versions": {
+    "comparison": [
+      {
+        "backup_comparable_rows": 1868,
+        "changed": 0,
+        "missing_local": 0,
+        "table": "portfolio_snapshots"
+      },
+      {
+        "backup_comparable_rows": 24296,
+        "changed": 0,
+        "missing_local": 0,
+        "table": "positions"
+      },
+      {
+        "backup_comparable_rows": 1868,
+        "changed": 0,
+        "missing_local": 0,
+        "table": "raw_snapshots"
+      },
+      {
+        "backup_comparable_rows": 310,
+        "changed": 0,
+        "missing_local": 0,
+        "table": "broker_fills"
+      },
+      {
+        "backup_comparable_rows": 499,
+        "changed": 0,
+        "missing_local": 0,
+        "table": "broker_movements"
+      },
+      {
+        "backup_comparable_rows": 1206,
+        "changed": 317,
+        "missing_local": 0,
+        "table": "decision_log"
+      },
+      {
+        "backup_comparable_rows": 130,
+        "changed": 0,
+        "missing_local": 0,
+        "table": "execution_plans"
+      },
+      {
+        "backup_comparable_rows": 528,
+        "changed": 0,
+        "missing_local": 0,
+        "table": "position_hold_observations"
+      },
+      {
+        "backup_comparable_rows": 43,
+        "changed": 42,
+        "missing_local": 1,
+        "table": "plan_execution_attributions"
+      },
+      {
+        "backup_comparable_rows": 80,
+        "changed": 0,
+        "missing_local": 1,
+        "table": "plan_execution_attribution_plans"
+      },
+      {
+        "backup_comparable_rows": 62,
+        "changed": 0,
+        "missing_local": 3,
+        "table": "plan_execution_attribution_movements"
+      },
+      {
+        "backup_comparable_rows": 2,
+        "changed": 0,
+        "missing_local": 0,
+        "table": "corporate_events"
+      },
+      {
+        "backup_comparable_rows": 1,
+        "changed": 1,
+        "missing_local": 0,
+        "table": "corporate_event_applications"
+      }
+    ],
+    "duplicate_declared_keys": 0,
+    "sources": {
+      "local": [
+        {
+          "n": 109,
+          "scope": "EXACT_OWNER",
+          "table": "broker_fills"
+        },
+        {
+          "n": 217,
+          "scope": "OWNER_NULL",
+          "table": "broker_fills"
+        },
+        {
+          "n": 515,
+          "scope": "NO_OWNER_COLUMN",
+          "table": "broker_movements"
+        },
+        {
+          "n": 1,
+          "scope": "OWNER_NULL",
+          "table": "corporate_event_applications"
+        },
+        {
+          "n": 2,
+          "scope": "NO_OWNER_COLUMN",
+          "table": "corporate_events"
+        },
+        {
+          "n": 290,
+          "scope": "EXACT_OWNER",
+          "table": "decision_log"
+        },
+        {
+          "n": 995,
+          "scope": "OWNER_NULL",
+          "table": "decision_log"
+        },
+        {
+          "n": 13,
+          "scope": "EXACT_OWNER",
+          "table": "execution_plans"
+        },
+        {
+          "n": 130,
+          "scope": "OWNER_NULL",
+          "table": "execution_plans"
+        },
+        {
+          "n": 63,
+          "scope": "NO_OWNER_COLUMN",
+          "table": "plan_execution_attribution_movements"
+        },
+        {
+          "n": 80,
+          "scope": "NO_OWNER_COLUMN",
+          "table": "plan_execution_attribution_plans"
+        },
+        {
+          "n": 43,
+          "scope": "OWNER_NULL",
+          "table": "plan_execution_attributions"
+        },
+        {
+          "n": 2337,
+          "scope": "EXACT_OWNER",
+          "table": "portfolio_snapshots"
+        },
+        {
+          "n": 23,
+          "scope": "EXACT_OWNER",
+          "table": "position_hold_observations"
+        },
+        {
+          "n": 528,
+          "scope": "OWNER_NULL",
+          "table": "position_hold_observations"
+        },
+        {
+          "n": 29751,
+          "scope": "EXACT_OWNER",
+          "table": "positions"
+        },
+        {
+          "n": 2337,
+          "scope": "EXACT_OWNER",
+          "table": "raw_snapshots"
+        }
+      ],
+      "supabase_backup": [
+        {
+          "n": 93,
+          "scope": "EXACT_OWNER",
+          "table": "broker_fills"
+        },
+        {
+          "n": 217,
+          "scope": "OWNER_NULL",
+          "table": "broker_fills"
+        },
+        {
+          "n": 499,
+          "scope": "NO_OWNER_COLUMN",
+          "table": "broker_movements"
+        },
+        {
+          "n": 1,
+          "scope": "OWNER_NULL",
+          "table": "corporate_event_applications"
+        },
+        {
+          "n": 2,
+          "scope": "NO_OWNER_COLUMN",
+          "table": "corporate_events"
+        },
+        {
+          "n": 211,
+          "scope": "EXACT_OWNER",
+          "table": "decision_log"
+        },
+        {
+          "n": 995,
+          "scope": "OWNER_NULL",
+          "table": "decision_log"
+        },
+        {
+          "n": 130,
+          "scope": "OWNER_NULL",
+          "table": "execution_plans"
+        },
+        {
+          "n": 62,
+          "scope": "NO_OWNER_COLUMN",
+          "table": "plan_execution_attribution_movements"
+        },
+        {
+          "n": 80,
+          "scope": "NO_OWNER_COLUMN",
+          "table": "plan_execution_attribution_plans"
+        },
+        {
+          "n": 43,
+          "scope": "OWNER_NULL",
+          "table": "plan_execution_attributions"
+        },
+        {
+          "n": 1868,
+          "scope": "EXACT_OWNER",
+          "table": "portfolio_snapshots"
+        },
+        {
+          "n": 3822,
+          "scope": "OWNER_NULL",
+          "table": "portfolio_snapshots"
+        },
+        {
+          "n": 528,
+          "scope": "OWNER_NULL",
+          "table": "position_hold_observations"
+        },
+        {
+          "n": 24296,
+          "scope": "EXACT_OWNER",
+          "table": "positions"
+        },
+        {
+          "n": 32233,
+          "scope": "OWNER_NULL",
+          "table": "positions"
+        },
+        {
+          "n": 1868,
+          "scope": "EXACT_OWNER",
+          "table": "raw_snapshots"
+        },
+        {
+          "n": 3822,
+          "scope": "OWNER_NULL",
+          "table": "raw_snapshots"
+        }
+      ]
+    }
+  },
+  "transaction_read_only": "on"
+}

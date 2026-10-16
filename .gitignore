@@ -116,6 +116,7 @@ backup_*.sql
 !tests/test_qeef_phase2.py
 !tests/test_qeef_phase2_postgres.py
 !tests/test_measurement_baseline.py
+!tests/test_phase2a_reconstruction.py
 
 # Private bounded E0 evidence
 output/contextual-e1/
