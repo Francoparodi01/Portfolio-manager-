@@ -11,6 +11,7 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.playwright-cli/
+.playwright-cli/
 frontend/output/
 .vite/
 *.tsbuildinfo
@@ -117,6 +118,9 @@ backup_*.sql
 !tests/test_qeef_phase2_postgres.py
 !tests/test_measurement_baseline.py
 !tests/test_phase2a_reconstruction.py
+!tests/test_cocos_activity_audit.py
+!tests/test_capture_cocos_activity.cjs
+!tests/test_cocos_tickets.py
 
 # Private bounded E0 evidence
 output/contextual-e1/
