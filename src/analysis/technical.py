@@ -176,11 +176,22 @@ def _ema(s: "pd.Series", span: int) -> "pd.Series":
     return s.ewm(span=span, adjust=False).mean()
 
 def _rsi(s: "pd.Series", period: int = 14) -> "pd.Series":
+    """Simple (rolling-mean) RSI with defined zero-gain/loss boundaries.
+
+    Preserve the existing smoothing convention; switching to Wilder RSI is a
+    separate, signal-affecting model change requiring its own validation.
+    """
     delta = s.diff()
-    gain  = delta.clip(lower=0).rolling(period).mean()
-    loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    rs    = gain / loss.replace(0, float("nan"))
-    return 100 - (100 / (1 + rs))
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss.replace(0, float("nan"))
+    rsi = 100 - (100 / (1 + rs))
+    valid = gain.notna() & loss.notna()
+    # For a full window: no losses => 100, neither gains nor losses => 50.
+    # Incomplete windows remain NaN; only a missing denominator is repaired.
+    rsi = rsi.mask(valid & (loss == 0) & (gain > 0), 100.0)
+    rsi = rsi.mask(valid & (loss == 0) & (gain == 0), 50.0)
+    return rsi
 
 def _macd(s: "pd.Series"):
     ema12 = _ema(s, 12); ema26 = _ema(s, 26)
