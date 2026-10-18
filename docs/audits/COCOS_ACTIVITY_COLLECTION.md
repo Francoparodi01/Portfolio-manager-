@@ -4,6 +4,8 @@ Captura: 2026-10-16; cierre del informe: 2026-10-17. Extensión de [Fase 2A](PHA
 
 **La lectura directa del broker ahora está VERIFIED para el corte descargado. La reconstrucción contable de cuenta sigue PARTIAL y el PnL neto sigue NOT_IDENTIFIABLE.** El resultado técnico de captura no certifica apertura de cuenta, cobertura de todas las operaciones ni completitud patrimonial.
 
+**Evidencia posterior:** el [avance de Fase 2B](PHASE2B_RECONCILIATION.md), con otro corte del 17/10, recupera ocho estados de cuenta y sus CSV, verifica ventanas de caja/cantidades y registra un nuevo fallo de los 39 PDFs pendientes. Sus resultados amplían la cobertura sin sobrescribir los conteos ni límites de esta captura de actividad.
+
 ## Alcance obtenido
 
 El [recibo agregado](evidence/cocos-activity-collection.json) fija los timestamps, hashes, cobertura, validación y límites de esta entrega. Las fechas de operaciones que devuelve la lista van de **2023-11-21 a 2026-10-09**. No se usa el primer registro como prueba de apertura de cuenta ni el último como cierre contable.

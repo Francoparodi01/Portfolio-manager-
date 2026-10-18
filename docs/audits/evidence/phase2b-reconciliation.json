@@ -1,0 +1,197 @@
+{
+  "activity_sha256": "f8576afdf818ee0203a3d637a814231e77987c437c08c6f507c85cae98973dc8",
+  "capture_sha256": "e7ac50ebfc1b222b4b917076b1db6ab392abb824a65c535a813b95575f828aec",
+  "cash_currency_mapping": {
+    "USD": "USD MEP",
+    "basis": "Cocos public web portfolioCashTitles module 4448; cash only"
+  },
+  "code_sha256_utf8_lf": {
+    "scripts/capture_phase2b.js": "d2448638c140db609bc485e5f0868c854a72fd21d844255ba575331881cb75af",
+    "scripts/capture_phase2b.py": "944e5c71509c660f404ab017362a7d1090e9cf84ec09f129d9fb9463f59a1237",
+    "scripts/reconcile_phase2b.py": "547ba4d0b46da66c467ab0c7232bacca37ab754b6176d4f209d2ab183bf03502",
+    "tests/test_capture_phase2b.cjs": "10d1a511afc7aa6f3220e64ade4c9beab5944a2ba8f0fe5ca47e79699c57a92a",
+    "tests/test_phase2b_reconciliation.py": "ec37f31a388ce1a29e5f64b2747dafabfe2125554f5ac9303780540166c11cca"
+  },
+  "counts": {
+    "activity_rows_by_settlement": 22,
+    "cash_ARS_VERIFIED_ARITHMETIC": 8,
+    "cash_USD MEP_MISSING_EXPLICIT_BOUNDARY": 2,
+    "cash_USD MEP_VERIFIED_ARITHMETIC": 6,
+    "csv_fallback_price_flags": 0,
+    "csv_missing_price_date": 1,
+    "csv_missing_price_flags": 0,
+    "csv_pdf_exact_name_currency": 107,
+    "csv_pdf_native_total_within_001": 107,
+    "csv_pdf_quantity_equal": 107,
+    "csv_price_date_different_from_report": 0,
+    "csv_ragged_cash_rows": 15,
+    "csv_rows": 108,
+    "quantity_comparisons": 95,
+    "quantity_residuals_zero": 95,
+    "reported_pending_settlement_fields": 3,
+    "statement_nav_sums_within_001": 16,
+    "statement_tables": 16,
+    "statement_tables_fully_parsed": 16,
+    "unknown_trade_quantities": 0,
+    "untickered_non_cash_table_rows": 3
+  },
+  "current_orders_rows": 0,
+  "daily_counts": [
+    {
+      "activity_rows_by_settlement": 4,
+      "cash_status": {
+        "ARS": "VERIFIED_ARITHMETIC",
+        "USD MEP": "MISSING_EXPLICIT_BOUNDARY"
+      },
+      "end_day": "2026-10-01",
+      "quantity_comparisons": 11,
+      "quantity_residuals_zero": 11,
+      "start_day": "2026-09-30"
+    },
+    {
+      "activity_rows_by_settlement": 5,
+      "cash_status": {
+        "ARS": "VERIFIED_ARITHMETIC",
+        "USD MEP": "MISSING_EXPLICIT_BOUNDARY"
+      },
+      "end_day": "2026-10-02",
+      "quantity_comparisons": 11,
+      "quantity_residuals_zero": 11,
+      "start_day": "2026-10-01"
+    },
+    {
+      "activity_rows_by_settlement": 6,
+      "cash_status": {
+        "ARS": "VERIFIED_ARITHMETIC",
+        "USD MEP": "VERIFIED_ARITHMETIC"
+      },
+      "end_day": "2026-10-05",
+      "quantity_comparisons": 13,
+      "quantity_residuals_zero": 13,
+      "start_day": "2026-10-04"
+    },
+    {
+      "activity_rows_by_settlement": 3,
+      "cash_status": {
+        "ARS": "VERIFIED_ARITHMETIC",
+        "USD MEP": "VERIFIED_ARITHMETIC"
+      },
+      "end_day": "2026-10-06",
+      "quantity_comparisons": 13,
+      "quantity_residuals_zero": 13,
+      "start_day": "2026-10-05"
+    },
+    {
+      "activity_rows_by_settlement": 1,
+      "cash_status": {
+        "ARS": "VERIFIED_ARITHMETIC",
+        "USD MEP": "VERIFIED_ARITHMETIC"
+      },
+      "end_day": "2026-10-07",
+      "quantity_comparisons": 11,
+      "quantity_residuals_zero": 11,
+      "start_day": "2026-10-06"
+    },
+    {
+      "activity_rows_by_settlement": 2,
+      "cash_status": {
+        "ARS": "VERIFIED_ARITHMETIC",
+        "USD MEP": "VERIFIED_ARITHMETIC"
+      },
+      "end_day": "2026-10-09",
+      "quantity_comparisons": 12,
+      "quantity_residuals_zero": 12,
+      "start_day": "2026-10-08"
+    },
+    {
+      "activity_rows_by_settlement": 1,
+      "cash_status": {
+        "ARS": "VERIFIED_ARITHMETIC",
+        "USD MEP": "VERIFIED_ARITHMETIC"
+      },
+      "end_day": "2026-10-13",
+      "quantity_comparisons": 12,
+      "quantity_residuals_zero": 12,
+      "start_day": "2026-10-12"
+    },
+    {
+      "activity_rows_by_settlement": 0,
+      "cash_status": {
+        "ARS": "VERIFIED_ARITHMETIC",
+        "USD MEP": "VERIFIED_ARITHMETIC"
+      },
+      "end_day": "2026-10-16",
+      "quantity_comparisons": 12,
+      "quantity_residuals_zero": 12,
+      "start_day": "2026-10-15"
+    }
+  ],
+  "economic_pnl_net": null,
+  "finished_at": "2026-10-17T06:52:51.297Z",
+  "histories": {
+    "ARS": {
+      "count": 1020,
+      "display_currency": "ARS",
+      "duplicate_dates": 0,
+      "max": "2026-10-17",
+      "min": "2024-01-02"
+    },
+    "USD": {
+      "count": 1020,
+      "display_currency": "USD",
+      "duplicate_dates": 0,
+      "max": "2026-10-17",
+      "min": "2024-01-02"
+    }
+  },
+  "legacy_crosswalk_counts": {
+    "cash_comparison_EXPLICIT_BROKER_NET": 186,
+    "cash_comparison_EXPLICIT_FEES": 6,
+    "cash_ticket_references": 192,
+    "cash_value_conflicts": 1,
+    "cash_values_compared": 192,
+    "cash_values_within_001": 191,
+    "explicit_account_rows": 359,
+    "unique_ticket_reference": 347,
+    "without_explicit_account_match": 156
+  },
+  "owner_context_sha256": "ff0c2b1ae71a1607022f94b7b724585402d3ffbc187ff4b4205fa704a55e2020",
+  "private_manifest_sha256": "bb65bf352504bae9603761d60e0a36eb115d95c372f05f60d5833880ab972b6b",
+  "pypdf_version": "6.10.0",
+  "qeef_preflight": {
+    "canonical_reconcile_called": false,
+    "contract": "src/analysis/qeef/accounting.py",
+    "reasons": [
+      "OPENING_COST_BASIS_NOT_PROVIDED",
+      "DATE_ONLY_EVENTS_NO_ATTESTED_CLOCK_TIMEZONE",
+      "FINANCING_COVERAGE_UNKNOWN",
+      "FX_AND_UNTICKERED_SECURITY_ATTRIBUTION_REQUIRED",
+      "LEGACY_ORDER_IDENTITIES_UNRESOLVED"
+    ],
+    "status": "NOT_IDENTIFIABLE"
+  },
+  "report_dates": [
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-07",
+    "2026-10-09",
+    "2026-10-13",
+    "2026-10-16"
+  ],
+  "reports": 8,
+  "retry_status_counts": {
+    "500": 39
+  },
+  "schema_version": "phase2b-reconciliation-v1",
+  "started_at": "2026-10-17T06:51:31.341Z",
+  "statement_history_comparison_counts": {
+    "available": 16,
+    "conflicting_same_date_statement_nav": 0,
+    "repeated_statement_date_sections": 3,
+    "unique_dates": 13,
+    "within_001": 0
+  },
+  "status": "PARTIAL"
+}

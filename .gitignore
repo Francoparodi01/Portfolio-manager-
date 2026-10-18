@@ -121,6 +121,8 @@ backup_*.sql
 !tests/test_cocos_activity_audit.py
 !tests/test_capture_cocos_activity.cjs
 !tests/test_cocos_tickets.py
+!tests/test_phase2b_reconciliation.py
+!tests/test_capture_phase2b.cjs
 
 # Private bounded E0 evidence
 output/contextual-e1/
