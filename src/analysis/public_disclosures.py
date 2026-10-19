@@ -1,7 +1,7 @@
 """Official public transaction disclosures, kept separate from Quantia signals.
 
 SEC Form 4 records are *filings*, not a real-time trading tape.
-Only non-derivative open-market P/S transactions are included in v1.
+Only non-derivative P/S transactions (market OR private) are included in v1.
 """
 from __future__ import annotations
 
@@ -111,7 +111,7 @@ def parse_sec_form4(
     source_url: str,
     accepted_at: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Parse open-market common/non-derivative P and S, not M/F/G/awards/options."""
+    """Parse non-derivative P and S (market or private), not M/F/G/awards/options."""
     if len(xml) > 3_000_000:
         raise ValueError("SEC ownership XML exceeds size limit")
     root = ET.fromstring(xml)
