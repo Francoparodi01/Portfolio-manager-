@@ -1,7 +1,7 @@
 """Authenticated, read-only public disclosure API surface."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import re
 
 from aiohttp import web
@@ -41,7 +41,7 @@ async def public_disclosures_view(request: web.Request) -> web.Response:
             )
             items = [
                 {
-                    key: value.isoformat() if isinstance(value, (datetime, __import__("datetime").date)) else value
+                    key: value.isoformat() if isinstance(value, (date, datetime)) else value
                     for key, value in dict(row).items()
                 }
                 for row in rows
@@ -55,7 +55,7 @@ async def public_disclosures_view(request: web.Request) -> web.Response:
         "ok": True, "state": state, "items": items,
         "count_returned": len(items), "limit": limit,
         "last_capture": last_capture.isoformat() if last_capture else None,
-        "scope": "SEC non-derivative open-market P/S; filtered to submitted tickers",
+        "scope": "SEC non-derivative market-or-private P/S; only collected tickers",
         "sources": {
             "SEC_FORM4": "AVAILABLE" if state != "NOT_INITIALIZED" else "NOT_INITIALIZED",
             "HOUSE_PTR": "NOT_IMPLEMENTED",
