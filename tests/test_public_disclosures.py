@@ -6,7 +6,7 @@ from src.analysis.public_disclosures import parse_sec_form4, recent_form4_filing
 
 SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
 <ownershipDocument xmlns="http://www.sec.gov/edgar/ownership">
-  <issuer><issuerTradingSymbol>AMD</issuerTradingSymbol></issuer>
+  <issuer><issuerCik>1</issuerCik><issuerTradingSymbol>AMD</issuerTradingSymbol></issuer>
   <reportingOwner>
     <reportingOwnerId><rptOwnerName>Example Executive</rptOwnerName></reportingOwnerId>
     <reportingOwnerRelationship><isOfficer>1</isOfficer><officerTitle>CEO</officerTitle></reportingOwnerRelationship>
@@ -77,6 +77,13 @@ def test_submission_filter_uses_filing_date_not_transaction_date():
     assert len(filings) == 2
     assert filings[0]["source_url"].endswith("/000000000126000001/ownership.xml")
     assert filings[1]["form"] == "4/A"
+
+
+def test_other_issuer_transaction_does_not_leak_into_monitored_ticker():
+    xml = SAMPLE.replace("<issuerCik>1</issuerCik>", "<issuerCik>2</issuerCik>")
+    result = parse_sec_form4(xml, ticker="AMD", cik="0000000001",
+                             accession="a", filed_on="2026-10-14", source_url="https://sec.gov")
+    assert result == []
 
 
 def test_reject_non_ownership_xml_and_invalid_shares():
