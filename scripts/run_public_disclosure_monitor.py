@@ -53,8 +53,6 @@ async def portfolio_tickers() -> list[str]:
 
 async def persist_events(events: list[dict[str, Any]]) -> int:
     """Append-only insert: a later fetch must not rewrite first_seen_at/PIT data."""
-    if not events:
-        return 0
     conn = await asyncpg.connect(get_config().database.url.replace("postgresql+asyncpg://", "postgresql://"))
     try:
         async with conn.transaction():
@@ -103,7 +101,7 @@ async def collect(
         "tickers_requested": tickers, "tickers_unresolved": [],
         "filings_checked": 0, "filings_failed": 0, "events": [],
         "errors": [],
-        "coverage": "open_market_non_derivative_P_S_only",
+        "coverage": "non_derivative_P_S_market_or_private_only",
     }
     async with httpx.AsyncClient(
         headers={"User-Agent": user_agent, "Accept": "application/json,text/xml,*/*"},
@@ -141,8 +139,8 @@ async def collect(
                     response.raise_for_status()
                     accepted = accepted_lookup.get(filing["accession"]) or None
                     # SEC sometimes uses ET-formatted timestamps without a timezone.
-                    if accepted and accepted.endswith("Z"):
-                        accepted_at = accepted
+                    if accepted and (accepted.endswith("Z") or accepted[-6:-5] in {"+", "-"}):
+                        accepted_at = accepted.replace(" ", "T")
                     elif accepted:
                         accepted_at = accepted.replace(" ", "T") + "Z"
                     else:
@@ -154,7 +152,7 @@ async def collect(
                         source_url=filing["source_url"], accepted_at=accepted_at,
                     )
                     output["events"].extend(rows)
-                except (httpx.HTTPError, ValueError, KeyError, Exception) as exc:
+                except Exception as exc:
                     # Partial coverage is explicit. One malformed filing is not a green result.
                     output["filings_failed"] += 1
                     output["errors"].append({
