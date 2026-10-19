@@ -3578,6 +3578,8 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/shadow-calibration", shadow_calibration_view)
     app.router.add_get("/api/learning-shadow", learning_shadow_v2_view)
     app.router.add_get("/api/human-activity", human_activity)
+    from src.monitor.disclosures import public_disclosures_view
+    app.router.add_get("/api/public-disclosures", public_disclosures_view)
     app.router.add_get("/api/corporate-actions", corporate_actions_view)
     app.router.add_get("/api/fills", fills)
     app.router.add_get("/api/logs/recent", logs_recent)
