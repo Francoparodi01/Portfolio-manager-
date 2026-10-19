@@ -15,6 +15,7 @@ const HistoricalReplayPage = lazy(() => import("../pages/HistoricalReplayPage"))
 const HumanBenchmarkPage = lazy(() => import("../pages/HumanBenchmarkPage"));
 const AuditPage = lazy(() => import("../pages/AuditPage"));
 const DataPage = lazy(() => import("../pages/DataPage"));
+const PublicDisclosuresPage = lazy(() => import("../pages/PublicDisclosuresPage"));
 
 export default function App() {
   const { session } = useSession();
@@ -34,6 +35,7 @@ export default function App() {
           <Route element={<HumanBenchmarkPage />} path="/bot-vs-humano" />
           <Route element={<AuditPage />} path="/auditoria" />
           <Route element={<DataPage />} path="/datos" />
+          <Route element={<PublicDisclosuresPage />} path="/insiders" />
           <Route element={<Navigate replace to="/" />} path="*" />
         </Routes>
       </Suspense>
