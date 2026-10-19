@@ -1,4 +1,37 @@
 {
+  "ci_validation": {
+    "baseline_commit": "1687cdcce50895a9dfacb6dae04188fd8d8d5626",
+    "meaning": "Regression gate passes; six baseline failures remain. Four strict xfails expose documented additional defects. Later report-only commit does not change validated code.",
+    "original": {
+      "baseline_failed": 6,
+      "baseline_passed": 938,
+      "candidate_failed": 7,
+      "candidate_passed": 946,
+      "commit": "935f7b156fccad5d88a0c4968188c858f003a299",
+      "conclusion": "failure",
+      "job_id": 117804866008,
+      "new_failure": "tests/test_contextual_e1.py::test_undefined_rsi_is_not_fabricated_oversold_zero",
+      "new_failures": 1,
+      "run_id": 39171341381
+    },
+    "validated_code": {
+      "baseline_failed": 6,
+      "baseline_passed": 938,
+      "baseline_skipped": 27,
+      "candidate_failed": 6,
+      "candidate_passed": 1006,
+      "candidate_skipped": 27,
+      "candidate_xfailed": 4,
+      "commit": "63a8c872ba294500be4d607f8628c37e7f528449",
+      "conclusion": "success",
+      "job_id": 117853032444,
+      "new_failures": 0,
+      "pandas": "2.3.3",
+      "python": "3.12.15",
+      "run_id": 39187543576,
+      "structural_passed": 37
+    }
+  },
   "code_sha256_utf8_lf": {
     "scripts/audit_technical_validation.py": "42bd796765df41d5e38f417b00948a528704440cf78397fbe3fb2c7283480bb3",
     "scripts/technical_reference.py": "1cdc9b32ce70716cd3816d1dbd954b71ca96e60a797689fc07514e6c3a344f81"
