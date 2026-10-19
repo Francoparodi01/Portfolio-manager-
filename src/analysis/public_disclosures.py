@@ -121,6 +121,14 @@ def parse_sec_form4(
             element.tag = element.tag.split("}", 1)[-1]
     if root.tag != "ownershipDocument":
         raise ValueError("not an SEC ownershipDocument")
+    # Issuers can also file Form 4 when THEY own another company.
+    # Never attribute that transaction to the ticker being monitored.
+    issuer_cik = _text(root, "issuer/issuerCik")
+    try:
+        if int(issuer_cik) != int(cik):
+            return []
+    except (ValueError, TypeError):
+        return []
 
     names = [
         _text(owner, "reportingOwnerId/rptOwnerName")
