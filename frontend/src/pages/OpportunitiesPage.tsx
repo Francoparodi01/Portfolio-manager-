@@ -231,6 +231,20 @@ function RankingItem({ row }: { row: RowRecord }) {
 }
 
 export default function OpportunitiesPage() {
+  return (
+    <div className="page-stack">
+      <PageHeader
+        eyebrow="Oportunidades"
+        title="Top 10 e historial del Radar"
+        description="Candidatos de la última captura y auditoría de resultados anteriores. Los precios incluyen su fecha y calidad."
+      />
+      <TopTenOpportunities />
+      <RadarHistory />
+    </div>
+  );
+}
+
+function RadarHistory() {
   const [params, setParams] = useSearchParams();
   const selected = filters.includes((params.get("estado") || "todas") as OpportunityFilter)
     ? ((params.get("estado") || "todas") as OpportunityFilter)
@@ -279,8 +293,6 @@ export default function OpportunitiesPage() {
         title="Ideas teoricas, outcomes y riesgo de camino"
         description="El radar descubre oportunidades. Esta pantalla audita si esas ideas tuvieron resultado posterior, sin mezclarlas con fills reales ni con el EV operativo del planner."
       />
-
-      <TopTenOpportunities />
 
       <MetricGroup>
         <Metric

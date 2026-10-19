@@ -16,9 +16,21 @@ Mostrar hasta diez **candidatos de investigación prospectivos**, fuera de carte
 ## Límites
 - La captura sólo existe si se habilitó explícitamente `RADAR_DISCOVERY_LEDGER_ENABLED=true` y el job `--capture-discovery`. **Este PR no activa ninguno.**
 - La evidencia técnica/fundamental no siempre está completa; no se fabrica research fundamental, valoración, noticias, probabilidades o autoridad operativa.
-- No se modifica optimizer, planner, scores, pesos, cron, flags, órdenes, fills, QEEF ni base de datos.
+- Esta vista no modifica optimizer, planner, scores guardados, pesos, cron, flags, órdenes, fills, QEEF ni base de datos. Las correcciones del motor propuestas en la misma rama se documentan por separado en la auditoría enlazada abajo.
 - La UI anterior de auditoría histórica se conserva debajo del panel prospectivo.
 - Tests cubren ausencia de datos, owner, ranking histórico y vencimiento; el build de frontend debe verificarse antes de merge.
 
 ## Contrato de uso
 Esta pantalla responde: *«¿Qué nombres propone investigar la última captura completa del Radar?»*. No responde: *«¿Qué conviene comprar hoy?»*. Una futura ficha por ticker deberá vincular fuente/fecha, validación de instrumento CEDEAR, research fundamental y análisis de cartera antes de proponer capital.
+
+## Top 10 compartido con Telegram
+
+`/top10` usa el mismo `fetch_top_opportunities` y `present_top_opportunities` que el endpoint. Ambos leen una transacción consistente de sólo lectura; el bot acepta únicamente el chat de la cuenta configurada en el monitor. El comando no refresca mercado, inicia ingestas ni realiza operaciones.
+
+La presentación agrega moneda, fecha/antigüedad del precio, score técnico, tendencia, volumen y definición, motivo, riesgo, calidad y campos faltantes. `metadata.top10_evidence` conserva los valores disponibles en las capturas futuras, sin cambiar schema, ranking ni decisiones históricas. Los campos ausentes en versiones anteriores siguen desconocidos: ni el score shadow ni el ranking sustituyen al score técnico.
+
+COMPRABLE_AHORA se presenta como COMPRAR; COMPRA_HABILITADA, SWAP_CANDIDATO y VIGILANCIA_A/B/C como VIGILAR; el resto como ESPERAR. La evidencia incompleta, vencida o no canónica obliga a mostrar ESPERAR, conservando el estado original. Se requiere calidad VALID de precio, volumen y procedencia, moneda y score conservados, precio positivo y timestamp verificable. No se crean señales operativas con este mapeo.
+
+El orden no se altera para ocultar faltantes: puede haber diez candidatos y ninguna compra verificable. Las posiciones originales pueden contener saltos. La fecha y versión permiten comprobar si dos consultas corresponden al mismo run. El panel prospectivo sigue disponible aunque falle la consulta del historial.
+
+Resultados, límites y reproducción: [Correcciones técnicas y Top 10 V1](audits/RADAR_CORRECTIONS_TOP10_V1.md).

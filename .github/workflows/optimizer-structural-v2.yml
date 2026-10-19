@@ -5,6 +5,9 @@ on:
     paths:
       - "src/analysis/**"
       - "scripts/run_analysis.py"
+      - "scripts/telegram_bot.py"
+      - "src/core/top10_telegram.py"
+      - "src/monitor/opportunities.py"
       - "tests/**"
       - ".github/workflows/optimizer-structural-v2.yml"
   push:

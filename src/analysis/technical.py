@@ -363,7 +363,7 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
     if ind.ema_12 > ind.ema_26:
         score += 1.0 * trend_factor
         reasons_buy.append("EMA12 > EMA26 — tendencia alcista corto plazo")
-    else:
+    elif ind.ema_12 < ind.ema_26:
         score -= 1.0 * trend_factor
         reasons_sell.append("EMA12 < EMA26 — tendencia bajista corto plazo")
 
@@ -371,10 +371,10 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
     if ind.sma_50 > 0:
         if ind.sma_20 > ind.sma_50:
             score += 1.2
-            reasons_buy.append("SMA20 > SMA50 — Golden Cross activo")
-        else:
+            reasons_buy.append("SMA20 > SMA50 — relación alcista de medias")
+        elif ind.sma_20 < ind.sma_50:
             score -= 1.2
-            reasons_sell.append("SMA20 < SMA50 — Death Cross activo")
+            reasons_sell.append("SMA20 < SMA50 — relación bajista de medias")
 
     # SMA 200 — tendencia de largo plazo (los institucionales la respetan)
     if ind.sma_200 is not None and ind.sma_200 > 0:
@@ -382,7 +382,7 @@ def generate_signals(ind: IndicatorSnapshot) -> Signal:
         if c > ind.sma_200:
             score += 0.8
             reasons_buy.append(f"Precio {dist_200:+.1%} sobre SMA200 — bull market")
-        else:
+        elif c < ind.sma_200:
             score -= 0.8
             reasons_sell.append(f"Precio {dist_200:+.1%} bajo SMA200 — bear market")
 

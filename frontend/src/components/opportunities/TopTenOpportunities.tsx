@@ -4,44 +4,37 @@ import { ResponsiveTable, type TableColumn } from "../../components/ui/Responsiv
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { useTopOpportunitiesQuery } from "../../hooks/useMonitorData";
 import type { TopOpportunity } from "../../types/api";
-import { getNumber, getString } from "../../utils/data";
-import { formatDateTime, formatNumber, formatScore } from "../../utils/format";
+import { getString } from "../../utils/data";
+import { formatDateTime, formatNumber } from "../../utils/format";
 
 const levels = new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 });
 
 function price(value: unknown): string {
   const number = typeof value === "number" ? value : Number(value);
-  return value === null || value === undefined || !Number.isFinite(number) ? "-" : levels.format(number);
+  return value === null || value === undefined || value === "" || !Number.isFinite(number) ? "No informado" : levels.format(number);
 }
 
 const columns: TableColumn<TopOpportunity>[] = [
-  { id: "rank", header: "#", render: (row) => formatNumber(row.rank_position), sortValue: (row) => getNumber(row, "rank_position") },
-  { id: "ticker", header: "Ticker", render: (row) => <strong className="ticker">{getString(row, "ticker")}</strong>, sortValue: (row) => getString(row, "ticker") },
-  { id: "readiness", header: "Preparación", render: (row) => <StatusBadge tone="info">{getString(row, "readiness_state") || "Sin clasificación"}</StatusBadge> },
-  { id: "ranking", header: "Ranking", align: "right", render: (row) => formatScore(getNumber(row, "ranking_score")), sortValue: (row) => getNumber(row, "ranking_score") },
-  { id: "trigger", header: "Activación", align: "right", render: (row) => price(row.trigger_price) },
-  { id: "invalidation", header: "Invalidación", align: "right", render: (row) => price(row.invalidation_price) },
-  { id: "target", header: "Objetivo", align: "right", render: (row) => price(row.target_price) },
-  { id: "rr", header: "R/R", align: "right", render: (row) => price(row.setup_risk_reward) },
+  { id: "ticker", header: "Ranking / ticker", render: (row) => <span>#{formatNumber(row.rank_position)} <strong className="ticker">{getString(row, "ticker")}</strong></span> },
+  { id: "state", header: "Estado", render: (row) => <span style={{ whiteSpace: "nowrap" }}><StatusBadge tone={row.display_state === "COMPRAR" ? "positive" : "warning"}>{row.display_state || "ESPERAR"}</StatusBadge></span> },
+  { id: "price", header: "Último precio registrado", render: (row) => <span>{price(row.reference_price)} {row.currency || "Moneda no verificada"}<br />{formatDateTime(row.reference_ts)}</span> },
+  { id: "technical", header: "Técnico / tendencia / volumen", render: (row) => <span>Score: {price(row.technical_score)}<br />{getString(row, "technical_regime", "No informada")}<br /><span title={row.volume_definition || "Sin definición"}>Volumen relativo: {price(row.volume_ratio)}</span></span> },
+  { id: "ranking", header: "Score ranking / niveles", render: (row) => <span>{price(row.ranking_score)}<details><summary>Niveles teóricos</summary>Activación: {price(row.trigger_price)}<br />Invalidación: {price(row.invalidation_price)}<br />Objetivo: {price(row.target_price)}<br />R/R: {price(row.setup_risk_reward)}</details></span> },
   { id: "quality", header: "Evidencia", render: (row) => (
-    <span title={getString(row, "data_source_mode")}>
-      Precio {getString(row, "price_quality_flag", "UNKNOWN")} · Features {getString(row, "feature_quality_flag", "UNKNOWN")}
+    <span title={(row.missing_data || []).join("; ")}>
+      {row.quality || "PARTIAL"} · {getString(row, "price_quality_flag", "UNKNOWN")}<br />
+      Fuente: {Object.keys(row.data_source_counts || {}).join(", ") || getString(row, "data_source_mode", "No informada")}<br />
+      Antigüedad: {row.price_age_seconds == null || row.price_age_seconds < 0 ? "No verificable" : `${(row.price_age_seconds / 3600).toFixed(1)} h`}
     </span>
   ) },
-  { id: "reason", header: "Contexto / límite", render: (row) => (
-    getString(row, "manual_event_risk") ||
-    getString(row, "why_not_now") ||
-    getString(row, "acceptance_reason") ||
-    getString(row, "technical_regime") ||
-    "Sin tesis textual verificable"
-  ) },
+  { id: "reason", header: "Motivo / riesgo principal", render: (row) => <span>{row.selection_reason}<br />Riesgo: {row.principal_risk}<br />{(row.missing_data || []).join("; ")}</span> },
 ];
 
 export function TopTenOpportunities() {
   const top = useTopOpportunitiesQuery();
   const data = top.data;
   return (
-    <Panel kicker="Captura prospectiva · solo lectura" title="Top 10 para investigar">
+    <Panel kicker="Mismo ranking que /top10 · solo lectura" title="Top 10 de oportunidades">
       {top.isLoading && !data ? (
         <LoadingState label="Consultando ultima captura del Radar Discovery" />
       ) : top.isError ? (
@@ -54,7 +47,9 @@ export function TopTenOpportunities() {
               ? "Las tablas de Radar Discovery no estan instaladas. No se usan decisiones historicas como sustituto."
               : data?.status === "OWNER_NOT_CONFIGURED"
                 ? "El monitor no tiene un owner configurado."
-                : "No existe una captura prospectiva completa para esta cuenta. Revisar RADAR_DISCOVERY_LEDGER_ENABLED y el job --capture-discovery."
+                : data?.status === "INVALID_CAPTURE"
+                  ? "La captura tiene datos inconsistentes. No se generan recomendaciones."
+                  : "No existe una captura completa para esta cuenta."
           }
         />
       ) : (
@@ -76,7 +71,8 @@ export function TopTenOpportunities() {
             <EmptyState label="La ultima captura no tiene candidatos elegibles fuera de cartera" />
           )}
           <p className="table-note">
-            Orden original congelado del Radar, no probabilidad de suba ni señal de compra.
+            Orden original del Radar. El estado refleja sus reglas en la fecha de captura; ESPERAR indica también evidencia insuficiente.
+            Se muestra el último precio registrado, no una cotización en vivo. El score no es una probabilidad de suba.
             Activación, objetivo e invalidación son niveles teóricos en la unidad de la fuente, no precios ejecutables verificados.
             Sin análisis fundamental certificado en esta vista. No se usan outcomes futuros para ordenar.
             {data.stale ? " No operar sobre esta captura vencida." : ""}

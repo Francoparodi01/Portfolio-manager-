@@ -30,9 +30,21 @@ export type EndpointKey =
   | "logs";
 
 export type TopOpportunity = RowRecord & {
+  reference_price?: number | null;
+  reference_ts?: string | null;
+  currency?: string | null;
+  technical_score?: number | null;
+  volume_ratio?: number | null;
+  volume_definition?: string | null;
+  display_state?: "COMPRAR" | "VIGILAR" | "ESPERAR";
+  quality?: string;
+  missing_data?: string[];
+  price_age_seconds?: number | null;
+  data_source_counts?: Record<string, number>;
+  selection_reason?: string;
+  principal_risk?: string;
   ticker: string;
   rank_position: number;
-  reference_ts?: string | null;
   trigger_price?: number | null;
   invalidation_price?: number | null;
   target_price?: number | null;
@@ -41,7 +53,7 @@ export type TopOpportunity = RowRecord & {
 
 export type TopOpportunitiesPayload = {
   ok: boolean;
-  status: "READY" | "NO_CAPTURE" | "SCHEMA_MISSING" | "OWNER_NOT_CONFIGURED";
+  status: "READY" | "NO_CAPTURE" | "SCHEMA_MISSING" | "OWNER_NOT_CONFIGURED" | "INVALID_CAPTURE";
   source?: string;
   research_only: true;
   captured_at?: string | null;

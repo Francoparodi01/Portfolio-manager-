@@ -1,4 +1,4 @@
-"""Independent arithmetic and edge cases; known extra defects are strict xfails.
+"""Independent arithmetic and edge cases, including the four corrected V1 defects.
 
 Synthetic data only. No DB, feeds, scheduler, execution or new shadow system.
 """
@@ -92,14 +92,14 @@ def test_technical_public_minimum_is_sixty(n):
 
 def test_screener_short_frame_is_rejected_despite_placeholder_fifty():
     metric=_compute_screener_metrics('SYNTHETIC',frame(n=39),None,None)
-    assert metric.rsi==50 and not metric.passes_screen
+    assert metric.rsi is None and not metric.passes_screen
     assert metric.fail_reason=='datos insuficientes'
 
 
-def test_screener_return_rsi_is_distinct_from_price_delta_rsi():
+def test_screener_uses_canonical_price_delta_rsi():
     f=frame('mixed',60);m=_compute_screener_metrics('SYNTHETIC',f,None,None)
-    assert m.rsi==pytest.approx(rsi(f.Close.tolist(),percentage=True))
-    assert abs(m.rsi-rsi(f.Close.tolist()))>0.01
+    assert m.rsi==pytest.approx(rsi(f.Close.tolist()))
+    assert abs(m.rsi-rsi(f.Close.tolist(),percentage=True))>0.01
 
 
 @pytest.mark.parametrize('value',[None,float('nan'),float('inf'),0.,-1.])
@@ -138,30 +138,27 @@ def test_radar_rank_matches_independent_formula_and_ignores_outcomes(edge,valid_
     c.prior_radar_outcomes={5:999,10:-999};assert opportunity_rank_score(c)==pytest.approx(expected)
 
 
-def test_old_and_new_helpers_are_the_actual_reviewed_git_versions():
-    old,versions=old_rsi();prices=frame('up').Close
-    assert math.isnan(old(prices).iloc[-1]) and _rsi(prices).iloc[-1]==100
-    assert versions['base_commit']!=versions['fix_commit']
+def test_v1_replay_refuses_a_changed_engine():
+    # V1 is pinned to its audited motor; run it in the PR29 worktree.
+    with pytest.raises(ValueError,match='Working technical module differs'):
+        old_rsi()
 
 
-@pytest.mark.xfail(strict=True,reason='TV1-01: screener assigns 100 to zero gains AND zero losses; engine policy is neutral 50')
+
 def test_screener_flat_price_should_be_neutral_under_declared_boundary_policy():
     assert _compute_screener_metrics('SYNTHETIC',frame('flat'),None,None).rsi==50
 
 
-@pytest.mark.xfail(strict=True,reason='TV1-02: screener atr_pct measures High-Low only and omits gaps')
 def test_screener_atr_label_should_include_true_range():
     f=frame('gap',60);m=_compute_screener_metrics('SYNTHETIC',f,None,None)
     assert _compute_asymmetry('SYNTHETIC',f,m).atr_pct==pytest.approx(_atr(f).iloc[-1]/m.price)
 
 
-@pytest.mark.xfail(strict=True,reason='TV1-03: screener emits finite RSI for a missing last close')
 def test_screener_missing_last_price_should_not_emit_finite_rsi():
     f=frame();f.loc[f.index[-1],'Close']=float('nan')
-    assert not math.isfinite(_compute_screener_metrics('SYNTHETIC',f,None,None).rsi)
+    assert _compute_screener_metrics('SYNTHETIC',f,None,None).rsi is None
 
 
-@pytest.mark.xfail(strict=True,reason='TV1-04: equality is described as an EMA/SMA bearish crossover')
 def test_equal_averages_should_not_claim_strict_bearish_inequalities():
     signal=generate_signals(compute_indicators(frame('flat'),'SYNTHETIC'))
     assert not any('EMA12 < EMA26' in r or 'SMA20 < SMA50' in r for r in signal.reasons)

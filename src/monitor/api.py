@@ -1966,7 +1966,8 @@ async def opportunities_top10(request: web.Request) -> web.Response:
         })
     pool: asyncpg.Pool = request.app["pool"]
     async with pool.acquire() as conn:
-        result = await fetch_top_opportunities(conn, owner_chat_id=owner_chat_id)
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            result = await fetch_top_opportunities(conn, owner_chat_id=owner_chat_id)
     return _json({"ok": True, **result})
 
 

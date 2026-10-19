@@ -515,6 +515,19 @@ def build_discovery_observations(
             "in_portfolio": ticker in held,
             "selected_top_n": ticker in selected,
             "metadata": {
+                # Forward-only display provenance in the existing JSON field.
+                # Does not change eligibility, rank, or historical snapshots.
+                "top10_evidence": {
+                    "version": "top10-evidence-v1",
+                    "currency": dict(getattr(tech, "data_quality", {}) or {}).get("series_identity", {}).get("currency"),
+                    "technical_score": _optional_float(getattr(tech, "score_raw", None)),
+                    "volume_ratio": dict(getattr(tech, "data_quality", {}) or {}).get("indicator_values", {}).get("vol_ratio"),
+                    "volume_definition": "current_volume_over_inclusive_sma20",
+                    "data_quality": {key: dict(getattr(tech, "data_quality", {}) or {}).get(key)
+                                     for key in ("price_status", "volume_status", "provenance_status")},
+                    "selection_reason": str(getattr(candidate, "action_concreta", "") or ""),
+                    "principal_risk": (list(getattr(candidate, "alerts", []) or []) or [None])[0],
+                },
                 "screener_fail_reason": str(getattr(screen, "fail_reason", "") or ""),
                 "rank_scope": "all_scored_screen_passers",
                 "v3_score_basis": "technical_shadow_v2_source_score",

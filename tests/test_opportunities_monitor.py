@@ -1,5 +1,5 @@
 """Contract tests for the owner-scoped prospective Opportunities read model."""
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import unittest
 from unittest.mock import AsyncMock
 
@@ -60,7 +60,7 @@ class TopOpportunitiesTests(unittest.IsolatedAsyncioTestCase):
         conn = AsyncMock()
         conn.fetchval.return_value = True
         conn.fetchrow.return_value = {
-            "run_id": "old", "captured_at": now,
+            "run_id": "old", "captured_at": now - timedelta(seconds=STALE_AFTER_SECONDS + 10),
             "captured_session": date(2026, 10, 1),
             "scoring_version": "v2", "universe_count": 1,
             "eligible_count": 1,
