@@ -120,7 +120,7 @@ export default function PublicDisclosuresPage() {
           </select>
         </div>
         {query.isLoading && !query.data ? <LoadingState label="Consultando operaciones" /> : null}
-        {query.isError ? <ErrorState label={query.error instanceof Error ? query.error.message : "No se pudo consultar"} /> : null}
+        {query.isError ? <ErrorState message={query.error instanceof Error ? query.error.message : "No se pudo consultar"} /> : null}
         {!query.isError && !query.isLoading ? (
           <ResponsiveTable
             columns={columns}
