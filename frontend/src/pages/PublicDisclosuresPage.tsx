@@ -88,7 +88,7 @@ export default function PublicDisclosuresPage() {
       <PageHeader
         eyebrow="Research / evidencia pública"
         title="Operaciones de insiders"
-        description="Compras y ventas declaradas en formularios SEC Form 4. Solo operaciones no derivadas de mercado abierto (P/S); no son señales de compra."
+        description="Compras y ventas declaradas en formularios SEC Form 4. Solo transacciones P/S no derivadas (de mercado o privadas); no son señales de compra."
       />
       <MetricGroup>
         <Metric label="Operaciones visibles" value={filtered.length} detail="Hasta 120 registros del alcance consultado" />
@@ -135,7 +135,7 @@ export default function PublicDisclosuresPage() {
 
       <Panel kicker="Límites" title="Cómo interpretar esta información">
         <p>“Operó” es la fecha de transacción; “Declaró” es la fecha presentada ante la SEC; la captura de Quantia puede ser posterior. Un formulario publicado hoy puede describir una transacción anterior.</p>
-        <p>Se excluyen ejercicios de opciones, adjudicaciones y otros códigos diferentes de P/S. Los movimientos pueden surgir de planes 10b5-1 y no prueban convicción discrecional. Los valores son aproximados cuando existen precio y cantidad.</p>
+        <p>Se excluyen ejercicios de opciones, adjudicaciones y otros códigos diferentes de P/S. El código P/S no diferencia mercado abierto de transacciones privadas. Los movimientos pueden surgir de planes 10b5-1 y no prueban convicción discrecional. Los valores son aproximados cuando existen precio y cantidad.</p>
         <p>Congreso de EE. UU.: <strong>fuentes House/Senate pendientes de integración</strong>. No se incluyen operaciones de congresistas en los totales actuales.</p>
       </Panel>
     </div>
