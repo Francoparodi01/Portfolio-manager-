@@ -59,7 +59,7 @@ export function TopTenOpportunities() {
         <>
           <div className="audit-note">
             <strong>{data.stale ? "Captura vencida — no es un ranking vigente" : "Ultima captura congelada"}</strong>
-            <span>
+            <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>
               Corte: {formatDateTime(data.captured_at)} · {formatNumber(data.count)} candidatos fuera de cartera ·
               Universo: {formatNumber(data.universe_count)} · Elegibles: {formatNumber(data.eligible_count)}.
               <br />Captura: {data.run_id} · Entradas: {data.input_sha256 || "hash no conservado"}
