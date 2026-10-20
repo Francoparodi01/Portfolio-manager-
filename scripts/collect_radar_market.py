@@ -10,6 +10,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import shutil
@@ -31,9 +32,11 @@ def write_json(path, value):
 
 
 def connection_config(env_file, host=None, port=5432):
-    config = dotenv_values(env_file)
+    config = dict(os.environ)
+    if env_file:
+        config.update(dotenv_values(env_file))
     owner = int(config.get('TELEGRAM_CHAT_ID') or 0)
-    if not owner:
+    if owner <= 0:
         raise ValueError('Explicit configured owner required')
     dsn = config['DATABASE_URL'].replace('postgresql+asyncpg://', 'postgresql://', 1)
     if host:
@@ -87,8 +90,16 @@ async def collect(args):
         universe.update({'SPY': 'CEDEAR', 'QQQ': 'CEDEAR'})
         async with pool.acquire() as conn:
             sentiments = await load_sentiment_contexts(conn, list(universe), as_of=started)
+            from src.analysis.manual_market_events import active_event_risk_by_ticker, manual_market_event_from_row
+            event_rows = None
+            if await conn.fetchval("SELECT to_regclass('public.manual_market_events')"):
+                event_rows = await conn.fetch("""SELECT * FROM manual_market_events
+                    WHERE is_active AND active_from <= $1 AND active_until >= $1""", started)
+            event_risks = (active_event_risk_by_ticker(map(manual_market_event_from_row, event_rows))
+                           if event_rows is not None else None)
         write_json(args.output / 'context-private.json', dict(owner_chat_id=owner, snapshot=snapshot,
                    universe=assets, asset_types=universe, portfolio_history=history,
+                   manual_event_risks=event_risks,
                    sentiment={k: asdict(v) for k, v in sentiments.items()}, as_of=started.isoformat()))
     finally:
         await pool.close()
@@ -113,10 +124,16 @@ async def collect(args):
 
     await asyncio.gather(*(one(t, a) for t, a in sorted(universe.items())))
     await asyncio.to_thread(collect_macro, args.output)
+    close_session = getattr(args, 'close_session', None)
+    if close_session:
+        from src.collector.radar_close_evidence import collect_close_bundle
+        await collect_close_bundle(args.output / 'byma-close',
+            [r['ticker'] for r in results if r['status']=='OK'], close_session)
     files = {p.relative_to(args.output).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
              for p in sorted(args.output.rglob('*')) if p.is_file()}
     write_json(args.output / 'manifest.json', {'started_at': started.isoformat(),
-               'finished_at': datetime.now(timezone.utc).isoformat(), 'results': results, 'sha256': files})
+               'finished_at': datetime.now(timezone.utc).isoformat(), 'results': results, 'sha256': files,
+               'market_session': close_session.isoformat() if close_session else None})
     print(json.dumps({'requested': len(universe), 'ok': sum(r['status']=='OK' for r in results),
                       'errors': [r['ticker'] for r in results if r['status']!='OK']}))
 
@@ -125,6 +142,8 @@ async def retry_collection(args):
     """Retry failed symbols in a NEW bundle; preserve original failed responses."""
     parent = args.retry_inputs
     previous = json.loads((parent/'manifest.json').read_text(encoding='utf8'))
+    if previous.get('market_session'):
+        raise ValueError('Daily evidence must be recollected as a new complete bundle')
     context = json.loads((parent/'context-private.json').read_text(encoding='utf8'))
     _, owner = connection_config(args.env_file, args.host, args.port)
     if owner != context['owner_chat_id']: raise ValueError('Owner mismatch')

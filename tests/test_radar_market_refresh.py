@@ -27,14 +27,14 @@ def raw(received='2026-10-19T21:25:00+00:00'):
                          dict(ticker='TEST',asset_type='CEDEAR',ts='2026-10-19T13:30:00+00:00',close_price=100,volume=200)])
 
 
-def test_after_close_requires_independent_matching_quote():
+def test_after_close_legacy_scrape_quote_cannot_certify_official_close():
     data=raw(); ratio=dict(isin='ARTEST',ratio='10:1')
     result=market_evidence(data,ratio,NOW)
     assert result['confirmed_close'] is None
     assert result['price_basis']=='POST_SESSION_REPORTED_CLOSE_UNCONFIRMED'
     quote=dict(currency='ARS',ts='2026-10-19T21:10:00+00:00',last_price=100)
     result=market_evidence(data,ratio,NOW,quote)
-    assert result['confirmed_close']['price']==100
+    assert result['confirmed_close'] is None
     assert result['price_updated_at'] is None  # bar start is NOT trade update time
     assert result['source_delay_seconds']==1200
     assert result['ratio']==ratio

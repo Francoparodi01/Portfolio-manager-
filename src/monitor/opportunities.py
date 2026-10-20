@@ -46,6 +46,12 @@ def present_top_opportunities(run: dict, candidates: list[dict], *, as_of: datet
     if now is None or captured is None or captured > now: return _empty('INVALID_CAPTURE')
     age = (now-captured).total_seconds()
     stale = age > STALE_AFTER_SECONDS
+    parameters = _object(run.get('parameters'))
+    if parameters.get('daily_job') == 'top10-daily-v1':
+        from src.collector.radar_close_evidence import latest_due_session
+        due = latest_due_session(now)
+        # Only presentation freshness changes. Saved ranks/scores stay immutable.
+        stale = stale or due is None or str(run.get('captured_session')) < due.isoformat()
     ranks = [r.get('rank_position') for r in candidates]
     tickers = [r.get('ticker') for r in candidates]
     if (any(not isinstance(n,int) or isinstance(n,bool) or n<1 for n in ranks)
@@ -97,13 +103,15 @@ def present_top_opportunities(run: dict, candidates: list[dict], *, as_of: datet
                     data_source_counts=_object(item.get('data_source_counts')),
                     why_not_now=metadata.get('why_not_now'), manual_event_risk=metadata.get('manual_event_risk'))
         for key in ('retrieved_at','price_updated_at','bar_start','market_session','source_delay_seconds',
-                    'confirmed_close','previous_reported_close','volume','volume_unit','ratio','ccl','provider_symbol'):
+                    'confirmed_close','independent_close','close_comparison','volume_comparison',
+                    'settlement_verified','previous_reported_close','volume','volume_unit','ratio','ccl','provider_symbol'):
             item[key] = evidence.get(key)
         item['price_basis'] = evidence.get('price_basis') or item['price_basis']
         item['price_basis_label'] = {
             'INTRADAY_PROVISIONAL': 'Intradiario provisional',
             'POST_SESSION_REPORTED_CLOSE_UNCONFIRMED': 'Cierre reportado; sin corroborar',
             'POST_SESSION_CLOSE_CORROBORATED_COCOS_TV': 'Cierre corroborado por Cocos y TradingView',
+            'POST_SESSION_CLOSE_CORROBORATED_BYMADATA_TV': 'Cierre corroborado por BYMADATA y TradingView',
             'LAST_RECORDED_NOT_LIVE_QUOTE': 'Precio registrado; no es una cotización en vivo',
         }.get(item['price_basis'], 'Base del precio no verificada')
         items.append(item)

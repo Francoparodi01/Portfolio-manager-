@@ -39,6 +39,10 @@ export type TopOpportunity = RowRecord & {
   volume?: number | null;
   volume_unit?: string | null;
   confirmed_close?: {price?: number; session?: string} | null;
+  independent_close?: {price?: number; session?: string; volume?: number; source?: string; retrieved_at?: string} | null;
+  close_comparison?: string;
+  volume_comparison?: string;
+  settlement_verified?: boolean;
   ratio?: {ratio?: string; as_of?: string; source?: string} | null;
   ccl?: {value?: number; as_of?: string; source?: string; quality?: string} | null;
   reference_price?: number | null;

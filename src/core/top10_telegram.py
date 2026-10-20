@@ -64,5 +64,16 @@ def render_top10(payload: dict) -> list[str]:
                 f"\nCCL referencia venta: {_num(ccl.get('value'))} ARS/USD · {html_text(ccl.get('as_of') or 'no verificado')}"
                 f"\nFuente CCL: {html_text(ccl.get('source') or 'no disponible', limit=100)}. No es CCL implícito del instrumento."
             )
+        independent = item.get('independent_close') or {}
+        if independent:
+            card += (
+                f"\nCierre independiente BYMADATA T+1: {_num(independent.get('price'))} ARS"
+                f" · rueda {html_text(independent.get('session'))}"
+                f"\nVolumen BYMADATA: {_num(independent.get('volume'))} nominales"
+                f" · comparación: {html_text(item.get('volume_comparison'))}"
+                f"\nComparación de cierre: {html_text(item.get('close_comparison'))}"
+                f" · plazo de la serie: {'verificado' if item.get('settlement_verified') else 'no verificado'}"
+                f"\nConsulta independiente: {html_text(independent.get('retrieved_at'))}"
+            )
         messages.append(card)
     return messages

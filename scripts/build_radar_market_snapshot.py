@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -29,6 +29,7 @@ from src.analysis.opportunity_screener import run_opportunity_analysis
 from src.analysis.radar_discovery import build_discovery_observations, RadarDiscoveryStore, SCORING_FINGERPRINT_FILES
 from src.monitor.opportunities import present_top_opportunities
 from src.core.top10_telegram import render_top10
+from src.collector.radar_close_evidence import assess_close, validate_candles, session_end, latest_due_session
 
 ART = ZoneInfo('America/Argentina/Buenos_Aires')
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +80,14 @@ def valid_ccl(calls, cutoff):
     return dict(value=None, quality='NOT_VERIFIED', basis='REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED')
 
 
+def validate_owner_context(snapshot, session, cutoff):
+    """A next-morning replay may use today's portfolio and yesterday's close."""
+    snapshot_stamp = datetime.fromisoformat(snapshot['scraped_at'])
+    if (snapshot_stamp > cutoff or snapshot_stamp.astimezone(ART).date() < session
+            or latest_due_session(cutoff) != session):
+        raise ValueError('Stale/future owner context or market session')
+
+
 def market_evidence(payload, ratio, cutoff, broker_quote=None):
     meta = payload['evidence'].get('symbol_metadata', {})
     rows = payload['candles']
@@ -101,11 +110,9 @@ def market_evidence(payload, ratio, cutoff, broker_quote=None):
     end = datetime(session.year, session.month, session.day, regular_end_hour, 15, tzinfo=ART)
     after_close = delayed is not None and (local-end).total_seconds() >= float(delayed)
     basis = 'POST_SESSION_REPORTED_CLOSE_UNCONFIRMED' if after_close else 'INTRADAY_PROVISIONAL'
+    # Legacy Cocos rows have scrape timestamps, not a dated official close.
+    # Matching a last trade after 17:15 is insufficient to certify settlement.
     corroborated = False
-    if after_close and broker_quote:
-        bt = datetime.fromisoformat(str(broker_quote['ts']))
-        corroborated = (broker_quote.get('currency')=='ARS' and bt.astimezone(ART).date()==session
-                        and end <= bt <= cutoff and float(broker_quote.get('last_price') or 0)==float(rows[-1]['close_price']))
     # Feed corroboration is explicit; it is not an official settlement assertion.
     if corroborated: basis = 'POST_SESSION_CLOSE_CORROBORATED_COCOS_TV'
     ratio_ok = ratio and meta.get('isin')==ratio['isin']
@@ -130,6 +137,17 @@ def build(args):
         if sha256((args.inputs/name.replace('\\','/')).read_bytes()).hexdigest()!=digest:
             raise ValueError('Input digest mismatch: '+name)
     cutoff = datetime.fromisoformat(manifest['finished_at'])
+    requested_session = manifest.get('market_session')
+    daily = requested_session is not None
+    session = date.fromisoformat(requested_session) if daily else cutoff.astimezone(ART).date()
+    ratio_receipt = None
+    if daily:
+        ratio_receipt = read_json(args.ratios.parent/'ratios-source.json')
+        if ratio_receipt['sha256'] != sha256(args.ratios.read_bytes()).hexdigest():
+            raise ValueError('Ratio file digest mismatch')
+        cutoff = max(cutoff, datetime.fromisoformat(ratio_receipt['retrieved_at']))
+    if daily and cutoff < session_end(session):
+        raise ValueError('Cannot calculate before session close')
     yahoo = read_json(args.inputs/'macro-yahoo.json')
     macro_dates = [datetime.fromisoformat(x.replace('Z','+00:00')) for x in yahoo['index']]
     if not macro_dates or any(d.replace(tzinfo=timezone.utc) > cutoff for d in macro_dates):
@@ -144,6 +162,8 @@ def build(args):
     ccl = valid_ccl(read_json(args.inputs/'macro-sources.json'), cutoff)
     macro.ccl = ccl.get('value')
     snapshot = context['snapshot']
+    if daily:
+        validate_owner_context(snapshot, session, cutoff)
     positions = snapshot['positions']
     assets = context['asset_types']
     quotes = {q['ticker']:q for q in context['universe']}
@@ -151,7 +171,27 @@ def build(args):
     for ticker in assets:
         try:
             payload = read_json(args.inputs/'candles'/f'{ticker}.json')
+            if daily:
+                validate_candles(payload, session)
             evidence = market_evidence(payload, ratio_map.get(ticker), cutoff, quotes.get(ticker))
+            if daily:
+                source_path = args.inputs/'byma-close'/f'{ticker}.json'
+                corroboration = assess_close(payload, read_json(source_path) if source_path.exists() else None,
+                                             session, cutoff)
+                evidence.update({k:v for k,v in corroboration.items() if k!='missing_data'})
+                evidence['missing_data'] += corroboration['missing_data']
+                if payload['candles'][-1]['asset_type'] == 'CEDEAR':
+                    ratio = evidence.get('ratio')
+                    try:
+                        ratio_date = datetime.strptime((ratio or {}).get('as_of', ''), '%d.%m.%Y').date()
+                        if ratio_date > session:
+                            raise ValueError('future ratio')
+                    except (ValueError, TypeError):
+                        evidence['ratio'] = None
+                        evidence['missing_data'].append('fecha de ratio no verificada para la rueda')
+                if corroboration['confirmed_close']:
+                    evidence['price_basis'] = 'POST_SESSION_CLOSE_CORROBORATED_BYMADATA_TV'
+                    evidence['missing_data'].remove('cierre sin corroboración independiente')
             frame = candles_to_frame(payload['candles'])
             # Current ratio is display evidence ONLY, not a historical ratio backfill.
             frame.attrs['cutoff'] = cutoff
@@ -191,6 +231,9 @@ def build(args):
                     available_cash_ars=cash, sentiment_contexts=sentiments, shadow_contexts={},
                     exclude_portfolio=False, capture_discovery=True, max_candidates=10, min_score=.10, min_rr=0.)
     report.generated_at=cutoff
+    if daily:
+        from scripts.run_opportunity import _apply_manual_event_risk_to_report
+        _apply_manual_event_risk_to_report(report, context.get('manual_event_risks') or {})
     observations = build_discovery_observations(report,universe=sorted(assets), history_frames=frames,
                     asset_types=assets, portfolio_tickers=held, selected_tickers=[], min_score=.10,min_rr=0.)
     for obs in observations:
@@ -198,24 +241,35 @@ def build(args):
         if extra:
             obs.metadata['top10_evidence'].update(extra, ccl=ccl)
             obs.metadata['top10_evidence']['missing_data'] += ['metadatos históricos PIT incompletos', 'contexto shadow previo omitido; no se reutilizan scores']
+            if daily and context.get('manual_event_risks') is None:
+                obs.metadata['top10_evidence']['missing_data'].append('eventos manuales no verificados')
             tech = report.discovery_technical_signals.get(obs.ticker)
             if tech:
                 obs.metadata['top10_evidence'].update(technical_signal=tech.signal,
                     indicator_values=tech.data_quality.get('indicator_values'),
                     indicator_quality=tech.data_quality, indicators_as_of=extra['bar_start'])
                 obs.metadata['top10_evidence']['missing_data'] += list(tech.data_quality.get('missing_features',[]))
-    inputs_hash=sha256(json.dumps(manifest['sha256'],sort_keys=True).encode()+args.ratios.read_bytes()).hexdigest()
+    inputs_hash=sha256(json.dumps(manifest['sha256'],sort_keys=True).encode()+args.ratios.read_bytes()
+        +(json.dumps(ratio_receipt,sort_keys=True).encode() if ratio_receipt else b'')).hexdigest()
     code_hash=sha256(b''.join(p.encode()+b'\0'+(ROOT/p).read_text(encoding='utf8').replace('\r\n','\n').encode()
-               for p in (*SCORING_FINGERPRINT_FILES, 'src/analysis/contextual_contracts.py', 'scripts/build_radar_market_snapshot.py'))).hexdigest()
+               for p in (*SCORING_FINGERPRINT_FILES, 'src/analysis/contextual_contracts.py',
+                         'src/collector/radar_close_evidence.py', 'config/radar_market_policy.json',
+                         'config/market_holidays_ar.json', 'scripts/build_radar_market_snapshot.py'))).hexdigest()
     version=f'radar-market-v1:{code_hash[:16]}:{inputs_hash[:16]}'
     run=dict(run_id=str(uuid5(NAMESPACE_URL,version)), captured_at=cutoff.isoformat(),
-             captured_session=cutoff.astimezone(ART).date().isoformat(), scoring_version=version,
+             captured_session=session.isoformat(), scoring_version=version,
              universe_count=len(assets)-len({'SPY','QQQ'}&set(assets)), eligible_count=sum(o.radar_eligible for o in observations),
              parameters=dict(top10_publication='v1', input_sha256=inputs_hash, engine_sha256=code_hash,
                 input_manifest=manifest['sha256'], snapshot_at=snapshot['scraped_at'], fresh_portfolio_scores=True,
                 omitted_contexts=['previous_shadow_scores'], full_operational_ranking_impact='NOT_VERIFIABLE',
                 thresholds=dict(min_score=.10,min_rr=0.), collected=len(frames), rejected=rejected,
                 ccl=ccl, ratio_file_sha256=sha256(args.ratios.read_bytes()).hexdigest()))
+    if daily:
+        run['parameters'].update(daily_job='top10-daily-v1', market_session=session.isoformat(),
+            ratio_source_receipt=ratio_receipt,
+            independent_close_count=sum(bool(p.get('independent_close')) for p in provenance.values()),
+            corroborated_close_count=sum(bool(p.get('confirmed_close')) for p in provenance.values()),
+            close_conflicts=sum(p.get('close_comparison')=='DIFFERENT' for p in provenance.values()))
     run['parameters']['macro_provenance'] = dict(source='yfinance + Argentina APIs',
               requested_at=macro_data['fetched_at'].isoformat(), latest_bar_date=max(macro_dates).date().isoformat(),
               timestamp_precision='daily bar date; not last trade time', missing_fields=[k for k,v in macro_data.items() if v is None])
@@ -244,7 +298,8 @@ async def publish(args,context,run,observations):
                     raise ValueError('Schema missing; migrations forbidden')
         result=await RadarDiscoveryStore(pool).save_snapshot(run_id=run['run_id'], owner_chat_id=owner,
                     captured_at=datetime.fromisoformat(run['captured_at']),scoring_version=run['scoring_version'],
-                    observations=observations,parameters=run['parameters'],initialize_schema=False)
+                    observations=observations,parameters=run['parameters'],initialize_schema=False,
+                    evidence_session=date.fromisoformat(run['captured_session']))
         write_json(args.output/'publication.json',result)
         print(json.dumps(result))
     finally: await pool.close()

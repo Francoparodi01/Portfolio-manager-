@@ -582,6 +582,7 @@ class RadarDiscoveryStore:
         observations: Sequence[RadarDiscoveryObservation],
         parameters: Mapping[str, Any],
         initialize_schema: bool = True,
+        evidence_session: date | None = None,
     ) -> dict[str, Any]:
         if not observations:
             return {"run_id": str(run_id), "inserted": 0, "duplicate": False}
@@ -589,7 +590,9 @@ class RadarDiscoveryStore:
             await self.ensure_schema()
         normalized_run_id = UUID(str(run_id))
         captured = _aware_datetime(captured_at)
-        session = captured.astimezone(ART_TZ).date()
+        session = evidence_session or captured.astimezone(ART_TZ).date()
+        if session > captured.astimezone(ART_TZ).date():
+            raise ValueError("Future evidence session")
         owner = int(owner_chat_id or 0)
         controls = sum(row.ticker in BENCHMARK_TICKERS for row in observations)
         universe_count = len(observations) - controls

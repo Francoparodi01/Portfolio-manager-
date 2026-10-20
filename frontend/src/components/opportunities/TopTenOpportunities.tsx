@@ -21,6 +21,14 @@ const columns: TableColumn<TopOpportunity>[] = [
   { id: "identity", header: "Ratio / CCL", render: (row) => <span>CEDEAR/acción o ADR: {row.ratio?.ratio || "No verificado"}<br />Comafi: {row.ratio?.as_of || "sin fecha"}<br />CCL referencia venta: {price(row.ccl?.value)} ARS/USD<br />{formatDateTime(row.ccl?.as_of)}<br />{row.ccl?.source ? <a href={row.ccl.source} target="_blank" rel="noreferrer">Fuente CCL</a> : "Fuente no disponible"}<br />No es CCL implícito del instrumento.</span> },
   { id: "technical", header: "Técnico / tendencia / volumen", render: (row) => <span>Score: {price(row.technical_score)}<br />{getString(row, "technical_regime", "No informada")}<br /><span title={row.volume_definition || "Sin definición"}>Volumen relativo: {price(row.volume_ratio)}</span></span> },
   { id: "ranking", header: "Score ranking / niveles", render: (row) => <span>{price(row.ranking_score)}<details><summary>Niveles teóricos</summary>Activación: {price(row.trigger_price)}<br />Invalidación: {price(row.invalidation_price)}<br />Objetivo: {price(row.target_price)}<br />R/R: {price(row.setup_risk_reward)}</details></span> },
+  { id: "confirmation", header: "Corroboración independiente", render: (row) => row.independent_close ? (
+    <span>BYMADATA · T+1<br />Cierre publicado: {price(row.independent_close.price)} ARS<br />
+      Rueda: {row.independent_close.session}<br />Consulta: {formatDateTime(row.independent_close.retrieved_at)}<br />
+      Volumen: {price(row.independent_close.volume)} nominales<br />
+      Precio: {row.close_comparison} · volumen: {row.volume_comparison}<br />
+      Plazo de la serie: {row.settlement_verified ? "verificado" : "no verificado"}
+    </span>
+  ) : <span>Sin cierre independiente verificado</span> },
   { id: "quality", header: "Evidencia", render: (row) => (
     <span title={(row.missing_data || []).join("; ")}>
       {row.quality || "PARTIAL"} · {getString(row, "price_quality_flag", "UNKNOWN")}<br />

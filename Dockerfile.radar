@@ -1,0 +1,20 @@
+# Immutable dependency image is verified by scripts/build_radar_images.py.
+# It contains Python, Chromium and the existing complete runtime dependencies.
+ARG RUNTIME_BASE=quantia-radar-dependencies:8e95486558630441
+FROM ${RUNTIME_BASE}
+USER root
+# Remove old application code from this BUILD layer, never a mounted runtime.
+RUN rm -rf /app && mkdir -p /app
+WORKDIR /app
+ARG CODE_VERSION
+ENV CODE_VERSION=${CODE_VERSION} RADAR_TOP10_DAILY_ENABLED=false
+LABEL org.opencontainers.image.revision=${CODE_VERSION}
+COPY . .
+RUN test -f src/collector/radar_close_evidence.py \
+    && test -f scripts/run_daily_top10.py \
+    && test -f config/radar_market_policy.json \
+    && mkdir -p outputs logs screenshots secrets .cache/huggingface \
+    && chown -R scraper:scraper /app
+USER scraper
+RUN python -c "import src.scheduler.runner, src.monitor.api, scripts.telegram_bot, scripts.run_daily_top10"
+CMD ["python", "-m", "src.scheduler.runner"]
