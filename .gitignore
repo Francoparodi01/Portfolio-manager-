@@ -116,6 +116,7 @@ backup_*.sql
 !tests/test_qeef_phase2.py
 !tests/test_qeef_phase2_postgres.py
 !tests/test_measurement_baseline.py
+!tests/test_technical_validation_v1.py
 
 # Private bounded E0 evidence
 output/contextual-e1/
@@ -126,3 +127,13 @@ output/contextual-e2/
 !tests/test_historical_contextual_replay.py
 !tests/test_historical_analysis_replay.py
 tmp/historical-analysis-*/
+
+!tests/test_radar_indicator_fixes.py
+
+!tests/test_top10_telegram.py
+!tests/test_radar_market_refresh.py
+!tests/test_radar_daily.py
+
+# Local visual checks may contain private capture data.
+output/playwright/
+.playwright-cli/

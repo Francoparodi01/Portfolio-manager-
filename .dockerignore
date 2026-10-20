@@ -32,6 +32,9 @@ secrets_multiuser
 logs
 screenshots
 outputs
+output
+tmp
+.playwright-cli
 models
 node_modules
 frontend/node_modules

@@ -21,6 +21,7 @@ Cambios respecto a v2.0:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -28,6 +29,8 @@ from types import SimpleNamespace
 from typing import Optional
 
 from src.analysis.execution_planner import MIN_TRADE_ARS
+from src.analysis.contextual_contracts import frame_quality
+from src.analysis.technical import _rsi, _atr
 from src.analysis.technical_buy_shadow_v3 import build_technical_buy_shadow_v3
 from src.core.telegram_format import (
     header as tg_header,
@@ -161,7 +164,7 @@ SECTOR_MAP: dict[str, list[str]] = {
 class ScreenerMetrics:
     ticker:             str
     asset_type:         str   = "UNKNOWN"
-    price:              float = 0.0
+    price:              Optional[float] = None
     avg_volume:         float = 0.0
     avg_turnover_ars:   float = 0.0
     annual_vol:         float = 0.0
@@ -172,7 +175,7 @@ class ScreenerMetrics:
     rs_benchmark_ticker: str  = ""
     momentum_20d:       float = 0.0
     momentum_60d:       float = 0.0
-    rsi:                float = 50.0
+    rsi:                Optional[float] = None
     above_sma200:       bool  = False
     above_sma50:        bool  = False
     passes_screen:      bool  = False
@@ -184,10 +187,10 @@ class AsymmetryMetrics:
     ticker:              str
     upside_to_6m_high:   float = 0.0
     max_drawdown_1y:     float = 0.0
-    atr_pct:             float = 0.0
+    atr_pct:             Optional[float] = None
     asymmetry_ratio:     float = 0.0
     support_level:       float = 0.0
-    stop_loss_pct:       float = 0.08
+    stop_loss_pct:       Optional[float] = None
     risk_reward:         float = 0.0
     rr_valid:            bool  = True
     rr_alert:            str   = ""
@@ -319,6 +322,16 @@ def opportunity_rank_score(candidate: OpportunityCandidate) -> float:
 # CAPA 1 — SCREENER
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _price_failure(df: "pd.DataFrame") -> str:
+    """Use the same price/cutoff contract as the technical engine; never fill."""
+    quality = frame_quality(df, cutoff=df.attrs.get("cutoff"))
+    reasons = quality["price_reasons"] + [
+        reason for reason in quality["provenance_reasons"]
+        if reason.startswith("AFTER_CUTOFF_")
+    ]
+    return ", ".join(reasons)
+
+
 def _compute_screener_metrics(
     ticker: str,
     df: "pd.DataFrame",
@@ -331,6 +344,11 @@ def _compute_screener_metrics(
         m.fail_reason = "datos insuficientes"
         return m
 
+    invalid = _price_failure(df)
+    if invalid:
+        m.fail_reason = "precios no verificables: " + invalid
+        return m
+
     close  = df["Close"].squeeze()
     volume = df["Volume"].squeeze() if "Volume" in df.columns else None
 
@@ -340,7 +358,7 @@ def _compute_screener_metrics(
         avg_close = float(close.tail(20).mean())
         m.avg_turnover_ars = m.avg_volume * avg_close
 
-    rets = close.pct_change().dropna()
+    rets = close.pct_change(fill_method=None).dropna()
     if len(rets) > 20:
         m.annual_vol = float(rets.std() * np.sqrt(252))
 
@@ -368,10 +386,13 @@ def _compute_screener_metrics(
             m.rs_benchmark_ticker = QQQ_TICKER
             m.rs_vs_spy_20d = m.momentum_20d - qqq_ret_20d
 
-    if len(rets) >= 14:
-        gains  = rets.clip(lower=0).tail(14).mean()
-        losses = (-rets.clip(upper=0)).tail(14).mean()
-        m.rsi  = float(100 - 100 / (1 + gains / losses)) if losses > 0 else 100.0
+    # Canonical rolling price-delta RSI, shared with technical.py. Flat=50;
+    # incomplete/invalid prices remain unknown rather than a neutral placeholder.
+    measured_rsi = float(_rsi(close, 14).iloc[-1])
+    if not math.isfinite(measured_rsi):
+        m.fail_reason = "RSI no verificable"
+        return m
+    m.rsi = measured_rsi
 
     if len(close) >= 200:
         m.above_sma200 = m.price > float(close.tail(200).mean())
@@ -416,7 +437,7 @@ def screen_universe(
     qqq_ret_20d: Optional[float] = None
     for ref_ticker, varname in [(SPY_TICKER, "spy"), (QQQ_TICKER, "qqq")]:
         df_ref = (history_frames or {}).get(ref_ticker)
-        if df_ref is not None and len(df_ref) >= 21:
+        if df_ref is not None and len(df_ref) >= 21 and not _price_failure(df_ref):
             c = df_ref["Close"].squeeze()
             ret = float(c.iloc[-1] / c.iloc[-21] - 1)
             if varname == "spy":
@@ -480,9 +501,15 @@ def _compute_asymmetry(
         a.rr_alert = "datos insuficientes para calcular R/R"
         return a
 
+    invalid = _price_failure(df)
+    if invalid:
+        a.rr_valid = False
+        a.rr_alert = "precios no verificables: " + invalid
+        return a
+
     close   = df["Close"].squeeze()
     a_price = screener.price
-    if a_price <= 0:
+    if a_price is None or not math.isfinite(a_price) or a_price <= 0:
         a.rr_valid = False
         a.rr_alert = "precio inválido"
         return a
@@ -495,12 +522,14 @@ def _compute_asymmetry(
     dd        = (window_1y - peak) / peak
     a.max_drawdown_1y = float(dd.min())
 
-    if "High" in df.columns and "Low" in df.columns:
-        atr_series = (df["High"].squeeze() - df["Low"].squeeze()).tail(14).mean()
-        a.atr_pct  = float(atr_series) / a_price if a_price > 0 else 0.0
-    else:
-        rets      = close.pct_change().dropna()
-        a.atr_pct = float(rets.tail(14).std()) * 2
+    # Same simple mean of true ranges as the technical engine, including gaps.
+    # Missing OHLC is rejected above; volatility is not substituted for ATR.
+    measured_atr = float(_atr(df, 14).iloc[-1])
+    if not math.isfinite(measured_atr) or measured_atr < 0:
+        a.rr_valid = False
+        a.rr_alert = "ATR no verificable"
+        return a
+    a.atr_pct = measured_atr / a_price
 
     a.stop_loss_pct = max(a.atr_pct * 1.5, 0.05)
     a.stop_loss_pct = min(a.stop_loss_pct, 0.18)
@@ -550,9 +579,10 @@ def _momentum_score(m: ScreenerMetrics) -> float:
     score += mo20 * 0.30
     mo60  = np.clip(m.momentum_60d / 0.15, -1.0, 1.0)
     score += mo60 * 0.20
-    if m.rsi > 80:   score -= 0.10
-    elif m.rsi > 70: score -= 0.05
-    elif m.rsi < 40: score += 0.05
+    if m.rsi is not None:
+        if m.rsi > 80:   score -= 0.10
+        elif m.rsi > 70: score -= 0.05
+        elif m.rsi < 40: score += 0.05
     return float(np.clip(score, -1.0, 1.0))
 
 
@@ -1337,7 +1367,7 @@ def run_opportunity_analysis(
         if status != CandidateStatus.DESCARTAR:
             cand = _apply_cash_constraint(cand, report.available_cash_ars)
 
-            if asym.atr_pct > 0:
+            if asym.atr_pct is not None and asym.atr_pct > 0:
                 cand.entry_zone_low  = round(screener_m.price * (1 - asym.atr_pct * 0.5), 2)
                 cand.entry_zone_high = round(screener_m.price * (1 + asym.atr_pct * 0.3), 2)
             else:

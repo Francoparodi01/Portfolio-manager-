@@ -29,6 +29,59 @@ export type EndpointKey =
   | "fills"
   | "logs";
 
+export type TopOpportunity = RowRecord & {
+  retrieved_at?: string | null;
+  price_updated_at?: string | null;
+  price_basis?: string;
+  price_basis_label?: string;
+  market_session?: string;
+  source_delay_seconds?: number | null;
+  volume?: number | null;
+  volume_unit?: string | null;
+  confirmed_close?: {price?: number; session?: string} | null;
+  independent_close?: {price?: number; session?: string; volume?: number; source?: string; retrieved_at?: string} | null;
+  close_comparison?: string;
+  volume_comparison?: string;
+  settlement_verified?: boolean;
+  ratio?: {ratio?: string; as_of?: string; source?: string} | null;
+  ccl?: {value?: number; as_of?: string; source?: string; quality?: string} | null;
+  reference_price?: number | null;
+  reference_ts?: string | null;
+  currency?: string | null;
+  technical_score?: number | null;
+  volume_ratio?: number | null;
+  volume_definition?: string | null;
+  display_state?: "COMPRAR" | "VIGILAR" | "ESPERAR";
+  quality?: string;
+  missing_data?: string[];
+  price_age_seconds?: number | null;
+  data_source_counts?: Record<string, number>;
+  selection_reason?: string;
+  principal_risk?: string;
+  ticker: string;
+  rank_position: number;
+  trigger_price?: number | null;
+  invalidation_price?: number | null;
+  target_price?: number | null;
+  setup_risk_reward?: number | null;
+};
+
+export type TopOpportunitiesPayload = {
+  run_id?: string;
+  input_sha256?: string;
+  ok: boolean;
+  status: "READY" | "NO_CAPTURE" | "SCHEMA_MISSING" | "OWNER_NOT_CONFIGURED" | "INVALID_CAPTURE";
+  source?: string;
+  research_only: true;
+  captured_at?: string | null;
+  scoring_version?: string | null;
+  stale?: boolean | null;
+  count: number;
+  universe_count?: number;
+  eligible_count?: number;
+  items: TopOpportunity[];
+};
+
 export type EndpointDefinition = {
   key: EndpointKey;
   label: string;

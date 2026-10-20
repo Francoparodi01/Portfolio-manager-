@@ -128,6 +128,12 @@ def test_build_discovery_observations_keeps_full_universe_and_portfolio():
         "BBB": _frame(50),
         "QQQ": _frame(200),
     }
+    report.discovery_technical_signals["AAA"].score_raw = 2.75
+    report.discovery_technical_signals["AAA"].data_quality = {
+        "series_identity": {"currency": "ARS"},
+        "indicator_values": {"vol_ratio": 1.25},
+        "price_status": "VALID", "volume_status": "VALID", "provenance_status": "VALID",
+    }
 
     rows = build_discovery_observations(
         report,
@@ -154,6 +160,13 @@ def test_build_discovery_observations_keeps_full_universe_and_portfolio():
     assert by_ticker["AAA"].feature_quality_flag == "PARTIAL"
     assert by_ticker["AAA"].setup_features["comparison_basis"] == "LOCAL_SAME_RUN"
     assert by_ticker["AAA"].metadata["manual_event_risk"] == "earnings_window"
+    evidence = by_ticker["AAA"].metadata["top10_evidence"]
+    assert evidence["technical_score"] == 2.75  # Not the v2 shadow score 0.6.
+    assert evidence["currency"] == "ARS"
+    assert evidence["volume_ratio"] == 1.25
+    assert evidence["data_quality"]["price_status"] == "VALID"
+    assert by_ticker["BBB"].metadata["top10_evidence"]["technical_score"] is None
+    assert by_ticker["BBB"].metadata["top10_evidence"]["currency"] is None
     assert by_ticker["HOLDING"].in_portfolio is True
     assert by_ticker["HOLDING"].radar_eligible is True
     assert by_ticker["BBB"].rejection_reason == "bajo umbral minimo"

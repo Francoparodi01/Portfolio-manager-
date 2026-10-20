@@ -515,6 +515,19 @@ def build_discovery_observations(
             "in_portfolio": ticker in held,
             "selected_top_n": ticker in selected,
             "metadata": {
+                # Forward-only display provenance in the existing JSON field.
+                # Does not change eligibility, rank, or historical snapshots.
+                "top10_evidence": {
+                    "version": "top10-evidence-v1",
+                    "currency": dict(getattr(tech, "data_quality", {}) or {}).get("series_identity", {}).get("currency"),
+                    "technical_score": _optional_float(getattr(tech, "score_raw", None)),
+                    "volume_ratio": dict(getattr(tech, "data_quality", {}) or {}).get("indicator_values", {}).get("vol_ratio"),
+                    "volume_definition": "current_volume_over_inclusive_sma20",
+                    "data_quality": {key: dict(getattr(tech, "data_quality", {}) or {}).get(key)
+                                     for key in ("price_status", "volume_status", "provenance_status")},
+                    "selection_reason": str(getattr(candidate, "action_concreta", "") or ""),
+                    "principal_risk": (list(getattr(candidate, "alerts", []) or []) or [None])[0],
+                },
                 "screener_fail_reason": str(getattr(screen, "fail_reason", "") or ""),
                 "rank_scope": "all_scored_screen_passers",
                 "v3_score_basis": "technical_shadow_v2_source_score",
@@ -568,13 +581,18 @@ class RadarDiscoveryStore:
         scoring_version: str,
         observations: Sequence[RadarDiscoveryObservation],
         parameters: Mapping[str, Any],
+        initialize_schema: bool = True,
+        evidence_session: date | None = None,
     ) -> dict[str, Any]:
         if not observations:
             return {"run_id": str(run_id), "inserted": 0, "duplicate": False}
-        await self.ensure_schema()
+        if initialize_schema:
+            await self.ensure_schema()
         normalized_run_id = UUID(str(run_id))
         captured = _aware_datetime(captured_at)
-        session = captured.astimezone(ART_TZ).date()
+        session = evidence_session or captured.astimezone(ART_TZ).date()
+        if session > captured.astimezone(ART_TZ).date():
+            raise ValueError("Future evidence session")
         owner = int(owner_chat_id or 0)
         controls = sum(row.ticker in BENCHMARK_TICKERS for row in observations)
         universe_count = len(observations) - controls

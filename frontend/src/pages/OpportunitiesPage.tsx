@@ -8,6 +8,7 @@ import { Panel } from "../components/ui/Panel";
 import { StatusBadge } from "../components/ui/StatusBadge";
 import { ResponsiveTable, type TableColumn } from "../components/ui/ResponsiveTable";
 import { useRadarQuery } from "../hooks/useMonitorData";
+import { TopTenOpportunities } from "../components/opportunities/TopTenOpportunities";
 import type { RowRecord, Tone } from "../types/api";
 import { asRows, getNumber, getString } from "../utils/data";
 import { formatDateTime, formatMoney, formatNumber, formatPercent, formatScore, sampleLabel, toneForNumber } from "../utils/format";
@@ -230,6 +231,20 @@ function RankingItem({ row }: { row: RowRecord }) {
 }
 
 export default function OpportunitiesPage() {
+  return (
+    <div className="page-stack">
+      <PageHeader
+        eyebrow="Oportunidades"
+        title="Top 10 e historial del Radar"
+        description="Candidatos de la última captura y auditoría de resultados anteriores. Los precios incluyen su fecha y calidad."
+      />
+      <TopTenOpportunities />
+      <RadarHistory />
+    </div>
+  );
+}
+
+function RadarHistory() {
   const [params, setParams] = useSearchParams();
   const selected = filters.includes((params.get("estado") || "todas") as OpportunityFilter)
     ? ((params.get("estado") || "todas") as OpportunityFilter)

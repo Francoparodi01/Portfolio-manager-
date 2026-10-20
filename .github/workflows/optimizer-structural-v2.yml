@@ -5,6 +5,16 @@ on:
     paths:
       - "src/analysis/**"
       - "scripts/run_analysis.py"
+      - "scripts/telegram_bot.py"
+      - "src/core/top10_telegram.py"
+      - "src/monitor/opportunities.py"
+      - "src/collector/radar_close_evidence.py"
+      - "src/scheduler/runner.py"
+      - "scripts/*radar*.py"
+      - "scripts/run_daily_top10.py"
+      - "scripts/validate_top10_runtime.py"
+      - "config/radar_market_policy.json"
+      - "Dockerfile.radar"
       - "tests/**"
       - ".github/workflows/optimizer-structural-v2.yml"
   push:
@@ -38,6 +48,8 @@ jobs:
             tests/test_optimizer_challenger_v2.py \
             tests/test_upcoming_earnings.py \
             tests/test_execution_nominals_and_rotation.py
+      - name: Daily Radar source, scheduler and shared-reader contracts
+        run: python -m pytest -q tests/test_radar_daily.py tests/test_radar_market_refresh.py tests/test_top10_telegram.py tests/test_scheduler_weekend_policy.py
       - name: Full-suite regression gate vs main
         shell: bash
         run: |

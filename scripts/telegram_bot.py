@@ -143,6 +143,7 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("events", "Próximos balances"),
     ("ticker", "Análisis por ticker"),
     ("radar", "Oportunidades experimentales"),
+    ("top10", "Top 10 compartido con el dashboard"),
     ("seguimiento", "Evolución de ideas seguidas"),
     ("radar_metricas", "Métricas prospectivas Radar"),
     ("mercado", "Mercado y noticias"),
@@ -3436,6 +3437,38 @@ async def regression_signal_handler(
     await regression_audit_handler(update, context)
 
 
+async def top10_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read the exact monitor owner/capture. No refresh, sync, ledger write or trade."""
+    if not await ensure_allowed_chat(update, context):
+        return
+    chat_id = int(update.effective_chat.id)
+    conn = None
+    try:
+        from src.core.top10_telegram import render_top10
+        from src.monitor.opportunities import fetch_top_opportunities
+        import asyncpg
+
+        config = get_config()
+        owner = int(config.scraper.telegram_chat_id or 0)
+        if not owner or chat_id != owner:
+            await send_text(context, chat_id, "Top 10: esta vista requiere la cuenta configurada en el dashboard.")
+            return
+        dsn = str(config.database.url).replace("postgresql+asyncpg://", "postgresql://", 1)
+        conn = await asyncpg.connect(dsn, timeout=5,
+                                     command_timeout=15,
+                                     server_settings={"default_transaction_read_only": "on"})
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            payload = await fetch_top_opportunities(conn, owner_chat_id=owner)
+        for card in render_top10(payload):
+            await send_text(context, chat_id, card)
+    except Exception as exc:
+        logger.warning("top10_unavailable code=%s", type(exc).__name__)
+        await send_text(context, chat_id, "Top 10: datos no disponibles. No se generaron recomendaciones.")
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
 async def radar_full_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "radar_full")
 
@@ -3867,6 +3900,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("calibracion",      calibration_handler))
     app.add_handler(CommandHandler("dcl",              calibration_handler))
     app.add_handler(CommandHandler("radar",            radar_handler))
+    app.add_handler(CommandHandler("top10",            top10_handler))
     app.add_handler(CommandHandler("radar_full", radar_full_handler))
     app.add_handler(CommandHandler("seguimiento", followed_watchlist_handler))
     app.add_handler(CommandHandler("watchlist", followed_watchlist_handler))

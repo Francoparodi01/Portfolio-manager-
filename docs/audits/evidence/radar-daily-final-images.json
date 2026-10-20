@@ -1,0 +1,59 @@
+{
+  "image_build": {
+    "commit": "eb1786969619d59d22eff6fe9604262448111bad",
+    "dependency_image": "sha256:8e95486558630441c661ed066367c261151b80850e2bc9562a9703899dca48f9",
+    "images": {
+      "quantia-radar-review:eb1786969619": "sha256:bcdbb567a6b56debd103742b2bab2f8e9bb8bde3e1b782db00faa222ea5b78a3",
+      "quantia-radar-frontend-review:eb1786969619": "sha256:8756eb855d18185126264944a9745ad3c5895f874531d26ac64ea88fc3b563b1"
+    },
+    "started_services": false
+  },
+  "api": {
+    "status": "API_VERIFIED",
+    "run_id": "f19a922b-350d-551d-bfeb-302d5ee8494b",
+    "input_sha256": "b45e8ed8627928dc92e80464b907409a37b23f1bc3d899eb23e80b3c3855bf5f",
+    "tickers": [
+      "META",
+      "TXN",
+      "ITUB",
+      "SHOP",
+      "CAAP",
+      "MA",
+      "STNE",
+      "VST",
+      "PYPL",
+      "BBAS3"
+    ],
+    "incoming_command": "LOCALLY_INJECTED_NOT_RECEIVED_FROM_TELEGRAM",
+    "messages": []
+  },
+  "unchanged_since_real_telegram_test": {
+    "scripts/telegram_bot.py": true,
+    "scripts/validate_top10_runtime.py": true,
+    "src/core/top10_telegram.py": true,
+    "src/core/telegram_format.py": true,
+    "src/monitor/opportunities.py": true,
+    "src/monitor/api.py": true,
+    "src/analysis/radar_discovery.py": true,
+    "frontend/src/components/opportunities/TopTenOpportunities.tsx": true
+  },
+  "scheduler": {
+    "job": "radar_top10_daily",
+    "hours": [
+      8,
+      9,
+      17,
+      18,
+      19,
+      20
+    ],
+    "minute": 45,
+    "timezone": "America/Argentina/Buenos_Aires",
+    "max_instances": 1,
+    "misfire_grace_time": 900,
+    "registered_in_image": true,
+    "operational_activation": false
+  },
+  "focused_tests": 208,
+  "operational_deployment": false
+}

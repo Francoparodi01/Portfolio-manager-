@@ -1,0 +1,21 @@
+{
+  "valid_from": "2026-01-01",
+  "valid_through": "2026-12-31",
+  "timezone": "America/Argentina/Buenos_Aires",
+  "calendar_source": "https://www.byma.com.ar/mercado/calendario-bursatil",
+  "sessions": [
+    {
+      "from": "2026-01-01",
+      "through": "2026-11-01",
+      "end": "17:15:00",
+      "source": "https://www.byma.com.ar/comunicados/comunicado-18782-horarios"
+    },
+    {
+      "from": "2026-11-02",
+      "through": "2026-12-31",
+      "end": "18:15:00",
+      "source": "https://www.byma.com.ar/comunicados/com19024-horarios"
+    }
+  ],
+  "note": "Publication waits 30 minutes after closing-price trading; source confirmation is still required. Calendar must be reviewed before 2027."
+}
