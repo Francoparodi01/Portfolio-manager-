@@ -3607,7 +3607,10 @@ async def run_daily_top10() -> None:
     from src.collector.radar_close_evidence import eligible_session
     if os.getenv("RADAR_TOP10_DAILY_ENABLED", "").lower() != "true":
         return
-    if eligible_session(_now_art()) is None:
+    now = _now_art()
+    # Morning retries cover delayed official dated history. Afternoon runs
+    # still require today's confirmed schedule/delay gate (including November).
+    if not is_trading_day(now) or (now.hour not in (8, 9) and eligible_session(now) is None):
         return
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "scripts/run_daily_top10.py", "--publish",
@@ -3629,7 +3632,7 @@ def register_daily_top10(scheduler) -> None:
     if os.getenv("RADAR_TOP10_DAILY_ENABLED", "").lower() == "true":
         scheduler.add_job(
             run_daily_top10,
-            CronTrigger(day_of_week=BUSINESS_DAY_CRON, hour="17,18,19,20", minute=45, timezone=TIMEZONE),
+            CronTrigger(day_of_week=BUSINESS_DAY_CRON, hour="8,9,17,18,19,20", minute=45, timezone=TIMEZONE),
             id="radar_top10_daily", name="Radar daily close, delayed feeds and bounded retries",
             misfire_grace_time=900, coalesce=True, max_instances=1, replace_existing=True,
         )

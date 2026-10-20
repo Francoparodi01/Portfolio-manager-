@@ -1,0 +1,145 @@
+{
+  "image_build": {
+    "commit": "7a4b2ca76eec14e396c42c31686259f9eef12a96",
+    "dependency_image": "sha256:8e95486558630441c661ed066367c261151b80850e2bc9562a9703899dca48f9",
+    "images": {
+      "quantia-radar-review:7a4b2ca76eec": "sha256:6391374f94039c8c386fc0160c137e2d49297ba9f74927bfb43068d6c4e7acac",
+      "quantia-radar-frontend-review:7a4b2ca76eec": "sha256:dfa1460d43b3abab49b1a96b5bb252aca1586b90944cd22254d8d1c2bdb20df2"
+    },
+    "started_services": false
+  },
+  "seed": {
+    "status": "SEEDED_LAB_ONLY",
+    "run_id": "f19a922b-350d-551d-bfeb-302d5ee8494b",
+    "first": {
+      "run_id": "f19a922b-350d-551d-bfeb-302d5ee8494b",
+      "inserted": 399,
+      "duplicate": false
+    },
+    "second": {
+      "run_id": "f19a922b-350d-551d-bfeb-302d5ee8494b",
+      "inserted": 0,
+      "duplicate": true
+    }
+  },
+  "api": {
+    "status": "API_VERIFIED",
+    "run_id": "f19a922b-350d-551d-bfeb-302d5ee8494b",
+    "input_sha256": "b45e8ed8627928dc92e80464b907409a37b23f1bc3d899eb23e80b3c3855bf5f",
+    "tickers": [
+      "META",
+      "TXN",
+      "ITUB",
+      "SHOP",
+      "CAAP",
+      "MA",
+      "STNE",
+      "VST",
+      "PYPL",
+      "BBAS3"
+    ],
+    "incoming_command": "LOCALLY_INJECTED_NOT_RECEIVED_FROM_TELEGRAM",
+    "messages": []
+  },
+  "telegram": {
+    "status": "REAL_TELEGRAM_TRANSPORT_VERIFIED",
+    "run_id": "f19a922b-350d-551d-bfeb-302d5ee8494b",
+    "input_sha256": "b45e8ed8627928dc92e80464b907409a37b23f1bc3d899eb23e80b3c3855bf5f",
+    "tickers": [
+      "META",
+      "TXN",
+      "ITUB",
+      "SHOP",
+      "CAAP",
+      "MA",
+      "STNE",
+      "VST",
+      "PYPL",
+      "BBAS3"
+    ],
+    "incoming_command": "LOCALLY_INJECTED_NOT_RECEIVED_FROM_TELEGRAM",
+    "messages": [
+      {
+        "message_id": 12709,
+        "sha256": "56dabe0462cdf8b189559a0fd2fdbd61c8aebe92a8dc6ca73d1143b6fbd28874"
+      },
+      {
+        "message_id": 12710,
+        "sha256": "32f64710a96c753f9f754fcdef2b1063cca793d2cd8a02078f3e436bb0190c65"
+      },
+      {
+        "message_id": 12711,
+        "sha256": "39743ed8ca5c28f3e7ec9113aacc1d717eaf2d94f2c4645bdd8818b68568a606"
+      },
+      {
+        "message_id": 12712,
+        "sha256": "0f2d146e627c8de70d5ccf20e7954f4d4a522b0ad7b16a93b16e81677165af82"
+      },
+      {
+        "message_id": 12713,
+        "sha256": "32d9b9cd325739e84b2e876ecddb9c37ad38b88e191b958f2bebba79d73913c1"
+      },
+      {
+        "message_id": 12714,
+        "sha256": "ec9fd26eba297ed2854f19d7f9ba0382f906723d934983bd32c4a6cc72b3d88e"
+      },
+      {
+        "message_id": 12715,
+        "sha256": "3f5bac40dcd4bae42edae26696f84463f61873a62fbbeafe05843809d1395fdb"
+      },
+      {
+        "message_id": 12716,
+        "sha256": "c1e062eab1b36bef1c29e888a32a565c5a70eb59eb9f4f524462ccc4b5544f52"
+      },
+      {
+        "message_id": 12717,
+        "sha256": "a09f4b38a6644e23b634f60359854df58e882adc1726f522b77d5e8e8c339422"
+      },
+      {
+        "message_id": 12718,
+        "sha256": "67e68def164754d5ce7f89c431ae09661578bcf41314956a6d2ace94642206dc"
+      },
+      {
+        "message_id": 12719,
+        "sha256": "83e5d15f9b396e63c0f03dcbaee4329467d63d1624a30f6fb942b6b9d0929319"
+      }
+    ]
+  },
+  "offline_replay": {
+    "run.json": {
+      "json_identical": true,
+      "canonical_sha256": "3bf47af657cec3d2cbc3f70a4d8992680c3bd6f92c9b06a166e17f20b2f69356"
+    },
+    "top10.json": {
+      "json_identical": true,
+      "canonical_sha256": "c9874ae437e2e8b481cc0106d6524049e30ee5f451489ea94463516eaefc10f9"
+    },
+    "observations-private.json": {
+      "json_identical": true,
+      "canonical_sha256": "3ad88fae058dcbf35d44a387307176e28b7867af06ef75c927629d6322dea865"
+    },
+    "portfolio-scores-private.json": {
+      "json_identical": true,
+      "canonical_sha256": "94e25872e57693ff36767ac7e84d20bbf4ac0bc65a1c19a76b9deedeafffeeb9"
+    }
+  },
+  "serialization_note": "JSON values identical; raw files differ by Windows CRLF versus Linux LF",
+  "frontend": {
+    "desktop_width": 1600,
+    "mobile_width": 390,
+    "horizontal_page_overflow": false,
+    "independent_rows": 10,
+    "expired_capture_displayed": true,
+    "scope": "Isolated real API and built frontend; unrelated lab tables absent"
+  },
+  "scheduler": {
+    "job_id": "radar_top10_daily",
+    "cron": "mon-fri 17,18,19,20:45 America/Argentina/Buenos_Aires",
+    "max_instances": 1,
+    "misfire_grace_time": 900,
+    "registered_in_built_image": true,
+    "operational_activation": false
+  },
+  "operational_deployment": false,
+  "incoming_telegram_polling_verified": false
+}

@@ -18,7 +18,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.collect_radar_market import collect, connection_config, write_json
 from scripts.build_radar_market_snapshot import build, publish, read_ratios, COMAFI_URL
-from src.collector.radar_close_evidence import ART, eligible_session, session_end
+from src.collector.radar_close_evidence import latest_due_session, session_end
 
 
 def download_ratios(output):
@@ -38,7 +38,9 @@ def download_ratios(output):
 async def run_daily(args, *, now=None, collector=collect, builder=build, publisher=publish,
                     ratios_loader=download_ratios, connector=None):
     now = now or datetime.now(timezone.utc)
-    due = eligible_session(now)
+    # Dated official history may arrive the next morning. Never back-publish
+    # anything older than the most recent session whose close is already due.
+    due = latest_due_session(now)
     session = getattr(args, "session", None) or due
     if session is None:
         return {"status": "NOT_DUE"}
@@ -96,7 +98,7 @@ async def main():
     parser.add_argument("--host")
     parser.add_argument("--port", type=int, default=5432)
     parser.add_argument("--output", type=Path, default=Path("outputs/radar-daily"))
-    parser.add_argument("--session", type=date.fromisoformat, help="Dated file-only validation; never back-publish")
+    parser.add_argument("--session", type=date.fromisoformat, help="Dated file validation; publication only for latest due session")
     parser.add_argument("--publish", action="store_true")
     args = parser.parse_args()
     result = await run_daily(args)

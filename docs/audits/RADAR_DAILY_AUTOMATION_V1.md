@@ -73,7 +73,8 @@ con este recálculo; no es un experimento de mismas entradas ni evidencia de ret
 
 `register_daily_top10` añade un job al APScheduler existente, sólo cuando
 `RADAR_TOP10_DAILY_ENABLED=true`. Intentos lunes–viernes a las 17:45, 18:45,
-19:45 y 20:45 ART. Se verifica calendario, fin de negociación y demora antes
+19:45 y 20:45 ART, y recuperación a las **08:45 y 09:45** para la última rueda
+cerrada si su histórico llegó más tarde. Se verifica calendario, fin de negociación y demora antes
 de recoger fuentes. [Comunicado 18782](https://www.byma.com.ar/comunicados/comunicado-18782-horarios):
 fin 17:15; [19024](https://www.byma.com.ar/comunicados/com19024-horarios):
 18:15 **desde 02/11/2026**. Margen conservador: 30 minutos; las
@@ -85,9 +86,10 @@ publicación atómica y omisión si ya existe el run diario completo. Fallos pre
 se conservan en otra carpeta; los siguientes horarios permiten reintentar.
 Cero cierres independientes bloquean la publicación; cobertura parcial produce
 una captura con faltantes y ESPERAR, sin rellenarla con precios viejos. Una
-captura publicada no se sobrescribe en reintentos. No hay recuperación automática
-de una rueda perdida después de las 20:45: al siguiente vencimiento el lector
-marca el run viejo como vencido.
+captura publicada no se sobrescribe en reintentos. Sólo se recupera la última
+rueda cuyo cierre ya venció; no hay backfill automático de huecos anteriores.
+Si la fuente no publica evidencia fechada, el lector mantiene el run anterior
+vencido. El horario de mercado no garantiza la disponibilidad del histórico.
 
 `RadarDiscoveryStore` persiste en las tablas existentes, sin DDL. `/top10` y
 `/api/opportunities/top10` usan `fetch_top_opportunities` y el mismo propietario,
@@ -124,14 +126,49 @@ ajeno al commit. Otra máquina necesita exportar/importar esa base con
 Frontend: Node 22 Alpine fijado por digest y `npm ci` con lock. Se generan
 recibos con SHA e IDs; no se reemplazan imágenes ni contenedores operativos.
 
+## Prueba del cierre del 20/10: publicación bloqueada
+
+Se ejecutó `run_daily_top10.py` de principio a fin, en modo archivos, con rueda
+inferida automáticamente. A las **19:18:17 ART** había 368 series válidas y
+88.035 velas, pero las **373 consultas históricas BYMADATA devolvieron HTTP 200
+con `data: []`**. Resultado: **SOURCE_BLOCKED**, sin publicación en SQL, Telegram
+ni dashboard. Run de diagnóstico `3c11788d-6a13-50db-a931-7d2eb6d3fc0c`;
+[recibo separado y candidatos no publicados](evidence/radar-daily-close20-blocked.json).
+Los diez estados son ESPERAR. No se utilizaron cotizaciones sin fecha ni
+cierres del 19 para sustituir ese faltante. Este intento conserva cuerpos
+originales, respuestas parseadas y hashes. Su ubicación local es
+`outputs/radar-daily-20261020/close20/2026-10-20/1c8192d2e96f4a39866056edfd3c9cee/`.
+
+El bloqueo motivó los reintentos matutinos: está observado que el histórico del
+19 estaba disponible el 20 por la mañana y el del 20 faltaba esa tarde; no se
+afirma una hora contractual de publicación ni que el del 20 ya se haya recuperado.
+
 ## Validación y pasos pendientes
 
-- 205 pruebas focalizadas aprobadas: contratos independientes, datos inválidos,
+- 208 pruebas focalizadas aprobadas: contratos independientes, datos inválidos,
   cambio horario, feriados, contexto del día siguiente, locks, idempotencia,
-  caducidad, lectores y correcciones matemáticas previas.
+  caducidad, recuperación matutina, histórico vacío, lectores y correcciones matemáticas previas.
 - Once tarjetas Telegram, máximo 1.622 caracteres en este payload.
-- Validación Docker, API y transporte Telegram: recibo de ejecución adjunto al
-  completar la prueba aislada. No se considera validado el polling productivo.
+- [Recibo Docker/API/Telegram](evidence/radar-daily-runtime-20261020.json):
+  imágenes construidas del commit `7a4b2ca`, frontend y backend identificados
+  por digest. Replay sin red en Linux produce exactamente los mismos valores
+  JSON que Windows: run, Top 10, 399 observaciones y scores de cartera.
+  Sólo difieren los saltos de línea CRLF/LF de los archivos.
+- PostgreSQL aislado: 399 observaciones insertadas; segundo intento 0 inserts,
+  `duplicate=true`. API autenticada real HTTP 200 con el mismo run/hash/orden.
+- Handler `/top10` registrado real, con autorización y DB aislada reales:
+  once tarjetas aceptadas por Telegram, idénticas al formato de la API. El
+  transporte sólo permitió `getMe` y `sendMessage` al propietario configurado.
+  Se envió una introducción de prueba además de esas tarjetas. **Entrada del
+  comando inyectada localmente; polling entrante productivo no verificado.**
+  No se cambió webhook, menú ni proceso del bot operativo.
+- Dashboard de la imagen nueva contra API aislada: escritorio 1.600 px y móvil
+  390 px sin desbordes, diez filas de evidencia BYMADATA, misma captura.
+  La prueba terminó después del cierre del 20/10: la captura de la rueda 19
+  correctamente se presentó vencida. Otros paneles carecen de tablas en el
+  laboratorio; no se afirma validación integral del dashboard operativo.
+- El job se registró en APScheduler dentro de la imagen con la expresión y
+  límites documentados. No se arrancó un scheduler operativo de prueba.
 
 Antes de activar: conciliar plazo y definición de cierre/volumen, completar
 ratios/identidad y procedencia histórica, revisar schema ya existente y la

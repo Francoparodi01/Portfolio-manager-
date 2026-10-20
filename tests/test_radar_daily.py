@@ -47,7 +47,7 @@ def test_confirmation_needs_dated_identity_not_clock_alone():
 
 
 @pytest.mark.parametrize("fault", ["same_upstream", "stale", "duplicate", "currency",
-    "symbol", "settlement", "negative", "nan", "future", "intraday", "delay_unknown"])
+    "symbol", "settlement", "negative", "nan", "future", "intraday", "delay_unknown", "empty_history"])
 def test_invalid_secondary_or_primary_never_confirms(fault):
     p, e = primary(), independent()
     if fault == "same_upstream": e["source"] = "YAHOO_ICE"
@@ -61,6 +61,7 @@ def test_invalid_secondary_or_primary_never_confirms(fault):
     if fault == "future": e["received_at"] = "2026-10-20T19:00:00-03:00"
     if fault == "intraday": p["evidence"]["received_at"] = "2026-10-19T17:20:00-03:00"
     if fault == "delay_unknown": p["evidence"]["symbol_metadata"]["delay"] = None
+    if fault == "empty_history": e["response"]["data"] = []
     result = assess_close(p, e, DAY, NOW)
     assert result["confirmed_close"] is None
     assert result["missing_data"]
@@ -165,6 +166,23 @@ def test_daily_default_only_writes_files(tmp_path):
     assert collector.await_args.args[0].close_session == DAY
 
 
+def test_morning_retry_uses_latest_closed_session_without_future_candles(tmp_path):
+    collector = AsyncMock()
+    result = asyncio.run(run_daily(args(tmp_path), now=datetime(2026,10,20,8,45,tzinfo=ART),
+        collector=collector, builder=lambda _: ({}, dict(run_id='morning',
+            parameters={'independent_close_count':1}), []), ratios_loader=lambda _: 'fixture'))
+    assert result['status'] == 'VALIDATED_FILES_ONLY'
+    assert collector.await_args.args[0].close_session == DAY
+
+
+def test_cannot_publish_an_older_session_after_next_close(tmp_path, monkeypatch):
+    monkeypatch.setenv('RADAR_TOP10_DAILY_ENABLED','true')
+    options = args(tmp_path, True)
+    options.session = DAY
+    with pytest.raises(ValueError, match='wrong session'):
+        asyncio.run(run_daily(options, now=datetime(2026,10,20,19,tzinfo=ART)))
+
+
 def test_no_official_evidence_blocks_publication(tmp_path):
     result = asyncio.run(run_daily(args(tmp_path), now=NOW, collector=AsyncMock(),
         builder=lambda _: ({}, {"parameters": {"independent_close_count": 0}}, []),
@@ -230,3 +248,4 @@ def test_scheduler_registration_disabled_by_default(monkeypatch):
     register_daily_top10(scheduler)
     assert scheduler.add_job.call_args.kwargs["max_instances"] == 1
     assert scheduler.add_job.call_args.kwargs["id"] == "radar_top10_daily"
+    assert "hour='8,9,17,18,19,20'" in str(scheduler.add_job.call_args.args[1])
