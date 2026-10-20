@@ -150,7 +150,7 @@ afirma una hora contractual de publicación ni que el del 20 ya se haya recupera
   caducidad, recuperación matutina, histórico vacío, lectores y correcciones matemáticas previas.
 - Once tarjetas Telegram, máximo 1.622 caracteres en este payload.
 - [Recibo Docker/API/Telegram](evidence/radar-daily-runtime-20261020.json):
-  imágenes construidas del commit `7a4b2ca`, frontend y backend identificados
+  primera validación con imágenes del commit `7a4b2ca`, frontend y backend identificados
   por digest. Replay sin red en Linux produce exactamente los mismos valores
   JSON que Windows: run, Top 10, 399 observaciones y scores de cartera.
   Sólo difieren los saltos de línea CRLF/LF de los archivos.
@@ -169,6 +169,12 @@ afirma una hora contractual de publicación ni que el del 20 ya se haya recupera
   laboratorio; no se afirma validación integral del dashboard operativo.
 - El job se registró en APScheduler dentro de la imagen con la expresión y
   límites documentados. No se arrancó un scheduler operativo de prueba.
+- [Imágenes finales de `eb17869`](evidence/radar-daily-final-images.json):
+  runtime `sha256:bcdbb567a6b56debd103742b2bab2f8e9bb8bde3e1b782db00faa222ea5b78a3`;
+  frontend `sha256:8756eb855d18185126264944a9745ad3c5895f874531d26ac64ea88fc3b563b1`.
+  Incluyen los reintentos matutinos; registro del cron y API real verificados
+  nuevamente. Handler, lectores, persistencia y frontend no cambiaron desde
+  la prueba Telegram. Contenedores del laboratorio detenidos al terminar.
 
 Antes de activar: conciliar plazo y definición de cierre/volumen, completar
 ratios/identidad y procedencia histórica, revisar schema ya existente y la
