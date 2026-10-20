@@ -1,0 +1,519 @@
+{
+  "run_id": "626bb30c-6e67-5929-ae9f-9e7331e297f3",
+  "captured_at": "2026-10-19T21:30:44.426294+00:00",
+  "captured_session": "2026-10-19",
+  "scoring_version": "radar-market-v1:4f4591409351bebf:2cd92452bae07abf",
+  "input_sha256": "2cd92452bae07abfe3a7da908d6ee0da188e0254195f0b8ebde14dd6d7b95830",
+  "engine_sha256": "4f4591409351bebf5710bc1cc1a212e82070204d660a4b14cbb903f3bb35adf3",
+  "universe_count": 397,
+  "eligible_count": 57,
+  "requested": 399,
+  "collected": 373,
+  "candles": 88637,
+  "missing_symbols": 26,
+  "short_histories_under_60": 20,
+  "technical_signals": {
+    "BUY": 36,
+    "SELL": 40,
+    "HOLD": 275
+  },
+  "screened": 132,
+  "items": [
+    {
+      "ticker": "TXN",
+      "rank_position": 1,
+      "reference_price": 89650.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 4.05,
+      "ranking_score": 40.14637876928797,
+      "technical_regime": "TRANSITIONAL",
+      "volume_ratio": 1.3722257450856057,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 2164.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:24:25.163987+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 89575.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 143,
+        "isin": "ARDEUT111622",
+        "as_of": "30.9.2026",
+        "ratio": "5:1",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "US8825081040",
+        "underlying_type": "Common Stock"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    },
+    {
+      "ticker": "MRVL",
+      "rank_position": 3,
+      "reference_price": 27440.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 2.65,
+      "ranking_score": 40.08695525925926,
+      "technical_regime": "TRANSITIONAL",
+      "volume_ratio": 0.5073032633852487,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 18708.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:23:18.098264+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 26320.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 247,
+        "isin": "AR0557997514",
+        "as_of": "30.9.2026",
+        "ratio": "14:1",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "US5738741041",
+        "underlying_type": "Common Stock"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    },
+    {
+      "ticker": "ITUB",
+      "rank_position": 5,
+      "reference_price": 15380.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 3.45,
+      "ranking_score": 30.465366453221524,
+      "technical_regime": "TRANSITIONAL",
+      "volume_ratio": 0.31583552055993,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 6498.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:22:54.338072+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 15310.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 199,
+        "isin": "ARBCOM460267",
+        "as_of": "30.9.2026",
+        "ratio": "1 :1",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "US4655621062",
+        "underlying_type": "ADR"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    },
+    {
+      "ticker": "SHOP",
+      "rank_position": 6,
+      "reference_price": 2500.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 4.0,
+      "ranking_score": 30.450544801097173,
+      "technical_regime": "STRONG_UPTREND",
+      "volume_ratio": 0.1874820684764052,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 9900.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:30:10.492572+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 2488.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 228,
+        "isin": "ARBCOM460341",
+        "as_of": "30.9.2026",
+        "ratio": "107:1",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "CA82509L1076",
+        "underlying_type": "Common Stock"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    },
+    {
+      "ticker": "META",
+      "rank_position": 7,
+      "reference_price": 47860.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 3.3,
+      "ranking_score": 30.435071164864187,
+      "technical_regime": "STRONG_UPTREND",
+      "volume_ratio": 0.6263576022436481,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 142823.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:23:13.102530+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 47880.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 160,
+        "isin": "ARBCOM460168",
+        "as_of": "30.9.2026",
+        "ratio": "24:1",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "US30303M1027",
+        "underlying_type": "Common Stock"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    },
+    {
+      "ticker": "CAAP",
+      "rank_position": 8,
+      "reference_price": 161450.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 6.7,
+      "ranking_score": 30.43250095010839,
+      "technical_regime": "RANGE",
+      "volume_ratio": 0.28241923858200646,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 431.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:21:52.424608+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 163350.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 215,
+        "isin": "ARBCOM4603I7",
+        "as_of": "30.9.2026",
+        "ratio": "1:4",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "LU1756447840",
+        "underlying_type": "Common Stock"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    },
+    {
+      "ticker": "MA",
+      "rank_position": 9,
+      "reference_price": 28800.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 6.25,
+      "ranking_score": 30.422639555555556,
+      "technical_regime": "TRANSITIONAL",
+      "volume_ratio": 1.801041002761844,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 16955.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:23:11.219162+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 30280.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 220,
+        "isin": "ARBCOM4603D8",
+        "as_of": "30.9.2026",
+        "ratio": "33:1",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "US57636Q1040",
+        "underlying_type": "Common Stock"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    },
+    {
+      "ticker": "VST",
+      "rank_position": 10,
+      "reference_price": 9370.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 5.75,
+      "ranking_score": 30.36978367022162,
+      "technical_regime": "TRANSITIONAL",
+      "volume_ratio": 0.16371103085049613,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 42336.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:24:37.431611+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 9500.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 315,
+        "isin": "AR0659507682",
+        "as_of": "30.9.2026",
+        "ratio": "26:1",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "US92840M1027",
+        "underlying_type": "Accion ordinaria"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    },
+    {
+      "ticker": "STNE",
+      "rank_position": 11,
+      "reference_price": 6210.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 1.6,
+      "ranking_score": 30.17243242867084,
+      "technical_regime": "TRANSITIONAL",
+      "volume_ratio": 0.8701736890920884,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 102967.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:24:06.848555+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 6080.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 253,
+        "isin": "AR0657424591",
+        "as_of": "30.9.2026",
+        "ratio": "3:1",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "KYG851581069",
+        "underlying_type": "Common Stock"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    },
+    {
+      "ticker": "PYPL",
+      "rank_position": 13,
+      "reference_price": 11410.0,
+      "reference_ts": "2026-10-19T13:30:00+00:00",
+      "currency": "ARS",
+      "technical_score": 2.55,
+      "ranking_score": 30.14504161262051,
+      "technical_regime": "TRANSITIONAL",
+      "volume_ratio": 0.2644542845313366,
+      "volume_definition": "current_volume_over_inclusive_sma20",
+      "volume": 7537.0,
+      "volume_unit": null,
+      "display_state": "ESPERAR",
+      "quality": "PARTIAL",
+      "price_basis": "POST_SESSION_REPORTED_CLOSE_UNCONFIRMED",
+      "retrieved_at": "2026-10-19T21:23:41.593128+00:00",
+      "price_updated_at": null,
+      "source_delay_seconds": 1200,
+      "confirmed_close": null,
+      "previous_reported_close": {
+        "price": 11470.0,
+        "bar_start": "2026-10-16T13:30:00+00:00"
+      },
+      "data_source_counts": {
+        "TRADINGVIEW_BYMA": 260
+      },
+      "ratio": {
+        "row": 168,
+        "isin": "ARBCOM4601S0",
+        "as_of": "30.9.2026",
+        "ratio": "8 : 1",
+        "sheet": "LISTA TOTAL DE CEDEARS",
+        "source": "https://www.comafi.com.ar/custodiaglobal/Multimedios/otros/14779.xlsx?v=192",
+        "underlying_isin": "US70450Y1038",
+        "underlying_type": "Common Stock"
+      },
+      "ccl": {
+        "bid": 1623.6,
+        "as_of": "2026-10-19T21:00:00+00:00",
+        "basis": "REFERENCE_CCL_ASK_NOT_INSTRUMENT_IMPLIED",
+        "value": 1625.6,
+        "source": "https://dolarapi.com/v1/dolares/contadoconliqui",
+        "quality": "VERIFIED_SOURCE_TIMESTAMP",
+        "currency": "ARS/USD",
+        "retrieved_at": "2026-10-19T21:30:40.555679+00:00"
+      }
+    }
+  ],
+  "validation": {
+    "focused_tests_passed": 163,
+    "frontend_build": true,
+    "live_http_status": 200,
+    "live_bot_handler_cards": 11,
+    "live_api_bot_messages_equal": true,
+    "telegram_test_messages_sent": 0,
+    "mobile_horizontal_overflow": false
+  },
+  "limitations": [
+    "No official close confirmation",
+    "Volume unit not provided",
+    "Incomplete historical PIT metadata",
+    "Published Comafi ratios dated 2026-09-30; no historical backfill",
+    "Historical shadow contexts omitted; actual prior ranking impact not verifiable"
+  ]
+}

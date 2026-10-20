@@ -68,7 +68,7 @@ def present_top_opportunities(run: dict, candidates: list[dict], *, as_of: datet
             volume = _number(setup.get('volume_ratio_latest_20'))
             definition = 'setup_features.volume_ratio_latest_20' if volume is not None else None
         price_age = (now-reference).total_seconds() if reference else None
-        missing = []
+        missing = list(evidence.get('missing_data') or [])
         if price is None or price <= 0:
             price = None; missing.append('precio no verificable')
         if not currency or currency == 'UNKNOWN':
@@ -87,7 +87,7 @@ def present_top_opportunities(run: dict, candidates: list[dict], *, as_of: datet
                                              'VIGILANCIA_A','VIGILANCIA_B','VIGILANCIA_C'} else 'ESPERAR')
         if missing: state = 'ESPERAR'
         risk = (metadata.get('manual_event_risk') or metadata.get('why_not_now')
-                or evidence.get('principal_risk') or '; '.join(missing) or 'Riesgo no informado')
+                or evidence.get('principal_risk') or (missing[0] if missing else 'Riesgo no informado'))
         item.update(reference_price=price, reference_ts=reference.isoformat() if reference else None,
                     currency=currency, technical_score=tech_score, volume_ratio=volume,
                     volume_definition=definition, display_state=state,
@@ -96,13 +96,25 @@ def present_top_opportunities(run: dict, candidates: list[dict], *, as_of: datet
                     price_age_seconds=price_age, price_basis='LAST_RECORDED_NOT_LIVE_QUOTE',
                     data_source_counts=_object(item.get('data_source_counts')),
                     why_not_now=metadata.get('why_not_now'), manual_event_risk=metadata.get('manual_event_risk'))
+        for key in ('retrieved_at','price_updated_at','bar_start','market_session','source_delay_seconds',
+                    'confirmed_close','previous_reported_close','volume','volume_unit','ratio','ccl','provider_symbol'):
+            item[key] = evidence.get(key)
+        item['price_basis'] = evidence.get('price_basis') or item['price_basis']
+        item['price_basis_label'] = {
+            'INTRADAY_PROVISIONAL': 'Intradiario provisional',
+            'POST_SESSION_REPORTED_CLOSE_UNCONFIRMED': 'Cierre reportado; sin corroborar',
+            'POST_SESSION_CLOSE_CORROBORATED_COCOS_TV': 'Cierre corroborado por Cocos y TradingView',
+            'LAST_RECORDED_NOT_LIVE_QUOTE': 'Precio registrado; no es una cotización en vivo',
+        }.get(item['price_basis'], 'Base del precio no verificada')
         items.append(item)
+    parameters = _object(run.get('parameters'))
     return dict(status='READY', source='radar_discovery_snapshots', research_only=True,
                 ranking_basis='frozen_production_rank', captured_at=captured.isoformat(),
                 evaluated_at=now.isoformat(), run_id=str(run['run_id']), scoring_version=str(run['scoring_version']),
                 captured_session=str(run['captured_session']), universe_count=int(run['universe_count']),
                 eligible_count=int(run['eligible_count']), capture_age_seconds=age, stale=stale,
-                count=len(items), items=items)
+                input_sha256=parameters.get('input_sha256'), engine_sha256=parameters.get('engine_sha256'),
+                publication=parameters.get('top10_publication'), count=len(items), items=items)
 
 
 async def fetch_top_opportunities(conn: Any, *, owner_chat_id: int) -> dict:
@@ -112,10 +124,11 @@ async def fetch_top_opportunities(conn: Any, *, owner_chat_id: int) -> dict:
                AND to_regclass('public.radar_discovery_snapshots') IS NOT NULL""")
     if not schema_ready: return _empty('SCHEMA_MISSING')
     run = await conn.fetchrow("""SELECT run_id, captured_at, captured_session, scoring_version,
-                  universe_count, eligible_count, NOW() AS evaluated_at
+                  universe_count, eligible_count, parameters, NOW() AS evaluated_at
            FROM radar_discovery_runs
            WHERE owner_chat_id = $1 AND status = 'COMPLETE' AND captured_at <= NOW()
-           ORDER BY captured_at DESC, run_id DESC LIMIT 1""", owner_chat_id)
+           ORDER BY (parameters->>'top10_publication' = 'v1') DESC NULLS LAST,
+                    captured_at DESC, run_id DESC LIMIT 1""", owner_chat_id)
     if run is None: return _empty('NO_CAPTURE')
     candidates = await conn.fetch("""SELECT ticker, asset_type, reference_ts, reference_price,
                   price_quality_flag, feature_quality_flag, data_source_mode, data_source_counts,

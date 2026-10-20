@@ -95,12 +95,17 @@ async def fetch_tv_candles(
     bars: int,
     interval: str = "1D",
     timeout_s: int = 30,
+    evidence: dict | None = None,
 ) -> list[MarketCandle]:
     tv_symbol = _tv_symbol(ticker)
     chart_session = _session_id("cs")
     quote_session = _session_id("qs")
     resolved_symbol = "symbol_1"
     url = "wss://data.tradingview.com/socket.io/websocket?from=chart%2F"
+    if evidence is not None:
+        evidence.update(source=SOURCE, symbol=tv_symbol, endpoint=url,
+                        adjustment="splits", interval=interval,
+                        requested_at=datetime.now(timezone.utc).isoformat(), messages=[])
     headers = {
         "Origin": "https://www.tradingview.com",
         "User-Agent": "Mozilla/5.0",
@@ -137,6 +142,11 @@ async def fetch_tv_candles(
                 for item in _parse_tv_frames(msg.data):
                     method = item.get("m")
                     params = item.get("p") or []
+                    if evidence is not None and method in {"symbol_resolved", "timescale_update", "symbol_error", "critical_error"}:
+                        evidence["messages"].append(item)
+                        evidence["received_at"] = datetime.now(timezone.utc).isoformat()
+                        if method == "symbol_resolved" and len(params) >= 3:
+                            evidence["symbol_metadata"] = params[2]
                     if method in {"critical_error", "symbol_error"}:
                         last_error = str(params)
                         continue

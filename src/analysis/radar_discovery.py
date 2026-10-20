@@ -581,10 +581,12 @@ class RadarDiscoveryStore:
         scoring_version: str,
         observations: Sequence[RadarDiscoveryObservation],
         parameters: Mapping[str, Any],
+        initialize_schema: bool = True,
     ) -> dict[str, Any]:
         if not observations:
             return {"run_id": str(run_id), "inserted": 0, "duplicate": False}
-        await self.ensure_schema()
+        if initialize_schema:
+            await self.ensure_schema()
         normalized_run_id = UUID(str(run_id))
         captured = _aware_datetime(captured_at)
         session = captured.astimezone(ART_TZ).date()

@@ -131,6 +131,8 @@ tmp/historical-analysis-*/
 !tests/test_radar_indicator_fixes.py
 
 !tests/test_top10_telegram.py
+!tests/test_radar_market_refresh.py
 
 # Local visual checks may contain private capture data.
 output/playwright/
+.playwright-cli/

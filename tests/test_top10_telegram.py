@@ -189,6 +189,8 @@ def test_top10_is_registered_in_application_and_menu(monkeypatch):
     monkeypatch.setattr(bot,'Application',SimpleNamespace(builder=lambda:builder))
     # Other suites replace telegram.ext globally; isolate the handler factory.
     monkeypatch.setattr(bot,'CommandHandler',lambda command,callback:SimpleNamespace(commands={command},callback=callback))
+    monkeypatch.setattr(bot,'MessageHandler',lambda *args,**kwargs:SimpleNamespace())
+    monkeypatch.setattr(bot,'CallbackQueryHandler',lambda *args,**kwargs:SimpleNamespace())
     monkeypatch.setattr(bot,'_get_token',lambda:'fixture-token')
     bot.build_app()
     handlers=[call.args[0] for call in app.add_handler.call_args_list]
