@@ -46,6 +46,8 @@ def _json_safe(value: Any) -> Any:
 
 def validate_exploratory_sql(sql: str) -> tuple[str, tuple[str, ...]]:
     query = " ".join(str(sql or "").strip().split())
+    if query.endswith(";"):
+        query = query[:-1].rstrip()
     if not query:
         raise ToolValidationError("sql cannot be empty")
     if len(query) > 8000:
