@@ -1,10 +1,11 @@
 """
-Read-only viability audit for the trading project.
+Read-only retrospective audit for the trading project.
 
-This module separates bot-only, followed-by-user and manual-only execution,
-measures 5d/10d/20d/40d independently, and reports whether the bot clears a
-conservative bar: positive IC, lower drawdown, and better net EV after costs.
-It does not change guards, thresholds, optimizer weights, or execution logic.
+This module separates bot-only, followed-by-user and manual-only execution and
+measures 5d/10d/20d/40d outcomes after costs. IC is score/outcome correlation;
+the sequential drawdown is descriptive and is not a portfolio-risk estimate.
+Passing these historical gates is not validation for capital allocation.
+The audit does not change guards, thresholds, optimizer weights, or execution.
 """
 
 from __future__ import annotations
@@ -386,7 +387,7 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
     upper_verdict = report.verdict.upper()
     if "VIABLE PARA" in upper_verdict:
         verdict_icon = "✅"
-    elif "EDGE BOT NO VALIDADO" in upper_verdict or "EDGE BOT PARCIAL" in upper_verdict:
+    elif "EDGE BOT NO VALIDADO" in upper_verdict or "EDGE BOT PARCIAL" in upper_verdict or "EDGE HISTORICO FAVORABLE" in upper_verdict:
         verdict_icon = "🟡"
     elif "SIN MUESTRA" in upper_verdict or "NO VALIDADO" in upper_verdict:
         verdict_icon = "⚪"
@@ -434,10 +435,9 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
 
     gate_labels = {
         "muestra bot-only 5d": "Muestra bot 5D",
-        "IC bot-only 5d positivo": "IC bot 5D",
+        "IC bot-only 5d positivo": "IC (correlación) bot 5D",
         "EV neto bot-only 5d positivo": "EV neto bot 5D",
         "EV neto bot-only mayor que manual-only 5d": "Ventaja vs manual",
-        "drawdown bot-only menor que manual-only 5d": "Drawdown vs manual",
         "comparacion contra manual-only 5d": "Comparación manual",
     }
     lines += ["", "<b>Gates bot-only</b>"]
@@ -474,6 +474,8 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
 
     lines += [
         "",
+        "<i>IC = correlación entre score y resultado; no es un intervalo de confianza.</i>",
+        "<i>Drawdown del gráfico compone episodios en secuencia; no modela capital ni exposición de cartera.</i>",
         "<i>Bot-only define los gates. Seguido es una cohorte descriptiva; manual-only queda separado.</i>",
         "<i>Guards y thresholds quedan intactos. Esto audita evidencia; no cambia decisiones.</i>",
     ]
@@ -585,7 +587,7 @@ def render_viability_chart(
     _draw_bar_panel(
         draw,
         box=(728, 260, 1346, 610),
-        title="IC bot-only por score",
+        title="Correlación score/resultado (IC)",
         horizons=horizons,
         series=[
             ("final", [_metric(report, "bot_only", h).ic_final for h in horizons], bot_color),
@@ -605,7 +607,7 @@ def render_viability_chart(
     _draw_bar_panel(
         draw,
         box=(54, 660, 672, 995),
-        title="Max drawdown",
+        title="Drawdown secuencial (no cartera)",
         horizons=horizons,
         series=[
             ("bot", [_metric(report, "bot_only", h).max_drawdown for h in horizons], bot_color),
@@ -692,8 +694,8 @@ def _chart_verdict(verdict: str) -> str:
         return "EDGE BOT NO VALIDADO\nfalta muestra / EV neto"
     if "NO VIABLE PARA ESCALAR" in upper:
         return "NO ESCALAR CAPITAL\naun no supera gates"
-    if "VIABLE PARA 180D" in upper:
-        return "VIABLE PARA 180D\ncon guards actuales"
+    if "EDGE HISTORICO FAVORABLE" in upper:
+        return "EDGE HISTORICO\nfavorable; capital no validado"
     if "SIN MUESTRA" in upper:
         return "SIN MUESTRA\nfaltan outcomes"
     return verdict
@@ -704,7 +706,7 @@ def _short_gate_name(name: str) -> str:
     if "muestra" in lowered:
         return "muestra 5d"
     if "ic" in lowered:
-        return "IC 5d > 0"
+        return "IC corr. 5d > 0"
     if "ev neto" in lowered and "mayor" in lowered:
         return "EV > manual"
     if "ev neto" in lowered:
@@ -890,7 +892,7 @@ def _draw_sample_panel(
     draw.text((x1 + 24, y1 + 20), "Resumen para decision", fill=text, font=font)
     draw.text(
         (x1 + 24, y1 + 56),
-        "EV neto debe ser positivo y mejor que manual. IC debe ser > 0.",
+        "EV neto positivo y mejor que manual. IC = correlacion score/resultado.",
         fill=muted,
         font=small_font,
     )
@@ -1088,13 +1090,6 @@ def _build_gates(
                 f"bot={_fmt_pct(bot5.net_ev)} vs manual={_fmt_pct(manual5.net_ev)}",
             )
         )
-        gates.append(
-            ViabilityGate(
-                "drawdown bot-only menor que manual-only 5d",
-                _drawdown_better(bot5.max_drawdown, manual5.max_drawdown),
-                f"bot={_fmt_pct(bot5.max_drawdown)} vs manual={_fmt_pct(manual5.max_drawdown)}",
-            )
-        )
     else:
         gates.append(
             ViabilityGate(
@@ -1115,12 +1110,12 @@ def _build_verdict(gates: list[ViabilityGate]) -> str:
         return "VIABLE COMO PROYECTO, EDGE BOT NO VALIDADO: falta muestra bot-only cerrada."
 
     if any(g.passed is False for g in gates):
-        return "VIABLE COMO SISTEMA, NO VIABLE PARA ESCALAR CAPITAL: no supera IC/EV/drawdown despues de costos."
+        return "EDGE BOT NO VALIDADO: no supera los gates retrospectivos de muestra, correlacion o EV neto despues de costos."
 
     if any(g.passed is None for g in gates):
-        return "VIABLE COMO PROYECTO, EDGE BOT PARCIAL: falta comparacion manual madura."
+        return "EDGE BOT PARCIAL: evidencia retrospectiva favorable, pero falta una comparacion manual madura."
 
-    return "VIABLE PARA 180D CON GUARDS: bot-only supera muestra, IC, EV neto y drawdown."
+    return "EDGE HISTORICO FAVORABLE, NO VALIDADO PARA CAPITAL: muestra, correlacion score/resultado y EV neto pasan los gates retrospectivos; falta validacion con capital y exposicion."
 
 
 def _build_warnings(df: pd.DataFrame, config: ViabilityAuditConfig) -> list[str]:
@@ -1262,12 +1257,6 @@ def _positive(value: Optional[float]) -> Optional[bool]:
 
 
 def _gt(left: Optional[float], right: Optional[float]) -> Optional[bool]:
-    if left is None or right is None:
-        return None
-    return left > right
-
-
-def _drawdown_better(left: Optional[float], right: Optional[float]) -> Optional[bool]:
     if left is None or right is None:
         return None
     return left > right
