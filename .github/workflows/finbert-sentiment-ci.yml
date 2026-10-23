@@ -5,12 +5,15 @@ on:
     paths:
       - 'src/analysis/news_retrieval_tool.py'
       - 'src/analysis/nlp_scorer.py'
+      - 'src/analysis/sentiment_queue.py'
       - 'src/analysis/sentiment_symbols.py'
       - 'src/analysis/sentiment_tool.py'
       - 'src/analysis/signal_aggregator.py'
       - 'scripts/run_sentiment_pipeline.py'
+      - 'scripts/run_market_context.py'
       - 'tests/test_finbert_sentiment.py'
       - 'tests/test_marketaux_news_tool.py'
+      - 'tests/test_sentiment_queue.py'
       - 'requirements.txt'
       - '.env.example'
       - '.github/workflows/finbert-sentiment-ci.yml'
@@ -34,17 +37,19 @@ jobs:
           python -m py_compile \
             src/analysis/news_retrieval_tool.py \
             src/analysis/nlp_scorer.py \
+            src/analysis/sentiment_queue.py \
             src/analysis/sentiment_symbols.py \
             src/analysis/sentiment_tool.py \
             src/analysis/signal_aggregator.py \
-            scripts/run_sentiment_pipeline.py
+            scripts/run_sentiment_pipeline.py \
+            scripts/run_market_context.py
       - name: Run focused tests
         id: focused_pytest
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          pytest -vv tests/test_finbert_sentiment.py tests/test_marketaux_news_tool.py 2>&1 | tee finbert-test-output.txt
+          pytest -vv tests/test_finbert_sentiment.py tests/test_marketaux_news_tool.py tests/test_sentiment_queue.py 2>&1 | tee finbert-test-output.txt
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
       - name: Upload focused test output
         if: always()
