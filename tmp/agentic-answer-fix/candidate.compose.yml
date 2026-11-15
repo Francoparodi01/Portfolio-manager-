@@ -1,3 +1,0 @@
-services:
-  telegram_bot:
-    image: cocos_copilot-telegram_bot:agentic-answer-candidate

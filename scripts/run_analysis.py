@@ -50,6 +50,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from src.core.config import get_config
+from src.core.analysis_profile import ANALYSIS_FULL_PROFILE
 from src.core.logger import get_logger
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
@@ -1135,6 +1136,7 @@ async def _save_execution_plan_events(
     owner_chat_id: int | None = None,
     run_id: str | None = None,
     run_intent: str = "formal_plan",
+    analysis_profile: str = "unspecified",
     manual_market_events: list[ManualMarketEvent] | None = None,
     corporate_action_effects: list[CorporateActionEffect] | None = None,
     corporate_action_flags: list[PriceQualityFlag] | None = None,
@@ -1163,7 +1165,7 @@ async def _save_execution_plan_events(
     if not run_id:
         raise ValueError("formal execution plan requires run_id")
 
-    db_url = cfg.database.url
+    db_url = str(cfg.database.url).replace("postgresql+asyncpg://", "postgresql://")
     saved_ids: list[int] = []
     execution_plan_id = uuid4()
     plan_created_at = datetime.now(timezone.utc)
@@ -1269,6 +1271,7 @@ async def _save_execution_plan_events(
     ) -> dict:
         extra = {
             "source": "execution_plan",
+            "analysis_profile": analysis_profile,
             "status": status,
             "decision_type": decision_type,
             "action": _action_to_text(getattr(d, "action", None)),
@@ -4372,6 +4375,7 @@ async def main(
                 owner_chat_id=owner_chat_id,
                 run_id=analysis_run_id,
                 run_intent=run_intent,
+                analysis_profile=(ANALYSIS_FULL_PROFILE if not skip_radar else "analisis_portfolio_v1"),
                 manual_market_events=manual_market_events,
                 corporate_action_effects=corporate_action_effects,
                 corporate_action_flags=corporate_action_flags,

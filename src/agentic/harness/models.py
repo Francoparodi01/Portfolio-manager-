@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from ..model_transport import default_agent_model
 
 
 @dataclass(frozen=True)
@@ -15,7 +16,7 @@ class ModelRoles:
 
     @classmethod
     def from_env(cls) -> "ModelRoles":
-        default = os.getenv("QUANTIA_AGENT_MODEL", "qwen3.5:9b")
+        default = default_agent_model()
         return cls(
             router=os.getenv("QUANTIA_LLM_ROUTER", default),
             reasoning=os.getenv("QUANTIA_LLM_REASONING", default),

@@ -1,0 +1,21 @@
+{
+  "schema": "quantia-desk-config-v1",
+  "mode": "PAPER_ONLY",
+  "universe_mode": "ALL_RECORDED_EQUITIES",
+  "research_budget": {"documents_per_batch": 8, "max_calls_per_run": 40, "max_calls_per_day": 50},
+  "llm": {
+    "provider": "openrouter",
+    "model": "nvidia/nemotron-3.5-super-vl:free",
+    "cost_policy": "FREE_ONLY"
+  },
+  "initial_cash": "3000000",
+  "lookback_days": 14,
+  "max_documents_per_issuer": 5,
+  "vix_yellow": "25",
+  "vix_red": "35",
+  "instruments": [
+    {"ticker": "AMD", "underlying": "AMD", "asset_type": "CEDEAR", "currency": "ARS", "underlying_kind": "COMMON_STOCK", "source_url": "https://ir.amd.com/news-events/press-releases/rss", "source_kind": "rss", "allowed_hosts": ["ir.amd.com"]},
+    {"ticker": "NVDA", "underlying": "NVDA", "asset_type": "CEDEAR", "currency": "ARS", "underlying_kind": "COMMON_STOCK", "source_url": "https://nvidianews.nvidia.com/releases.xml", "source_kind": "rss", "allowed_hosts": ["nvidianews.nvidia.com"]},
+    {"ticker": "MU", "underlying": "MU", "asset_type": "CEDEAR", "currency": "ARS", "underlying_kind": "COMMON_STOCK", "source_url": "https://investors.micron.com/news/default.aspx", "source_kind": "html", "allowed_hosts": ["investors.micron.com"]}
+  ]
+}

@@ -1,5 +1,10 @@
 # Technical Buy Shadow V3
 
+Alcance documental: contrato del módulo y replay histórico inicial. Las cifras
+del replay de abril-agosto de 2026 no son resultados actuales ni una evaluación
+prospectiva independiente. Para interpretar cohortes y horizontes consultar
+[la guía del agente sobre los cuatro shadow](agent/shadow-modules.md).
+
 `technical-buy-shadow-v3` convierte la lectura técnica V2 en una herramienta
 experimental de análisis de compras nuevas. No intenta decidir ventas: una vez
 que el activo está en cartera, esa responsabilidad sigue en `/analisis`.

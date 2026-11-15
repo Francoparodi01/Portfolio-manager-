@@ -13,6 +13,7 @@ import httpx
 from .contracts import AgentDecision, AgentModelError, ToolSpec
 from .answer import evidence_decision
 from .diagnostics import diagnostic_decision, question_plan, decision_lab_arguments
+from .model_transport import agent_base_url, agent_provider, chat_content, default_agent_model
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +62,9 @@ class OllamaAgentModel:
         temperature: float = 0.0,
         conversation_context: list[dict[str, Any]] | None = None,
     ) -> None:
-        self.name = model or os.getenv("QUANTIA_AGENT_MODEL", "qwen2.5:3b")
-        self.base_url = (
-            base_url
-            or os.getenv("QUANTIA_AGENT_OLLAMA_URL")
-            or os.getenv("OLLAMA_URL")
-            or "http://host.docker.internal:11434"
-        ).rstrip("/")
+        self.provider = agent_provider()
+        self.name = model or default_agent_model()
+        self.base_url = agent_base_url(self.provider, base_url)
         self.timeout_seconds = float(
             timeout_seconds
             if timeout_seconds is not None
@@ -184,13 +181,10 @@ class OllamaAgentModel:
     async def _call(self, payload: dict[str, Any]) -> str:
         started = time.monotonic()
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            response = await client.post(f"{self.base_url}/api/chat", json=payload)
-        response.raise_for_status()
+            content = await chat_content(client, provider=self.provider, base_url=self.base_url, payload=payload)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info("[CHAT][MODEL] model=%s elapsed_ms=%s", self.name, elapsed_ms)
-        data = response.json()
-        message = data.get("message") or {}
-        return str(message.get("content") or "")
+        return content
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:

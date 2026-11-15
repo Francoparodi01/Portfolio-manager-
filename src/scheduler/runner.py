@@ -51,6 +51,9 @@ except ImportError:
     HAS_APSCHEDULER = False
 
 from src.core.config import get_config
+from src.core.analysis_profile import (
+    ANALYSIS_FULL_PROFILE, ANALYSIS_FULL_HOURS_ART, full_analysis_args,
+)
 from src.core.logger import get_logger
 from src.core.market_calendar import is_trading_day, market_closed_reason
 from src.core.portfolio_cache import (
@@ -1549,7 +1552,7 @@ async def run_verify_decision_prices() -> None:
             pass
 
 
-async def run_daily_analysis() -> None:
+async def run_daily_analysis(*, formal: bool = False, notify: bool = True) -> None:
     """Corre el analisis principal despues de construir velas internas EOD."""
     if not _is_business_day():
         logger.info("daily_analysis omitido: %s", market_closed_reason() or "mercado cerrado")
@@ -1558,9 +1561,24 @@ async def run_daily_analysis() -> None:
     cfg = get_config()
     notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
     owner_chat_id = str(cfg.scraper.telegram_chat_id or "").strip()
-    cmd = [sys.executable, "scripts/run_analysis.py", "--no-llm", "--skip-radar"]
-    if owner_chat_id.isdigit():
-        cmd.extend(["--owner-chat-id", owner_chat_id])
+    if not owner_chat_id.isdigit() or int(owner_chat_id) <= 0:
+        logger.error("daily_analysis omitido: owner_chat_id requerido")
+        return
+    if formal:
+        if not _is_market_window(_now_art()):
+            logger.info("analysis_full measurement omitido: fuera de rueda")
+            return
+        refresh = await request_portfolio_refresh(
+            requester="scheduler:analisis_full",
+            owner_chat_id=int(owner_chat_id), include_fills=True, include_market=True,
+            timeout_seconds=360,
+        )
+        if not refresh.get("ok"):
+            logger.error("analysis_full measurement omitido: refresh no disponible")
+            return
+    cmd = [sys.executable, *full_analysis_args(
+        int(owner_chat_id), persist=formal, notify=notify,
+    )]
     logger.info("daily_analysis iniciando: %s", " ".join(cmd))
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1597,11 +1615,15 @@ async def run_daily_analysis() -> None:
                     report_type="analysis",
                     owner_chat_id=int(owner_chat_id),
                     report_text=out.strip(),
-                    metadata={"source": "scheduler", "job": "daily_analysis"},
+                    metadata={"source": "scheduler", "job": "analysis_full_measurement" if formal else "daily_analysis",
+                              "analysis_profile": ANALYSIS_FULL_PROFILE},
                 )
                 logger.info("daily_analysis cache Telegram actualizado")
             except Exception as exc:
                 logger.warning("daily_analysis cache Telegram fallo: %s", exc)
+
+            if formal:
+                return
 
             radar_cmd = [
                 sys.executable,
@@ -1658,6 +1680,11 @@ async def run_daily_analysis() -> None:
         notifier.notify_critical_error("daily_analysis", str(e))
 
     await run_verify_decision_prices()
+
+
+async def run_intraday_full_analysis() -> None:
+    """Measure the complete native plan in market hours without extra messages."""
+    await run_daily_analysis(formal=True, notify=False)
 
 
 async def run_radar_audit_capture() -> None:
@@ -3607,6 +3634,14 @@ async def _scheduler_main() -> None:
         raise ImportError("apscheduler no instalado: pip install apscheduler>=3.10")
 
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+    scheduler.add_job(
+        run_intraday_full_analysis,
+        _business_day_cron(hour=",".join(map(str, ANALYSIS_FULL_HOURS_ART)), minute=0),
+        id="analysis_full_measurement",
+        name="Analysis full measurement 11:00/13:00/16:00 ART",
+        misfire_grace_time=180, max_instances=1, coalesce=True, replace_existing=True,
+    )
+    logger.info("analysis_full measurements enabled: 11:00/13:00/16:00 ART")
 
     scheduler.add_job(
         run_opening_portfolio_report_then_start_intraday,

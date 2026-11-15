@@ -97,12 +97,12 @@ Use SQL Explorer for novel exploratory questions such as:
 Exploratory evidence does not become a production rule automatically.
 
 ## Project-document RAG
-`search_quantia_docs` performs bounded retrieval over checked-in Markdown documentation. It returns snippets with file path and SHA-256 so architecture/metric explanations are grounded in the repository rather than model memory.
+`search_quantia_docs` performs bounded retrieval over Markdown documentation shipped with the runtime. It ranks passage coverage, heading/title relevance and distinctive query terms, without rewarding repeated words. Spanish accents are normalized and version tokens such as V2/V3 are retained. Results include file path, line range and SHA-256. Output limits preserve valid JSON and explicitly mark truncation. The additive retrieval method is `weighted-passage-coverage-v2`; the response schema remains `quantia-doc-search-v1`.
 
 AGENTS.md and the two core semantic/catalog documents are loaded into every agent run. The wider documentation set is retrieved on demand.
 
 ## Synthesis and verification
-For open-ended questions, Qwen may synthesize the final answer from successful observations. The runtime then applies deterministic guards:
+For open-ended questions, the configured LLM may synthesize the final answer from successful observations. `QUANTIA_AGENT_PROVIDER` selects Ollama or OpenRouter; model names come from configuration. See [OpenRouter](openrouter.md). Provider configuration is distinct from tool authority. The runtime then applies deterministic guards:
 - DVA claims require Decision Lab evidence;
 - realized/real PnL claims require canonical performance evidence;
 - causal/guarantee claims are rejected when based only on exploratory SQL;
@@ -130,7 +130,7 @@ Static architecture/security tests:
 pytest -q tests/test_grounded_agent_architecture.py
 ```
 
-Real local evals against Ollama + Quantia DB:
+Real evals against the configured provider + Quantia DB:
 
 ```bash
 python scripts/run_grounded_agent_evals.py --owner-chat-id <CHAT_ID>
@@ -161,7 +161,7 @@ The Dockerfile copies the whole repository (`COPY . .`), so AGENTS.md and the ag
 ## Explicit non-goals in v1
 - no passive listening to ordinary Telegram chat;
 - no automatic trading;
-- no database writes;
+- no model-directed database writes (the runtime still persists audit traces);
 - no threshold/config mutation;
 - no unrestricted SQL;
 - no multi-agent topology solely for architectural complexity.

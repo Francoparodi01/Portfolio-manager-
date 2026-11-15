@@ -39,6 +39,11 @@ outputs/
 docs/export/
 *.log
 tests/*
+!tests/test_backtesting_command.py
+!tests/test_backtesting_ledger.py
+!tests/test_thesis_desk_backtest.py
+!tests/test_thesis_desk_workflow.py
+!tests/test_thesis_desk_universe.py
 !tests/test_trend_regime.py
 !tests/test_trend_sell_guard.py
 !tests/test_sentiment_fetcher_sources.py
@@ -80,6 +85,7 @@ tests/*
 !tests/test_tradingview_byma_backfill.py
 !tests/test_agentic_loop.py
 !tests/test_agentic_guards.py
+!tests/test_agent_openrouter.py
 !tests/fixtures/
 tests/fixtures/*
 !tests/fixtures/shadow_causal_examples.json
