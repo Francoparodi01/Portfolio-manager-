@@ -1,5 +1,7 @@
 # Technical Analysis Desk — cobertura y cierre de los puntos abiertos
 
+> Informe histórico de etapa 0. El protocolo de piloto de esta versión quedó reemplazado por [etapa 0b](technical-analysis-desk-stage0b.md): cinco paquetes completos repetidos, USD 2 máximo y debate excluido. La evidencia de cobertura de abajo conserva su corte original.
+
 **Auditoría de solo lectura; no se implementó ni activó el Desk.** Captura principal: 2026-11-14 23:50:59 ART (2026-11-15 02:50:59 UTC). Detalle de identidad y enlaces: 23:52:23 ART. Base local configurada `quantia`, owner del bot, transacciones `REPEATABLE READ` con `transaction_read_only=on` verificado. Ambas capturas seleccionaron el mismo último run Radar.
 
 ## Resultado
