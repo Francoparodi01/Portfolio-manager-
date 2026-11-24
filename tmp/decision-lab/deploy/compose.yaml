@@ -1,5 +1,0 @@
-services:
-  telegram_bot:
-    image: quantia-telegram-decision-lab:65632bb
-  scheduler:
-    image: quantia-scheduler-decision-lab:1541193

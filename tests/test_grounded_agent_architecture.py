@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.agentic.contracts import ToolSpec, ToolValidationError
-from src.agentic.docs_retriever import search_project_docs
+from src.agentic.docs_retriever import _bounded_json, search_project_docs
 from src.agentic.grounded_model import GroundedQuantiaAgentModel
 from src.agentic.prompt_context import load_agent_prompt_context, missing_prompt_context_files
 from src.agentic.sql_explorer import _scoped_query, validate_exploratory_sql
@@ -194,6 +194,49 @@ def test_docs_retriever_returns_grounded_snippet_and_hash():
     assert payload["results"]
     assert all(item["path"].endswith(".md") for item in payload["results"])
     assert all(len(item["sha256"]) == 64 for item in payload["results"])
+
+
+def test_docs_retriever_prefers_specific_passage_over_repetition(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "long.md").write_text("# General\n" + "calibracion shadow\n" * 2000, encoding="utf-8")
+    (docs / "v2.md").write_text("# Calibración Shadow V2\nContrato anterior.", encoding="utf-8")
+    expected = "# Calibración Shadow V3\n\nLa cobertura no es acierto."
+    (docs / "v3.md").write_text(expected, encoding="utf-8")
+    result = search_project_docs(tmp_path, "como es la calibracion shadow v3")["results"][0]
+    assert result["path"] == "docs/v3.md"
+    assert result["snippet"] == expected
+    assert (result["line_start"], result["line_end"]) == (1, 3)
+
+
+@pytest.mark.parametrize("limit", [256, 700, 1800, 18000])
+def test_docs_retriever_budget_preserves_valid_json_and_lines(limit):
+    payload = search_project_docs(ROOT, "Calibración Shadow V3 Learning Shadow", max_results=10)
+    content = _bounded_json(payload, limit)
+    assert len(content) <= limit
+    result = json.loads(content)
+    assert result["result_count"] == len(result["results"])
+    for item in result["results"]:
+        original = (ROOT / item["path"]).read_text(encoding="utf-8").splitlines()
+        assert "\n".join(original[item["line_start"] - 1:item["line_end"]]).startswith(item["snippet"])
+
+
+def test_agent_core_context_is_not_truncated():
+    context = load_agent_prompt_context(ROOT)
+    for relative in context.source_hashes:
+        assert (ROOT / relative).read_text(encoding="utf-8").strip() in context.text
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("como hace las imagenes del analisis tecnico ticker", "docs/agent/ticker-technical.md"),
+    ("ticker technical analysis chart image generation /ticker command", "docs/agent/ticker-technical.md"),
+    ("Calibracion Shadow V3 Learning Shadow resultados", "docs/agent/shadow-modules.md"),
+    ("OpenRouter Nemotron agente modelo", "docs/agent/openrouter.md"),
+    ("ledger Telegram recomendaciones historicas ejecuciones", "docs/agent/historical-evidence.md"),
+])
+def test_docs_retriever_finds_agent_guides(query, expected):
+    results = search_project_docs(ROOT, query, max_results=3)["results"]
+    assert expected in [item["path"] for item in results]
 
 
 def test_grounded_eval_corpus_has_safety_and_source_selection_coverage():

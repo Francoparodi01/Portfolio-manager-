@@ -13,6 +13,7 @@ import httpx
 from .models import ModelRoles
 from .schemas import ConversationState, TaskSpec
 from .task import TaskParser
+from ..model_transport import agent_base_url, agent_provider, chat_content
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +101,8 @@ class SemanticTaskRouter:
     def __init__(self, *, model: str | None = None, base_url: str | None = None) -> None:
         roles = ModelRoles.from_env()
         self.model = model or roles.router
-        self.base_url = (
-            base_url
-            or os.getenv("QUANTIA_AGENT_OLLAMA_URL")
-            or os.getenv("OLLAMA_URL")
-            or "http://host.docker.internal:11434"
-        ).rstrip("/")
+        self.provider = agent_provider()
+        self.base_url = agent_base_url(self.provider, base_url)
         self.timeout_seconds = max(2.0, min(45.0, float(os.getenv("QUANTIA_ROUTER_TIMEOUT_SECONDS", "15"))))
         self.keep_alive = os.getenv("QUANTIA_OLLAMA_KEEP_ALIVE", "30m")
         self.fallback = TaskParser()
@@ -289,13 +286,11 @@ class SemanticTaskRouter:
         started = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await asyncio.wait_for(
-                    client.post(f"{self.base_url}/api/chat", json=payload),
+                content = await asyncio.wait_for(
+                    chat_content(client, provider=self.provider, base_url=self.base_url, payload=payload),
                     timeout=self.timeout_seconds,
                 )
-            response.raise_for_status()
-            body = response.json()
-            value = self._parse_json(str((body.get("message") or {}).get("content") or ""))
+            value = self._parse_json(content)
             task = self._to_task(raw, value, state)
             logger.info(
                 "[CHAT][ROUTER] source=semantic model=%s elapsed_ms=%s intent=%s confidence=%s",

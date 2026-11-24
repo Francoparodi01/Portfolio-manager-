@@ -12,6 +12,7 @@ import httpx
 
 from .schemas import EvidenceObject, TaskSpec
 from .skills import SkillDefinition
+from ..model_transport import agent_base_url, agent_provider, chat_content
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +27,8 @@ class GroundedSynthesizer:
 
     def __init__(self, *, model: str, base_url: str | None = None, timeout_seconds: float = 45) -> None:
         self.model = model
-        self.base_url = (
-            base_url
-            or os.getenv("QUANTIA_AGENT_OLLAMA_URL")
-            or os.getenv("OLLAMA_URL")
-            or "http://host.docker.internal:11434"
-        ).rstrip("/")
+        self.provider = agent_provider()
+        self.base_url = agent_base_url(self.provider, base_url)
         self.timeout_seconds = float(os.getenv("QUANTIA_HARNESS_SYNTHESIS_TIMEOUT_SECONDS", str(timeout_seconds)))
         self.max_chars = int(os.getenv("QUANTIA_HARNESS_SYNTHESIS_EVIDENCE_CHARS", "3500"))
         self.context_tokens = max(
@@ -328,11 +325,10 @@ class GroundedSynthesizer:
         started = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await asyncio.wait_for(
-                    client.post(f"{self.base_url}/api/chat", json=payload),
+                content = await asyncio.wait_for(
+                    chat_content(client, provider=self.provider, base_url=self.base_url, payload=payload),
                     timeout=self.timeout_seconds,
                 )
-            response.raise_for_status()
             elapsed_ms = int((time.monotonic() - started) * 1000)
             logger.info(
                 "[CHAT][SYNTHESIS] model=%s elapsed_ms=%s evidence_chars=%s",
@@ -340,8 +336,6 @@ class GroundedSynthesizer:
                 elapsed_ms,
                 used,
             )
-            data = response.json()
-            content = str((data.get("message") or {}).get("content") or "")
             answer = self._extract_answer(content)
             if answer:
                 return answer[:6000]

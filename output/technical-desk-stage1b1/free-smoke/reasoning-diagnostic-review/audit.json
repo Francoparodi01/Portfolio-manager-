@@ -1,0 +1,404 @@
+{
+  "status": "VERIFIED",
+  "plans": [
+    {
+      "version": 1,
+      "preregistered_at": "2026-11-24T00:16:55.765550+00:00",
+      "sha256": "32cb78f3ab563cf774da8ad58a097e00e93b3b8477f3fd240f6a68d9b51709ef"
+    },
+    {
+      "version": 2,
+      "preregistered_at": "2026-11-24T00:20:09.734860+00:00",
+      "sha256": "7fa4df0850818b25fe37935c0cad9cb9e1f27fb63f2969d47251b1eb002c9edc"
+    },
+    {
+      "version": 3,
+      "preregistered_at": "2026-11-24T00:22:27.310866+00:00",
+      "sha256": "e780e6dd400e9a0b2bf33a8567adcde7ceb5b36674b0b546d1e8d196aa97c668"
+    }
+  ],
+  "attempts": [
+    {
+      "version": 1,
+      "case": "minimum_default",
+      "cost_details": {
+        "upstream_inference_completions_cost": 0,
+        "upstream_inference_cost": 0,
+        "upstream_inference_prompt_cost": 0
+      },
+      "endpoint_requested": "nvidia",
+      "endpoint_resolved": null,
+      "error_code": null,
+      "evaluation": {
+        "content_is_null": false,
+        "content_utf8_bytes": 342,
+        "elliott_gate_passed": false,
+        "exact_synthetic_control": false,
+        "exhausted_in_reasoning": false,
+        "native_finish_reason": "length",
+        "reported_nonreasoning_output_tokens": 151,
+        "validation": {
+          "anchor_validation": "NOT_EVALUABLE",
+          "parse_role_output": "NOT_EVALUABLE",
+          "status": "INVALID_JSON"
+        }
+      },
+      "finish_reason": "length",
+      "http_status": 200,
+      "hypothetical_paid_cost_usd": "0.00028474",
+      "hypothetical_paid_pricing": {
+        "basis": "FULL_INPUT_PRICE_NO_CACHE_DISCOUNT_UPPER_ESTIMATE_NOT_BILLED",
+        "model_id": "nvidia/nemotron-3.5-super-vl",
+        "pricing": {
+          "completion": "0.00000047",
+          "input_cache_read": "0.00000002",
+          "prompt": "0.00000015"
+        },
+        "sha256": "3b623a6b73a922a0b7849ea6a34bd377262411cec7b5f56784199d4b2106f2c8",
+        "source": "output/technical-desk-stage1/model_pricing/20261123T025847Z-models.raw.json",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "verified_at": "2026-11-23T02:58:47.108313+00:00"
+      },
+      "input_bound": 6666,
+      "latency_ms": 4663.167,
+      "ledger_response_encoding": "UTF8",
+      "model_resolved": "nvidia/nemotron-3.5-super-vl:free",
+      "output_bound": 512,
+      "provider_resolved": "Nvidia",
+      "request_sha256": "27dcd757cc199c6fe9e84b4a40f05c56210324b0e6427a81f0939d3c98c560b9",
+      "response_sha256": "ff4f0f2dde039648a7143ca12a42d171954eb5af6985158837d4540c60336081",
+      "selected_headers": {},
+      "status": "RECEIVED",
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 294,
+        "output": 512,
+        "reasoning": 361
+      },
+      "usage_cost": 0
+    },
+    {
+      "version": 1,
+      "case": "minimum_disabled",
+      "cost_details": {
+        "upstream_inference_completions_cost": 0,
+        "upstream_inference_cost": 0,
+        "upstream_inference_prompt_cost": 0
+      },
+      "endpoint_requested": "nvidia",
+      "endpoint_resolved": null,
+      "error_code": null,
+      "evaluation": {
+        "content_is_null": false,
+        "content_utf8_bytes": 676,
+        "elliott_gate_passed": true,
+        "exact_synthetic_control": true,
+        "exhausted_in_reasoning": false,
+        "native_finish_reason": "stop",
+        "reported_nonreasoning_output_tokens": 282,
+        "validation": {
+          "anchor_validation": "VALID",
+          "elliott_scenarios": [],
+          "parse_role_output": "VALID",
+          "status": "ABSTAIN",
+          "timeframes": [
+            {
+              "scenarios": 0,
+              "state": "ABSTAIN",
+              "timeframe": "D"
+            },
+            {
+              "scenarios": 0,
+              "state": "ABSTAIN",
+              "timeframe": "W"
+            }
+          ]
+        }
+      },
+      "finish_reason": "stop",
+      "http_status": 200,
+      "hypothetical_paid_cost_usd": "0.00017664",
+      "hypothetical_paid_pricing": {
+        "basis": "FULL_INPUT_PRICE_NO_CACHE_DISCOUNT_UPPER_ESTIMATE_NOT_BILLED",
+        "model_id": "nvidia/nemotron-3.5-super-vl",
+        "pricing": {
+          "completion": "0.00000047",
+          "input_cache_read": "0.00000002",
+          "prompt": "0.00000015"
+        },
+        "sha256": "3b623a6b73a922a0b7849ea6a34bd377262411cec7b5f56784199d4b2106f2c8",
+        "source": "output/technical-desk-stage1/model_pricing/20261123T025847Z-models.raw.json",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "verified_at": "2026-11-23T02:58:47.108313+00:00"
+      },
+      "input_bound": 6696,
+      "latency_ms": 2606.239,
+      "ledger_response_encoding": "UTF8",
+      "model_resolved": "nvidia/nemotron-3.5-super-vl:free",
+      "output_bound": 512,
+      "provider_resolved": "Nvidia",
+      "request_sha256": "c93c47b0bbdfaf2bea4352e24f9012d9b635732793f907dfac2f17cef8b6e5a2",
+      "response_sha256": "1195b2239e49ebf95b73e1e75974dc2a4f747e439a0414580f788e45e9226d6d",
+      "selected_headers": {},
+      "status": "RECEIVED",
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 294,
+        "output": 282,
+        "reasoning": 0
+      },
+      "usage_cost": 0
+    },
+    {
+      "version": 1,
+      "case": "elliott_disabled",
+      "cost_details": {
+        "upstream_inference_completions_cost": 0,
+        "upstream_inference_cost": 0,
+        "upstream_inference_prompt_cost": 0
+      },
+      "endpoint_requested": "nvidia",
+      "endpoint_resolved": null,
+      "error_code": null,
+      "evaluation": {
+        "content_is_null": false,
+        "content_utf8_bytes": 708,
+        "elliott_gate_passed": false,
+        "exact_synthetic_control": null,
+        "exhausted_in_reasoning": false,
+        "native_finish_reason": "stop",
+        "reported_nonreasoning_output_tokens": 364,
+        "validation": {
+          "anchor_validation": "REJECTED_OR_NOT_EVALUABLE",
+          "parse_role_output": "REJECTED",
+          "reason": "ROLE_OUTPUT_SCHEMA_VIOLATION",
+          "status": "INVALID"
+        }
+      },
+      "finish_reason": "stop",
+      "http_status": 200,
+      "hypothetical_paid_cost_usd": "0.01363628",
+      "hypothetical_paid_pricing": {
+        "basis": "FULL_INPUT_PRICE_NO_CACHE_DISCOUNT_UPPER_ESTIMATE_NOT_BILLED",
+        "model_id": "nvidia/nemotron-3.5-super-vl",
+        "pricing": {
+          "completion": "0.00000047",
+          "input_cache_read": "0.00000002",
+          "prompt": "0.00000015"
+        },
+        "sha256": "3b623a6b73a922a0b7849ea6a34bd377262411cec7b5f56784199d4b2106f2c8",
+        "source": "output/technical-desk-stage1/model_pricing/20261123T025847Z-models.raw.json",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "verified_at": "2026-11-23T02:58:47.108313+00:00"
+      },
+      "input_bound": 190161,
+      "latency_ms": 8635.646,
+      "ledger_response_encoding": "UTF8",
+      "model_resolved": "nvidia/nemotron-3.5-super-vl:free",
+      "output_bound": 4096,
+      "provider_resolved": "Nvidia",
+      "request_sha256": "09b15d133a3d46ecc0162ba4005082945b827bb671eaa7dffeea8276b9447d19",
+      "response_sha256": "027fc24afb8dfd26a80f23516c420f0e3851d8afe3c46229ad32f3f0bc97fcb9",
+      "selected_headers": {},
+      "status": "RECEIVED",
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 89768,
+        "output": 364,
+        "reasoning": 0
+      },
+      "usage_cost": 0
+    },
+    {
+      "version": 2,
+      "case": "elliott_disabled",
+      "cost_details": {
+        "upstream_inference_completions_cost": 0,
+        "upstream_inference_cost": 0,
+        "upstream_inference_prompt_cost": 0
+      },
+      "endpoint_requested": "nvidia",
+      "endpoint_resolved": null,
+      "error_code": null,
+      "evaluation": {
+        "content_is_null": false,
+        "content_utf8_bytes": 5342,
+        "elliott_gate_passed": false,
+        "exact_synthetic_control": null,
+        "exhausted_in_reasoning": false,
+        "native_finish_reason": "stop",
+        "reported_nonreasoning_output_tokens": 3005,
+        "validation": {
+          "anchor_validation": "REJECTED_OR_NOT_EVALUABLE",
+          "parse_role_output": "REJECTED",
+          "reason": "ROLE_OUTPUT_SCHEMA_VIOLATION",
+          "status": "INVALID"
+        }
+      },
+      "finish_reason": "stop",
+      "http_status": 200,
+      "hypothetical_paid_cost_usd": "0.01488070",
+      "hypothetical_paid_pricing": {
+        "basis": "FULL_INPUT_PRICE_NO_CACHE_DISCOUNT_UPPER_ESTIMATE_NOT_BILLED",
+        "model_id": "nvidia/nemotron-3.5-super-vl",
+        "pricing": {
+          "completion": "0.00000047",
+          "input_cache_read": "0.00000002",
+          "prompt": "0.00000015"
+        },
+        "sha256": "3b623a6b73a922a0b7849ea6a34bd377262411cec7b5f56784199d4b2106f2c8",
+        "source": "output/technical-desk-stage1/model_pricing/20261123T025847Z-models.raw.json",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "verified_at": "2026-11-23T02:58:47.108313+00:00"
+      },
+      "input_bound": 190236,
+      "latency_ms": 27326.091,
+      "ledger_response_encoding": "UTF8",
+      "model_resolved": "nvidia/nemotron-3.5-super-vl:free",
+      "output_bound": 4096,
+      "provider_resolved": "Nvidia",
+      "request_sha256": "db99960212f9fa6f7133dd38506ba09b4ec8c9296310a1a0e80fc2cfbdf5fa9e",
+      "response_sha256": "af9d35014317683a5d1965bf519bde15292a9aed2d51c967cd68f4cdfef99fce",
+      "selected_headers": {},
+      "status": "RECEIVED",
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 89789,
+        "output": 3005,
+        "reasoning": 0
+      },
+      "usage_cost": 0
+    },
+    {
+      "version": 3,
+      "case": "elliott_disabled",
+      "cost_details": {
+        "upstream_inference_completions_cost": 0,
+        "upstream_inference_cost": 0,
+        "upstream_inference_prompt_cost": 0
+      },
+      "endpoint_requested": "nvidia",
+      "endpoint_resolved": null,
+      "error_code": null,
+      "evaluation": {
+        "content_is_null": false,
+        "content_utf8_bytes": 652,
+        "elliott_gate_passed": false,
+        "exact_synthetic_control": null,
+        "exhausted_in_reasoning": false,
+        "native_finish_reason": "stop",
+        "reported_nonreasoning_output_tokens": 307,
+        "validation": {
+          "anchor_validation": "VALID",
+          "elliott_scenarios": [],
+          "parse_role_output": "VALID",
+          "status": "ABSTAIN",
+          "timeframes": [
+            {
+              "scenarios": 0,
+              "state": "ABSTAIN",
+              "timeframe": "D"
+            },
+            {
+              "scenarios": 0,
+              "state": "ABSTAIN",
+              "timeframe": "W"
+            }
+          ]
+        }
+      },
+      "finish_reason": "stop",
+      "http_status": 200,
+      "hypothetical_paid_cost_usd": "0.01363109",
+      "hypothetical_paid_pricing": {
+        "basis": "FULL_INPUT_PRICE_NO_CACHE_DISCOUNT_UPPER_ESTIMATE_NOT_BILLED",
+        "model_id": "nvidia/nemotron-3.5-super-vl",
+        "pricing": {
+          "completion": "0.00000047",
+          "input_cache_read": "0.00000002",
+          "prompt": "0.00000015"
+        },
+        "sha256": "3b623a6b73a922a0b7849ea6a34bd377262411cec7b5f56784199d4b2106f2c8",
+        "source": "output/technical-desk-stage1/model_pricing/20261123T025847Z-models.raw.json",
+        "source_url": "https://openrouter.ai/api/v1/models",
+        "verified_at": "2026-11-23T02:58:47.108313+00:00"
+      },
+      "input_bound": 190816,
+      "latency_ms": 8112.71,
+      "ledger_response_encoding": "UTF8",
+      "model_resolved": "nvidia/nemotron-3.5-super-vl:free",
+      "output_bound": 4096,
+      "provider_resolved": "Nvidia",
+      "request_sha256": "8f9a475377113054aec65dc881e62502f8792758cc84efd4bac2a3fa919b0588",
+      "response_sha256": "a2398a7ed794ec150f30b2e85b98e0297fed2088d3bc6daf20aa561830649f78",
+      "selected_headers": {},
+      "status": "RECEIVED",
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 89912,
+        "output": 307,
+        "reasoning": 0
+      },
+      "usage_cost": 0
+    }
+  ],
+  "diagnostic_tokens": {
+    "input": 270057,
+    "output": 4470,
+    "reasoning": 361,
+    "cache_read": 0,
+    "cache_write": 0
+  },
+  "reported_usage_cost_usd": "0",
+  "hypothetical_paid_upper_estimate_usd": "0.04260945",
+  "ledgers": [
+    {
+      "version": 1,
+      "event_count": 10,
+      "counts": {
+        "runs": 1,
+        "evaluations": 6,
+        "attempts": 3
+      },
+      "head_hash": "6e955c0fbef7370f5be57c52a569f7c735a89d7dd3d7f55106d372b0f170995b",
+      "read_only": true
+    },
+    {
+      "version": 2,
+      "event_count": 4,
+      "counts": {
+        "runs": 1,
+        "evaluations": 2,
+        "attempts": 1
+      },
+      "head_hash": "af62511994deeb4863047dd5bfa6e22b1c2e42591e2185ee9c31a71dd69c572d",
+      "read_only": true
+    },
+    {
+      "version": 3,
+      "event_count": 5,
+      "counts": {
+        "runs": 1,
+        "evaluations": 2,
+        "attempts": 1,
+        "hypotheses": 1
+      },
+      "head_hash": "63c4b5b0e3c1acddb65b1301d243e5c2c47956cce51ac20afd857609acd517b3",
+      "read_only": true
+    }
+  ],
+  "original_responses_hash_verified": 8,
+  "new_responses_hash_verified": 5,
+  "protected_files_unchanged": 9,
+  "packet_schema_caps_provider_unchanged": true,
+  "secret_scan_files": 47,
+  "secret_match_files": 0,
+  "archive_sha256": "c4f04fd7fa9cd93eb5269295a024ea4fe0d9ddb39d7286ed76d52f7787162d08",
+  "moderator_started": false,
+  "pilot_started": false
+}

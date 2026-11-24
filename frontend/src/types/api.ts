@@ -29,6 +29,30 @@ export type EndpointKey =
   | "fills"
   | "logs";
 
+export type TopOpportunity = RowRecord & {
+  ticker: string;
+  rank_position: number;
+  reference_ts?: string | null;
+  trigger_price?: number | null;
+  invalidation_price?: number | null;
+  target_price?: number | null;
+  setup_risk_reward?: number | null;
+};
+
+export type TopOpportunitiesPayload = {
+  ok: boolean;
+  status: "READY" | "NO_CAPTURE" | "SCHEMA_MISSING" | "OWNER_NOT_CONFIGURED";
+  source?: string;
+  research_only: true;
+  captured_at?: string | null;
+  scoring_version?: string | null;
+  stale?: boolean | null;
+  count: number;
+  universe_count?: number;
+  eligible_count?: number;
+  items: TopOpportunity[];
+};
+
 export type EndpointDefinition = {
   key: EndpointKey;
   label: string;

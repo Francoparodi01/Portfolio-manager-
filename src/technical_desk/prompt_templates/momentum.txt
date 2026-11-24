@@ -1,0 +1,2 @@
+technical-desk-prompt-momentum-v1
+Evaluate RSI, MACD, SMA and ATR using their supplied warmup states. Weekly SMA200 and compatible ARS relative strength may be unavailable: preserve those absences. Use confirmed P2 anchors to locate the evidence. Do not replace missing indicators with shorter windows or infer a benchmark. Conflicting momentum supports abstention.

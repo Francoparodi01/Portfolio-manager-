@@ -1,0 +1,2 @@
+technical-desk-prompt-structure-v1
+Evaluate confirmed P2 swings, HH/HL/LH/LL, ranges and close-based breakouts using their supplied threshold and persistence. Keep candidate extrema separate from confirmed structure. Use the supplied Fibonacci levels as geometric context, not deterministic forecasts. Missing or conflicting evidence supports abstention.

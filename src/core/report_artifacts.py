@@ -10,6 +10,8 @@ from typing import Any
 
 import asyncpg
 
+from src.core.analysis_profile import ANALYSIS_FULL_PROFILE
+
 
 REPORT_ARTIFACT_VERSION = os.getenv(
     "TELEGRAM_REPORT_ARTIFACT_VERSION",
@@ -134,6 +136,7 @@ async def read_report_inputs(
         "report_type": str(report_type),
         "owner_chat_id": int(owner_chat_id),
         "runner_fingerprint": _runner_fingerprint(report_type),
+        "analysis_profile": ANALYSIS_FULL_PROFILE if report_type == "analysis" else None,
         "portfolio_snapshot_id": values.get("portfolio_snapshot_id"),
         "market_bucket": _market_bucket(values.get("market_data_at")),
         "candle_data_at": _as_utc(values.get("candle_data_at")).isoformat()

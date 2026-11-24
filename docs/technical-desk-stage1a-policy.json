@@ -1,0 +1,67 @@
+{
+  "version": "technical-desk-features-v1",
+  "mode": "SHADOW_ONLY",
+  "decimal_precision": 34,
+  "pivots": {
+    "detector": "CLOSED_BAR_FRACTAL_V1",
+    "left_bars": 2,
+    "right_bars": 2,
+    "scale_by_timeframe": {"D": "2L2R_D", "W": "2L2R_W"},
+    "ties": "EARLIEST_IN_WINDOW_STRICT_LEFT_INCLUSIVE_RIGHT",
+    "dual_high_low": "AMBIGUOUS_EXCLUDE_FROM_CONFIRMED",
+    "open_extrema": "CANDIDATE_NOT_CONFIRMED",
+    "same_kind_chain": "REPLACE_ONLY_WITH_STRICTLY_MORE_EXTREME_WHEN_CONFIRMED"
+  },
+  "fibonacci": {
+    "version": "fibonacci-fixed-ratios-v1",
+    "retracements": ["0.236", "0.382", "0.5", "0.618", "0.786"],
+    "extensions": ["1", "1.272", "1.618", "2", "2.618"],
+    "retracement_origin": "SECOND_PIVOT_BACK_TOWARD_FIRST",
+    "extension_origin": "FIRST_PIVOT_IN_DIRECTION_OF_SWING"
+  },
+  "structure": {
+    "comparison": "CONSECUTIVE_SAME_KIND_ON_ACTIVE_ALTERNATING_CHAIN",
+    "equal_tolerance_ticks": 1,
+    "equality_rule": "ABS_DIFFERENCE_LE_ONE_TICK",
+    "five_pivot_windows": "ALL_CONSECUTIVE_WINDOWS_ON_ACTIVE_ALTERNATING_CHAIN"
+  },
+  "tick_source": "CAPTURED_SYMBOL_MINMOV_DIVIDED_BY_PRICESCALE_NONFRACTIONAL_ONLY",
+  "ranges": {
+    "lookback_bars": 20,
+    "exclude_current_bar": true,
+    "breakout_threshold_ticks": 1,
+    "persistence_closes": 2,
+    "persistence_reference": "FROZEN_RANGE_AT_FIRST_BREAKOUT_CLOSE"
+  },
+  "indicators": {
+    "rsi_period": 14,
+    "rsi_method": "WILDER_FIRST_14_CLOSE_DELTAS_SEED_FLAT_50",
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "ema_seed": "SMA_FULL_WINDOW",
+    "sma_windows": [20, 50, 200],
+    "atr_period": 14,
+    "atr_method": "WILDER_SMA_SEED_FIRST_TR_HIGH_MINUS_LOW",
+    "partial_windows": "PROHIBITED"
+  },
+  "elliott": {
+    "version": "elliott-deterministic-rules-v1",
+    "extreme_tolerance_ticks": 1,
+    "wave2_full_retrace_tolerance": 0,
+    "wave4_overlap_tolerance": 0,
+    "wave3_shortest_tolerance_ticks": 1,
+    "ordinary_impulse_required_pivots": 6,
+    "five_alternating_pivots": "INCOMPLETE_FIVE_WAVE_IMPULSE",
+    "diagonals": "UNSUPPORTED_PATTERN"
+  },
+  "volume_scan": {
+    "version": "volume-median-scan-v1",
+    "pre_sessions": 10,
+    "post_sessions_including_current": 10,
+    "threshold": "3",
+    "classification": "CANDIDATE_FOR_REVIEW_NOT_AN_ADJUSTMENT",
+    "causal_feature": false
+  },
+  "relative_strength": {"status": "NOT_AVAILABLE", "reason": "NO_COMPATIBLE_ARS_BENCHMARK"}
+}

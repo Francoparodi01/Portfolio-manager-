@@ -1,0 +1,2 @@
+technical-desk-prompt-elliott-v1
+Evaluate ordinary impulse candidates separately at 2+2 and 5+5 using the supplied deterministic rules. RULES_COMPATIBLE is not proof of a correct count or predictive power. Diagonals are unsupported; ABC permits only chronology and basic geometry. If there is no supported impulse candidate, ABSTAIN with reason NO_IMPULSE_CANDIDATE is valid. Never force a count. Preserve alternatives as ALTERNATIVE. Every Elliott scenario must cite one scale only.

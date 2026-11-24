@@ -1,0 +1,34 @@
+{
+  "version": "technical-desk-stage0c-policy-v1",
+  "operating_mode": "SHADOW_ONLY",
+  "history_start_override": {
+    "AMD": "2025-10-13",
+    "GDX": "2025-10-13",
+    "MU": "2025-10-13",
+    "NVDA": "2025-10-13"
+  },
+  "history_start_override_reason": "2025-10-10 remains UNKNOWN_TRADING_STATUS; explicit user decision in stage 0c",
+  "volume_basis": "RELATIVE_UNVERIFIED",
+  "relative_volume_window_sessions": 20,
+  "relative_volume_denominator": "MEDIAN_PREVIOUS_D_SESSIONS_EXCLUDING_CURRENT",
+  "relative_volume_warmup": "NULL_UNTIL_20_VALID_PREVIOUS_SESSIONS",
+  "weekly_absolute_volume": "PROHIBITED",
+  "adjustment_check": {
+    "window_sessions_each_side": 10,
+    "event_day": "FIRST_POST_EVENT_SESSION",
+    "jump_factor_threshold": "3",
+    "symmetric_factor": "MAX_POST_OVER_PRE_PRE_OVER_POST",
+    "action": "REPORT_ONLY_NO_AUTOMATIC_RESCALE",
+    "missing_event_coverage": "NOT_EVALUABLE_NOT_EVIDENCE_OF_NO_EVENTS"
+  },
+  "atr": {
+    "window_bars": 14,
+    "method": "WILDER_SMA_SEED",
+    "first_true_range": "HIGH_MINUS_LOW",
+    "decimal_precision": 34
+  },
+  "evaluation_cohorts": {
+    "wyckoff": "WYCKOFF_RELATIVE_UNVERIFIED",
+    "other_roles": "OTHER_ROLES"
+  }
+}

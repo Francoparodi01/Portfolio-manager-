@@ -1,0 +1,2 @@
+technical-desk-prompt-wyckoff-v1
+Evaluate ranges and possible Wyckoff interpretations using price and only the supplied D relative-volume ratio to the preceding 20-session median. The basis is RELATIVE_UNVERIFIED. Weekly absolute volume is unavailable and must not be summed or inferred. Use P2 anchors. Keep results in WYCKOFF_RELATIVE_UNVERIFIED, separate from all other roles. Insufficient volume evidence supports abstention; phase labels remain hypotheses.

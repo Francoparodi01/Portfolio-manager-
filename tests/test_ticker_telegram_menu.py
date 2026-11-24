@@ -41,7 +41,7 @@ def test_ticker_action_sends_multiple_chart_paths():
     assert "line.startswith(\"[chart]\")" in action
 
 
-def test_weekly_analysis_uses_report_cache_and_full_analysis_forces_sync():
+def test_weekly_analysis_delegates_to_fresh_full_analysis():
     source = (ROOT / "scripts" / "telegram_bot.py").read_text(encoding="utf-8")
     sync_start = source.index("async def sync_operational_state")
     sync_end = source.index("def main_keyboard", sync_start)
@@ -55,11 +55,11 @@ def test_weekly_analysis_uses_report_cache_and_full_analysis_forces_sync():
 
     assert "await _has_recent_operational_sync(owner_chat_id)" in sync
     assert "await _mark_operational_sync(owner_chat_id)" in sync
-    assert '_load_cached_report("analysis", chat_id)' in action
-    assert "sync_operational_state" in action
-    assert action.index("sync_operational_state") < action.index("_load_cached_report")
+    assert 'await action_analysis_full(context, chat_id)' in action
+    assert '_load_cached_report' not in action
     assert "sync_operational_state(full=True, owner_chat_id=chat_id)" in full_action
-    assert "[BOT][ANALYSIS] cache_hit=" in action
+    assert "full_analysis_args(chat_id)" in full_action
+    assert '_save_cached_report("analysis", chat_id, report)' in full_action
 
 
 def test_historical_reports_do_not_force_cocos_scrape():

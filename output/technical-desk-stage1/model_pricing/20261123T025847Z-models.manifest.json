@@ -1,0 +1,13 @@
+{
+  "requested_at_utc": "2026-11-23T02:58:47.108313+00:00",
+  "url": "https://openrouter.ai/api/v1/models",
+  "authorization_header_sent": false,
+  "attempts": 1,
+  "http_status": 200,
+  "server_date": "Mon, 23 Nov 2026 02:58:49 GMT",
+  "file": "20261123T025847Z-models.raw.json",
+  "sha256": "3b623a6b73a922a0b7849ea6a34bd377262411cec7b5f56784199d4b2106f2c8",
+  "bytes": 925826,
+  "status": "VERIFIED_PUBLIC_RESPONSE",
+  "candidate_count": 3
+}

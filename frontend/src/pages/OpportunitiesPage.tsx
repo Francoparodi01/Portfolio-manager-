@@ -8,6 +8,7 @@ import { Panel } from "../components/ui/Panel";
 import { StatusBadge } from "../components/ui/StatusBadge";
 import { ResponsiveTable, type TableColumn } from "../components/ui/ResponsiveTable";
 import { useRadarQuery } from "../hooks/useMonitorData";
+import { TopTenOpportunities } from "../components/opportunities/TopTenOpportunities";
 import type { RowRecord, Tone } from "../types/api";
 import { asRows, getNumber, getString } from "../utils/data";
 import { formatDateTime, formatMoney, formatNumber, formatPercent, formatScore, sampleLabel, toneForNumber } from "../utils/format";
@@ -278,6 +279,8 @@ export default function OpportunitiesPage() {
         title="Ideas teoricas, outcomes y riesgo de camino"
         description="El radar descubre oportunidades. Esta pantalla audita si esas ideas tuvieron resultado posterior, sin mezclarlas con fills reales ni con el EV operativo del planner."
       />
+
+      <TopTenOpportunities />
 
       <MetricGroup>
         <Metric

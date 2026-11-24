@@ -1,0 +1,136 @@
+[
+  {
+    "name": "DeepInfra | nvidia/nemotron-3-super-120b-a12b-20230311",
+    "provider_name": "DeepInfra",
+    "tag": "deepinfra/bf16/flex",
+    "quantization": "bf16",
+    "pricing": {
+      "prompt": "0.00000006",
+      "completion": "0.00000032",
+      "discount": 0
+    },
+    "context_length": 262144,
+    "max_prompt_tokens": null,
+    "max_completion_tokens": 235929,
+    "supported_parameters": [
+      "reasoning",
+      "include_reasoning",
+      "max_tokens",
+      "temperature",
+      "top_p",
+      "stop",
+      "frequency_penalty",
+      "presence_penalty",
+      "repetition_penalty",
+      "top_k",
+      "seed",
+      "min_p",
+      "logit_bias",
+      "response_format",
+      "structured_outputs",
+      "tools",
+      "tool_choice",
+      "reasoning_effort"
+    ]
+  },
+  {
+    "name": "DeepInfra | nvidia/nemotron-3-super-120b-a12b-20230311",
+    "provider_name": "DeepInfra",
+    "tag": "deepinfra/bf16",
+    "quantization": "bf16",
+    "pricing": {
+      "prompt": "0.000000075",
+      "completion": "0.0000004",
+      "discount": 0
+    },
+    "context_length": 262144,
+    "max_prompt_tokens": null,
+    "max_completion_tokens": 16384,
+    "supported_parameters": [
+      "reasoning",
+      "include_reasoning",
+      "max_tokens",
+      "temperature",
+      "top_p",
+      "stop",
+      "frequency_penalty",
+      "presence_penalty",
+      "repetition_penalty",
+      "top_k",
+      "seed",
+      "min_p",
+      "tools",
+      "tool_choice",
+      "logit_bias",
+      "response_format",
+      "structured_outputs",
+      "reasoning_effort"
+    ]
+  },
+  {
+    "name": "DekaLLM | nvidia/nemotron-3-super-120b-a12b-20230311",
+    "provider_name": "DekaLLM",
+    "tag": "dekallm/fp8",
+    "quantization": "fp8",
+    "pricing": {
+      "prompt": "0.00000008",
+      "completion": "0.00000045",
+      "discount": 0
+    },
+    "context_length": 262144,
+    "max_prompt_tokens": null,
+    "max_completion_tokens": 235929,
+    "supported_parameters": [
+      "reasoning",
+      "include_reasoning",
+      "frequency_penalty",
+      "logit_bias",
+      "max_tokens",
+      "presence_penalty",
+      "seed",
+      "stop",
+      "temperature",
+      "top_p",
+      "response_format",
+      "tools",
+      "logprobs",
+      "top_logprobs",
+      "structured_outputs",
+      "reasoning_effort"
+    ]
+  },
+  {
+    "name": "DeepInfra | nvidia/nemotron-3-super-120b-a12b-20230311",
+    "provider_name": "DeepInfra",
+    "tag": "deepinfra/bf16/priority",
+    "quantization": "bf16",
+    "pricing": {
+      "prompt": "0.0000001125",
+      "completion": "0.0000006",
+      "discount": 0
+    },
+    "context_length": 262144,
+    "max_prompt_tokens": null,
+    "max_completion_tokens": 235929,
+    "supported_parameters": [
+      "reasoning",
+      "include_reasoning",
+      "max_tokens",
+      "temperature",
+      "top_p",
+      "stop",
+      "frequency_penalty",
+      "presence_penalty",
+      "repetition_penalty",
+      "top_k",
+      "seed",
+      "min_p",
+      "logit_bias",
+      "response_format",
+      "structured_outputs",
+      "tools",
+      "tool_choice",
+      "reasoning_effort"
+    ]
+  }
+]

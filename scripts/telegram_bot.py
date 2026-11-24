@@ -57,6 +57,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.telegram_format import html_text, note, validate_telegram_html
+from src.core.analysis_profile import ANALYSIS_FULL_PROFILE, full_analysis_args
 
 try:
     from src.core.config import get_config
@@ -138,7 +139,8 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("menu", "Abrir panel principal"),
     ("help", "Cómo leer Quantia"),
     ("portfolio", "Cartera actual"),
-    ("analisis", "Plan operativo"),
+    ("analisis_full", "Análisis completo y decisiones"),
+    ("backtest", "Simular y medir decisiones históricas"),
     ("analisis_contextual", "Contexto PIT experimental (shadow)"),
     ("events", "Próximos balances"),
     ("ticker", "Análisis por ticker"),
@@ -447,7 +449,8 @@ async def _save_cached_report(report_type: str, chat_id: int, report: str) -> No
             report_type=report_type,
             owner_chat_id=chat_id,
             report_text=report,
-            metadata={"source": "telegram", "market_open": _report_cache_market_open()},
+            metadata={"source": "telegram", "market_open": _report_cache_market_open(),
+                      "analysis_profile": ANALYSIS_FULL_PROFILE if report_type == "analysis" else None},
         )
     except Exception as exc:
         logger.warning("[BOT][CACHE] write fallo type=%s: %s", report_type, exc)
@@ -859,10 +862,11 @@ def help_text() -> str:
         "El bot informa y audita. No ejecuta órdenes.\n\n"
         "<b>Cartera y análisis</b>\n"
         "<code>/portfolio</code>: cartera actual y concentración.\n"
-        "<code>/analisis</code>: plan operativo compacto y auditable.\n"
+        "<code>/analisis</code>: alias del análisis completo.\n"
         "<code>/analisis_contextual</code>: mismo pipeline con contexto PIT shadow; no ejecuta ni cambia el plan.\n"
         "<code>/analisis_test</code>: simulación compacta sin guardar.\n"
-        "<code>/analisis_full</code>: simulación completa sin guardar.\n"
+        "<code>/backtest</code>: simulación histórica configurable, estado e informes PDF + CSV.\n"
+        "<code>/analisis_full</code>: cartera, radar y plan completo; guarda decisiones válidas en rueda para medirlas.\n"
         "<code>/analisis_debug</code>: diagnóstico técnico sin guardar.\n"
         "<code>/events</code>: próximos balances de la cartera.\n"
         "<code>/ticker NVDA</code>: análisis técnico y gráfico por acción.\n"
@@ -1232,44 +1236,8 @@ async def action_weekly_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def action_analysis(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    started = time.perf_counter()
-    sync_note = await sync_operational_state(
-        full=False,
-        owner_chat_id=chat_id,
-    )
-    cached = await _load_cached_report("analysis", chat_id)
-    if cached:
-        logger.info(
-            "[BOT][ANALYSIS] cache_hit=true total_s=%.2f",
-            time.perf_counter() - started,
-        )
-        await send_text(
-            context,
-            chat_id,
-            sync_note
-            + _artifact_note(cached, "/analisis_full")
-            + str(cached["report_text"]),
-        )
-        return
-
-    owner_args = _owner_cli_args(chat_id)
-    analysis_started = time.perf_counter()
-    report = await run_first_existing_script(
-        [
-            ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--skip-radar", *owner_args],
-            ["scripts/run_analysis.py", "--no-llm", "--skip-radar", *owner_args],
-            ["scripts/run_analysis.py", "--no-telegram", "--skip-radar", *owner_args],
-            ["scripts/run_analysis.py", "--skip-radar", *owner_args],
-        ],
-        timeout=COMMAND_TIMEOUT_SECONDS,
-    )
-    logger.info(
-        "[BOT][ANALYSIS] cache_hit=false compute_s=%.2f total_s=%.2f",
-        time.perf_counter() - analysis_started,
-        time.perf_counter() - started,
-    )
-    await _save_cached_report("analysis", chat_id, report)
-    await send_text(context, chat_id, sync_note + report)
+    """Compatibility alias: every request computes the complete operational plan."""
+    await action_analysis_full(context, chat_id)
 
 
 async def action_contextual_analysis(
@@ -1313,17 +1281,12 @@ async def action_analysis_test(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
 
 async def action_analysis_full(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    owner_args = _owner_cli_args(chat_id)
     sync_note = await sync_operational_state(full=True, owner_chat_id=chat_id)
     report = await run_first_existing_script(
-        [
-            ["scripts/run_analysis.py", "--no-telegram", "--no-llm", "--no-persist", "--run-intent", "exploratory", *owner_args],
-            ["scripts/run_analysis.py", "--no-llm", "--no-persist", "--run-intent", "exploratory", *owner_args],
-            ["scripts/run_analysis.py", "--no-telegram", "--no-persist", "--run-intent", "exploratory", *owner_args],
-            ["scripts/run_analysis.py", "--no-persist", "--run-intent", "exploratory", *owner_args],
-        ],
-        timeout=COMMAND_TIMEOUT_SECONDS,
+        [full_analysis_args(chat_id)],
+        timeout=900,
     )
+    await _save_cached_report("analysis", chat_id, report)
     await send_text(context, chat_id, sync_note + report)
 
 
@@ -3206,6 +3169,19 @@ async def analysis_full_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None
 async def analysis_debug_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "analysis_debug")
 
+async def backtest_handler(update, context):
+    if not await ensure_allowed_chat(update, context):
+        return
+    from src.backtesting.telegram import handle
+    await handle(update, context)
+
+async def backtest_callback(update, context):
+    if not await ensure_allowed_chat(update, context):
+        return
+    from src.backtesting.telegram import callback
+    await callback(update, context)
+
+
 async def market_context_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "market_context")
 
@@ -3827,6 +3803,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("analysis_test",    analysis_test_handler))
     app.add_handler(CommandHandler("analysis_full",    analysis_full_handler))
     app.add_handler(CommandHandler("analisis_full",    analysis_full_handler))
+    app.add_handler(CommandHandler("backtest",         backtest_handler))
     app.add_handler(CommandHandler("analysis_debug",   analysis_debug_handler))
     app.add_handler(CommandHandler("analisis_debug",   analysis_debug_handler))
     app.add_handler(CommandHandler("mercado",          market_context_handler))
@@ -3892,6 +3869,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("cocos_reintentar",          admin_refresh_portfolio_handler))
 
     # Botones
+    app.add_handler(CallbackQueryHandler(backtest_callback, pattern=r"^bt:"))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(error_handler)
 
