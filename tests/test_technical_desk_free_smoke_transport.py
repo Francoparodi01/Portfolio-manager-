@@ -146,11 +146,41 @@ def test_reasoning_disabled_is_exact_on_serialized_and_http_body(server, manifes
     assert len(server["requests"]) == 1
 
 
+@pytest.mark.parametrize("reasoning", [{"enabled": True}, {"enabled": True, "effort": "low"}])
+def test_reasoning_enabled_exact_on_serialized_and_http_body(server, manifest, reasoning):
+    rendered = {"messages": request(manifest)["messages"]}
+    baseline = build_free_request(rendered, manifest=manifest, role="elliott", max_output_tokens=24576)
+    manifest["reasoning"] = reasoning
+    body = build_free_request(rendered, manifest=manifest, role="elliott", max_output_tokens=24576)
+    assert body == {**baseline, "reasoning": reasoning}
+    serialized = serialized_request(body)
+    assert json.loads(serialized)["reasoning"]["enabled"] is True
+    result = send(manifest, server, body)
+    assert result["status"] == "RECEIVED"
+    assert server["requests"][0]["body"] == serialized
+    actual = json.loads(server["requests"][0]["body"])
+    assert actual["reasoning"] == reasoning and actual["reasoning"]["enabled"] is True
+    for field in ("messages", "response_format", "max_tokens", "temperature", "provider"):
+        assert actual[field] == baseline[field]
+    assert actual["max_tokens"] == 24576
+    manifest["reasoning"] = {"enabled": False}
+    with pytest.raises(DeskTransportError, match="CONTRACT_CHANGED"):
+        send(manifest, server, body)
+    assert len(server["requests"]) == 1
+
+
 @pytest.mark.parametrize("reasoning", [
     {"enabled": 0}, {"enabled": 0.0}, {"enabled": "false"},
-    {"enabled": None}, {"enabled": True}, {"enabled": False, "exclude": True},
+    {"enabled": 1}, {"enabled": 1.0}, {"enabled": "true"},
+    {"enabled": None}, {"enabled": False, "exclude": True},
     {"enabled": False, "effort": "low"}, {"exclude": True}, {}, False, 0, [],
     {"effort": "low", "exclude": True},
+    {"enabled": True, "effort": "high"}, {"enabled": True, "effort": None},
+    {"enabled": 1, "effort": "low"}, {"enabled": 1.0, "effort": "low"},
+    {"enabled": "true", "effort": "low"}, {"enabled": 0, "effort": "low"},
+    {"enabled": True, "exclude": False}, {"enabled": True, "max_tokens": 1024},
+    {"enabled": True, "effort": "low", "exclude": False},
+    {"enabled": True, "effort": "low", "max_tokens": 1024},
 ])
 def test_invalid_reasoning_blocks_before_socket(server, manifest, reasoning):
     body = request(manifest)

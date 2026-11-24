@@ -1,0 +1,22 @@
+{
+  "files_sha256_unchanged": {
+    "src/technical_desk/pilot_protocol.py": true,
+    "src/technical_desk/pilot_protocol_v3.py": true,
+    "src/technical_desk/pilot_protocol_v31.py": true,
+    "src/technical_desk/role_contracts.py": true,
+    "tests/test_technical_desk_pilot_protocol.py": true,
+    "tests/test_technical_desk_pilot_protocol_v3.py": true,
+    "tests/test_technical_desk_pilot_protocol_v31.py": true,
+    "tests/test_technical_desk_role_contracts.py": true,
+    "scripts\\build_technical_desk_stage1b.py": true,
+    "src\\technical_desk\\dry_dispatch.py": true,
+    "src\\technical_desk\\local_ledger.py": true,
+    "src\\technical_desk\\prompt_packets.py": true,
+    "src\\technical_desk\\prompts.py": true
+  },
+  "protected_diff_stat": "0 files changed",
+  "private_prompt_checks_passed": 50,
+  "leak_tests": "7 passed in 2.39s",
+  "other_tests_rerun": false,
+  "model_calls": 0
+}

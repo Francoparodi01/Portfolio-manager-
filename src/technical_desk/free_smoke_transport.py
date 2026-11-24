@@ -39,7 +39,10 @@ def _free_manifest(manifest):
     if reasoning is not None and not (
             isinstance(reasoning, dict) and (
                 reasoning == {"effort": "low"} or
-                (set(reasoning) == {"enabled"} and reasoning["enabled"] is False))):
+                (set(reasoning) == {"enabled"} and
+                 (reasoning["enabled"] is False or reasoning["enabled"] is True)) or
+                (set(reasoning) == {"enabled", "effort"} and
+                 reasoning["enabled"] is True and reasoning["effort"] == "low"))):
         raise DeskTransportError("FREE_SMOKE_REASONING_NOT_PREREGISTERED")
     return manifest
 

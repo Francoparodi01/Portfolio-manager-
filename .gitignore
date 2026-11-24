@@ -41,6 +41,8 @@ output/technical-desk-stage0b-remediation/
 output/technical-desk-stage0c/
 output/technical-desk-stage1a/
 output/technical-desk-stage1a1/
+output/technical-desk-stage1b/
+output/technical-desk-stage1b1/
 docs/export/
 *.log
 tests/*
@@ -57,6 +59,17 @@ tests/*
 !tests/test_technical_desk_pilot_protocol_v31.py
 !tests/test_technical_desk_elliott_control.py
 !tests/test_technical_desk_volume_clusters.py
+!tests/test_technical_desk_prompts.py
+!tests/test_technical_desk_prompt_packets.py
+!tests/test_technical_desk_dry_dispatch.py
+!tests/test_technical_desk_local_ledger.py
+!tests/test_technical_desk_compact_prompts.py
+!tests/test_technical_desk_compact_dry_run.py
+!tests/test_technical_desk_desk_transport.py
+!tests/test_technical_desk_endpoint_pricing.py
+!tests/test_technical_desk_free_smoke_transport.py
+!tests/test_technical_desk_free_smoke.py
+!tests/test_technical_desk_reasoning_diagnostic.py
 !tests/test_backtesting_command.py
 !tests/test_backtesting_ledger.py
 !tests/test_thesis_desk_backtest.py

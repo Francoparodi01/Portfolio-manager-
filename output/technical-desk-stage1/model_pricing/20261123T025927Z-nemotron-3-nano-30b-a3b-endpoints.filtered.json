@@ -1,0 +1,35 @@
+[
+  {
+    "name": "Nebius | nvidia/nemotron-3-nano-30b-a3b",
+    "provider_name": "Nebius",
+    "tag": "nebius/fp8",
+    "quantization": "fp8",
+    "pricing": {
+      "prompt": "0.00000006",
+      "completion": "0.00000024",
+      "input_cache_read": "0.000000012",
+      "discount": 0
+    },
+    "context_length": 262144,
+    "max_prompt_tokens": null,
+    "max_completion_tokens": 235929,
+    "supported_parameters": [
+      "reasoning",
+      "include_reasoning",
+      "max_tokens",
+      "temperature",
+      "top_p",
+      "stop",
+      "frequency_penalty",
+      "presence_penalty",
+      "seed",
+      "top_k",
+      "logit_bias",
+      "repetition_penalty",
+      "response_format",
+      "structured_outputs",
+      "tools",
+      "tool_choice"
+    ]
+  }
+]

@@ -1,0 +1,100 @@
+{
+  "base_input_tokens": 20199220,
+  "base_output_cap": 184320,
+  "reservation_input_tokens": 42202500,
+  "reservation_output_cap": 368640,
+  "reservation_usd": "4.367706",
+  "by_role": {
+    "elliott": {
+      "input": 5348118,
+      "output": 40960,
+      "input_max_per_request": 573118,
+      "output_max_per_request": 4096,
+      "reservation_usd": "1.179004"
+    },
+    "wyckoff": {
+      "input": 1845758,
+      "output": 40960,
+      "input_max_per_request": 189106,
+      "output_max_per_request": 4096,
+      "reservation_usd": "0.41098"
+    },
+    "structure": {
+      "input": 1844728,
+      "output": 30720,
+      "input_max_per_request": 189003,
+      "output_max_per_request": 3072,
+      "reservation_usd": "0.402582"
+    },
+    "momentum": {
+      "input": 1844818,
+      "output": 30720,
+      "input_max_per_request": 189012,
+      "output_max_per_request": 3072,
+      "reservation_usd": "0.4026"
+    },
+    "moderator": {
+      "input": 9315798,
+      "output": 40960,
+      "input_max_per_request": 969886,
+      "output_max_per_request": 4096,
+      "reservation_usd": "1.97254"
+    }
+  },
+  "by_packet": {
+    "AMD": {
+      "input": 4017730,
+      "output": 36864,
+      "base_cost_usd": "0.4165186",
+      "allocated_reservation_usd": "0.8735412"
+    },
+    "GDX": {
+      "input": 4139818,
+      "output": 36864,
+      "base_cost_usd": "0.4287274",
+      "allocated_reservation_usd": "0.8735412"
+    },
+    "GOOGL": {
+      "input": 3987156,
+      "output": 36864,
+      "base_cost_usd": "0.4134612",
+      "allocated_reservation_usd": "0.8735412"
+    },
+    "MU": {
+      "input": 3836174,
+      "output": 36864,
+      "base_cost_usd": "0.398363",
+      "allocated_reservation_usd": "0.8735412"
+    },
+    "NVDA": {
+      "input": 4218342,
+      "output": 36864,
+      "base_cost_usd": "0.4365798",
+      "allocated_reservation_usd": "0.8735412"
+    }
+  },
+  "private_prompt_checks_passed": 50,
+  "shared_supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "max_tokens",
+    "presence_penalty",
+    "reasoning",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_k",
+    "top_p"
+  ],
+  "hypothetical_reservations": {
+    "nvidia/nemotron-3-nano-30b-a3b": "2.62062360",
+    "nvidia/nemotron-3-super-120b-a12b": "3.312643500",
+    "nvidia/nemotron-3.5-lightning": "3.02790300"
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "version": "technical-desk-projection-v2",
+  "mode": "SHADOW_ONLY",
+  "table_encoding": "columns_and_rows_arrays_recursive_union_of_sorted_keys",
+  "rounding": {
+    "mode": "ROUND_HALF_EVEN",
+    "prices": "nearest_packet_tick_then_tick_decimal_places",
+    "price_fields": ["open", "high", "low", "close", "price", "level", "prices", "targets", "retracements", "extensions"],
+    "sma_values": "nearest_packet_tick",
+    "derived_decimal_places": 6,
+    "rsi_and_relative_volume_decimal_places": 4,
+    "scope": "PROMPT_VIEW_ONLY_ORIGINAL_PACKET_AND_VALIDATOR_UNCHANGED"
+  },
+  "roles": {
+    "elliott": {
+      "candles": false,
+      "pivots": "all_confirmed_P2_and_P5_D_W",
+      "features": ["ordinary_impulse_candidates_all_states_all_rules_both_scales", "latest_swing_fibonacci", "open_extrema_candidates", "atr"],
+      "single_scale_per_scenario": true
+    },
+    "wyckoff": {
+      "candles": "all_D_OHLC_relative_volume_and_W_OHLC_no_absolute_volume",
+      "pivots": "all_confirmed_P2_D_W",
+      "features": ["range", "breakout_candidate", "breakout_confirmed", "open_extrema_candidates", "atr"],
+      "volume_basis": "RELATIVE_UNVERIFIED",
+      "volume_ratio_window_sessions": 20,
+      "evaluation_cohort": "WYCKOFF_RELATIVE_UNVERIFIED"
+    },
+    "structure": {
+      "candles": "recent_HLC",
+      "daily_bar_limit": 60,
+      "weekly_bar_limit": 26,
+      "pivots": "all_confirmed_P2_D_W",
+      "features": ["structure", "range", "breakout_candidate", "breakout_confirmed", "latest_swing_fibonacci", "open_extrema_candidates", "atr"]
+    },
+    "momentum": {
+      "candles": false,
+      "pivots": "last_8_confirmed_P2_per_timeframe",
+      "features": ["latest_close", "rsi", "macd", "macd_signal", "macd_histogram", "sma_20", "sma_50", "sma_200", "atr", "relative_strength_missing_reason"]
+    },
+    "moderator": {
+      "candles": false,
+      "raw_features": false,
+      "inputs": ["four_validated_same_replica_hypotheses_including_alternatives", "context_validator_results", "elliott_rules_for_matching_cited_candidates", "only_pivots_cited_by_hypothesis_anchors"],
+      "full_input_cap_utf8_bytes": 65536,
+      "on_cap_exceeded": "NOT_STARTED_NEVER_TRUNCATE",
+      "dry_run_hypotheses": "EXPLICIT_ABSTENTION_FIXTURES_ONLY"
+    }
+  },
+  "schema": "ONLY_IN_RESPONSE_FORMAT_NEVER_DUPLICATE_IN_MESSAGE",
+  "anchor_identity": "unchanged_P2_or_P5_colon_D_or_W_colon_original_sha256",
+  "anchor_validation": "must_exist_in_visible_confirmed_pivots_and_full_precision_context",
+  "output_caps_tokens": {"elliott": 4096, "wyckoff": 4096, "structure": 3072, "momentum": 3072, "moderator": 4096},
+  "response_cap_utf8_bytes": 16384,
+  "input_bound": {"tokens_per_utf8_byte": 1, "overhead_tokens": 1024, "moderator": "complete_body_bytes_plus_remaining_space_to_full_input_cap", "label": "CONSERVATIVE_BYTE_CEILING_NOT_TOKENIZER_MEASUREMENT"},
+  "pilot": {"packets": 5, "replicas": 2, "roles": 5, "retry_reserve": 1, "budget_usd": "2", "debate": false},
+  "smoke": {"ticker": "AMD", "replicas": 1, "roles": 5, "retry_reserve": 0, "budget_usd": "0.50", "debate": false}
+}

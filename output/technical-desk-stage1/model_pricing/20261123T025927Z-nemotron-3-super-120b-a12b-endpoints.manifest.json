@@ -1,0 +1,12 @@
+{
+  "url": "https://openrouter.ai/api/v1/models/nvidia/nemotron-3-super-120b-a12b/endpoints",
+  "requested_at_utc": "2026-11-23T02:59:27.425594+00:00",
+  "authorization_header_sent": false,
+  "attempts": 1,
+  "http_status": 200,
+  "server_date": "Mon, 23 Nov 2026 02:59:26 GMT",
+  "file": "20261123T025927Z-nemotron-3-super-120b-a12b-endpoints.raw.json",
+  "sha256": "ee23654d14453020370d2577f1ee90ca9fe55e4f792f36d467bcc1eeca34d222",
+  "bytes": 4794,
+  "status": "VERIFIED_PUBLIC_RESPONSE"
+}
