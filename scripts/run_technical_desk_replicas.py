@@ -35,7 +35,8 @@ def prepare_plan(manifest, packets, contexts, expected, choice):
                 for name, view in packets.items()}
     if any(r["prompt_version"] != "technical-desk-prompt-elliott-v2.3" for r in rendered.values()):
         raise ValueError("FROZEN_PROMPT_V23_REQUIRED")
-    assert rendered["AMD"]["messages"][0] == rendered["CONTROL"]["messages"][0]
+    if rendered["AMD"]["messages"][0] != rendered["CONTROL"]["messages"][0]:
+        raise ValueError("SYSTEM_MESSAGE_MUST_MATCH_ACROSS_DATASETS")
     cases = []
     for block_index, (dataset, replica) in enumerate(BLOCKS):
         for arm in (("A", "B") if block_index % 2 == 0 else ("B", "A")):
@@ -51,7 +52,8 @@ def prepare_plan(manifest, packets, contexts, expected, choice):
                               input_bound=bound, prompt_version=rendered[dataset]["prompt_version"]))
     for dataset in packets:
         a, b = [next(c["body"] for c in cases if c["dataset"] == dataset and c["arm"] == arm) for arm in ("A", "B")]
-        assert {k: v for k, v in a.items() if k not in ("reasoning", "max_tokens")} == {k: v for k, v in b.items() if k not in ("reasoning", "max_tokens")}
+        if {k: v for k, v in a.items() if k not in ("reasoning", "max_tokens")} != {k: v for k, v in b.items() if k not in ("reasoning", "max_tokens")}:
+            raise ValueError("ARMS_MAY_DIFFER_ONLY_IN_REASONING_AND_MAX_TOKENS")
     return dict(version="technical-desk-replicas-v1", mode="SHADOW_ONLY", phase1_commit=COMMIT,
                 maximum_posts=16, automatic_retries=0, stop_on_429=True, moderator=False, pilot=False,
                 arms=arms, effort_choice=choice, cases=cases, packets=packets, expected_control=expected,
@@ -61,6 +63,8 @@ def prepare_plan(manifest, packets, contexts, expected, choice):
                     abstain="both D and W explicitly ABSTAIN; denominator all attempted requests",
                     rates="numerator divided by attempted per dataset/arm; planned counts shown separately",
                     control_success=expected["spec"]["success"], unknown="missing stays null; known-token denominators reported",
+                    replica_independence="REPLICAS_OF_AN_ARM_ARE_IDENTICAL_REQUESTS_AT_TEMPERATURE_0; they measure provider-side nondeterminism, not sampling variance",
+                    amd_expected_answer="NONE_PREREGISTERED; neither contract nor prompt defines recency, so AMD ABSTAIN rate is descriptive, not accuracy",
                     ordering="eight paired blocks with alternating AB/BA, controls interleaved; no adaptive changes"))
 
 
@@ -190,11 +194,22 @@ def execute(plan, contexts, directory, ledger, send, preflight, *, progress=prin
     return result
 
 
+def phase1_commit_in_history(root=ROOT, commit=COMMIT):
+    """The Phase 1 commit must be an ancestor of HEAD; later commits are allowed because
+    CODE_FILES and the protected contracts are bound by SHA-256 in the preregistered plan."""
+    try:
+        subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"], cwd=root, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
-    if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip() != COMMIT:
+    if not phase1_commit_in_history():
         raise ValueError("PHASE1_COMMIT_REQUIRED")
     manifest, amd, amd_context, protected = smoke.load_inputs()
     if not args.execute:

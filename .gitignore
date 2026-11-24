@@ -70,6 +70,7 @@ tests/*
 !tests/test_technical_desk_free_smoke_transport.py
 !tests/test_technical_desk_free_smoke.py
 !tests/test_technical_desk_reasoning_diagnostic.py
+!tests/test_technical_desk_replicas.py
 !tests/test_backtesting_command.py
 !tests/test_backtesting_ledger.py
 !tests/test_thesis_desk_backtest.py

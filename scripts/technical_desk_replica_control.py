@@ -159,7 +159,8 @@ def identifies_expected_count(parsed, expected):
 def amd_compatible_dates(view):
     """Return at most three frozen AMD compatible windows, with causal dates."""
     lookup = {p["id"]: p for p in view["pivots"]["D"]}
-    last = view["ohlcv"]["D"][-1]["bar_start"]
+    bars = [bar["bar_start"] for bar in view["ohlcv"]["D"]]
+    last = bars[-1]
     result = []
     for scale, source in view["features"]["elliott_scales"]["D"].items():
         for candidate in source["candidates"]:
@@ -169,6 +170,10 @@ def amd_compatible_dates(view):
             result.append(dict(scale=scale, start=pivots[0]["pivot_time"], end=pivots[-1]["pivot_time"],
                 confirmed_at=pivots[-1]["confirmed_at"], last_daily_bar=last,
                 ends_on_last_daily_bar=pivots[-1]["pivot_time"] == last,
+                # A confirmed pivot needs right-side bars, so the flag above can never be true;
+                # the informative recency measure is the number of daily sessions after the end.
+                sessions_after_end=(len(bars) - 1 - bars.index(pivots[-1]["pivot_time"])
+                                    if pivots[-1]["pivot_time"] in bars else None),
                 direction="BULLISH" if pivots[0]["kind"] == "LOW" else "BEARISH",
                 pivots=[{k: p[k] for k in ("id", "kind", "price", "pivot_time", "confirmed_at")} for p in pivots]))
     return result
