@@ -58,6 +58,7 @@ tests/*
 !tests/test_technical_desk_causality.py
 !tests/test_technical_desk_pilot_protocol_v31.py
 !tests/test_technical_desk_elliott_control.py
+!tests/test_technical_desk_outcome_resolver.py
 !tests/test_technical_desk_volume_clusters.py
 !tests/test_technical_desk_prompts.py
 !tests/test_technical_desk_prompt_packets.py
