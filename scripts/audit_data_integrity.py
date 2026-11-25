@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ART = ZoneInfo("America/Argentina/Buenos_Aires")
 HORIZONS = (5, 10, 20, 40)
+SENSITIVITY_DIFF = 0.05          # O1 differences above 5 pp are removed in the sensitivity run
 RETURN_TOLERANCE = 1e-4          # absolute difference in a return (0.01 percentage points)
 JUMP_THRESHOLD = 0.30            # |daily close-to-close| above this needs a corporate action
 SAMPLE_ROWS = 8
@@ -240,6 +241,62 @@ def compare_with_report(frame: pd.DataFrame, report: Any, cost: float, scope_mas
     return pd.DataFrame(rows)
 
 
+def _horizon_days(horizon: str) -> int:
+    return int(str(horizon).rstrip("d"))
+
+
+def sensitivity_variants(raw: pd.DataFrame, jumps: pd.DataFrame, bad_pairs: set, horizons: tuple[str, ...],
+                         slack_days: int = 7) -> dict[str, pd.DataFrame]:
+    """The decision log the viability audit reads, with progressively more doubtful outcomes removed.
+
+    - sin_horizontes_con_saltos: blank a horizon when a flagged price jump falls inside its window
+    - sin_tickers_con_saltos:    drop every decision of a ticker that has a flagged jump
+    - sin_diferencias_O1:        blank the (decision, horizon) pairs whose stored outcome differs a lot from the canonical series
+    - sin_nada_dudoso:           all of the above together
+    """
+    def blank(frame: pd.DataFrame, mask: pd.Series, horizon: str) -> None:
+        for column in (f"outcome_{horizon}", f"executable_outcome_{horizon}"):
+            if column in frame.columns:
+                frame.loc[mask, column] = np.nan
+
+    flagged: dict[str, list[date]] = {}
+    for jump in jumps.itertuples():
+        for day in (jump.day, jump.previous_day):
+            flagged.setdefault(str(jump.ticker).upper(), []).append(pd.Timestamp(day).date())
+    tickers = raw["ticker"].astype(str).str.upper()
+    decided_day = pd.to_datetime(raw["decided_at"], utc=True).dt.tz_convert(ART).dt.date
+
+    def near_jump(horizon: str) -> pd.Series:
+        span = _horizon_days(horizon) + slack_days
+        return pd.Series([any(start <= day <= start + timedelta(days=span) for day in flagged.get(t, []))
+                          for t, start in zip(tickers, decided_day)], index=raw.index)
+
+    def doubtful_o1(horizon: str) -> pd.Series:
+        return raw["id"].map(lambda value: (value, horizon) in bad_pairs).astype(bool)
+
+    variants = {"base": raw.copy()}
+    variants["sin_horizontes_con_saltos"] = raw.copy()
+    variants["sin_diferencias_O1"] = raw.copy()
+    variants["sin_nada_dudoso"] = raw[~tickers.isin(flagged)].copy()
+    for horizon in horizons:
+        blank(variants["sin_horizontes_con_saltos"], near_jump(horizon), horizon)
+        blank(variants["sin_diferencias_O1"], doubtful_o1(horizon), horizon)
+        blank(variants["sin_nada_dudoso"], doubtful_o1(horizon).loc[variants["sin_nada_dudoso"].index], horizon)
+    variants["sin_tickers_con_saltos"] = raw[~tickers.isin(flagged)].copy()
+    return {name: variants[name] for name in ("base", "sin_horizontes_con_saltos", "sin_tickers_con_saltos",
+                                              "sin_diferencias_O1", "sin_nada_dudoso")}
+
+
+def sensitivity_table(variants: dict[str, pd.DataFrame], config: Any, runner) -> pd.DataFrame:
+    rows = []
+    for name, frame in variants.items():
+        report = runner(frame, config)
+        for horizon, metric in report.metrics.get("bot_only", {}).items():
+            rows.append(dict(variant=name, horizon=horizon, rows=len(frame), n=metric.n, net_ev=metric.net_ev,
+                             win_rate=metric.win_rate, ic_final=metric.ic_final, verdict=str(report.verdict).split(":")[0]))
+    return pd.DataFrame(rows)
+
+
 def mature_missing(decisions: pd.DataFrame, now: datetime) -> pd.DataFrame:
     """Rows whose horizon has already passed but whose outcome is still null."""
     rows = []
@@ -338,7 +395,7 @@ async def check_movement_duplicates(conn, cutoff) -> Check:
     return check
 
 
-async def check_decisions_and_outcomes(conn, cutoff, now) -> list[Check]:
+async def check_decisions_and_outcomes(conn, cutoff, now, context: Optional[dict] = None) -> list[Check]:
     checks = []
     decisions = await fetch(conn, """SELECT id, decided_at, ticker, decision, decision_type, price_at_decision,
                                             outcome_5d, outcome_10d, outcome_20d, outcome_40d, outcome_filled_at, outcome_basis
@@ -418,6 +475,9 @@ async def check_decisions_and_outcomes(conn, cutoff, now) -> list[Check]:
                                   note="ticker con evento corporativo (ajuste esperable)" if ticker in adjusted_tickers else ""))
     unexplained = [d for d in diffs if d["cause"] == "NO_CANDLE_MATCHES" and not d["note"]]
     frame = pd.DataFrame(diffs)
+    if context is not None and diffs:
+        context["o1_bad"] = {(d["id"], d["horizon"]) for d in diffs
+                             if d["diff"] is None or abs(d["diff"]) >= SENSITIVITY_DIFF or d["sign_flip"]}
     c.detail = f"{checked} outcomes comparados; {len(diffs)} difieren ({len(unexplained)} sin explicacion)"
     if diffs:
         size = frame["diff"].abs().dropna() * 100
@@ -430,9 +490,10 @@ async def check_decisions_and_outcomes(conn, cutoff, now) -> list[Check]:
     return checks
 
 
-async def check_candles(conn, cutoff) -> list[Check]:
+async def check_candles(conn, cutoff, context: Optional[dict] = None, now: Optional[datetime] = None) -> list[Check]:
     return [*await guarded("C1", _candle_values(conn, cutoff)), *await guarded("C2", _candle_conflicts(conn, cutoff)),
-            *await guarded("C3", _candle_jumps(conn, cutoff))]
+            *await guarded("C3", _candle_jumps(conn, cutoff, context)),
+            *await guarded("C4", check_series_identity(conn, cutoff, now or datetime.now(timezone.utc)))]
 
 
 async def _candle_values(conn, cutoff) -> Check:
@@ -455,7 +516,7 @@ async def _candle_conflicts(conn, cutoff) -> Check:
     return finish(c, df, warn_only=True)
 
 
-async def _candle_jumps(conn, cutoff) -> list[Check]:
+async def _candle_jumps(conn, cutoff, context: Optional[dict] = None) -> list[Check]:
     c = Check("C3", f"Daily jump >= {JUMP_THRESHOLD:.0%} with no confirmed corporate action within 5 days")
     candles = await fetch(conn, """SELECT ticker, (ts AT TIME ZONE 'UTC')::date AS day, close_price::float8 AS close, source, scraped_at
                                    FROM market_candles WHERE interval = '1d' AND ts >= $1""", cutoff - timedelta(days=60))
@@ -470,6 +531,8 @@ async def _candle_jumps(conn, cutoff) -> list[Check]:
         jumps = jumps[[not any(abs((pd.Timestamp(r.day).date() - d).days) <= 5 for d in known.get(str(r.ticker).upper(), []))
                        for r in jumps.itertuples()]]
     c = finish(c, jumps)
+    if context is not None:
+        context["jumps"] = jumps
     if jumps.empty:
         return [c]
     c.detail = (f"{len(jumps)} saltos en {jumps['ticker'].nunique()} tickers; {int(jumps['source_change'].sum())} con cambio de fuente "
@@ -489,6 +552,50 @@ async def _candle_jumps(conn, cutoff) -> list[Check]:
     return [c, c2]
 
 
+async def check_series_identity(conn, cutoff, now) -> Check:
+    """Tickers for which get_market_candles raises AMBIGUOUS_SERIES_IDENTITY (several currency/venue/long_ticker series)."""
+    c = Check("C4", "Tickers with an ambiguous candle series identity (get_market_candles raises for them)")
+    amb = await fetch(conn, """
+        WITH identities AS (
+            SELECT DISTINCT ticker, asset_type, currency, venue FROM market_candles WHERE interval = '1d'
+        ), per_ticker AS (
+            SELECT ticker, COUNT(*) AS identities,
+                   STRING_AGG(COALESCE(asset_type::text, '?') || '/' || COALESCE(currency::text, '?') || '/' || COALESCE(venue::text, '?'),
+                              ' | ' ORDER BY COALESCE(asset_type::text, '?') || '/' || COALESCE(currency::text, '?') || '/' || COALESCE(venue::text, '?')) AS combos
+            FROM identities GROUP BY ticker
+        ), long_ids AS (
+            SELECT ticker, COUNT(DISTINCT long_ticker) AS long_ids FROM market_candles
+            WHERE interval = '1d' AND long_ticker NOT LIKE 'INTERNAL:%' AND long_ticker NOT LIKE 'TV:%' AND long_ticker NOT LIKE 'YAHOO:%'
+            GROUP BY ticker
+        )
+        SELECT p.ticker, p.identities, COALESCE(l.long_ids, 0) AS long_ids, p.combos
+        FROM per_ticker p LEFT JOIN long_ids l USING (ticker)
+        WHERE GREATEST(p.identities, COALESCE(l.long_ids, 0)) > 1
+        ORDER BY p.ticker""")
+    if amb.empty:
+        c.detail = "ningun ticker con series ambiguas"
+        return c
+    decisions = await fetch(conn, """SELECT id, decided_at, ticker, decision, outcome_5d, outcome_10d, outcome_20d, outcome_40d, outcome_basis
+                                     FROM decision_log WHERE decided_at >= $1""", cutoff)
+    names = set(amb["ticker"].astype(str).str.upper())
+    mine = decisions[decisions["ticker"].astype(str).str.upper().isin(names)
+                     & decisions["decision"].astype(str).str.upper().isin(["BUY", "SELL"])] if not decisions.empty else decisions
+    pending = []
+    for _, row in mine.iterrows():
+        if str(row.get("outcome_basis") or "") == "legacy_external":
+            continue
+        decided_day = pd.Timestamp(row["decided_at"]).tz_convert(ART).date()
+        if any(pd.isna(row[f"outcome_{h}d"]) and decided_day + timedelta(days=h) <= now.astimezone(ART).date() for h in HORIZONS):
+            pending.append(dict(id=row["id"], ticker=str(row["ticker"]).upper(), decided_at=row["decided_at"]))
+    per_ticker = mine["ticker"].astype(str).str.upper().value_counts().to_dict() if len(mine) else {}
+    amb = amb.assign(decisions_in_window=amb["ticker"].astype(str).str.upper().map(per_ticker).fillna(0).astype(int))
+    c.detail = (f"{len(amb)} tickers ambiguos ({', '.join(amb['ticker'].astype(str).head(10))}); decisiones en la ventana: "
+                f"{int(amb['decisions_in_window'].sum())}; con outcomes maduros sin llenar: {len(pending)}. "
+                "Por lectura de codigo, update_outcomes captura la excepcion fuera del loop y devuelve 0: una decision pendiente de un "
+                "ticker ambiguo frenaria el lote entero. Verificar en los logs del scheduler (AMBIGUOUS_SERIES_IDENTITY).")
+    return finish(c, amb, warn_only=not pending)       # FAIL only when a pending outcome would hit the exception
+
+
 async def check_costs(conn, cutoff, model_cost: float) -> Check:
     check = Check("K1", f"Real fee rate vs the modelled {model_cost:.2%} per operation")
     df = await fetch(conn, """SELECT side, fees_ars / NULLIF(gross_amount_ars, 0) AS rate FROM broker_fills
@@ -503,7 +610,7 @@ async def check_costs(conn, cutoff, model_cost: float) -> Check:
     return check
 
 
-async def check_report(config, cost: float) -> list[Check]:
+async def check_report(config, cost: float, context: Optional[dict] = None) -> list[Check]:
     from src.analysis.viability_audit import (ACTIVE_ACTIONS, _prepare_frame, _scope_mask,  # noqa: F401
                                               load_viability_decision_log, run_viability_audit_sync)
     raw = await load_viability_decision_log(config)
@@ -538,6 +645,23 @@ async def check_report(config, cost: float) -> list[Check]:
     wrong = comparison[~comparison["ok"]]
     c.detail = f"{len(comparison)} metricas comparadas; veredicto: {report.verdict}"
     checks.append(finish(c, wrong if len(wrong) else None))
+
+    c = Check("R3", "Does the /viability verdict survive removing doubtful candles and outcomes? (bot_only)")
+    context = context or {}
+    jumps = context.get("jumps", pd.DataFrame(columns=JUMP_COLUMNS))
+    variants = sensitivity_variants(raw, jumps, context.get("o1_bad", set()), config.horizons)
+    table = sensitivity_table(variants, config, run_viability_audit_sync)
+    verdicts = table.groupby("variant", sort=False)["verdict"].first().to_dict() if not table.empty else {}
+    first = config.horizons[0]
+    head = table[table["horizon"] == first].set_index("variant") if not table.empty else table
+    c.detail = " | ".join(f"{name}: {verdicts.get(name, '?')} (n={int(head.loc[name, 'n'])}, EV neto={head.loc[name, 'net_ev'] * 100:.2f}%, IC={head.loc[name, 'ic_final']})"
+                          if name in head.index and head.loc[name, "net_ev"] == head.loc[name, "net_ev"] else f"{name}: {verdicts.get(name, '?')}"
+                          for name in variants) + f" [horizonte {first}]"
+    if len(set(verdicts.values())) > 1:
+        c.status = "WARN"
+    c.count = int(len(table))
+    c.evidence = table
+    checks.append(c)
     return checks
 
 
@@ -625,17 +749,18 @@ async def main_async(args) -> int:
     config = ViabilityAuditConfig(database_url=url, days=args.days, cost_bps=args.cost_bps, min_sample=args.min_sample)
 
     checks: list[Check] = []
+    context: dict = {}      # evidence handed from the O1 and C3 checks to the R3 sensitivity run
     conn = await asyncpg.connect(dsn)
     try:
         async with conn.transaction(readonly=True):
             checks += await guarded("A", check_attributions(conn, cutoff))
             checks += await guarded("M1", check_movement_duplicates(conn, cutoff))
-            checks += await guarded("D", check_decisions_and_outcomes(conn, cutoff, now))
-            checks += await guarded("C", check_candles(conn, cutoff))
+            checks += await guarded("D", check_decisions_and_outcomes(conn, cutoff, now, context))
+            checks += await guarded("C", check_candles(conn, cutoff, context, now))
             checks += await guarded("K1", check_costs(conn, cutoff, cost))
     finally:
         await conn.close()
-    checks += await guarded("R", check_report(config, cost))
+    checks += await guarded("R", check_report(config, cost, context))
 
     out_dir = Path(args.out_dir) / now.strftime("%Y%m%d-%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=False)

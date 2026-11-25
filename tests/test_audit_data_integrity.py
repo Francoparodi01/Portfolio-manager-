@@ -2,7 +2,7 @@
 import asyncio
 import dataclasses
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -217,7 +217,7 @@ def test_one_failing_candle_query_does_not_hide_the_other_candle_checks():
                 raise TypeError("boom")
             return []
     checks = asyncio.run(audit.check_candles(Conn(), NOW))
-    assert {c.check_id: c.status for c in checks} == {"C1": "PASS", "C2": "PASS", "C3": "ERROR"}
+    assert {c.check_id: c.status for c in checks} == {"C1": "PASS", "C2": "PASS", "C3": "ERROR", "C4": "PASS"}
 
 
 def _raw(*rows):
@@ -276,10 +276,12 @@ def test_only_outcomes_exiting_on_a_flagged_candle_are_reported():
 
 class _FakeConn:
     """Routes the audit's SQL to canned rows so the DB-facing checks run end to end without a database."""
-    def __init__(self, decisions, candles):
-        self.decisions, self.candles = decisions, candles
+    def __init__(self, decisions, candles, identity=()):
+        self.decisions, self.candles, self.identity = decisions, candles, list(identity)
 
     async def fetch(self, sql, *params):
+        if "per_ticker" in sql:
+            return self.identity
         if "FROM decision_log" in sql:
             return self.decisions
         if "DISTINCT e.ticker" in sql or "corporate_event" in sql:
@@ -321,3 +323,61 @@ def test_c3_reports_the_outcomes_that_exit_on_a_broken_candle():
     checks = {c.check_id: c for c in asyncio.run(audit._candle_jumps(conn, datetime(2026, 6, 1, tzinfo=timezone.utc)))}
     assert checks["C3"].status == "FAIL" and "1 saltos en 1 tickers" in checks["C3"].detail
     assert checks["C3b"].status == "WARN" and checks["C3b"].count == 1 and "1 con cambio de fuente" in checks["C3b"].detail
+
+
+def test_c4_fails_only_when_an_ambiguous_ticker_has_a_pending_mature_outcome():
+    amb = [dict(ticker="AOCA", identities=2, long_ids=0, combos="STOCK/ARS/BYMA | STOCK/USD/NYSE")]
+    cutoff = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    pending = _FakeConn([_decision(ticker="AOCA", outcome_5d=None)], [], amb)
+    done = _FakeConn([_decision(ticker="AOCA", outcome_5d=0.1, outcome_10d=0.1, outcome_20d=0.1, outcome_40d=0.1)], [], amb)
+    clean = _FakeConn([_decision(ticker="AMD")], [], [])
+    assert asyncio.run(audit.check_series_identity(pending, cutoff, NOW)).status == "FAIL"
+    assert asyncio.run(audit.check_series_identity(done, cutoff, NOW)).status == "WARN"
+    assert asyncio.run(audit.check_series_identity(clean, cutoff, NOW)).status == "PASS"
+    assert "AOCA" in asyncio.run(audit.check_series_identity(pending, cutoff, NOW)).detail
+
+
+def _decision_log_rows():
+    rows = sample_rows()
+    for index, row in enumerate(rows):
+        row.update(id=index + 1, ticker="AAA" if index % 2 == 0 else "BBB",
+                   decided_at=datetime(2026, 9, 1, 15, tzinfo=timezone.utc) + timedelta(days=index))
+    return rows
+
+
+def _flagged(ticker, day):
+    return pd.DataFrame([dict(ticker=ticker, day=day, previous_day=day - timedelta(days=1), previous_close=100.0, close=10.0,
+                              change=-0.9, previous_source="COCOS", source="internal_snapshot", source_change=True)])
+
+
+def test_sensitivity_variants_remove_only_the_doubtful_outcomes():
+    raw = pd.DataFrame(_decision_log_rows())
+    variants = audit.sensitivity_variants(raw, _flagged("AAA", date(2026, 9, 3)), {(2, "5d")}, ("5d",))
+    assert len(variants["base"]) == 10 and variants["base"]["outcome_5d"].notna().all()
+    assert len(variants["sin_tickers_con_saltos"]) == 5 and set(variants["sin_tickers_con_saltos"]["ticker"]) == {"BBB"}
+    near = variants["sin_horizontes_con_saltos"]
+    assert set(near.loc[near["outcome_5d"].isna(), "ticker"]) == {"AAA"} and near.loc[near["ticker"] == "BBB", "outcome_5d"].notna().all()
+    o1 = variants["sin_diferencias_O1"]
+    assert list(o1.loc[o1["outcome_5d"].isna(), "id"]) == [2]
+    assert len(variants["sin_nada_dudoso"]) == 5 and variants["sin_nada_dudoso"].loc[variants["sin_nada_dudoso"]["id"] == 2, "outcome_5d"].isna().all()
+
+
+def test_sensitivity_table_runs_the_real_viability_audit_on_each_variant():
+    config, raw, _ = build_report(_decision_log_rows())
+    variants = audit.sensitivity_variants(raw, _flagged("AAA", date(2026, 9, 3)), set(), config.horizons)
+    table = audit.sensitivity_table(variants, config, run_viability_audit_sync).set_index(["variant", "horizon"])
+    assert table.loc[("base", "5d"), "n"] == 5 and table.loc[("sin_tickers_con_saltos", "5d"), "n"] == 2
+
+
+def test_check_report_runs_r1_r2_r3_end_to_end(monkeypatch):
+    import src.analysis.viability_audit as viability
+    config, raw, _ = build_report(_decision_log_rows())
+
+    async def fake_loader(_config):
+        return raw
+    monkeypatch.setattr(viability, "load_viability_decision_log", fake_loader)
+    context = {"jumps": _flagged("AAA", date(2026, 9, 3)), "o1_bad": {(2, "5d")}}
+    checks = {c.check_id: c for c in asyncio.run(audit.check_report(config, 0.005, context))}
+    assert set(checks) == {"R1", "R2", "R3"} and checks["R2"].status == "PASS"
+    assert checks["R3"].count == 5 and "sin_tickers_con_saltos" in checks["R3"].detail and "base:" in checks["R3"].detail
+    assert set(checks["R3"].evidence["variant"]) == {"base", "sin_horizontes_con_saltos", "sin_tickers_con_saltos", "sin_diferencias_O1", "sin_nada_dudoso"}
