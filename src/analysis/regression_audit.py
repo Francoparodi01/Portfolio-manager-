@@ -51,6 +51,13 @@ import asyncpg
 import numpy as np
 import pandas as pd
 
+from src.analysis.audit_inference import (
+    aligned_scores,
+    canonical_outcome_mask,
+    decision_dates,
+    horizon_block_length,
+)
+
 try:
     import statsmodels.api as sm
     HAS_STATSMODELS = True
@@ -60,6 +67,15 @@ except Exception:
 
 
 DEFAULT_HORIZONS = ("5d", "10d", "20d", "40d")
+ALIGNED_SCORE_COLUMNS = (
+    "final_score",
+    "technical_score",
+    "macro_score",
+    "sentiment_score",
+    "risk_score",
+    "trend_score",
+    "reversion_score",
+)
 ACTIVE_ACTIONS = ("BUY", "SELL", "SELL_PARTIAL", "SELL_FULL")
 NULL_TEXT_VALUES = {"", "none", "nan", "nat", "<na>", "null"}
 
@@ -143,6 +159,10 @@ class RegressionModelResult:
     threshold_reason: Optional[str]
     expected_return_at_buy_min_008: Optional[float]
     notes: list[str]
+    # "cluster_date_blocks" when p-values account for overlapping outcomes;
+    # "ols" / "hc1" / "numpy" otherwise (p-values not usable for decisions).
+    se_method: str = "ols"
+    n_clusters: Optional[int] = None
 
 
 @dataclass
@@ -365,7 +385,8 @@ def normalize_decision_frame(df: pd.DataFrame) -> pd.DataFrame:
     # Extraer capas desde JSONB layers.
     if "layers" in out.columns:
         layer_rows = out["layers"].apply(_extract_layers)
-        layer_df = pd.DataFrame(list(layer_rows))
+        # Keep the frame's own index: a filtered frame does not have a 0..n-1 index.
+        layer_df = pd.DataFrame(list(layer_rows), index=out.index)
 
         for c in layer_df.columns:
             out[c] = pd.to_numeric(layer_df[c], errors="coerce")
@@ -722,6 +743,14 @@ def prepare_model_frame(
     if raw_col not in out.columns:
         return pd.DataFrame(), raw_col, [], [f"No existe columna {raw_col}"]
 
+    # Same outcome as /viability and /neto: the executable outcome of a real fill
+    # wins over the decision-price outcome when both exist.
+    executable_col = f"executable_outcome_{horizon}"
+    if executable_col in out.columns:
+        out[raw_col] = pd.to_numeric(out[executable_col], errors="coerce").combine_first(
+            pd.to_numeric(out[raw_col], errors="coerce")
+        )
+
     target_col = raw_col
 
     # Elegir acciones
@@ -737,6 +766,14 @@ def prepare_model_frame(
 
     if config.target_mode == "directional":
         target_col = f"directional_{horizon}"
+
+        # The directional outcome of a SELL is positive when the price falls, and a
+        # SELL is taken on a negative score. Regressing it on the raw score mixes
+        # signs between BUY and SELL rows; scores are aligned with the decision.
+        if "decision" in out.columns:
+            for score_col in ALIGNED_SCORE_COLUMNS:
+                if score_col in out.columns:
+                    out[score_col] = aligned_scores(out[score_col], out["decision"])
 
         def directional(row) -> float:
             val = row.get(raw_col)
@@ -895,6 +932,16 @@ def run_regression_audit_sync(
         )
 
     df, mode_warnings = apply_audit_mode_filter(df, config)
+
+    if not df.empty:
+        canonical = canonical_outcome_mask(df)
+        dropped = int((~canonical).sum())
+        if dropped:
+            mode_warnings = [
+                *mode_warnings,
+                f"Se excluyeron {dropped} filas con outcome_basis no canonico (legacy_external).",
+            ]
+            df = df[canonical].copy()
 
     rows_loaded = len(df)
 
@@ -1113,6 +1160,11 @@ def fit_ols_model(
 
     usable_cols = [target_col] + features
     mdf = df[usable_cols].replace([np.inf, -np.inf], np.nan).dropna().copy()
+    groups = (
+        _date_block_groups(df.loc[mdf.index, "decided_at"], horizon)
+        if "decided_at" in df.columns
+        else None
+    )
 
     n = len(mdf)
 
@@ -1180,7 +1232,20 @@ def fit_ols_model(
         )
 
     X_sm = sm.add_constant(X, has_constant="add")
-    model = sm.OLS(y, X_sm).fit()
+    n_clusters = int(len(np.unique(groups))) if groups is not None else None
+    if n_clusters is not None and n_clusters >= MIN_CLUSTERS:
+        # Outcomes of decisions a few days apart overlap: cluster the standard
+        # errors by blocks of decision dates instead of treating rows as independent.
+        model = sm.OLS(y, X_sm).fit(cov_type="cluster", cov_kwds={"groups": groups})
+        se_method = "cluster_date_blocks"
+    else:
+        model = sm.OLS(y, X_sm).fit(cov_type="HC1")
+        se_method = "hc1"
+        notes.append(
+            f"Menos de {MIN_CLUSTERS} bloques de fechas independientes "
+            f"({n_clusters if n_clusters is not None else 'sin fechas'}): "
+            "p-values sin corregir por solapamiento; no usar para calibrar."
+        )
 
     preds = model.predict(X_sm)
     rmse = float(np.sqrt(np.mean((y - preds) ** 2)))
@@ -1218,8 +1283,10 @@ def fit_ols_model(
             coef=score_coef,
             cost=cost_threshold,
             n=n,
-            p_value=score_pvalue,
+            p_value=score_pvalue if se_method == "cluster_date_blocks" else None,
         )
+        if se_method != "cluster_date_blocks":
+            suggested, threshold_reason = None, "p-value no corregido por solapamiento de outcomes"
 
     expected_008 = (
         intercept + score_coef * 0.08
@@ -1232,9 +1299,9 @@ def fit_ols_model(
             notes.append(
                 "Coeficiente de final_score no positivo: el score no está calibrando retornos positivos en esta muestra."
             )
-        elif score_pvalue is not None and score_pvalue > 0.10:
+        elif se_method != "cluster_date_blocks" or score_pvalue is None or score_pvalue > 0.10:
             notes.append(
-                "Coeficiente de final_score no significativo con p>0.10; interpretar con cautela."
+                "Coeficiente de final_score no significativo (p>0.10 o p sin corregir); interpretar con cautela."
             )
         else:
             notes.append(
@@ -1263,7 +1330,22 @@ def fit_ols_model(
         threshold_reason=threshold_reason,
         expected_return_at_buy_min_008=expected_008,
         notes=notes,
+        se_method=se_method,
+        n_clusters=n_clusters,
     )
+
+
+MIN_CLUSTERS = 10
+
+
+def _date_block_groups(decided_at: pd.Series, horizon: str) -> Optional[np.ndarray]:
+    """Cluster id per row: consecutive decision dates grouped in horizon-long blocks."""
+    labels = decision_dates(decided_at)
+    if labels.isna().any() or labels.empty:
+        return None
+    block = horizon_block_length(horizon)
+    order = {day: i // block for i, day in enumerate(sorted(labels.unique()))}
+    return labels.map(order).to_numpy(dtype=int)
 
 
 def _fit_numpy_fallback(
@@ -1302,13 +1384,8 @@ def _fit_numpy_fallback(
     threshold_reason = None
 
     if is_score_only_model:
-        suggested, threshold_reason = safe_threshold(
-            intercept=intercept,
-            coef=score_coef,
-            cost=cost_threshold,
-            n=len(X),
-            p_value=None,
-        )
+        # Without p-values there is no evidence the slope differs from zero.
+        threshold_reason = "sin p-values (statsmodels no instalado)"
 
     expected_008 = (
         intercept + score_coef * 0.08
@@ -1335,6 +1412,7 @@ def _fit_numpy_fallback(
         threshold_reason=threshold_reason,
         expected_return_at_buy_min_008=expected_008,
         notes=notes,
+        se_method="numpy",
     )
 
 
@@ -1432,12 +1510,18 @@ def _render_model_scorecard(report: RegressionAuditReport) -> list[str]:
             f"{_fmt_pct(model.rmse):>7} "
             f"{_fmt_float(model.ic, 3, signed=True):>7} "
             f"{_fmt_float(model.score_coef, 4, signed=True):>8} "
-            f"{_fmt_float(model.score_pvalue, 3):>6} "
+            f"{_fmt_float(model.score_pvalue, 3):>5}{'' if model.se_method == 'cluster_date_blocks' else '*'}"
+            " "
             f"{_fmt_pct(model.expected_return_at_buy_min_008, signed=True):>8} "
             f"{_MATURITY_SHORT.get(maturity, maturity[:4]):>5}"
         )
 
-    return ["<pre>", *rows, "</pre>"]
+    footer = (
+        ["<i>* p sin corregir por solapamiento de outcomes (pocas fechas o sin statsmodels): no sirve para calibrar.</i>"]
+        if any(m.se_method != "cluster_date_blocks" and m.score_pvalue is not None for m in report.models)
+        else ["<i>p con errores agrupados por bloques de fechas de decision.</i>"]
+    )
+    return ["<pre>", *rows, "</pre>", *footer]
 
 
 def _render_bucket_scorecard(
@@ -1502,7 +1586,7 @@ def _render_regression_audit_aligned(
     lines: list[str] = []
 
     title_target = (
-        "RETORNO DIRECCIONAL"
+        "RETORNO DIRECCIONAL · score alineado (SELL invertido)"
         if report.target_mode == "directional"
         else "RETORNO BRUTO"
     )
@@ -1637,15 +1721,22 @@ def _build_human_reading(report: RegressionAuditReport) -> list[str]:
         )
         return lines
 
-    if pval is not None and pval > 0.10:
+    corrected = baseline_5d.se_method == "cluster_date_blocks"
+    significant = corrected and pval is not None and pval <= 0.10
+    if not significant:
+        reason = (
+            "no significativo (p>0.10)"
+            if corrected
+            else "sin p-value corregido por solapamiento de outcomes"
+        )
         lines.append(
             f"🟡 El coeficiente de final_score es positivo sobre retorno {target_name}, "
-            "pero no significativo. Hay señal posible, todavía débil."
+            f"pero {reason}. Hay señal posible, todavía débil."
         )
     else:
         lines.append(
             f"🟢 El coeficiente de final_score es positivo sobre retorno {target_name} "
-            "y estadísticamente útil para calibración."
+            f"y significativo (p={pval:.3f}, errores agrupados por bloques de fechas)."
         )
 
     if r2 < 0.03:
@@ -1658,7 +1749,8 @@ def _build_human_reading(report: RegressionAuditReport) -> list[str]:
         )
     else:
         lines.append(
-            "R² razonable para una señal financiera simple. Buena base para calibrar thresholds."
+            "R² razonable para una señal financiera simple"
+            + ("." if significant else ", pero sin significancia no alcanza para calibrar.")
         )
 
     if ic is not None:
@@ -1666,13 +1758,13 @@ def _build_human_reading(report: RegressionAuditReport) -> list[str]:
             lines.append(
                 "IC negativo: mantener modo conservador hasta mejorar consistencia."
             )
-        elif ic < 0.05:
+        elif ic < 0.05 or not significant:
             lines.append(
-                "IC positivo débil: hay algo de relación, pero todavía no suficiente para agresividad."
+                "IC positivo débil o no significativo: no alcanza para afirmar valor predictivo."
             )
         else:
             lines.append(
-                "IC positivo relevante: el ranking de scores empieza a tener valor predictivo."
+                "IC positivo y coeficiente significativo: el ranking de scores muestra valor predictivo en esta muestra."
             )
 
     if baseline_5d.suggested_buy_threshold is not None:

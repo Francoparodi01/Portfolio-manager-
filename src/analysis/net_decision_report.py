@@ -84,7 +84,12 @@ def enrich_decision(raw: dict) -> dict:
     else:
         amount = theoretical or stored_executed
 
-    has_complete_actual_fees = fill_count > 0 and fee_count == fill_count and amount > 0
+    fill_fees = abs(_float(row.get("fill_fees_ars"), 0.0) or 0.0)
+    # Cocos always charges commission and market fees: a fill stored with fees = 0
+    # means "not captured", not "free". Only a positive total counts as actual fees.
+    has_complete_actual_fees = (
+        fill_count > 0 and fee_count == fill_count and amount > 0 and fill_fees > 0
+    )
     if has_complete_actual_fees:
         cost_ars = abs(_float(row.get("fill_fees_ars"), 0.0) or 0.0)
         cost_rate = cost_ars / amount

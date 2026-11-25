@@ -7,6 +7,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from src.analysis.audit_inference import evidence, mean_interval, rank_ic_interval
 from src.analysis.dcl.outcome_loader import EnrichedDecision
 
 
@@ -26,6 +27,8 @@ class AuditResult:
     is_statistically_significant: bool
     confidence_level: str
     warning_flags: list[str] = field(default_factory=list)
+    # 95% date-block interval of the primary-horizon rank IC.
+    ic_ci_95: tuple[Optional[float], Optional[float]] = (None, None)
 
 
 def _spearman(xs: list[float], ys: list[float]) -> Optional[float]:
@@ -68,6 +71,11 @@ def _outcome(decision: EnrichedDecision, horizon: str) -> Optional[float]:
     }.get(horizon)
 
 
+def _score(decision: EnrichedDecision) -> float:
+    # Outcomes are directional: sells must be scored in their own direction.
+    return decision.aligned_score if decision.aligned_score is not None else decision.final_score
+
+
 class StatisticalAuditor:
     def run(
         self,
@@ -87,7 +95,7 @@ class StatisticalAuditor:
         ic_by_horizon: dict[str, Optional[float]] = {}
         for horizon in ("5d", "10d", "20d"):
             rows = [
-                (d.final_score, _outcome(d, horizon))
+                (_score(d), _outcome(d, horizon))
                 for d in auditable
                 if _outcome(d, horizon) is not None
             ]
@@ -97,11 +105,8 @@ class StatisticalAuditor:
                 else None
             )
 
-        primary_values = [
-            float(_outcome(d, primary_horizon))
-            for d in auditable
-            if _outcome(d, primary_horizon) is not None
-        ]
+        primary = [d for d in auditable if _outcome(d, primary_horizon) is not None]
+        primary_values = [float(_outcome(d, primary_horizon)) for d in primary]
         primary_ic = ic_by_horizon.get(primary_horizon)
         ic_tstat = None
         if primary_ic is not None and len(primary_values) > 1:
@@ -112,10 +117,27 @@ class StatisticalAuditor:
         win_rate = wins / n if n else None
         win_ci = _wilson_ci(wins, n)
         ev_mean = float(np.mean(primary_values)) if primary_values else None
-        ev_ci = _bootstrap_mean_ci(primary_values)
 
-        significant = bool(ic_tstat is not None and abs(ic_tstat) > 1.65)
-        if not significant:
+        dates = [d.decision_date for d in primary]
+        dated = bool(primary) and all(dates)
+        if dated:
+            # Overlapping outcomes of nearby decisions are not independent rows.
+            ic_result = rank_ic_interval(dates, [_score(d) for d in primary], primary_values, primary_horizon)
+            ev_result = mean_interval(dates, primary_values, primary_horizon)
+            ic_ci = (ic_result.get("lower"), ic_result.get("upper"))
+            ev_ci = (ev_result.get("lower"), ev_result.get("upper"))
+            ic_evidence = evidence(ic_result)
+        else:
+            warning_flags.append("NO_DECISION_DATES_INDEPENDENT_ROWS_ASSUMED")
+            ic_ci = (None, None)
+            ev_ci = _bootstrap_mean_ci(primary_values)
+            ic_evidence = None if ic_tstat is None else (True if ic_tstat > 1.96 else False if ic_tstat < -1.96 else None)
+
+        # Only a positive IC is evidence for the score; a significantly negative IC is a red flag.
+        significant = ic_evidence is True
+        if ic_evidence is False:
+            warning_flags.append("IC_SIGNIFICANTLY_NEGATIVE")
+        elif not significant:
             warning_flags.append("NOT_STATISTICALLY_SIGNIFICANT")
 
         if significant and n_auditable >= 50:
@@ -140,4 +162,5 @@ class StatisticalAuditor:
             is_statistically_significant=significant,
             confidence_level=confidence,
             warning_flags=warning_flags,
+            ic_ci_95=ic_ci,
         )

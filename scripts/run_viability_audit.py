@@ -2,9 +2,11 @@
 Run the 180d viability audit.
 
 The report separates bot-only, followed-by-user and manual-only execution, measures
-5d/10d/20d/40d independently, and checks positive IC, lower drawdown, and
-better net EV after costs. It refreshes derived plan/movement links but does not
-change thresholds, planner behavior, source movements, or decision_log.
+5d/10d/20d/40d independently, and gates bot-only 5d on rank IC, net EV after costs
+and net EV versus manual, each decided on a 95% date-block bootstrap interval
+(an interval crossing zero is "not conclusive"). Drawdown is descriptive only.
+It refreshes derived plan/movement links but does not change thresholds,
+planner behavior, source movements, or decision_log.
 """
 
 from __future__ import annotations

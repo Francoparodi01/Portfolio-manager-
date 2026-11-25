@@ -166,3 +166,11 @@ def test_render_performance_explains_pending_outcomes_without_self_referential_c
     assert "Hay <b>2</b> ejecuciones reales pendientes de outcome" in report
     assert "No es error: aun falta recorrido de mercado" in report
     assert "Corriendo <code>python scripts/run_performance.py</code>" not in report
+
+
+def test_ev_label_is_judged_net_of_estimated_costs():
+    from scripts.run_performance import _ev_label
+
+    # 2.5% gross is only 1.75% after the 0.75% cost estimate: marginal, not positive.
+    assert _ev_label(0.025).startswith("🟡 MARGINAL")
+    assert _ev_label(0.005).startswith("❌ NEGATIVO")

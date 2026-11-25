@@ -123,3 +123,10 @@ def test_run_csv_has_one_row_per_analysis(tmp_path):
     assert content.count("\n") == 3
     assert "run-1" in content
     assert "run-2" in content
+
+
+def test_zero_recorded_fees_fall_back_to_policy_estimate():
+    # fees_ars = 0 on every fill means the fee was not captured; it is never "free".
+    row = enrich_decision(_row(fee_count=1, fill_fees_ars=0))
+    assert row["cost_basis"] == "estimated_policy"
+    assert row["cost_rate"] > 0

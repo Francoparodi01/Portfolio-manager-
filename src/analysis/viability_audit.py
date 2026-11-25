@@ -1,9 +1,13 @@
 """
-Read-only viability audit for the trading project.
+Read-only retrospective viability audit for the trading project.
 
-This module separates bot-only, followed-by-user and manual-only execution,
-measures 5d/10d/20d/40d independently, and reports whether the bot clears a
-conservative bar: positive IC, lower drawdown, and better net EV after costs.
+This module separates bot-only, followed-by-user and manual-only execution and
+measures 5d/10d/20d/40d outcomes after costs. The bot-only 5d gates (rank IC,
+net EV, net EV versus manual) are decided on 95% date-block bootstrap intervals:
+outcomes of nearby decisions overlap, so a point estimate above zero is not
+evidence. An interval that crosses zero is "not conclusive", never a pass.
+The sequential drawdown is descriptive, not a portfolio-risk estimate, and
+passing these historical gates does not validate allocating more capital.
 It does not change guards, thresholds, optimizer weights, or execution logic.
 """
 
@@ -21,6 +25,16 @@ import asyncpg
 import numpy as np
 import pandas as pd
 
+from src.analysis.audit_inference import (
+    aligned_scores,
+    decision_dates,
+    difference_interval,
+    evidence,
+    fmt_interval,
+    mean_interval,
+    rank_ic,
+    rank_ic_interval,
+)
 from src.analysis.regression_audit import DEFAULT_HORIZONS, normalize_decision_frame
 
 
@@ -42,6 +56,8 @@ class ViabilityAuditConfig:
     cost_bps: float = 75.0
     min_sample: int = 30
     horizons: tuple[str, ...] = DEFAULT_HORIZONS
+    # Fraction of equity committed to each trade when building the drawdown curve.
+    position_fraction: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -61,6 +77,9 @@ class HorizonMetrics:
     ic_final: Optional[float]
     ic_trend: Optional[float]
     ic_reversion: Optional[float]
+    n_dates: int = 0
+    net_ev_interval: Optional[dict] = None
+    ic_interval: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +101,8 @@ class ViabilityAuditReport:
     verdict: str
     warnings: list[str]
     followed_summary: dict[str, int]
+    # NO_SAMPLE | FAIL | INCONCLUSIVE | PASS — drives icons; never parse `verdict`.
+    verdict_level: str = "NO_SAMPLE"
 
 
 async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFrame:
@@ -344,6 +365,7 @@ def run_viability_audit_sync(
             verdict="SIN MUESTRA: todavia no hay decisiones ejecutadas con outcomes.",
             warnings=["No se cargaron filas desde decision_log."],
             followed_summary=dict(frame.attrs.get("followed_summary") or {}),
+            verdict_level="NO_SAMPLE",
         )
 
     df = _prepare_frame(frame, config.horizons)
@@ -361,11 +383,12 @@ def run_viability_audit_sync(
                 scope=scope,
                 horizon=horizon,
                 cost=cost,
+                position_fraction=config.position_fraction,
             )
 
     warnings = _build_warnings(df, config)
-    gates = _build_gates(metrics, config)
-    verdict = _build_verdict(gates)
+    gates = _build_gates(metrics, config, df=df, cost=cost)
+    verdict, verdict_level = _build_verdict(gates)
 
     return ViabilityAuditReport(
         generated_at=generated_at,
@@ -378,20 +401,16 @@ def run_viability_audit_sync(
         verdict=verdict,
         warnings=warnings,
         followed_summary=followed_summary,
+        verdict_level=verdict_level,
     )
+
+
+VERDICT_ICONS = {"PASS": "🟢", "INCONCLUSIVE": "🟡", "FAIL": "🔴", "NO_SAMPLE": "⚪"}
 
 
 def render_viability_audit(report: ViabilityAuditReport) -> str:
     cost = float(report.cost_bps) / 10_000.0
-    upper_verdict = report.verdict.upper()
-    if "VIABLE PARA" in upper_verdict:
-        verdict_icon = "✅"
-    elif "EDGE BOT NO VALIDADO" in upper_verdict or "EDGE BOT PARCIAL" in upper_verdict:
-        verdict_icon = "🟡"
-    elif "SIN MUESTRA" in upper_verdict or "NO VALIDADO" in upper_verdict:
-        verdict_icon = "⚪"
-    else:
-        verdict_icon = "🔴"
+    verdict_icon = VERDICT_ICONS.get(report.verdict_level, "⚪")
 
     lines = [
         "<b>🧪 Viability</b>",
@@ -418,7 +437,8 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
             f"<b>{escape(horizon.upper())}</b>",
             (
                 f"🤖 Bot · n{bot.n if bot else 0} · win {_fmt_pct(bot.win_rate if bot else None, signed=False)} · "
-                f"EV <b>{_fmt_pct(bot.net_ev if bot else None)}</b>"
+                f"EV <b>{_fmt_pct(bot.net_ev if bot else None)}</b> "
+                f"{escape(fmt_interval(bot.net_ev_interval if bot else None, _fmt_pct))}"
             ),
             (
                 f"🧭 Seguido · n{followed.n if followed else 0} · "
@@ -434,16 +454,15 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
 
     gate_labels = {
         "muestra bot-only 5d": "Muestra bot 5D",
-        "IC bot-only 5d positivo": "IC bot 5D",
+        "IC bot-only 5d positivo": "IC bot 5D (correlación de rango score/resultado)",
         "EV neto bot-only 5d positivo": "EV neto bot 5D",
         "EV neto bot-only mayor que manual-only 5d": "Ventaja vs manual",
-        "drawdown bot-only menor que manual-only 5d": "Drawdown vs manual",
         "comparacion contra manual-only 5d": "Comparación manual",
     }
     lines += ["", "<b>Gates bot-only</b>"]
     if report.gates:
         for gate in report.gates:
-            icon = "✅" if gate.passed is True else "❌" if gate.passed is False else "⚪"
+            icon = "✅" if gate.passed is True else "❌" if gate.passed is False else "🟡"
             name = gate_labels.get(gate.name, gate.name)
             lines.append(f"{icon} {escape(name)} · {escape(gate.detail)}")
     else:
@@ -474,6 +493,8 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
 
     lines += [
         "",
+        "<i>✅/❌ solo si todo el rango 95% (bootstrap por bloques de fechas) queda de un lado de 0; 🟡 = no concluyente.</i>",
+        "<i>IC = correlación de rango score/resultado, no intervalo de confianza. EV es retorno absoluto: no descuenta benchmark.</i>",
         "<i>Bot-only define los gates. Seguido es una cohorte descriptiva; manual-only queda separado.</i>",
         "<i>Guards y thresholds quedan intactos. Esto audita evidencia; no cambia decisiones.</i>",
     ]
@@ -529,12 +550,12 @@ def render_viability_chart(
         font=small_font,
     )
 
-    verdict_color = ok if "VIABLE PARA" in report.verdict else warn if "EDGE BOT" in report.verdict else danger
+    verdict_color = {"PASS": ok, "INCONCLUSIVE": warn, "FAIL": danger}.get(report.verdict_level, muted)
     _rounded(draw, (905, 40, 1346, 160), "#16232d", outline=verdict_color)
     draw.text((930, 62), "Lectura", fill=muted, font=small_font)
     _draw_wrapped(
         draw,
-        _chart_verdict(report.verdict),
+        _chart_verdict(report),
         (930, 92),
         max_width=390,
         fill=verdict_color,
@@ -546,7 +567,7 @@ def render_viability_chart(
     gate_y = 184
     for gate in report.gates[:5]:
         color = ok if gate.passed is True else danger if gate.passed is False else muted
-        label = "OK" if gate.passed is True else "NO" if gate.passed is False else "N/A"
+        label = "OK" if gate.passed is True else "NO" if gate.passed is False else "?"
         _rounded(draw, (gate_x, gate_y, gate_x + 246, gate_y + 60), "#121e28", outline=color)
         draw.text((gate_x + 16, gate_y + 12), label, fill=color, font=subtitle_font)
         draw.text((gate_x + 58, gate_y + 10), _short_gate_name(gate.name), fill=text, font=small_font)
@@ -585,7 +606,7 @@ def render_viability_chart(
     _draw_bar_panel(
         draw,
         box=(728, 260, 1346, 610),
-        title="IC bot-only por score",
+        title="IC de rango bot-only (score vs resultado)",
         horizons=horizons,
         series=[
             ("final", [_metric(report, "bot_only", h).ic_final for h in horizons], bot_color),
@@ -605,7 +626,7 @@ def render_viability_chart(
     _draw_bar_panel(
         draw,
         box=(54, 660, 672, 995),
-        title="Max drawdown",
+        title="Drawdown secuencial (descriptivo, no cartera)",
         horizons=horizons,
         series=[
             ("bot", [_metric(report, "bot_only", h).max_drawdown for h in horizons], bot_color),
@@ -686,17 +707,13 @@ def _metric(report: ViabilityAuditReport, scope: str, horizon: str) -> HorizonMe
     return report.metrics.get(scope, {}).get(horizon, _empty_horizon(scope, horizon))
 
 
-def _chart_verdict(verdict: str) -> str:
-    upper = verdict.upper()
-    if "EDGE BOT NO VALIDADO" in upper:
-        return "EDGE BOT NO VALIDADO\nfalta muestra / EV neto"
-    if "NO VIABLE PARA ESCALAR" in upper:
-        return "NO ESCALAR CAPITAL\naun no supera gates"
-    if "VIABLE PARA 180D" in upper:
-        return "VIABLE PARA 180D\ncon guards actuales"
-    if "SIN MUESTRA" in upper:
-        return "SIN MUESTRA\nfaltan outcomes"
-    return verdict
+def _chart_verdict(report: ViabilityAuditReport) -> str:
+    return {
+        "PASS": "EDGE HISTORICO FAVORABLE\nno validado para escalar capital",
+        "INCONCLUSIVE": "EDGE BOT NO CONCLUYENTE\nel rango 95% cruza 0",
+        "FAIL": "EDGE BOT NO VALIDADO\nfalla al menos un gate",
+        "NO_SAMPLE": "SIN MUESTRA SUFICIENTE\nfaltan outcomes bot-only",
+    }.get(report.verdict_level, report.verdict)
 
 
 def _short_gate_name(name: str) -> str:
@@ -704,7 +721,7 @@ def _short_gate_name(name: str) -> str:
     if "muestra" in lowered:
         return "muestra 5d"
     if "ic" in lowered:
-        return "IC 5d > 0"
+        return "IC rango 5d > 0"
     if "ev neto" in lowered and "mayor" in lowered:
         return "EV > manual"
     if "ev neto" in lowered:
@@ -890,7 +907,7 @@ def _draw_sample_panel(
     draw.text((x1 + 24, y1 + 20), "Resumen para decision", fill=text, font=font)
     draw.text(
         (x1 + 24, y1 + 56),
-        "EV neto debe ser positivo y mejor que manual. IC debe ser > 0.",
+        "OK solo si todo el rango 95% supera 0. ? = no concluyente.",
         fill=muted,
         font=small_font,
     )
@@ -909,7 +926,8 @@ def _draw_sample_panel(
         bot = _metric(report, "bot_only", horizon)
         followed = _metric(report, "followed", horizon)
         manual = _metric(report, "manual_only", horizon)
-        ev_color = ok if bot.net_ev is not None and bot.net_ev > 0 else danger
+        ev_evidence = evidence(bot.net_ev_interval)
+        ev_color = ok if ev_evidence is True else danger if ev_evidence is False else muted
         ic_color = ok if bot.ic_final is not None and bot.ic_final > 0 else danger
         draw.text((x1 + 24, y), horizon, fill=text, font=mono_font)
         draw.text((x1 + 72, y), str(bot.n), fill=text, font=mono_font)
@@ -925,9 +943,9 @@ def _draw_sample_panel(
     y += 30
     for gate in report.gates[:5]:
         color = ok if gate.passed is True else danger if gate.passed is False else muted
-        label = "OK" if gate.passed is True else "NO" if gate.passed is False else "N/A"
+        label = "OK" if gate.passed is True else "NO" if gate.passed is False else "?"
         draw.text((x1 + 24, y), label, fill=color, font=mono_font)
-        draw.text((x1 + 74, y), gate.detail[:48], fill=text, font=mono_font)
+        draw.text((x1 + 74, y), gate.detail.split(";")[-1].strip()[:46], fill=text, font=mono_font)
         y += 30
 
 
@@ -972,9 +990,8 @@ def _prepare_frame(frame: pd.DataFrame, horizons: tuple[str, ...]) -> pd.DataFra
     if "decision" in df.columns:
         df = df[df["decision"].isin(ACTIVE_ACTIONS)].copy()
 
-    df["score_side"] = np.where(df["decision"].isin(SELL_ACTIONS), -1.0, 1.0)
     for col in ["final_score", "trend_score", "reversion_score"]:
-        df[f"aligned_{col}"] = pd.to_numeric(df[col], errors="coerce") * df["score_side"]
+        df[f"aligned_{col}"] = aligned_scores(df[col], df["decision"])
 
     return df
 
@@ -1010,6 +1027,7 @@ def _compute_horizon_metrics(
     scope: str,
     horizon: str,
     cost: float,
+    position_fraction: float = 1.0,
 ) -> HorizonMetrics:
     outcome_col = f"effective_outcome_{horizon}"
     if frame.empty or outcome_col not in frame.columns:
@@ -1022,6 +1040,14 @@ def _compute_horizon_metrics(
 
     if data.empty:
         return _empty_horizon(scope, horizon)
+
+    if "decided_at" in data.columns:
+        # The drawdown path must follow time, not database/row order.
+        data["_decided_at"] = pd.to_datetime(data["decided_at"], errors="coerce", utc=True)
+        data = data.sort_values("_decided_at", kind="stable", na_position="last")
+        dates = decision_dates(data["decided_at"])
+    else:
+        dates = pd.Series([None] * len(data), index=data.index)
 
     data["_net"] = data["_gross"] - cost
     net = data["_net"].astype(float)
@@ -1036,6 +1062,13 @@ def _compute_horizon_metrics(
     if loss_sum > 0:
         profit_factor = float(wins.sum()) / loss_sum
 
+    final_scores = data.get("aligned_final_score")
+    ic_interval = (
+        rank_ic_interval(dates, final_scores, gross, horizon)
+        if final_scores is not None
+        else None
+    )
+
     return HorizonMetrics(
         scope=scope,
         horizon=horizon,
@@ -1048,16 +1081,35 @@ def _compute_horizon_metrics(
         gross_ev=gross_ev,
         net_ev=net_ev,
         profit_factor=profit_factor,
-        max_drawdown=_max_drawdown(net.tolist()),
-        ic_final=_corr(data.get("aligned_final_score"), gross),
-        ic_trend=_corr(data.get("aligned_trend_score"), gross),
-        ic_reversion=_corr(data.get("aligned_reversion_score"), gross),
+        max_drawdown=_max_drawdown(net.tolist(), position_fraction),
+        ic_final=rank_ic(final_scores, gross) if final_scores is not None else None,
+        ic_trend=rank_ic(data.get("aligned_trend_score"), gross),
+        ic_reversion=rank_ic(data.get("aligned_reversion_score"), gross),
+        n_dates=int(dates.dropna().nunique()),
+        net_ev_interval=mean_interval(dates, net, horizon),
+        ic_interval=ic_interval,
     )
+
+
+def _scope_outcomes(
+    df: pd.DataFrame, scope: str, horizon: str, cost: float
+) -> tuple[pd.Series, pd.Series]:
+    data = df[_scope_mask(df, scope)]
+    net = pd.to_numeric(data.get(f"effective_outcome_{horizon}"), errors="coerce") - cost
+    dates = (
+        decision_dates(data["decided_at"])
+        if "decided_at" in data.columns
+        else pd.Series([None] * len(data), index=data.index)
+    )
+    return dates, net
 
 
 def _build_gates(
     metrics: dict[str, dict[str, HorizonMetrics]],
     config: ViabilityAuditConfig,
+    *,
+    df: Optional[pd.DataFrame] = None,
+    cost: float = 0.0,
 ) -> list[ViabilityGate]:
     bot5 = metrics["bot_only"].get("5d", _empty_horizon("bot_only", "5d"))
     manual5 = metrics["manual_only"].get("5d", _empty_horizon("manual_only", "5d"))
@@ -1066,33 +1118,34 @@ def _build_gates(
         ViabilityGate(
             "muestra bot-only 5d",
             bot5.n >= config.min_sample,
-            f"n={bot5.n}, minimo={config.min_sample}",
+            f"n={bot5.n}, minimo={config.min_sample}, fechas={bot5.n_dates}",
         ),
         ViabilityGate(
             "IC bot-only 5d positivo",
-            _positive(bot5.ic_final),
-            f"IC={_fmt_float(bot5.ic_final)}",
+            evidence(bot5.ic_interval),
+            f"IC rango={_fmt_float(bot5.ic_final)} {fmt_interval(bot5.ic_interval, _fmt_float)}",
         ),
         ViabilityGate(
             "EV neto bot-only 5d positivo",
-            _positive(bot5.net_ev),
-            f"EV neto={_fmt_pct(bot5.net_ev)}",
+            evidence(bot5.net_ev_interval),
+            f"EV neto={_fmt_pct(bot5.net_ev)} {fmt_interval(bot5.net_ev_interval, _fmt_pct)}",
         ),
     ]
 
     if manual5.n >= config.min_sample:
+        difference = None
+        if df is not None and "5d" in config.horizons:
+            bot_dates, bot_net = _scope_outcomes(df, "bot_only", "5d", cost)
+            manual_dates, manual_net = _scope_outcomes(df, "manual_only", "5d", cost)
+            difference = difference_interval(bot_dates, bot_net, manual_dates, manual_net, "5d")
         gates.append(
             ViabilityGate(
                 "EV neto bot-only mayor que manual-only 5d",
-                _gt(bot5.net_ev, manual5.net_ev),
-                f"bot={_fmt_pct(bot5.net_ev)} vs manual={_fmt_pct(manual5.net_ev)}",
-            )
-        )
-        gates.append(
-            ViabilityGate(
-                "drawdown bot-only menor que manual-only 5d",
-                _drawdown_better(bot5.max_drawdown, manual5.max_drawdown),
-                f"bot={_fmt_pct(bot5.max_drawdown)} vs manual={_fmt_pct(manual5.max_drawdown)}",
+                evidence(difference),
+                (
+                    f"bot={_fmt_pct(bot5.net_ev)} vs manual={_fmt_pct(manual5.net_ev)}; "
+                    f"diferencia {fmt_interval(difference, _fmt_pct)}"
+                ),
             )
         )
     else:
@@ -1107,20 +1160,39 @@ def _build_gates(
     return gates
 
 
-def _build_verdict(gates: list[ViabilityGate]) -> str:
+GATE_SHORT_NAMES = {
+    "IC bot-only 5d positivo": "IC 5D",
+    "EV neto bot-only 5d positivo": "EV neto 5D",
+    "EV neto bot-only mayor que manual-only 5d": "ventaja vs manual",
+    "comparacion contra manual-only 5d": "comparacion manual (falta muestra)",
+}
+
+
+def _build_verdict(gates: list[ViabilityGate]) -> tuple[str, str]:
+    """Verdict text and level (NO_SAMPLE | FAIL | INCONCLUSIVE | PASS)."""
     if not gates:
-        return "NO VALIDADO: sin datos suficientes."
+        return "SIN MUESTRA: sin datos suficientes.", "NO_SAMPLE"
 
-    if any(g.passed is False and "muestra" in g.name for g in gates):
-        return "VIABLE COMO PROYECTO, EDGE BOT NO VALIDADO: falta muestra bot-only cerrada."
+    sample = next((g for g in gates if "muestra" in g.name), None)
+    if sample is not None and sample.passed is False:
+        return f"SIN MUESTRA SUFICIENTE: edge bot sin evaluar ({sample.detail}).", "NO_SAMPLE"
 
-    if any(g.passed is False for g in gates):
-        return "VIABLE COMO SISTEMA, NO VIABLE PARA ESCALAR CAPITAL: no supera IC/EV/drawdown despues de costos."
+    failed = [GATE_SHORT_NAMES.get(g.name, g.name) for g in gates if g.passed is False]
+    if failed:
+        return "EDGE BOT NO VALIDADO: falla " + "; ".join(failed) + ".", "FAIL"
 
-    if any(g.passed is None for g in gates):
-        return "VIABLE COMO PROYECTO, EDGE BOT PARCIAL: falta comparacion manual madura."
+    open_gates = [GATE_SHORT_NAMES.get(g.name, g.name) for g in gates if g.passed is None]
+    if open_gates:
+        return (
+            "EDGE BOT NO CONCLUYENTE: " + ", ".join(open_gates) + " sin evidencia (rango 95% cruza 0).",
+            "INCONCLUSIVE",
+        )
 
-    return "VIABLE PARA 180D CON GUARDS: bot-only supera muestra, IC, EV neto y drawdown."
+    return (
+        "EDGE HISTORICO FAVORABLE, NO VALIDADO PARA ESCALAR CAPITAL: IC, EV neto y ventaja "
+        "vs manual con rango 95% sobre 0; retrospectivo y sin descontar benchmark.",
+        "PASS",
+    )
 
 
 def _build_warnings(df: pd.DataFrame, config: ViabilityAuditConfig) -> list[str]:
@@ -1224,22 +1296,13 @@ def _cutoff(days: int, since: Optional[str]) -> datetime:
     return datetime.now(tz=timezone.utc) - timedelta(days=int(days))
 
 
-def _corr(x, y) -> Optional[float]:
-    try:
-        xs = pd.to_numeric(pd.Series(x), errors="coerce")
-        ys = pd.to_numeric(pd.Series(y), errors="coerce")
-        data = pd.concat([xs, ys], axis=1).dropna()
-        if len(data) < 5:
-            return None
-        if data.iloc[:, 0].std() < 1e-12 or data.iloc[:, 1].std() < 1e-12:
-            return None
-        value = float(data.iloc[:, 0].corr(data.iloc[:, 1]))
-        return value if math.isfinite(value) else None
-    except Exception:
-        return None
+def _max_drawdown(returns: list[float], position_fraction: float = 1.0) -> Optional[float]:
+    """Max drawdown of a chronological curve that commits `position_fraction` of equity per trade.
 
-
-def _max_drawdown(returns: list[float]) -> Optional[float]:
+    With 1.0 every trade compounds the whole account, which turns a long series of
+    overlapping trades into a meaningless -99%. Overlap between trades is still not
+    modelled, so this stays a descriptive figure, not a gate.
+    """
     if not returns:
         return None
     equity = 1.0
@@ -1248,29 +1311,11 @@ def _max_drawdown(returns: list[float]) -> Optional[float]:
     for value in returns:
         if value is None or not math.isfinite(float(value)):
             continue
-        equity *= max(0.0, 1.0 + float(value))
+        equity *= max(0.0, 1.0 + position_fraction * float(value))
         peak = max(peak, equity)
         if peak > 0:
             worst = min(worst, equity / peak - 1.0)
     return float(worst)
-
-
-def _positive(value: Optional[float]) -> Optional[bool]:
-    if value is None:
-        return None
-    return value > 0
-
-
-def _gt(left: Optional[float], right: Optional[float]) -> Optional[bool]:
-    if left is None or right is None:
-        return None
-    return left > right
-
-
-def _drawdown_better(left: Optional[float], right: Optional[float]) -> Optional[bool]:
-    if left is None or right is None:
-        return None
-    return left > right
 
 
 def _fmt_pct(value: Optional[float], *, signed: bool = True) -> str:
