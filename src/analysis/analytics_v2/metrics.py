@@ -7,6 +7,11 @@ import pandas as pd
 from .bootstrap import interval, spearman
 
 
+def _text_or_none(value):
+    """pandas turns a missing id into NaN, which canonical JSON (allow_nan=False) rejects."""
+    return None if value is None or (isinstance(value, float) and math.isnan(value)) else value
+
+
 def distribution(values):
     a = np.asarray(values, dtype=float)
     if not len(a):
@@ -129,7 +134,7 @@ def cohort_metrics(outcomes, policy, *, inference_enabled=True):
             row["inference_stability_status"] = "INFERENCE_UNSTABLE" if len(available_signs) > 1 else "STABLE_POSITIVE" if row["inference_stable"] else "INSUFFICIENT_OR_NONPOSITIVE_BLOCK_EVIDENCE"
         for item in mature.sort_values([value_col, "episode_id"], ascending=[False, True]).to_dict("records"):
             concentrations.append({**meta, "episode_id": item["episode_id"], "ticker": item["ticker"],
-                                   "original_instrument_id": item["original_instrument_id"],
+                                   "original_instrument_id": _text_or_none(item["original_instrument_id"]),
                                    "contribution_unit_notional": item[value_col], "cluster": item["cluster"]})
         metrics.append(row)
     return metrics, inference, concentrations, calibrations

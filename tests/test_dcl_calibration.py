@@ -150,7 +150,8 @@ def test_statistical_auditor_computes_ic_wr_and_ev():
                 "id": i,
                 "ticker": f"T{i % 4}",
                 "decision": "BUY" if i % 2 else "SELL",
-                "final_score": score,
+                # A SELL is taken on a negative score; its stored outcome is directional.
+                "final_score": score if i % 2 else -score,
                 "outcome_5d": score - 0.10,
                 "outcome_basis": "canonical_cocos",
                 "candle_source_mode": "official",
@@ -237,3 +238,47 @@ def test_outcome_loader_scopes_owner_query(monkeypatch):
 
     assert "owner_chat_id = $2" in seen["query"]
     assert seen["args"][1] == 123
+
+
+def _dcl_rows(n_dates, *, slope, seed, legacy_every=0):
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    for i, day in enumerate(pd.bdate_range("2026-03-02", periods=n_dates)):
+        strength = float(rng.uniform(0.02, 0.25))
+        sell = i % 2 == 0
+        rows.append(
+            {
+                "id": i,
+                "decided_at": day.tz_localize("UTC") + pd.Timedelta(hours=15),
+                "ticker": f"T{i % 4}",
+                "decision": "SELL" if sell else "BUY",
+                "final_score": -strength if sell else strength,
+                "outcome_5d": slope * strength + float(rng.normal(0, 0.02)),
+                "outcome_basis": "legacy_external" if legacy_every and i % legacy_every == 0 else "canonical_cocos",
+                "candle_source_mode": "official",
+                "regime": "bull_low_vol",
+                "source": "execution_plan",
+                "status": "EXECUTED",
+                "decision_type": "executable",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def test_dcl_significance_needs_a_positive_dated_interval():
+    strong = StatisticalAuditor().run(decisions_from_frame(_dcl_rows(80, slope=0.6, seed=1)))
+    assert strong.ic_ci_95[0] is not None and strong.ic_ci_95[0] > 0
+    assert strong.is_statistically_significant and strong.confidence_level == "HIGH"
+
+    inverted = StatisticalAuditor().run(decisions_from_frame(_dcl_rows(80, slope=-0.6, seed=2)))
+    # A significantly negative IC used to be reported as HIGH confidence.
+    assert not inverted.is_statistically_significant
+    assert inverted.confidence_level == "LOW"
+    assert "IC_SIGNIFICANTLY_NEGATIVE" in inverted.warning_flags
+
+
+def test_dcl_never_audits_legacy_external_outcomes():
+    decisions = decisions_from_frame(_dcl_rows(20, slope=0.5, seed=3, legacy_every=2))
+    assert sum(d.is_auditable for d in decisions) == 10

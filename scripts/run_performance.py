@@ -46,6 +46,7 @@ from src.core.logger import get_logger
 from src.collector.db import PortfolioDatabase
 from src.collector.notifier import TelegramNotifier
 from src.analysis.decision_engine import directional_return
+from src.analysis.net_decision_report import ESTIMATED_COST_RATE
 from src.core.market_calendar import is_trading_day, market_closed_reason
 from src.core.telegram_format import (
     header as tg_header,
@@ -120,12 +121,17 @@ def _layer_component(layers: dict, name: str) -> float | None:
 
 
 def _ev_label(ev: float | None, *, historical_only: bool = False) -> str:
+    """Label on the EV *net of the estimated cost*; the gross EV alone overstates results.
+
+    No significance test is done here: /viability carries the interval-based gates.
+    """
     if ev is None:
         return "SIN DATOS"
+    ev = ev - ESTIMATED_COST_RATE
     if ev > 0.02:
         if historical_only:
-            return "✅ POSITIVO — histórico favorable, ejecución aún por validar"
-        return "✅ POSITIVO — muestra operativa favorable, seguir validando"
+            return "✅ POSITIVO neto de costos — histórico favorable, ejecución aún por validar"
+        return "✅ POSITIVO neto de costos — sin test estadístico, ver /viability"
     if ev > 0:
         if historical_only:
             return "🟡 MARGINAL — histórico levemente favorable, seguir midiendo"
@@ -831,7 +837,11 @@ def render_performance_report(stats: dict) -> str:
         ),
         f"   Ganancia promedio al acertar: <b>{_pct(avg_win)}</b>",
         f"   Perdida promedio al fallar: <b>{_pct(avg_loss)}</b>",
-        f"   {ev_title}: <b>{_pct(ev)}</b>",
+        f"   {ev_title} (bruto): <b>{_pct(ev)}</b>",
+        (
+            f"   Neto de costo estimado ({ESTIMATED_COST_RATE:.2%}): "
+            f"<b>{_pct(ev - ESTIMATED_COST_RATE if ev is not None else None)}</b>"
+        ),
         f"   {_ev_label(ev, historical_only=('hist' in ev_title.lower() and 'agregado' in ev_title.lower()))}",
         f"   {tg_note(ev_note)}",
         "",

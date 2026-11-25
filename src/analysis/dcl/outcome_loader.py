@@ -8,6 +8,8 @@ from typing import Any, Optional
 import asyncpg
 import pandas as pd
 
+from src.analysis.audit_inference import NON_CANONICAL_OUTCOME_BASES, SELL_ACTIONS, decision_dates
+
 # ---------------------------------------------------------------------------
 # Intento importar normalize_decision_frame; si no existe, usamos identidad.
 # ---------------------------------------------------------------------------
@@ -46,6 +48,10 @@ class EnrichedDecision:
     outcome_10d: Optional[float] = None
     outcome_20d: Optional[float] = None
     is_auditable: bool = False
+    # Score in the direction of the decision (sells flipped): outcomes are directional.
+    aligned_score: Optional[float] = None
+    # Local decision date (YYYY-MM-DD) for date-block inference.
+    decision_date: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +322,13 @@ def decisions_from_frame(
             "outcome_10d": _optional_float(row.get("outcome_10d")),
             "outcome_20d": _optional_float(row.get("outcome_20d")),
         }
-        has_any_outcome = any(v is not None for v in outcomes.values())
+        basis = _clean_text(row.get("outcome_basis"), "").lower()
+        # legacy_external outcomes use another price unit and never feed metrics.
+        canonical_basis = basis not in NON_CANONICAL_OUTCOME_BASES
+        has_any_outcome = canonical_basis and any(v is not None for v in outcomes.values())
+        final_score = float(_optional_float(row.get("final_score")) or 0.0)
+        side = _clean_text(row.get("decision"), "").upper()
+        decision_day = decision_dates([row.get("decided_at")]).iloc[0]
 
         # layer_scores: None cuando el dato no está disponible
         layer_scores: dict[str, Optional[float]] = {
@@ -336,7 +348,7 @@ def decisions_from_frame(
                 decision_id=_clean_text(row.get("id"), ""),
                 ticker=_clean_text(row.get("ticker"), "").upper(),
                 decision_type=_decision_kind(row),
-                final_score=float(_optional_float(row.get("final_score")) or 0.0),
+                final_score=final_score,
                 layer_scores=layer_scores,
                 was_blocked=was_blocked,
                 block_reason=_clean_text(row.get("block_reason"), "") or None,
@@ -348,6 +360,8 @@ def decisions_from_frame(
                 is_auditable=_is_auditable_for_mode(
                     has_any_outcome, quality, quality_mode
                 ),
+                aligned_score=-final_score if side in SELL_ACTIONS else final_score,
+                decision_date=decision_day if isinstance(decision_day, str) else None,
             )
         )
 

@@ -22,6 +22,13 @@ def _ci(ci: tuple) -> str:
     return f"{_pct(low)} a {_pct(high)}"
 
 
+def _ci_num(ci: tuple) -> str:
+    low, high = ci
+    if low is None or high is None:
+        return "N/A"
+    return f"{_num(low)} a {_num(high)}"
+
+
 def _quality_line(counts: dict[str, int]) -> str:
     if not counts:
         return "   Sin filas para clasificar"
@@ -53,17 +60,17 @@ def render_calibration_report(report: CalibrationReport) -> str:
         "",
         "<b>CALIDAD DE DATOS</b>",
         _quality_line(report.quality_counts),
-        "   strict: propuestas solo con clean/canonica.",
+        "   strict: propuestas solo con clean/canonica. legacy_external nunca es auditable.",
         "   relaxed: auditoria con clean + mixed.",
         "",
         "<b>AUDITORIA ESTADISTICA</b>",
-        f"   IC 5D:  <b>{_num(audit.ic_5d)}</b>",
+        f"   IC 5D (rango, score alineado):  <b>{_num(audit.ic_5d)}</b>  rango 95% { _ci_num(audit.ic_ci_95) }",
         f"   IC 10D: <b>{_num(audit.ic_10d)}</b>",
         f"   IC 20D: <b>{_num(audit.ic_20d)}</b>",
         f"   IC t-stat: <b>{_num(audit.ic_tstat)}</b>",
-        f"   Win rate: <b>{_pct(audit.win_rate)}</b>  CI95 { _ci(audit.win_rate_ci_95) }",
-        f"   EV medio 5D: <b>{_pct(audit.ev_mean)}</b>  CI95 { _ci(audit.ev_bootstrap_ci) }",
-        f"   Confianza: <b>{audit.confidence_level}</b>",
+        f"   Win rate: <b>{_pct(audit.win_rate)}</b>  rango 95% { _ci(audit.win_rate_ci_95) }",
+        f"   EV medio 5D (bruto): <b>{_pct(audit.ev_mean)}</b>  rango 95% { _ci(audit.ev_bootstrap_ci) }",
+        f"   Confianza: <b>{audit.confidence_level}</b> (solo HIGH/MEDIUM si el rango 95% del IC queda sobre 0)",
         "",
     ]
 

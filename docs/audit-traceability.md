@@ -56,7 +56,7 @@ Evidencia:
 
 - Performance operativa: [scripts/run_performance.py](../scripts/run_performance.py).
 - Regression por modo/horizonte/costos: [scripts/run_regression_audit.py](../scripts/run_regression_audit.py).
-- Viability bot-only/manual-only, EV neto, IC y drawdown:
+- Viability bot-only/manual-only, EV neto, IC (con rango 95%) y drawdown descriptivo:
   [scripts/run_viability_audit.py](../scripts/run_viability_audit.py).
 - Confidence audit: [scripts/run_confidence_audit.py](../scripts/run_confidence_audit.py).
 - DCL/calibration: [scripts/run_calibration.py](../scripts/run_calibration.py) y
@@ -65,6 +65,48 @@ Evidencia:
 
 Pendiente de validar: resultado numerico actual de esas metricas contra la DB
 viva en este relevamiento.
+
+## Modos auditables y reglas de inferencia (2026-11-25)
+
+| Comando Telegram | Script / modulo | Que mide | Como decide |
+|---|---|---|---|
+| `/viability`, `/viabilidad` | `run_viability_audit.py`, `viability_audit.py` | bot-only vs seguido vs manual-only, EV neto, IC, drawdown | gates 5d por rango 95% bootstrap por bloques de fechas |
+| `/regression` (`signal`, `optimizer`, `execution`, `blocked`, `all`) | `run_regression_audit.py`, `regression_audit.py` | relacion score -> outcome por modo | OLS con errores agrupados por bloques de fechas |
+| `/dcl`, `/calibration` | `run_calibration.py`, `dcl/` | IC por horizonte, win rate, EV | significativo solo si el rango 95% del IC queda sobre 0 |
+| `/confianza`, `/confidence` | `run_confidence_audit.py` | salud del pipeline y madurez de outcomes | cuenta outcomes de decisiones ejecutadas y canonicas |
+| `/performance` | `run_performance.py` | win rate, EV, retornos por horizonte | etiqueta sobre EV neto de costo estimado; sin test |
+| `/neto`, `/resultado_neto` | `net_decision_report.py` | neto por corrida y decision | fees reales solo si son > 0; si no, costo estimado |
+| `/ledger`, `/atribucion` | `decision_ledger.py` | resumen economico y bot vs humano | descriptivo |
+| `/override`, `/bot_vs_humano` | `run_override_audit.py` | seguimiento humano del plan | descriptivo (intencion = ticker + lado) |
+| `/analytics` | `analytics_v2/` | cohortes con inferencia por bloques | intervalos y BH ya incorporados |
+| `/qeef`, `/radar_metricas`, `/shadow` | `qeef/`, radar, shadow | evidencia prospectiva y audit-only | fuera del EV operativo |
+
+Reglas comunes (`src/analysis/audit_inference.py`):
+
+- Score alineado por direccion: los outcomes se guardan direccionales (un SELL
+  gana si el precio cae) y un SELL nace de un score negativo. Correlacionar el
+  score crudo con el outcome direccional mezcla signos; se invierte el score de
+  los SELL en `/viability`, `/regression` (modo direccional) y `/dcl`.
+- `outcome_basis = legacy_external` nunca entra a metricas.
+- Outcome efectivo: `executable_outcome_Nd` si existe, si no `outcome_Nd`.
+- Outcomes de decisiones cercanas se solapan: los intervalos remuestrean fechas
+  de decision en bloques de ~5/7 del horizonte (5d -> 4 fechas).
+- Un gate pasa solo si todo el rango 95% queda sobre 0; si cruza 0 es
+  "no concluyente". "IC" es la correlacion score/resultado, no un intervalo de
+  confianza; por eso los intervalos se rotulan "rango 95%".
+- El drawdown de `/viability` es descriptivo (cronologico, 10% del capital por
+  operacion, sin modelar solapamiento) y ya no es gate.
+- `/viability` mide el exceso contra un benchmark (por defecto `SPY` CEDEAR en
+  ARS, `--benchmark` para cambiarlo): retorno del benchmark entre el dia local
+  de la decision y la primera vela >= dia + N, igual que `update_outcomes`. Para
+  SELL el retorno del benchmark se suma. Es un gate: sin velas del benchmark el
+  veredicto no puede ser favorable. Los demas informes siguen en retorno absoluto.
+- Holdout prospectivo: `python scripts/freeze_decision_rules.py --freeze` guarda
+  en `config/decision_rules_freeze.json` la fecha y el hash de cada archivo
+  alcanzable por import desde `scripts/run_analysis.py` (mas `config/*.json`),
+  normalizado a LF. `/viability` reporta aparte las decisiones bot-only
+  posteriores a esa fecha (objetivo 40) y avisa si algun archivo de reglas
+  cambio (`--check`). No cubre `.env`, estado de la base ni modelos externos.
 
 ## Productivo vs shadow/audit-only
 

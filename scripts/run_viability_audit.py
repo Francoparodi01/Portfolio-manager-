@@ -2,9 +2,11 @@
 Run the 180d viability audit.
 
 The report separates bot-only, followed-by-user and manual-only execution, measures
-5d/10d/20d/40d independently, and checks positive IC, lower drawdown, and
-better net EV after costs. It refreshes derived plan/movement links but does not
-change thresholds, planner behavior, source movements, or decision_log.
+5d/10d/20d/40d independently, and gates bot-only 5d on rank IC, net EV after costs
+and net EV versus manual, each decided on a 95% date-block bootstrap interval
+(an interval crossing zero is "not conclusive"). Drawdown is descriptive only.
+It refreshes derived plan/movement links but does not change thresholds,
+planner behavior, source movements, or decision_log.
 """
 
 from __future__ import annotations
@@ -26,6 +28,11 @@ from src.analysis.viability_audit import (  # noqa: E402
     render_viability_audit,
     run_viability_audit,
 )
+from src.analysis.rules_freeze import (  # noqa: E402
+    check_manifest,
+    freeze_note as freeze_note_for,
+    load_manifest,
+)
 from src.collector.notifier import TelegramNotifier  # noqa: E402
 from src.analysis.plan_follow_attribution import sync_plan_execution_attributions  # noqa: E402
 from src.core.config import get_config  # noqa: E402
@@ -42,6 +49,13 @@ async def main() -> None:
     parser.add_argument("--since", type=str, default=None)
     parser.add_argument("--cost-bps", type=float, default=75.0)
     parser.add_argument("--min-sample", type=int, default=30)
+    parser.add_argument("--benchmark", type=str, default="SPY", help="CEDEAR ARS benchmark ticker; 'none' to skip")
+    parser.add_argument(
+        "--frozen-since",
+        type=str,
+        default=None,
+        help="start of the prospective cohort; defaults to config/decision_rules_freeze.json",
+    )
     parser.add_argument("--chart-out", type=str, default=None)
     parser.add_argument("--no-telegram", action="store_true")
     args = parser.parse_args()
@@ -54,6 +68,12 @@ async def main() -> None:
     finally:
         await conn.close()
 
+    frozen_since, freeze_note = args.frozen_since, None
+    manifest = load_manifest()
+    if manifest is not None:
+        frozen_since = frozen_since or manifest.get("frozen_at")
+        freeze_note = freeze_note_for(check_manifest(manifest))
+
     report = await run_viability_audit(
         ViabilityAuditConfig(
             database_url=cfg.database.url,
@@ -61,6 +81,9 @@ async def main() -> None:
             since=args.since,
             cost_bps=args.cost_bps,
             min_sample=args.min_sample,
+            benchmark_ticker=None if args.benchmark.lower() == "none" else args.benchmark.upper(),
+            frozen_since=frozen_since,
+            freeze_note=freeze_note,
         )
     )
     text = render_viability_audit(report)

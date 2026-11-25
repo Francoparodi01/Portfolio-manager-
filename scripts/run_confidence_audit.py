@@ -176,7 +176,11 @@ async def build_confidence_audit(days: int = 180) -> str:
                 COUNT(*) FILTER (WHERE COALESCE(source, layers->>'source') = 'radar') AS radar,
                 COUNT(outcome_5d) AS closed_5d,
                 COUNT(outcome_10d) AS closed_10d,
-                COUNT(outcome_20d) AS closed_20d
+                COUNT(outcome_20d) AS closed_20d,
+                COUNT(COALESCE(executable_outcome_5d, outcome_5d)) FILTER (
+                    WHERE status IN ('EXECUTED', 'EXECUTED_MANUAL')
+                      AND COALESCE(outcome_basis, '') <> 'legacy_external'
+                ) AS closed_5d_real
             FROM decision_log
             WHERE decided_at >= NOW() - ($1::int * INTERVAL '1 day')
               AND decision IN ('BUY','SELL','SELL_PARTIAL','SELL_FULL')
@@ -234,12 +238,15 @@ async def build_confidence_audit(days: int = 180) -> str:
         + _num(decisions["executed_manual"] if decisions else None)
     ) > 0
     closed_5d = _num(decisions["closed_5d"] if decisions else None)
-    outcomes_ready = closed_5d >= 12
+    # Radar, optimizer and blocked ideas also get outcomes; only executed decisions with
+    # a canonical outcome basis measure the real system.
+    closed_5d_real = _num(decisions["closed_5d_real"] if decisions else None)
+    outcomes_ready = closed_5d_real >= 12
 
     hard_ok = portfolio_ok and market_ok and candles_ok and decisions_ok
     measurement_ready = execution_ready and outcomes_ready
 
-    if hard_ok and execution_ready and closed_5d >= 100:
+    if hard_ok and execution_ready and closed_5d_real >= 100:
         verdict = "CONFIABLE para auditoria estadistica inicial"
     elif hard_ok and measurement_ready:
         verdict = "OPERATIVO Y AUDITABLE, muestra chica"
@@ -268,7 +275,7 @@ async def build_confidence_audit(days: int = 180) -> str:
         f"• {_state(portfolio_ok, 'Portfolio reciente')} — {_fmt_dt(latest_portfolio['scraped_at'] if latest_portfolio else None)} | {_money(latest_portfolio['total_value_ars'] if latest_portfolio else None)}",
         f"• {_state(market_ok, 'Market prices recientes')} — {_fmt_dt(market['latest_ts'] if market else None)} | 7d rows {_num(market['rows_7d'] if market else None)} / tickers {_num(market['tickers_7d'] if market else None)}",
         (
-            f"• {_state(candles_ok and not candles_wait, 'Candles canonicas', wait=candles_wait)} "
+            f"• {_state(candles_ok and not candles_wait, 'Velas del dia (internal_snapshot)', wait=candles_wait)} "
             f"— velas {escape(str(candle_day or '-'))} "
             f"({_num(candles['latest_candle_assets'] if candles else None)} activos) | "
             + (
@@ -285,7 +292,8 @@ async def build_confidence_audit(days: int = 180) -> str:
         f"• Total {days}d: <b>{_num(decisions['total'] if decisions else None)}</b>",
         f"• Execution plan: {_num(decisions['execution_plan'] if decisions else None)} | APPROVED/executable: <b>{_num(decisions['approved_executable'] if decisions else None)}</b> | EXECUTED bot: <b>{_num(decisions['executed'] if decisions else None)}</b> | EXECUTED manual: <b>{_num(decisions['executed_manual'] if decisions else None)}</b>",
         f"• Blocked: {_num(decisions['blocked'] if decisions else None)} | Optimizer: {_num(decisions['optimizer'] if decisions else None)} | Radar: {_num(decisions['radar'] if decisions else None)}",
-        f"• Outcomes cerrados: 5d {_num(decisions['closed_5d'] if decisions else None)} | 10d {_num(decisions['closed_10d'] if decisions else None)} | 20d {_num(decisions['closed_20d'] if decisions else None)}",
+        f"• Outcomes 5d ejecutados (canonicos): <b>{closed_5d_real}</b>",
+        f"• Outcomes cerrados todas las fuentes (incluye radar/optimizer/bloqueadas): 5d {_num(decisions['closed_5d'] if decisions else None)} | 10d {_num(decisions['closed_10d'] if decisions else None)} | 20d {_num(decisions['closed_20d'] if decisions else None)}",
         "",
         "<b>Ejecucion real</b>",
     ]
@@ -308,10 +316,10 @@ async def build_confidence_audit(days: int = 180) -> str:
         lines.append("• El sistema esta capturando datos y decisiones, pero aun no hay fills EXECUTED reconciliados.")
         lines.append("• Para confiar en performance real falta importar/reconciliar movimientos Cocos.")
     elif not outcomes_ready:
-        lines.append("• Hay ejecucion, pero faltan al menos 12 outcomes 5d cerrados para una lectura minima.")
+        lines.append("• Hay ejecucion, pero faltan al menos 12 outcomes 5d de operaciones ejecutadas para una lectura minima.")
     else:
         lines.append("• Hay base minima para diagnostico de performance/regresion, no para afirmar edge definitivo.")
-        if closed_5d < 100:
+        if closed_5d_real < 100:
             lines.append("• Muestra chica: mantener recoleccion de ruedas y revisar metricas por mes.")
 
     return "\n".join(lines)
