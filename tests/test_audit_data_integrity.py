@@ -143,3 +143,13 @@ def test_the_script_cannot_write_to_the_database():
     assert sql_blocks, "expected SQL in the script"
     for block in sql_blocks:
         assert not re.search(r"\b(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE|GRANT|COPY)\b", block, flags=re.I), block[:80]
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("postgresql+asyncpg://portfolio:s3cr@t%40x@db:5432/portfolio", "postgresql+asyncpg://portfolio:s3cr@t%40x@localhost:5432/portfolio"),
+    ("postgresql://u:p@db/portfolio?sslmode=disable", "postgresql://u:p@localhost/portfolio?sslmode=disable"),
+    ("postgresql://db:5433/x", "postgresql://localhost:5433/x"),
+])
+def test_override_host_changes_only_the_host(url, expected):
+    assert audit.override_host(url, "localhost") == expected
+    assert audit.override_host(url, None) == url

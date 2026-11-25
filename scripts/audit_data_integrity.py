@@ -394,6 +394,21 @@ async def check_report(config, cost: float) -> list[Check]:
 # Runner
 # ---------------------------------------------------------------------------------------------
 
+def override_host(url: str, host: Optional[str]) -> str:
+    """Return the URL with only its host replaced (user, password, port and database are kept).
+
+    The .env points at the Docker service name (`db`), which only resolves inside the Docker
+    network; from the host machine the same database is published on localhost.
+    """
+    if not host:
+        return url
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(url)
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    port = f":{parts.port}" if parts.port else ""
+    return urlunsplit(parts._replace(netloc=f"{userinfo}{at}{host}{port}"))
+
+
 def render_summary(checks: list[Check], meta: dict) -> str:
     order = {"FAIL": 0, "ERROR": 1, "WARN": 2, "INFO": 3, "PASS": 4}
     lines = [f"# Data integrity audit — {meta['generated_at']}", "",
@@ -427,7 +442,7 @@ async def main_async(args) -> int:
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=args.days)
     cost = args.cost_bps / 10_000.0
-    url = get_config().database.url
+    url = override_host(get_config().database.url, args.db_host)
     dsn = url.replace("postgresql+asyncpg://", "postgresql://")
     config = ViabilityAuditConfig(database_url=url, days=args.days, cost_bps=args.cost_bps, min_sample=args.min_sample)
 
@@ -465,6 +480,7 @@ def main() -> int:
     parser.add_argument("--cost-bps", type=float, default=75.0)
     parser.add_argument("--min-sample", type=int, default=30)
     parser.add_argument("--out-dir", default="output/data_integrity")
+    parser.add_argument("--db-host", default=None, help="replace only the host of the configured DATABASE_URL (e.g. localhost)")
     return asyncio.run(main_async(parser.parse_args()))
 
 
