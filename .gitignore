@@ -86,6 +86,7 @@ tests/*
 !tests/test_shadow_causal.py
 !tests/test_manual_market_events.py
 !tests/test_viability_audit.py
+!tests/test_audit_data_integrity.py
 !tests/test_broker_movement_dedupe.py
 !tests/test_broker_fill_db.py
 !tests/test_superseded_broker_fills.py
