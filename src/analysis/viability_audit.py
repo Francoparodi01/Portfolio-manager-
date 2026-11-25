@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import math
 import json
+import re
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Optional
@@ -58,6 +60,15 @@ class ViabilityAuditConfig:
     horizons: tuple[str, ...] = DEFAULT_HORIZONS
     # Fraction of equity committed to each trade when building the drawdown curve.
     position_fraction: float = 0.10
+    # Benchmark in the same unit as the outcomes (CEDEAR prices in ARS include the CCL).
+    benchmark_ticker: Optional[str] = "SPY"
+    benchmark_asset_type: str = "CEDEAR"
+    benchmark_currency: str = "ARS"
+    # Decisions at or after this instant form the prospective (frozen rules) cohort.
+    frozen_since: Optional[str] = None
+    prospective_target: int = 40
+    # Result of checking the rules freeze manifest ("reglas intactas..." / "REGLAS MODIFICADAS...").
+    freeze_note: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +91,10 @@ class HorizonMetrics:
     n_dates: int = 0
     net_ev_interval: Optional[dict] = None
     ic_interval: Optional[dict] = None
+    # Net EV minus the benchmark return over the same window (sign-adjusted for sells).
+    excess_ev: Optional[float] = None
+    n_excess: int = 0
+    excess_interval: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +118,11 @@ class ViabilityAuditReport:
     followed_summary: dict[str, int]
     # NO_SAMPLE | FAIL | INCONCLUSIVE | PASS — drives icons; never parse `verdict`.
     verdict_level: str = "NO_SAMPLE"
+    benchmark_label: Optional[str] = None
+    frozen_since: Optional[str] = None
+    prospective: Optional[HorizonMetrics] = None
+    prospective_target: int = 40
+    freeze_note: Optional[str] = None
 
 
 async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFrame:
@@ -343,8 +363,51 @@ async def load_viability_decision_log(config: ViabilityAuditConfig) -> pd.DataFr
     return frame
 
 
+async def load_benchmark_candles(config: ViabilityAuditConfig) -> list[tuple[date, float]]:
+    """Daily canonical closes of the benchmark, same source priority as get_market_candles."""
+    if not config.benchmark_ticker:
+        return []
+    dsn = config.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    conn = await asyncpg.connect(dsn)
+    try:
+        rows = await conn.fetch(
+            """
+            WITH candidates AS (
+                SELECT * FROM market_candles
+                WHERE ticker = $1 AND asset_type = $2 AND currency = $3 AND interval = '1d'
+                  AND close_price IS NOT NULL AND close_price > 0
+            ), ranked AS (
+                SELECT ts, close_price, venue, long_ticker,
+                    COUNT(DISTINCT venue) OVER () AS venues,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY date_trunc('day', ts AT TIME ZONE 'UTC')
+                        ORDER BY CASE source WHEN 'COCOS' THEN 0 WHEN 'TRADINGVIEW_BYMA' THEN 1
+                                             WHEN 'internal_snapshot' THEN 2 ELSE 3 END,
+                                 scraped_at DESC, ts DESC
+                    ) AS source_rank
+                FROM candidates
+            )
+            SELECT ts, close_price::float8 AS close_price, venues
+            FROM ranked WHERE source_rank = 1 ORDER BY ts ASC
+            """,
+            config.benchmark_ticker.upper(),
+            config.benchmark_asset_type.upper(),
+            config.benchmark_currency.upper(),
+        )
+    finally:
+        await conn.close()
+    if rows and int(rows[0]["venues"] or 0) > 1:
+        raise ValueError("AMBIGUOUS_SERIES_IDENTITY: benchmark has more than one venue")
+    return [(row["ts"].date(), float(row["close_price"])) for row in rows]
+
+
 async def run_viability_audit(config: ViabilityAuditConfig) -> ViabilityAuditReport:
     frame = await load_viability_decision_log(config)
+    if config.benchmark_ticker:
+        try:
+            frame.attrs["benchmark_candles"] = await load_benchmark_candles(config)
+        except Exception as exc:  # the audit must still run without a benchmark
+            frame.attrs["benchmark_error"] = f"{type(exc).__name__}: {exc}"[:160]
     return run_viability_audit_sync(frame, config)
 
 
@@ -369,6 +432,14 @@ def run_viability_audit_sync(
         )
 
     df = _prepare_frame(frame, config.horizons)
+    benchmark_candles = list(frame.attrs.get("benchmark_candles") or [])
+    benchmark_label = None
+    if config.benchmark_ticker:
+        benchmark_label = (
+            f"{config.benchmark_ticker.upper()} {config.benchmark_asset_type.upper()} "
+            f"{config.benchmark_currency.upper()}"
+        )
+        _attach_benchmark_returns(df, benchmark_candles, config.horizons)
     followed_summary = dict(frame.attrs.get("followed_summary") or {})
     followed_summary["comparable"] = int(_scope_mask(df, "followed").sum())
     metrics: dict[str, dict[str, HorizonMetrics]] = {}
@@ -387,6 +458,22 @@ def run_viability_audit_sync(
             )
 
     warnings = _build_warnings(df, config)
+    if config.benchmark_ticker and not benchmark_candles:
+        warnings.append(
+            f"Sin velas del benchmark {benchmark_label}"
+            + (f" ({frame.attrs['benchmark_error']})" if frame.attrs.get("benchmark_error") else "")
+            + ": el exceso no se puede medir y el veredicto no puede ser favorable."
+        )
+    prospective = None
+    if config.frozen_since and "5d" in config.horizons:
+        start = pd.Timestamp(config.frozen_since)
+        start = start.tz_localize("America/Argentina/Buenos_Aires") if start.tzinfo is None else start
+        decided = pd.to_datetime(df.get("decided_at"), utc=True, errors="coerce")
+        prospective_df = df[_scope_mask(df, "bot_only") & (decided >= start)]
+        prospective = _compute_horizon_metrics(
+            prospective_df, scope="bot_only", horizon="5d", cost=cost,
+            position_fraction=config.position_fraction,
+        )
     gates = _build_gates(metrics, config, df=df, cost=cost)
     verdict, verdict_level = _build_verdict(gates)
 
@@ -402,7 +489,46 @@ def run_viability_audit_sync(
         warnings=warnings,
         followed_summary=followed_summary,
         verdict_level=verdict_level,
+        benchmark_label=benchmark_label,
+        frozen_since=config.frozen_since,
+        prospective=prospective,
+        prospective_target=config.prospective_target,
+        freeze_note=config.freeze_note,
     )
+
+
+def _attach_benchmark_returns(
+    df: pd.DataFrame, candles: list[tuple[date, float]], horizons: tuple[str, ...]
+) -> None:
+    """Benchmark return over each decision's outcome window.
+
+    Mirrors update_outcomes: entry on the decision's local (ART) day, exit on the
+    first candle on or after decision day + N calendar days. Entry uses the last
+    benchmark close on or before the decision day.
+    """
+    for horizon in horizons:
+        df[f"benchmark_return_{horizon}"] = np.nan
+    if not candles or "decided_at" not in df.columns or df.empty:
+        return
+    candles = sorted(candles)
+    days = [day for day, _close in candles]
+    closes = [close for _day, close in candles]
+    decided = pd.to_datetime(df["decided_at"], utc=True, errors="coerce")
+    local_days = decided.dt.tz_convert("America/Argentina/Buenos_Aires").dt.date
+    for horizon in horizons:
+        span = int(re.search(r"\d+", horizon).group())
+        values = []
+        for day in local_days:
+            if day is None or pd.isna(day):
+                values.append(np.nan)
+                continue
+            entry_index = bisect_right(days, day) - 1
+            exit_index = bisect_left(days, day + timedelta(days=span))
+            if entry_index < 0 or exit_index >= len(days):
+                values.append(np.nan)
+                continue
+            values.append(closes[exit_index] / closes[entry_index] - 1.0)
+        df[f"benchmark_return_{horizon}"] = values
 
 
 VERDICT_ICONS = {"PASS": "🟢", "INCONCLUSIVE": "🟡", "FAIL": "🔴", "NO_SAMPLE": "⚪"}
@@ -418,6 +544,7 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
         (
             f"{int(report.days)}d · costo <b>{cost:.2%}</b> · "
             f"gate mínimo <b>n{int(report.min_sample)}</b>"
+            + (f" · benchmark <b>{escape(report.benchmark_label)}</b>" if report.benchmark_label else "")
         ),
         "",
         "<b>Veredicto</b>",
@@ -439,6 +566,12 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
                 f"🤖 Bot · n{bot.n if bot else 0} · win {_fmt_pct(bot.win_rate if bot else None, signed=False)} · "
                 f"EV <b>{_fmt_pct(bot.net_ev if bot else None)}</b> "
                 f"{escape(fmt_interval(bot.net_ev_interval if bot else None, _fmt_pct))}"
+                + (
+                    f" · exceso <b>{_fmt_pct(bot.excess_ev)}</b> "
+                    f"{escape(fmt_interval(bot.excess_interval, _fmt_pct))}"
+                    if bot and bot.n_excess
+                    else ""
+                )
             ),
             (
                 f"🧭 Seguido · n{followed.n if followed else 0} · "
@@ -456,6 +589,7 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
         "muestra bot-only 5d": "Muestra bot 5D",
         "IC bot-only 5d positivo": "IC bot 5D (correlación de rango score/resultado)",
         "EV neto bot-only 5d positivo": "EV neto bot 5D",
+        "EV neto bot-only 5d sobre benchmark": "Exceso vs benchmark 5D",
         "EV neto bot-only mayor que manual-only 5d": "Ventaja vs manual",
         "comparacion contra manual-only 5d": "Comparación manual",
     }
@@ -490,11 +624,42 @@ def render_viability_audit(report: ViabilityAuditReport) -> str:
     )
     if maturity_warning:
         lines += ["", f"⚠️ {escape(maturity_warning)}"]
+    benchmark_warning = next((w for w in report.warnings if "benchmark" in w.lower()), None)
+    if benchmark_warning:
+        lines += ["", f"⚠️ {escape(benchmark_warning)}"]
+
+    if report.frozen_since:
+        p5 = report.prospective
+        n = p5.n if p5 else 0
+        lines += [
+            "",
+            f"<b>🧊 Prospectivo · reglas congeladas desde {escape(str(report.frozen_since)[:10])}</b>",
+            f"Bot 5D · n<b>{n}</b>/{int(report.prospective_target)} objetivo",
+        ]
+        if report.freeze_note:
+            icon = "⚠️" if "MODIFICADAS" in report.freeze_note else "🔒"
+            lines.append(f"{icon} {escape(report.freeze_note)}")
+        if p5 and p5.n:
+            lines.append(
+                f"EV <b>{_fmt_pct(p5.net_ev)}</b> {escape(fmt_interval(p5.net_ev_interval, _fmt_pct))}"
+                + (
+                    f" · exceso <b>{_fmt_pct(p5.excess_ev)}</b> {escape(fmt_interval(p5.excess_interval, _fmt_pct))}"
+                    if p5.n_excess
+                    else ""
+                )
+            )
+            lines.append(
+                f"IC <b>{_fmt_float(p5.ic_final)}</b> {escape(fmt_interval(p5.ic_interval, _fmt_float))}"
+            )
+        lines.append(
+            "<i>Solo decisiones posteriores al congelamiento: es la evidencia que no se pudo ajustar mirando resultados.</i>"
+        )
 
     lines += [
         "",
         "<i>✅/❌ solo si todo el rango 95% (bootstrap por bloques de fechas) queda de un lado de 0; 🟡 = no concluyente.</i>",
-        "<i>IC = correlación de rango score/resultado, no intervalo de confianza. EV es retorno absoluto: no descuenta benchmark.</i>",
+        "<i>IC = correlación de rango score/resultado, no intervalo de confianza.</i>",
+        "<i>Exceso = EV neto menos el retorno del benchmark en la misma ventana (para SELL, se suma).</i>",
         "<i>Bot-only define los gates. Seguido es una cohorte descriptiva; manual-only queda separado.</i>",
         "<i>Guards y thresholds quedan intactos. Esto audita evidencia; no cambia decisiones.</i>",
     ]
@@ -722,12 +887,14 @@ def _short_gate_name(name: str) -> str:
         return "muestra 5d"
     if "ic" in lowered:
         return "IC rango 5d > 0"
+    if "benchmark" in lowered:
+        return "exceso > bench"
     if "ev neto" in lowered and "mayor" in lowered:
         return "EV > manual"
     if "ev neto" in lowered:
         return "EV neto > 0"
-    if "drawdown" in lowered:
-        return "DD < manual"
+    if "comparacion" in lowered:
+        return "vs manual (sin n)"
     return name[:22]
 
 
@@ -739,6 +906,8 @@ def _gate_badge_detail(report: ViabilityAuditReport, gate: ViabilityGate) -> str
         return f"n={bot.n}/{report.min_sample}"
     if "ic" in name:
         return _fmt_chart_float(bot.ic_final)
+    if "benchmark" in name:
+        return _fmt_chart_pct(bot.excess_ev)
     if "ev neto" in name and "mayor" in name:
         return f"{_fmt_chart_pct(bot.net_ev)} vs {_fmt_chart_pct(manual.net_ev)}"
     if "ev neto" in name:
@@ -945,7 +1114,9 @@ def _draw_sample_panel(
         color = ok if gate.passed is True else danger if gate.passed is False else muted
         label = "OK" if gate.passed is True else "NO" if gate.passed is False else "?"
         draw.text((x1 + 24, y), label, fill=color, font=mono_font)
-        draw.text((x1 + 74, y), gate.detail.split(";")[-1].strip()[:46], fill=text, font=mono_font)
+        # First clause of the detail; the "; " inside a "[a; b]" range is not a separator.
+        summary = re.split(r";\s(?![^\[]*\])", gate.detail)[0]
+        draw.text((x1 + 74, y), summary[:46], fill=text, font=mono_font)
         y += 30
 
 
@@ -1069,6 +1240,17 @@ def _compute_horizon_metrics(
         else None
     )
 
+    excess_ev, n_excess, excess_interval = None, 0, None
+    bench_col = f"benchmark_return_{horizon}"
+    if bench_col in data.columns:
+        side = np.where(data["decision"].isin(SELL_ACTIONS), -1.0, 1.0) if "decision" in data.columns else 1.0
+        excess = net - side * pd.to_numeric(data[bench_col], errors="coerce").astype(float)
+        valid = excess.notna()
+        n_excess = int(valid.sum())
+        if n_excess:
+            excess_ev = float(excess[valid].mean())
+            excess_interval = mean_interval(dates[valid], excess[valid], horizon)
+
     return HorizonMetrics(
         scope=scope,
         horizon=horizon,
@@ -1088,6 +1270,9 @@ def _compute_horizon_metrics(
         n_dates=int(dates.dropna().nunique()),
         net_ev_interval=mean_interval(dates, net, horizon),
         ic_interval=ic_interval,
+        excess_ev=excess_ev,
+        n_excess=n_excess,
+        excess_interval=excess_interval,
     )
 
 
@@ -1132,6 +1317,20 @@ def _build_gates(
         ),
     ]
 
+    if config.benchmark_ticker:
+        gates.append(
+            ViabilityGate(
+                "EV neto bot-only 5d sobre benchmark",
+                evidence(bot5.excess_interval) if bot5.n_excess else None,
+                (
+                    f"exceso vs {config.benchmark_ticker.upper()}={_fmt_pct(bot5.excess_ev)} "
+                    f"{fmt_interval(bot5.excess_interval, _fmt_pct)}; con benchmark n={bot5.n_excess}"
+                    if bot5.n_excess
+                    else f"sin velas de {config.benchmark_ticker.upper()} para estas fechas"
+                ),
+            )
+        )
+
     if manual5.n >= config.min_sample:
         difference = None
         if df is not None and "5d" in config.horizons:
@@ -1163,8 +1362,8 @@ def _build_gates(
 GATE_SHORT_NAMES = {
     "IC bot-only 5d positivo": "IC 5D",
     "EV neto bot-only 5d positivo": "EV neto 5D",
+    "EV neto bot-only 5d sobre benchmark": "exceso vs benchmark 5D",
     "EV neto bot-only mayor que manual-only 5d": "ventaja vs manual",
-    "comparacion contra manual-only 5d": "comparacion manual (falta muestra)",
 }
 
 
@@ -1181,7 +1380,12 @@ def _build_verdict(gates: list[ViabilityGate]) -> tuple[str, str]:
     if failed:
         return "EDGE BOT NO VALIDADO: falla " + "; ".join(failed) + ".", "FAIL"
 
-    open_gates = [GATE_SHORT_NAMES.get(g.name, g.name) for g in gates if g.passed is None]
+    # Without enough manual-only trades there is nothing to compare against: informative, not blocking.
+    open_gates = [
+        GATE_SHORT_NAMES.get(g.name, g.name)
+        for g in gates
+        if g.passed is None and g.name != "comparacion contra manual-only 5d"
+    ]
     if open_gates:
         return (
             "EDGE BOT NO CONCLUYENTE: " + ", ".join(open_gates) + " sin evidencia (rango 95% cruza 0).",
@@ -1189,8 +1393,8 @@ def _build_verdict(gates: list[ViabilityGate]) -> tuple[str, str]:
         )
 
     return (
-        "EDGE HISTORICO FAVORABLE, NO VALIDADO PARA ESCALAR CAPITAL: IC, EV neto y ventaja "
-        "vs manual con rango 95% sobre 0; retrospectivo y sin descontar benchmark.",
+        "EDGE HISTORICO FAVORABLE, NO VALIDADO PARA ESCALAR CAPITAL: todos los gates con rango "
+        "95% sobre 0; retrospectivo, falta el periodo con reglas congeladas.",
         "PASS",
     )
 

@@ -96,7 +96,17 @@ Reglas comunes (`src/analysis/audit_inference.py`):
   confianza; por eso los intervalos se rotulan "rango 95%".
 - El drawdown de `/viability` es descriptivo (cronologico, 10% del capital por
   operacion, sin modelar solapamiento) y ya no es gate.
-- Ningun informe descuenta benchmark: EV positivo no es exceso de retorno.
+- `/viability` mide el exceso contra un benchmark (por defecto `SPY` CEDEAR en
+  ARS, `--benchmark` para cambiarlo): retorno del benchmark entre el dia local
+  de la decision y la primera vela >= dia + N, igual que `update_outcomes`. Para
+  SELL el retorno del benchmark se suma. Es un gate: sin velas del benchmark el
+  veredicto no puede ser favorable. Los demas informes siguen en retorno absoluto.
+- Holdout prospectivo: `python scripts/freeze_decision_rules.py --freeze` guarda
+  en `config/decision_rules_freeze.json` la fecha y el hash de cada archivo
+  alcanzable por import desde `scripts/run_analysis.py` (mas `config/*.json`),
+  normalizado a LF. `/viability` reporta aparte las decisiones bot-only
+  posteriores a esa fecha (objetivo 40) y avisa si algun archivo de reglas
+  cambio (`--check`). No cubre `.env`, estado de la base ni modelos externos.
 
 ## Productivo vs shadow/audit-only
 
