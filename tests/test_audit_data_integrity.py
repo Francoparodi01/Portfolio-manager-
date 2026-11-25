@@ -153,3 +153,22 @@ def test_the_script_cannot_write_to_the_database():
 def test_override_host_changes_only_the_host(url, expected):
     assert audit.override_host(url, "localhost") == expected
     assert audit.override_host(url, None) == url
+
+
+def test_database_url_is_read_from_the_env_file_and_nothing_else(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("\n".join([
+        "# DATABASE_URL=postgresql://commented:out@x/y",
+        "DATABASE_URL_LOCAL=postgresql://wrong:one@cocos_db/x",
+        "TELEGRAM_BOT_TOKEN = \"must-not-be-read\"",
+        "DATABASE_URL=postgresql://first:one@db/first",
+        "export DATABASE_URL=\"postgresql://quantia:p-w@db:5432/quantia\"  # trailing",
+    ]), encoding="utf-8")
+    assert audit.database_url_from_env_file(str(env)) == "postgresql://quantia:p-w@db:5432/quantia"
+    plain = tmp_path / "plain.env"
+    plain.write_text("DATABASE_URL=postgresql://u:p@db/x #comment\n", encoding="utf-8")
+    assert audit.database_url_from_env_file(str(plain)) == "postgresql://u:p@db/x"
+    assert audit.database_url_from_env_file(str(tmp_path / "missing.env")) is None
+    empty = tmp_path / "empty.env"
+    empty.write_text("OTHER=1\n", encoding="utf-8")
+    assert audit.database_url_from_env_file(str(empty)) is None

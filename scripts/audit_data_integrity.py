@@ -394,6 +394,32 @@ async def check_report(config, cost: float) -> list[Check]:
 # Runner
 # ---------------------------------------------------------------------------------------------
 
+def database_url_from_env_file(path: str) -> Optional[str]:
+    """Read ONLY DATABASE_URL from a .env file (the last assignment wins, like python-dotenv).
+
+    On the host machine nothing loads .env (Docker does it through env_file), so without this the
+    config silently falls back to its placeholder default URL and the login fails.
+    """
+    file = Path(path)
+    if not file.is_file():
+        return None
+    value = None
+    for line in file.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        text = line.strip().removeprefix("export ").lstrip()
+        if text.startswith("#") or "=" not in text:
+            continue
+        name, _, raw = text.partition("=")
+        if name.strip() != "DATABASE_URL":
+            continue
+        raw = raw.strip()
+        if raw[:1] in ("'", '"') and raw.count(raw[0]) >= 2:
+            raw = raw[1:raw.index(raw[0], 1)]
+        else:
+            raw = raw.split(" #", 1)[0].strip()
+        value = raw or None
+    return value
+
+
 def override_host(url: str, host: Optional[str]) -> str:
     """Return the URL with only its host replaced (user, password, port and database are kept).
 
@@ -442,7 +468,8 @@ async def main_async(args) -> int:
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=args.days)
     cost = args.cost_bps / 10_000.0
-    url = override_host(get_config().database.url, args.db_host)
+    url = os.environ.get("DATABASE_URL") or database_url_from_env_file(args.env_file) or get_config().database.url
+    url = override_host(url, args.db_host)
     dsn = url.replace("postgresql+asyncpg://", "postgresql://")
     config = ViabilityAuditConfig(database_url=url, days=args.days, cost_bps=args.cost_bps, min_sample=args.min_sample)
 
@@ -480,6 +507,7 @@ def main() -> int:
     parser.add_argument("--cost-bps", type=float, default=75.0)
     parser.add_argument("--min-sample", type=int, default=30)
     parser.add_argument("--out-dir", default="output/data_integrity")
+    parser.add_argument("--env-file", default=".env", help="file to read DATABASE_URL from when it is not in the environment")
     parser.add_argument("--db-host", default=None, help="replace only the host of the configured DATABASE_URL (e.g. localhost)")
     return asyncio.run(main_async(parser.parse_args()))
 
