@@ -103,15 +103,92 @@ def classify_movement_duplicates(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+JUMP_COLUMNS = ["ticker", "day", "previous_day", "previous_close", "close", "change", "previous_source", "source", "source_change"]
+
+
 def price_jumps(candles: pd.DataFrame, threshold: float = JUMP_THRESHOLD) -> pd.DataFrame:
-    """Daily close-to-close moves above the threshold, per ticker."""
+    """Daily close-to-close moves above the threshold, per ticker (with the source of both candles)."""
     if candles.empty:
-        return pd.DataFrame(columns=["ticker", "day", "previous_close", "close", "change"])
+        return pd.DataFrame(columns=JUMP_COLUMNS)
     frame = candles.sort_values(["ticker", "day"]).copy()
     frame["close"] = pd.to_numeric(frame["close"], errors="coerce").astype(float)   # NUMERIC arrives as Decimal
-    frame["previous_close"] = frame.groupby("ticker")["close"].shift(1)
+    if "source" not in frame.columns:
+        frame["source"] = None
+    grouped = frame.groupby("ticker")
+    frame["previous_close"] = grouped["close"].shift(1)
+    frame["previous_day"] = grouped["day"].shift(1)
+    frame["previous_source"] = grouped["source"].shift(1)
     frame["change"] = frame["close"] / frame["previous_close"] - 1.0
-    return frame[frame["change"].abs() >= threshold][["ticker", "day", "previous_close", "close", "change"]].reset_index(drop=True)
+    frame["source_change"] = frame["source"].astype(str) != frame["previous_source"].astype(str)
+    return frame[frame["change"].abs() >= threshold][JUMP_COLUMNS].reset_index(drop=True)
+
+
+def first_day_on_or_after(days: list[date], target: date) -> Optional[date]:
+    later = [day for day in days if day >= target]
+    return min(later) if later else None
+
+
+def implied_exit_close(entry_price: float, stored_return: float, decision: str) -> float:
+    """The exit price a stored directional return was computed from."""
+    ret = float(stored_return)
+    return float(entry_price) * (1.0 - ret if str(decision).upper() == "SELL" else 1.0 + ret)
+
+
+def explain_outcome_difference(entry_price: float, decided_at: datetime, decision: str, stored: float, horizon_days: int,
+                               raw_candles: pd.DataFrame, canonical_exit_day: Optional[date]) -> dict:
+    """Which stored candle (any source, any day) produced a stored outcome that no longer matches the canonical series.
+
+    raw_candles holds every 1d candle of the ticker with columns day (date), close (float), source.
+    """
+    implied = implied_exit_close(entry_price, stored, decision)
+    tolerance = max(abs(implied) * 1e-6, 1e-9)
+    hits = raw_candles[(raw_candles["close"] - implied).abs() <= tolerance] if not raw_candles.empty else raw_candles
+    if hits.empty:
+        return dict(cause="NO_CANDLE_MATCHES", used_day=None, used_source=None)
+    target_day = decided_at.astimezone(ART).date() + timedelta(days=horizon_days)
+    if canonical_exit_day is None:
+        top = hits.iloc[0]
+        return dict(cause="CANDLE_NO_LONGER_EXISTS", used_day=top["day"], used_source=top["source"])
+    top = hits.assign(_gap=hits["day"].map(lambda day: abs((day - canonical_exit_day).days))).sort_values("_gap", kind="stable").iloc[0]
+    if top["day"] == canonical_exit_day:
+        cause = "OTHER_SOURCE_SAME_DAY"
+    elif top["day"] > canonical_exit_day:
+        cause = "LATER_CANDLE_USED"        # the candle for the target day was missing when the outcome was written
+    elif top["day"] < target_day:
+        cause = "EXIT_BEFORE_TARGET"
+    else:
+        cause = "EARLIER_CANDLE_USED"
+    return dict(cause=cause, used_day=top["day"], used_source=top["source"])
+
+
+def outcomes_touching_jumps(jumps: pd.DataFrame, decisions: pd.DataFrame, days_by_ticker: dict[str, list[date]],
+                            now: datetime) -> pd.DataFrame:
+    """Stored outcomes whose exit candle is one of the two candles around a flagged price jump."""
+    columns = ["id", "ticker", "decision", "horizon", "exit_day", "stored", "jump_day", "jump_change", "source_change"]
+    if jumps.empty or decisions.empty:
+        return pd.DataFrame(columns=columns)
+    flagged: dict[str, dict[date, Any]] = {}
+    for jump in jumps.itertuples():
+        ticker = str(jump.ticker).upper()
+        for day in (pd.Timestamp(jump.day).date(), pd.Timestamp(jump.previous_day).date()):
+            flagged.setdefault(ticker, {})[day] = jump
+    rows = []
+    for _, row in decisions.iterrows():
+        ticker = str(row["ticker"]).upper()
+        if ticker not in flagged or str(row["decision"]).upper() not in ("BUY", "SELL"):
+            continue
+        for horizon in HORIZONS:
+            stored = row[f"outcome_{horizon}d"]
+            if pd.isna(stored):
+                continue
+            target = pd.Timestamp(row["decided_at"]).tz_convert(ART).date() + timedelta(days=horizon)
+            exit_day = first_day_on_or_after(days_by_ticker.get(ticker, []), target)
+            if exit_day in flagged[ticker]:
+                jump = flagged[ticker][exit_day]
+                rows.append(dict(id=row["id"], ticker=ticker, decision=row["decision"], horizon=f"{horizon}d", exit_day=str(exit_day),
+                                 stored=float(stored), jump_day=str(pd.Timestamp(jump.day).date()), jump_change=float(jump.change),
+                                 source_change=bool(jump.source_change)))
+    return pd.DataFrame(rows, columns=columns)
 
 
 CANDLE_SOURCE_PRIORITY = {"COCOS": 0, "TRADINGVIEW_BYMA": 1, "internal_snapshot": 2}
@@ -303,9 +380,11 @@ async def check_decisions_and_outcomes(conn, cutoff, now) -> list[Check]:
         checks.append(c)
         return checks
     tickers = sorted(base["ticker"].str.upper().unique())
-    candles = pick_canonical_candles(await fetch(conn, """SELECT ticker, (ts AT TIME ZONE 'UTC')::date AS day,
+    raw_candles = await fetch(conn, """SELECT ticker, (ts AT TIME ZONE 'UTC')::date AS day,
                                    close_price::float8 AS close, source, scraped_at
-                                   FROM market_candles WHERE interval = '1d' AND ticker = ANY($1::text[])""", tickers))
+                                   FROM market_candles WHERE interval = '1d' AND ticker = ANY($1::text[])""", tickers)
+    candles = pick_canonical_candles(raw_candles)
+    raw_by_ticker = {t: g[["day", "close", "source"]] for t, g in raw_candles.groupby(raw_candles["ticker"].str.upper())} if not raw_candles.empty else {}
     adjusted = await fetch(conn, """SELECT DISTINCT e.ticker FROM corporate_event_instrument_effects e
                                     JOIN corporate_events ev ON ev.id = e.event_id
                                     WHERE ev.lifecycle_status IN ('CONFIRMED','EFFECTIVE') AND ev.effective_at >= $1""", cutoff - timedelta(days=60))
@@ -327,12 +406,24 @@ async def check_decisions_and_outcomes(conn, cutoff, now) -> list[Check]:
             checked += 1
             if mine is None or abs(float(stored) - mine) > RETURN_TOLERANCE:
                 ticker = str(row["ticker"]).upper()
+                target = pd.Timestamp(row["decided_at"]).tz_convert(ART).date() + timedelta(days=horizon)
+                why = explain_outcome_difference(float(row["price_at_decision"]), pd.Timestamp(row["decided_at"]).to_pydatetime(),
+                                                 row["decision"], float(stored), horizon,
+                                                 raw_by_ticker.get(ticker, pd.DataFrame(columns=["day", "close", "source"])),
+                                                 first_day_on_or_after([day for day, _ in days], target))
                 diffs.append(dict(id=row["id"], ticker=ticker, horizon=f"{horizon}d", stored=float(stored), recomputed=mine,
                                   diff=None if mine is None else float(stored) - mine,
+                                  sign_flip=None if mine is None else (float(stored) > 0) != (mine > 0),
+                                  cause=why["cause"], used_day=why["used_day"], used_source=why["used_source"],
                                   note="ticker con evento corporativo (ajuste esperable)" if ticker in adjusted_tickers else ""))
-    unexplained = [d for d in diffs if not d["note"]]
+    unexplained = [d for d in diffs if d["cause"] == "NO_CANDLE_MATCHES" and not d["note"]]
     frame = pd.DataFrame(diffs)
     c.detail = f"{checked} outcomes comparados; {len(diffs)} difieren ({len(unexplained)} sin explicacion)"
+    if diffs:
+        size = frame["diff"].abs().dropna() * 100
+        c.detail += (" | causas: " + ", ".join(f"{k}={v}" for k, v in frame["cause"].value_counts().items())
+                     + f" | |dif| mediana={size.median():.2f}pp p95={size.quantile(0.95):.2f}pp max={size.max():.2f}pp"
+                     + f" | cambian de signo={int((frame['sign_flip'] == True).sum())}")
     finish(c, frame, warn_only=not unexplained)
     c.count = len(diffs)
     checks.append(c)
@@ -364,7 +455,7 @@ async def _candle_conflicts(conn, cutoff) -> Check:
     return finish(c, df, warn_only=True)
 
 
-async def _candle_jumps(conn, cutoff) -> Check:
+async def _candle_jumps(conn, cutoff) -> list[Check]:
     c = Check("C3", f"Daily jump >= {JUMP_THRESHOLD:.0%} with no confirmed corporate action within 5 days")
     candles = await fetch(conn, """SELECT ticker, (ts AT TIME ZONE 'UTC')::date AS day, close_price::float8 AS close, source, scraped_at
                                    FROM market_candles WHERE interval = '1d' AND ts >= $1""", cutoff - timedelta(days=60))
@@ -378,7 +469,24 @@ async def _candle_jumps(conn, cutoff) -> Check:
             known.setdefault(str(row.ticker).upper(), []).append(row.day)
         jumps = jumps[[not any(abs((pd.Timestamp(r.day).date() - d).days) <= 5 for d in known.get(str(r.ticker).upper(), []))
                        for r in jumps.itertuples()]]
-    return finish(c, jumps)
+    c = finish(c, jumps)
+    if jumps.empty:
+        return [c]
+    c.detail = (f"{len(jumps)} saltos en {jumps['ticker'].nunique()} tickers; {int(jumps['source_change'].sum())} con cambio de fuente "
+                f"entre velas consecutivas. Tickers: " + ", ".join(f"{t}:{n}" for t, n in jumps["ticker"].value_counts().head(8).items()))
+    decisions = await fetch(conn, """SELECT id, decided_at, ticker, decision, outcome_5d, outcome_10d, outcome_20d, outcome_40d
+                                     FROM decision_log WHERE decided_at >= $1""", cutoff)
+    canonical = pick_canonical_candles(candles)
+    days_by_ticker = {str(t).upper(): [pd.Timestamp(d).date() for d in g["day"]] for t, g in canonical.groupby("ticker")}
+    touched = outcomes_touching_jumps(jumps, decisions, days_by_ticker, datetime.now(timezone.utc))
+    c2 = Check("C3b", "Stored outcomes whose exit candle is one of the two candles around a flagged jump")
+    c2 = finish(c2, touched, warn_only=True)
+    if len(touched):
+        extreme = int((touched["stored"].abs() >= 0.5).sum())
+        c2.detail = (f"{len(touched)} outcomes en {touched['id'].nunique()} decisiones tocan una vela dudosa; "
+                     f"{extreme} con |outcome| >= 50%; {int(touched['source_change'].sum())} con cambio de fuente. "
+                     "Cruzar los ids contra el cohorte bot_only antes de confiar en IC/EV.")
+    return [c, c2]
 
 
 async def check_costs(conn, cutoff, model_cost: float) -> Check:

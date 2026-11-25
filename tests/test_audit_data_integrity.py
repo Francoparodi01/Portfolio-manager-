@@ -218,3 +218,106 @@ def test_one_failing_candle_query_does_not_hide_the_other_candle_checks():
             return []
     checks = asyncio.run(audit.check_candles(Conn(), NOW))
     assert {c.check_id: c.status for c in checks} == {"C1": "PASS", "C2": "PASS", "C3": "ERROR"}
+
+
+def _raw(*rows):
+    return pd.DataFrame([dict(day=date(2026, 9, d), close=close, source=source) for d, close, source in rows])
+
+
+def test_implied_exit_close_inverts_the_directional_return():
+    assert audit.implied_exit_close(100, 0.10, "BUY") == pytest.approx(110)
+    assert audit.implied_exit_close(100, 0.10, "SELL") == pytest.approx(90)
+
+
+def test_stored_outcome_made_from_another_source_on_the_same_day_is_explained():
+    decided = datetime(2026, 9, 1, 15, tzinfo=timezone.utc)                  # target day 5d = 9/6
+    raw = _raw((6, 110.0, "internal_snapshot"), (6, 111.0, "COCOS"), (7, 120.0, "COCOS"))
+    why = audit.explain_outcome_difference(100, decided, "BUY", 0.10, 5, raw, date(2026, 9, 6))
+    assert (why["cause"], why["used_source"]) == ("OTHER_SOURCE_SAME_DAY", "internal_snapshot")
+
+
+def test_stored_outcome_made_before_the_target_day_candle_existed_is_explained():
+    decided = datetime(2026, 9, 1, 15, tzinfo=timezone.utc)
+    raw = _raw((6, 111.0, "COCOS"), (8, 120.0, "COCOS"))
+    why = audit.explain_outcome_difference(100, decided, "BUY", 0.20, 5, raw, date(2026, 9, 6))
+    assert (why["cause"], why["used_day"]) == ("LATER_CANDLE_USED", date(2026, 9, 8))
+
+
+def test_stored_outcome_that_matches_no_candle_is_unexplained_and_an_exit_before_target_is_flagged():
+    decided = datetime(2026, 9, 1, 15, tzinfo=timezone.utc)
+    raw = _raw((4, 105.0, "COCOS"), (6, 111.0, "COCOS"))
+    assert audit.explain_outcome_difference(100, decided, "BUY", 0.5, 5, raw, date(2026, 9, 6))["cause"] == "NO_CANDLE_MATCHES"
+    assert audit.explain_outcome_difference(100, decided, "BUY", 0.05, 5, raw, date(2026, 9, 6))["cause"] == "EXIT_BEFORE_TARGET"
+    assert audit.explain_outcome_difference(100, decided, "BUY", 0.5, 5, raw.iloc[0:0], None)["cause"] == "NO_CANDLE_MATCHES"
+
+
+def test_jumps_report_the_source_change_between_the_two_candles():
+    candles = pd.DataFrame([dict(ticker="AOCA", day=date(2026, 6, 1), close=2400.0, source="TRADINGVIEW_BYMA"),
+                            dict(ticker="AOCA", day=date(2026, 6, 2), close=35400.0, source="COCOS"),
+                            dict(ticker="AOCA", day=date(2026, 6, 3), close=35500.0, source="COCOS")])
+    jumps = audit.price_jumps(candles)
+    assert len(jumps) == 1 and bool(jumps.loc[0, "source_change"]) and jumps.loc[0, "previous_day"] == date(2026, 6, 1)
+
+
+def test_only_outcomes_exiting_on_a_flagged_candle_are_reported():
+    jumps = pd.DataFrame([dict(ticker="BAYN", day=date(2026, 9, 6), previous_day=date(2026, 9, 5), previous_close=3800.0, close=0.01,
+                               change=-0.99, previous_source="COCOS", source="TRADINGVIEW_BYMA", source_change=True)])
+    decisions = pd.DataFrame([
+        dict(id=1, decided_at=datetime(2026, 9, 1, 15, tzinfo=timezone.utc), ticker="BAYN", decision="BUY",
+             outcome_5d=-0.99, outcome_10d=None, outcome_20d=None, outcome_40d=None),
+        dict(id=2, decided_at=datetime(2026, 8, 1, 15, tzinfo=timezone.utc), ticker="BAYN", decision="BUY",
+             outcome_5d=0.02, outcome_10d=None, outcome_20d=None, outcome_40d=None),
+        dict(id=3, decided_at=datetime(2026, 9, 1, 15, tzinfo=timezone.utc), ticker="MU", decision="BUY",
+             outcome_5d=0.02, outcome_10d=None, outcome_20d=None, outcome_40d=None)])
+    days = {"BAYN": [date(2026, 8, 6), date(2026, 9, 5), date(2026, 9, 6), date(2026, 9, 7)], "MU": [date(2026, 9, 6)]}
+    touched = audit.outcomes_touching_jumps(jumps, decisions, days, NOW)
+    assert list(touched["id"]) == [1] and bool(touched.loc[0, "source_change"])
+
+
+class _FakeConn:
+    """Routes the audit's SQL to canned rows so the DB-facing checks run end to end without a database."""
+    def __init__(self, decisions, candles):
+        self.decisions, self.candles = decisions, candles
+
+    async def fetch(self, sql, *params):
+        if "FROM decision_log" in sql:
+            return self.decisions
+        if "DISTINCT e.ticker" in sql or "corporate_event" in sql:
+            return []
+        if "FROM market_candles" in sql:
+            return self.candles
+        raise AssertionError(sql)
+
+
+def _decision(**over):
+    row = dict(id=1, decided_at=datetime(2026, 9, 1, 15, tzinfo=timezone.utc), ticker="AMD", decision="BUY", decision_type="NEW",
+               price_at_decision=100.0, outcome_5d=None, outcome_10d=None, outcome_20d=None, outcome_40d=None,
+               outcome_filled_at=None, outcome_basis="canonical_cocos")
+    row.update(over)
+    return row
+
+
+def _candle(ticker, day, close, source="COCOS"):
+    return dict(ticker=ticker, day=day, close=close, source=source, scraped_at=datetime(2026, 9, 30, tzinfo=timezone.utc))
+
+
+def test_o1_runs_end_to_end_and_names_the_candle_the_stored_outcome_came_from():
+    conn = _FakeConn([_decision(outcome_5d=0.20, outcome_filled_at=datetime(2026, 9, 9, tzinfo=timezone.utc))],
+                     [_candle("AMD", date(2026, 9, 6), 111.0), _candle("AMD", date(2026, 9, 8), 120.0)])
+    checks = {c.check_id: c for c in asyncio.run(audit.check_decisions_and_outcomes(conn, datetime(2026, 6, 1, tzinfo=timezone.utc), NOW))}
+    assert checks["O1"].status == "WARN" and "LATER_CANDLE_USED=1" in checks["O1"].detail and "cambian de signo=0" in checks["O1"].detail
+
+
+def test_o1_fails_when_no_candle_explains_the_stored_outcome():
+    conn = _FakeConn([_decision(outcome_5d=0.55, outcome_filled_at=datetime(2026, 9, 9, tzinfo=timezone.utc))],
+                     [_candle("AMD", date(2026, 9, 6), 111.0)])
+    checks = {c.check_id: c for c in asyncio.run(audit.check_decisions_and_outcomes(conn, datetime(2026, 6, 1, tzinfo=timezone.utc), NOW))}
+    assert checks["O1"].status == "FAIL" and "NO_CANDLE_MATCHES=1" in checks["O1"].detail
+
+
+def test_c3_reports_the_outcomes_that_exit_on_a_broken_candle():
+    conn = _FakeConn([_decision(ticker="BAYN", outcome_5d=-0.9999)],
+                     [_candle("BAYN", date(2026, 9, 5), 3800.0, "COCOS"), _candle("BAYN", date(2026, 9, 6), 0.01, "TRADINGVIEW_BYMA")])
+    checks = {c.check_id: c for c in asyncio.run(audit._candle_jumps(conn, datetime(2026, 6, 1, tzinfo=timezone.utc)))}
+    assert checks["C3"].status == "FAIL" and "1 saltos en 1 tickers" in checks["C3"].detail
+    assert checks["C3b"].status == "WARN" and checks["C3b"].count == 1 and "1 con cambio de fuente" in checks["C3b"].detail
