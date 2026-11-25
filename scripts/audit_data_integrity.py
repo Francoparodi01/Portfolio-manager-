@@ -108,9 +108,35 @@ def price_jumps(candles: pd.DataFrame, threshold: float = JUMP_THRESHOLD) -> pd.
     if candles.empty:
         return pd.DataFrame(columns=["ticker", "day", "previous_close", "close", "change"])
     frame = candles.sort_values(["ticker", "day"]).copy()
+    frame["close"] = pd.to_numeric(frame["close"], errors="coerce").astype(float)   # NUMERIC arrives as Decimal
     frame["previous_close"] = frame.groupby("ticker")["close"].shift(1)
     frame["change"] = frame["close"] / frame["previous_close"] - 1.0
     return frame[frame["change"].abs() >= threshold][["ticker", "day", "previous_close", "close", "change"]].reset_index(drop=True)
+
+
+CANDLE_SOURCE_PRIORITY = {"COCOS": 0, "TRADINGVIEW_BYMA": 1, "internal_snapshot": 2}
+
+
+def pick_canonical_candles(candles: pd.DataFrame) -> pd.DataFrame:
+    """One candle per ticker and day, chosen exactly like Database.get_market_candles:
+    source priority (COCOS, TRADINGVIEW_BYMA, internal_snapshot, anything else), then the latest scrape."""
+    if candles.empty:
+        return candles
+    frame = candles.copy()
+    frame["_rank"] = frame["source"].map(CANDLE_SOURCE_PRIORITY).fillna(3)
+    frame = frame.sort_values(["ticker", "day", "_rank", "scraped_at"], ascending=[True, True, True, False], kind="stable")
+    return frame.drop_duplicates(["ticker", "day"], keep="first").drop(columns="_rank").reset_index(drop=True)
+
+
+def explain_unclassified(frame: pd.DataFrame, unclassified: pd.DataFrame) -> pd.Series:
+    """Why an executed row belongs to no cohort. Only ORPHAN is a data problem: the other two
+    are exclusions the viability audit applies on purpose (to avoid counting a trade twice)."""
+    def flag(name):
+        return unclassified.get(name, pd.Series(False, index=unclassified.index)).astype("boolean").fillna(False).astype(bool)
+    reason = pd.Series("ORPHAN", index=unclassified.index)
+    reason[flag("duplicate_movement")] = "DUPLICATE_SYNTHETIC"
+    reason[flag("attributed_followed")] = "ATTRIBUTED_TO_A_PLAN"
+    return reason
 
 
 def compare_with_report(frame: pd.DataFrame, report: Any, cost: float, scope_mask) -> pd.DataFrame:
@@ -150,7 +176,9 @@ def mature_missing(decisions: pd.DataFrame, now: datetime) -> pd.DataFrame:
         missing = decisions[mature & decisions[column].isna()]
         rows.append(dict(horizon=f"{horizon}d", mature=int(mature.sum()), missing=int(len(missing)),
                          pct=round(100.0 * len(missing) / max(int(mature.sum()), 1), 1),
-                         worst_tickers=",".join(f"{t}:{c}" for t, c in missing["ticker"].value_counts().head(5).items())))
+                         worst_tickers=",".join(f"{t}:{c}" for t, c in missing["ticker"].value_counts().head(5).items()),
+                         by_basis=",".join(f"{b}:{c}" for b, c in missing.get("outcome_basis", pd.Series(dtype=object))
+                                           .fillna("NULL").value_counts().items())))
     return pd.DataFrame(rows)
 
 
@@ -262,7 +290,7 @@ async def check_decisions_and_outcomes(conn, cutoff, now) -> list[Check]:
     c = Check("D3", "Mature horizon with null outcome (coverage)")
     cov = mature_missing(decisions, now)
     c.status = "INFO"
-    c.detail = "; ".join(f"{r.horizon}: {r.missing}/{r.mature} ({r.pct}%)" for r in cov.itertuples())
+    c.detail = "; ".join(f"{r.horizon}: {r.missing}/{r.mature} ({r.pct}%) [{r.by_basis}]" for r in cov.itertuples())
     c.evidence = cov
     checks.append(c)
 
@@ -275,23 +303,21 @@ async def check_decisions_and_outcomes(conn, cutoff, now) -> list[Check]:
         checks.append(c)
         return checks
     tickers = sorted(base["ticker"].str.upper().unique())
-    candles = await fetch(conn, """SELECT ticker, (ts AT TIME ZONE 'UTC')::date AS day, close_price AS close, source
-                                   FROM market_candles WHERE interval = '1d' AND ticker = ANY($1::text[]) ORDER BY ts""", tickers)
+    candles = pick_canonical_candles(await fetch(conn, """SELECT ticker, (ts AT TIME ZONE 'UTC')::date AS day,
+                                   close_price::float8 AS close, source, scraped_at
+                                   FROM market_candles WHERE interval = '1d' AND ticker = ANY($1::text[])""", tickers))
     adjusted = await fetch(conn, """SELECT DISTINCT e.ticker FROM corporate_event_instrument_effects e
                                     JOIN corporate_events ev ON ev.id = e.event_id
                                     WHERE ev.lifecycle_status IN ('CONFIRMED','EFFECTIVE') AND ev.effective_at >= $1""", cutoff - timedelta(days=60))
     adjusted_tickers = set(adjusted["ticker"].str.upper()) if not adjusted.empty else set()
     by_ticker = {t: g for t, g in candles.groupby(candles["ticker"].str.upper())} if not candles.empty else {}
-    diffs, checked, ambiguous = [], 0, set()
+    days_by_ticker = {t: [(pd.Timestamp(day).date(), float(value)) for day, value in zip(g["day"], g["close"])]
+                      for t, g in by_ticker.items()}
+    diffs, checked = [], 0
     for _, row in base.iterrows():
-        group = by_ticker.get(str(row["ticker"]).upper())
-        if group is None:
+        days = days_by_ticker.get(str(row["ticker"]).upper())
+        if days is None:
             continue
-        # one close per day; several different closes on a day make the recomputation ambiguous
-        per_day = group.groupby("day")["close"].agg(["min", "max", "first"])
-        if (per_day["max"] - per_day["min"]).abs().max() > 1e-6:
-            ambiguous.add(str(row["ticker"]).upper())
-        days = [(pd.Timestamp(day).date(), float(value)) for day, value in per_day["first"].items()]
         for horizon in HORIZONS:
             stored = row[f"outcome_{horizon}d"]
             if pd.isna(stored):
@@ -303,8 +329,7 @@ async def check_decisions_and_outcomes(conn, cutoff, now) -> list[Check]:
                 ticker = str(row["ticker"]).upper()
                 diffs.append(dict(id=row["id"], ticker=ticker, horizon=f"{horizon}d", stored=float(stored), recomputed=mine,
                                   diff=None if mine is None else float(stored) - mine,
-                                  note="ticker con evento corporativo (ajuste esperable)" if ticker in adjusted_tickers
-                                  else ("velas ambiguas ese dia" if ticker in ambiguous else "")))
+                                  note="ticker con evento corporativo (ajuste esperable)" if ticker in adjusted_tickers else ""))
     unexplained = [d for d in diffs if not d["note"]]
     frame = pd.DataFrame(diffs)
     c.detail = f"{checked} outcomes comparados; {len(diffs)} difieren ({len(unexplained)} sin explicacion)"
@@ -315,25 +340,35 @@ async def check_decisions_and_outcomes(conn, cutoff, now) -> list[Check]:
 
 
 async def check_candles(conn, cutoff) -> list[Check]:
-    checks = []
+    return [*await guarded("C1", _candle_values(conn, cutoff)), *await guarded("C2", _candle_conflicts(conn, cutoff)),
+            *await guarded("C3", _candle_jumps(conn, cutoff))]
+
+
+async def _candle_values(conn, cutoff) -> Check:
     c = Check("C1", "Candles with impossible values (<= 0, high < low, close outside the range)")
     df = await fetch(conn, """SELECT ticker, ts, interval, open_price, high_price, low_price, close_price, source FROM market_candles
                               WHERE interval = '1d' AND ts >= $1 AND (close_price <= 0 OR high_price < low_price
                                  OR close_price > high_price * 1.0001 OR close_price < low_price * 0.9999)""", cutoff - timedelta(days=60))
-    checks.append(finish(c, df))
+    return finish(c, df)
 
+
+async def _candle_conflicts(conn, cutoff) -> Check:
     c = Check("C2", "Same ticker and day with different closes")
     df = await fetch(conn, """SELECT ticker, (ts AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS rows, MIN(close_price) AS min_close,
                                      MAX(close_price) AS max_close, ARRAY_AGG(DISTINCT source) AS sources
                               FROM market_candles WHERE interval = '1d' AND ts >= $1
                               GROUP BY ticker, (ts AT TIME ZONE 'UTC')::date
-                              HAVING COUNT(*) > 1 AND MAX(close_price) <> MIN(close_price)""", cutoff - timedelta(days=60))
-    checks.append(finish(c, df))
+                              HAVING COUNT(*) > 1 AND (MAX(close_price) - MIN(close_price)) / NULLIF(MIN(close_price), 0) > 0.001""",
+                   cutoff - timedelta(days=60))
+    c.detail = "Closes de distinta fuente que difieren > 0.1%. El sistema elige por prioridad de fuente (COCOS > TRADINGVIEW_BYMA > internal_snapshot), asi que es una advertencia, no un error."
+    return finish(c, df, warn_only=True)
 
+
+async def _candle_jumps(conn, cutoff) -> Check:
     c = Check("C3", f"Daily jump >= {JUMP_THRESHOLD:.0%} with no confirmed corporate action within 5 days")
-    candles = await fetch(conn, """SELECT ticker, (ts AT TIME ZONE 'UTC')::date AS day, close_price AS close FROM market_candles
-                                   WHERE interval = '1d' AND ts >= $1""", cutoff - timedelta(days=60))
-    jumps = price_jumps(candles)
+    candles = await fetch(conn, """SELECT ticker, (ts AT TIME ZONE 'UTC')::date AS day, close_price::float8 AS close, source, scraped_at
+                                   FROM market_candles WHERE interval = '1d' AND ts >= $1""", cutoff - timedelta(days=60))
+    jumps = price_jumps(pick_canonical_candles(candles))
     if not jumps.empty:
         events = await fetch(conn, """SELECT e.ticker, (ev.effective_at AT TIME ZONE 'UTC')::date AS day FROM corporate_event_instrument_effects e
                                       JOIN corporate_events ev ON ev.id = e.event_id
@@ -343,8 +378,7 @@ async def check_candles(conn, cutoff) -> list[Check]:
             known.setdefault(str(row.ticker).upper(), []).append(row.day)
         jumps = jumps[[not any(abs((pd.Timestamp(r.day).date() - d).days) <= 5 for d in known.get(str(r.ticker).upper(), []))
                        for r in jumps.itertuples()]]
-    checks.append(finish(c, jumps))
-    return checks
+    return finish(c, jumps)
 
 
 async def check_costs(conn, cutoff, model_cost: float) -> Check:
@@ -366,7 +400,7 @@ async def check_report(config, cost: float) -> list[Check]:
                                               load_viability_decision_log, run_viability_audit_sync)
     raw = await load_viability_decision_log(config)
     checks = []
-    c = Check("R1", "Cohorts overlap, or an executed row belongs to no cohort")
+    c = Check("R1", "Cohorts overlap, or an executed row belongs to no cohort for an unexplained reason")
     if raw.empty:
         c.status, c.detail = "INFO", "sin filas"
         return [c]
@@ -376,10 +410,19 @@ async def check_report(config, cost: float) -> list[Check]:
     status = frame["status"].fillna("").astype(str).str.upper()
     unclassified = frame[(membership == 0) & status.str.startswith("EXECUTED")]
     overlap = frame[membership > 1]
-    c.detail = ", ".join(f"{k}={int(v.sum())}" for k, v in masks.items()) + f" | superpuestas={len(overlap)} | ejecutadas sin cohorte={len(unclassified)}"
-    evidence = pd.concat([overlap.assign(problem="OVERLAP"), unclassified.assign(problem="UNCLASSIFIED")])
-    keep = [col for col in ("id", "ticker", "decision", "source", "status", "decided_at", "problem") if col in evidence.columns]
-    checks.append(finish(c, evidence[keep] if len(evidence) else None))
+    reasons = explain_unclassified(frame, unclassified)
+    breakdown = ", ".join(f"{k}={v}" for k, v in reasons.value_counts().items()) or "ninguna"
+    c.detail = (", ".join(f"{k}={int(v.sum())}" for k, v in masks.items())
+                + f" | superpuestas={len(overlap)} | ejecutadas sin cohorte: {breakdown}"
+                + " (ATTRIBUTED_TO_A_PLAN y DUPLICATE_SYNTHETIC son exclusiones intencionales)")
+    problems = pd.concat([overlap.assign(problem="OVERLAP"), unclassified[reasons == "ORPHAN"].assign(problem="ORPHAN")])
+    keep = [col for col in ("id", "ticker", "decision", "source", "status", "decided_at", "problem") if col in problems.columns]
+    checks.append(finish(c, problems[keep] if len(problems) else None))
+    if len(unclassified) and not len(problems):
+        explained = unclassified.assign(reason=reasons)
+        c.status, c.count = "INFO", int(len(explained))
+        c.evidence = explained[[col for col in ("id", "ticker", "decision", "source", "status", "decided_at", "reason") if col in explained.columns]]
+        c.sample = c.evidence.head(SAMPLE_ROWS).astype(str).to_dict("records")
 
     c = Check("R2", "/viability report differs from an independent recomputation (n, net EV, win rate, IC)")
     report = run_viability_audit_sync(raw, config)

@@ -172,3 +172,49 @@ def test_database_url_is_read_from_the_env_file_and_nothing_else(tmp_path):
     empty = tmp_path / "empty.env"
     empty.write_text("OTHER=1\n", encoding="utf-8")
     assert audit.database_url_from_env_file(str(empty)) is None
+
+
+def test_candle_choice_follows_the_systems_source_priority_then_latest_scrape():
+    candles = pd.DataFrame([
+        dict(ticker="ASTS", day=date(2026, 11, 9), close=10.0, source="TRADINGVIEW_BYMA", scraped_at=datetime(2026, 11, 9, 22, tzinfo=timezone.utc)),
+        dict(ticker="ASTS", day=date(2026, 11, 9), close=11.0, source="COCOS", scraped_at=datetime(2026, 11, 9, 20, tzinfo=timezone.utc)),
+        dict(ticker="ASTS", day=date(2026, 11, 9), close=12.0, source="COCOS", scraped_at=datetime(2026, 11, 9, 23, tzinfo=timezone.utc)),
+        dict(ticker="ASTS", day=date(2026, 11, 10), close=13.0, source="OTHER", scraped_at=datetime(2026, 11, 10, 20, tzinfo=timezone.utc)),
+        dict(ticker="ASTS", day=date(2026, 11, 10), close=14.0, source="internal_snapshot", scraped_at=datetime(2026, 11, 10, 19, tzinfo=timezone.utc)),
+    ])
+    chosen = audit.pick_canonical_candles(candles).set_index("day")["close"].to_dict()
+    assert chosen == {date(2026, 11, 9): 12.0, date(2026, 11, 10): 14.0}
+
+
+def test_price_jumps_accepts_decimal_closes_as_returned_by_numeric_columns():
+    from decimal import Decimal
+    candles = pd.DataFrame([dict(ticker="YPFD", day=date(2026, 8, 3), close=Decimal("100.0")),
+                            dict(ticker="YPFD", day=date(2026, 8, 4), close=Decimal("10.0"))])
+    assert list(audit.price_jumps(candles)["ticker"]) == ["YPFD"]
+
+
+def test_only_orphans_are_unexplained_when_an_executed_row_has_no_cohort():
+    rows = pd.DataFrame([dict(attributed_followed=True, duplicate_movement=False),
+                         dict(attributed_followed=False, duplicate_movement=True),
+                         dict(attributed_followed=False, duplicate_movement=False),
+                         dict(attributed_followed=True, duplicate_movement=True)])
+    assert list(audit.explain_unclassified(rows, rows)) == ["ATTRIBUTED_TO_A_PLAN", "DUPLICATE_SYNTHETIC", "ORPHAN", "ATTRIBUTED_TO_A_PLAN"]
+
+
+def test_coverage_reports_missing_outcomes_by_outcome_basis():
+    decisions = pd.DataFrame([
+        dict(decided_at=datetime(2026, 9, 1, 15, tzinfo=timezone.utc), ticker="AMD", outcome_basis="legacy_external", outcome_5d=None, outcome_10d=None, outcome_20d=None, outcome_40d=None),
+        dict(decided_at=datetime(2026, 9, 2, 15, tzinfo=timezone.utc), ticker="MU", outcome_basis=None, outcome_5d=None, outcome_10d=None, outcome_20d=None, outcome_40d=None),
+    ])
+    row = audit.mature_missing(decisions, NOW).set_index("horizon").loc["5d"]
+    assert set(row["by_basis"].split(",")) == {"legacy_external:1", "NULL:1"}
+
+
+def test_one_failing_candle_query_does_not_hide_the_other_candle_checks():
+    class Conn:
+        async def fetch(self, sql, *params):
+            if "scraped_at" in sql:
+                raise TypeError("boom")
+            return []
+    checks = asyncio.run(audit.check_candles(Conn(), NOW))
+    assert {c.check_id: c.status for c in checks} == {"C1": "PASS", "C2": "PASS", "C3": "ERROR"}
