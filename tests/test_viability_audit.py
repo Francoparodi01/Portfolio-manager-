@@ -1,9 +1,13 @@
 import asyncio
 
 import pandas as pd
+import pytest
 
 from src.analysis.viability_audit import (
     ViabilityAuditConfig,
+    _build_verdict,
+    _max_drawdown,
+    ViabilityGate,
     load_viability_decision_log,
     render_viability_chart,
     render_viability_audit,
@@ -369,3 +373,72 @@ def test_viability_loader_uses_fill_lineage_to_exclude_followed_manual_rows(monk
         and "bf.external_fill_id = movement.external_movement_id" in statement
         for statement in conn.statements
     )
+
+
+def _negative_ic_frame(n=6):
+    rows = []
+    for i in range(n):  # EV positive, but score is anti-correlated with the outcome -> only the IC gate fails
+        rows.append(_row(source="execution_plan", status="EXECUTED", final_score=0.05 + 0.02 * i,
+                         outcome_5d=0.06 - 0.01 * i))
+    return pd.DataFrame(rows)
+
+
+def test_verdict_names_the_failed_gate_and_negative_verdict_is_not_green():
+    report = run_viability_audit_sync(
+        _negative_ic_frame(),
+        ViabilityAuditConfig(database_url="postgresql://unused", horizons=("5d",), min_sample=5, cost_bps=50),
+    )
+    failed = [g.name for g in report.gates if g.passed is False]
+    assert failed == ["IC bot-only 5d positivo"]
+    assert report.verdict.startswith("VIABLE COMO SISTEMA, NO VIABLE PARA ESCALAR CAPITAL")
+    assert "IC bot-only 5d positivo" in report.verdict
+    assert "EV" not in report.verdict.split(":", 1)[1] and "drawdown" not in report.verdict.lower()
+    rendered = render_viability_audit(report)
+    assert "✅" not in rendered.split("<b>Resultados netos")[0]
+    assert "🔴" in rendered.split("<b>Resultados netos")[0]
+
+
+def test_green_icon_only_for_a_fully_passing_verdict():
+    rows = [_row(source="execution_plan", status="EXECUTED", final_score=0.05 + 0.02 * i, outcome_5d=0.02 + 0.01 * i)
+            for i in range(6)]
+    report = run_viability_audit_sync(
+        pd.DataFrame(rows),
+        ViabilityAuditConfig(database_url="postgresql://unused", horizons=("5d",), min_sample=5, cost_bps=50),
+    )
+    head = render_viability_audit(report).split("<b>Resultados netos")[0]
+    assert report.verdict.startswith("VIABLE") and "NO VIABLE" not in report.verdict
+    assert "✅" in head or "🟡" in head
+
+
+def test_verdict_lists_every_failed_gate():
+    gates = [ViabilityGate("muestra ok", True, ""), ViabilityGate("IC x", False, ""), ViabilityGate("EV y", False, "")]
+    assert _build_verdict(gates).endswith("no cumple IC x; EV y.")
+
+
+def test_drawdown_uses_fixed_position_fraction_instead_of_compounding_the_whole_account():
+    returns = [-0.05] * 100
+    assert _max_drawdown(returns) < -0.99                      # old behaviour: whole account each trade
+    sized = _max_drawdown(returns, 0.10)
+    assert -0.45 < sized < -0.35                                # 0.995 ** 100 - 1 = -39.4%
+    assert _max_drawdown([0.02, -0.10, 0.03], 0.10) == pytest.approx(0.99 * 1.002 / 1.002 - 1)
+
+
+def test_drawdown_follows_chronological_order_not_row_order():
+    chronological = [("2026-07-01", 0.20), ("2026-07-02", -0.30), ("2026-07-03", -0.30), ("2026-07-04", 0.30)]
+    shuffled = [chronological[2], chronological[0], chronological[3], chronological[1]]
+
+    def drawdown(order):
+        rows = []
+        for day, outcome in order:
+            row = _row(source="execution_plan", status="EXECUTED", final_score=0.1, outcome_5d=outcome)
+            row["decided_at"] = day
+            rows.append(row)
+        return run_viability_audit_sync(
+            pd.DataFrame(rows),
+            ViabilityAuditConfig(database_url="postgresql://unused", horizons=("5d",), min_sample=1, cost_bps=0),
+        ).metrics["bot_only"]["5d"].max_drawdown
+
+    expected = _max_drawdown([value for _, value in chronological], 0.10)
+    assert expected < 0
+    assert drawdown(chronological) == pytest.approx(expected)
+    assert drawdown(shuffled) == pytest.approx(expected)

@@ -42,6 +42,8 @@ class ViabilityAuditConfig:
     cost_bps: float = 75.0
     min_sample: int = 30
     horizons: tuple[str, ...] = DEFAULT_HORIZONS
+    # Fraction of equity committed to each trade when building the drawdown curve.
+    position_fraction: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -361,6 +363,7 @@ def run_viability_audit_sync(
                 scope=scope,
                 horizon=horizon,
                 cost=cost,
+                position_fraction=config.position_fraction,
             )
 
     warnings = _build_warnings(df, config)
@@ -384,7 +387,7 @@ def run_viability_audit_sync(
 def render_viability_audit(report: ViabilityAuditReport) -> str:
     cost = float(report.cost_bps) / 10_000.0
     upper_verdict = report.verdict.upper()
-    if "VIABLE PARA" in upper_verdict:
+    if upper_verdict.startswith("VIABLE PARA 180D"):
         verdict_icon = "✅"
     elif "EDGE BOT NO VALIDADO" in upper_verdict or "EDGE BOT PARCIAL" in upper_verdict:
         verdict_icon = "🟡"
@@ -1010,6 +1013,7 @@ def _compute_horizon_metrics(
     scope: str,
     horizon: str,
     cost: float,
+    position_fraction: float = 1.0,
 ) -> HorizonMetrics:
     outcome_col = f"effective_outcome_{horizon}"
     if frame.empty or outcome_col not in frame.columns:
@@ -1022,6 +1026,11 @@ def _compute_horizon_metrics(
 
     if data.empty:
         return _empty_horizon(scope, horizon)
+
+    if "decided_at" in data.columns:
+        # The drawdown path must follow time, not database/row order.
+        data["_decided_at"] = pd.to_datetime(data["decided_at"], errors="coerce", utc=True)
+        data = data.sort_values("_decided_at", kind="stable", na_position="last")
 
     data["_net"] = data["_gross"] - cost
     net = data["_net"].astype(float)
@@ -1048,7 +1057,7 @@ def _compute_horizon_metrics(
         gross_ev=gross_ev,
         net_ev=net_ev,
         profit_factor=profit_factor,
-        max_drawdown=_max_drawdown(net.tolist()),
+        max_drawdown=_max_drawdown(net.tolist(), position_fraction),
         ic_final=_corr(data.get("aligned_final_score"), gross),
         ic_trend=_corr(data.get("aligned_trend_score"), gross),
         ic_reversion=_corr(data.get("aligned_reversion_score"), gross),
@@ -1092,7 +1101,7 @@ def _build_gates(
             ViabilityGate(
                 "drawdown bot-only menor que manual-only 5d",
                 _drawdown_better(bot5.max_drawdown, manual5.max_drawdown),
-                f"bot={_fmt_pct(bot5.max_drawdown)} vs manual={_fmt_pct(manual5.max_drawdown)}",
+                f"bot={_fmt_pct(bot5.max_drawdown)} (n={bot5.n}) vs manual={_fmt_pct(manual5.max_drawdown)} (n={manual5.n})",
             )
         )
     else:
@@ -1115,7 +1124,8 @@ def _build_verdict(gates: list[ViabilityGate]) -> str:
         return "VIABLE COMO PROYECTO, EDGE BOT NO VALIDADO: falta muestra bot-only cerrada."
 
     if any(g.passed is False for g in gates):
-        return "VIABLE COMO SISTEMA, NO VIABLE PARA ESCALAR CAPITAL: no supera IC/EV/drawdown despues de costos."
+        failed = "; ".join(g.name for g in gates if g.passed is False)
+        return f"VIABLE COMO SISTEMA, NO VIABLE PARA ESCALAR CAPITAL: no cumple {failed}."
 
     if any(g.passed is None for g in gates):
         return "VIABLE COMO PROYECTO, EDGE BOT PARCIAL: falta comparacion manual madura."
@@ -1239,7 +1249,12 @@ def _corr(x, y) -> Optional[float]:
         return None
 
 
-def _max_drawdown(returns: list[float]) -> Optional[float]:
+def _max_drawdown(returns: list[float], position_fraction: float = 1.0) -> Optional[float]:
+    """Max drawdown of a chronological curve that commits `position_fraction` of equity per trade.
+
+    With 1.0 every trade compounds the whole account, which turns a long series of overlapping
+    trades into a meaningless -99%. Overlap between horizons is still not modelled.
+    """
     if not returns:
         return None
     equity = 1.0
@@ -1248,7 +1263,7 @@ def _max_drawdown(returns: list[float]) -> Optional[float]:
     for value in returns:
         if value is None or not math.isfinite(float(value)):
             continue
-        equity *= max(0.0, 1.0 + float(value))
+        equity *= max(0.0, 1.0 + position_fraction * float(value))
         peak = max(peak, equity)
         if peak > 0:
             worst = min(worst, equity / peak - 1.0)
