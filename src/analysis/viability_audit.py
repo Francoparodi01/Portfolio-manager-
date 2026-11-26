@@ -378,7 +378,8 @@ async def load_benchmark_candles(config: ViabilityAuditConfig) -> list[tuple[dat
                   AND close_price IS NOT NULL AND close_price > 0
             ), ranked AS (
                 SELECT ts, close_price, venue, long_ticker,
-                    COUNT(DISTINCT venue) OVER () AS venues,
+                    -- Postgres has no DISTINCT inside window functions.
+                    (SELECT COUNT(DISTINCT venue) FROM candidates) AS venues,
                     ROW_NUMBER() OVER (
                         PARTITION BY date_trunc('day', ts AT TIME ZONE 'UTC')
                         ORDER BY CASE source WHEN 'COCOS' THEN 0 WHEN 'TRADINGVIEW_BYMA' THEN 1
