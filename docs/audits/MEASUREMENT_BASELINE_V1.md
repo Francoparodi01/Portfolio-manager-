@@ -231,3 +231,38 @@ El empaquetador reproduce **esta publicación fechada** usando los nombres de ar
 Validación: **20 tests sobre fixtures sintéticos y archivos temporales aislados**, sin conexiones ni migraciones. Cubren precisión decimal, tipos JSON, UTC, NULL/escapes COPY, CRC/truncamiento, rechazos de sintaxis no soportada, separación de propietarios, colisiones de claves, cambios de contenido, outputs inmutables, integridad de fingerprints, valuación con faltantes/FX y schema con identificadores entre comillas. Además se ejecutaron las lecturas reales y se reprodujo exactamente QEEF original. No se declara la suite completa del repositorio verde.
 
 Se publican solo diagnóstico, pruebas y documentación. **Sin cambios a scoring, optimizer, planner, activaciones shadow, configuración operativa ni PR #25; sin migraciones operativas, órdenes, merge o deploy.**
+
+## 10. Revisión documental posterior al merge — 16/10/2026
+
+**Esta sección es un anexo, no una segunda captura de datos.** El contenido y los cortes de las secciones 1–9 permanecen congelados como evidencia de la auditoría mergeada en el PR #26 (merge UTC: 2026-10-16 04:40:01). Esta revisión se efectúa mediante acceso de lectura al repositorio GitHub y a su recibo público. Ningún contador histórico anterior se actualiza o extrapola.
+
+### Fuentes accesibles en esta revisión
+
+| Fuente | Verificación realizada aquí | Restricción |
+|---|---|---|
+| GitHub `main`, documentos QEEF, `db.py`, migraciones y scripts de auditoría | **VERIFIED** para contenido de repositorio y existencia de archivos | El código no prueba que un proceso o migración esté activo en producción |
+| `docs/audits/evidence/measurement-baseline-v1.json` | **VERIFIED** para la lectura de su contenido publicado; controles internos reproducibles con el nuevo script | Agregados y hashes publicados no sustituyen datos privados ni prueba de procedencia |
+| PostgreSQL operativo y PostgreSQL antiguo | **NO VERIFICADA EN ESTA REVISIÓN** | Los accesos consignados en sección 2 son resultados del PR #26, no conexiones nuevas |
+| Supabase live | **NO VERIFICADA EN ESTA REVISIÓN** | Continúa sin lectura independiente que cierre origen y corte; el error XX000 corresponde al intento histórico |
+| Backup `db_cluster-09-10-2026@17-43-09.backup.gz` y capturas privadas | **NO VERIFICADA EN ESTA REVISIÓN** | Se verifican los metadatos publicados, no se reabre el archivo privado ni se valida nuevamente su CRC/hash |
+| Extracto original, API del broker y sus comisiones | **NO VERIFICADA EN ESTA REVISIÓN** | Las filas `broker_fills`/`broker_movements` persistidas son fuentes secundarias, no un ledger externo certificado |
+
+### Diagnóstico conservador
+
+- **VERIFIED:** integridad lógica de los conteos del recibo público y código/documentación inspeccionados, dentro del alcance estático; NO implica PnL VERIFIED.
+- **PARTIAL:** valuación por posición, snapshots, cantidades y relojes expuestos en la evidencia agregada. Los 85 residuales de cartera y 42 discrepancias en aritmética de fills siguen pendientes de fuente independiente.
+- **RECOVERABLE:** versiones y cinco claves históricas conservadas en backup/capturas, **según la auditoría previa**; no se han recuperado datos nuevos aquí.
+- **NOT_IDENTIFIABLE:** PnL neto, alpha, atribución de movimientos sin owner, fees ausentes y equivalencia causal de decisiones/ejecuciones con estas fuentes.
+
+Persisten además un riesgo de implementación documentalmente comprobable: `_portfolio_observation_times` en `src/collector/db.py` consulta snapshots sin restringir por `owner_chat_id`; no prueba contaminación de ningún registro concreto. No se modifica ese flujo operativo en este PR.
+
+### Reproducción adicional, sin base de datos
+
+```powershell
+python scripts/verify_measurement_receipt.py --check-code
+python -m pytest tests/test_verify_measurement_receipt.py -q --override-ini addopts=''
+```
+
+El primer comando contrasta el recibo público congelado contra sus invariantes: 59 tablas, claves compartidas/ausentes, diferencias de contenido, duplicados por claves declaradas, cambios de clase owner y carácter read-only reportado. `--check-code` compara los hashes SHA256 del código auditado en el checkout. **Solo valida consistencia del recibo y correspondencia de archivos; no recalcula la base operativa ni autentica la fuente privada.** El segundo comando usa exclusivamente fixtures sintéticos.
+
+**Prioridad para la Fase 2:** MB01 (extracto independiente del broker, comisiones, flujos y apertura/cierre), MB02 (enlaces de owner e identidades), MB04 (cierres de posiciones/caja), MB03/MB05 (versionado y PIT de mercado). La publicación de rentabilidad neta queda bloqueada hasta certificar al menos una ventana contable acotada. Sin migraciones, sin recomputación histórica, sin cambios de estrategia y sin merge autorizado de esta revisión.
