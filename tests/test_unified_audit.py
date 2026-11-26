@@ -92,3 +92,40 @@ def test_dedupe_keeps_latest_row_per_ticker_side_day():
         }
     )
     assert sorted(dedupe_intentions(frame)["id"].tolist()) == [2, 3, 4]
+
+
+def test_bot_split_by_side_weeks_and_recent_window():
+    frame = _frame()
+    report = compute_unified_audit(frame, _config(), health=_health())
+    assert report.bot_sides["BUY"].n == 80 and report.bot_sides["SELL"].n == 0
+    assert report.bot_weeks["weeks"] >= 8
+    assert 0 < report.bot_weeks["top2_share"] < 1
+    text = render_unified_audit(report)
+    assert "2b · Bot ejecutado por lado" in text and "Semanas:" in text
+    assert validate_telegram_html(text)[0] is True and len(text) < 4096
+
+
+def test_recent_hits_counts_only_the_window():
+    from datetime import timedelta
+
+    from src.analysis.unified_audit import recent_hits
+
+    now = pd.Timestamp.now(tz="UTC")
+    bot = pd.DataFrame(
+        {
+            "decided_at": [now - timedelta(days=d) for d in (5, 20, 40, 90)],
+            "effective_outcome_5d": [0.05, 0.005, -0.02, 0.10],
+        }
+    )
+    hits = recent_hits(bot, cost=0.0075, days=60)
+    # 0.5% gross is a gross hit but a net loss after the 0.75% cost; the 90-day-old trade is out.
+    assert (hits["n"], hits["gross_wins"], hits["net_wins"]) == (3, 2, 1)
+
+
+def test_concentrated_result_is_flagged():
+    from src.analysis.unified_audit import weekly_concentration
+
+    days = pd.date_range("2026-09-01", periods=10, freq="7D", tz="UTC")
+    bot = pd.DataFrame({"decided_at": days, "effective_outcome_5d": [0.2, 0.15] + [0.0] * 8})
+    weeks = weekly_concentration(bot, cost=0.0075)
+    assert weeks["top2_share"] > 1  # the other weeks lose the cost: the best two carry everything
