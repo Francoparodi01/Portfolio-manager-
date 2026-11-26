@@ -253,8 +253,10 @@ def test_metadata_known_for_one_row_does_not_fill_unknown_rows():
     assert f.attrs["series_identity"]["volume_unit"] is None
 
 
-def test_undefined_rsi_is_not_fabricated_oversold_zero():
+def test_zero_loss_rsi_is_overbought_not_fabricated_oversold_zero():
     f = frame()
     f["Close"] = np.arange(260) + 100.
     f["Open"], f["High"], f["Low"] = f.Close, f.Close+2, f.Close-2
-    assert compute_indicators(f, "TEST").rsi_14 is None
+    # A complete rising window is defined by the zero-loss boundary. Missing
+    # lookback still stays unknown; it is covered separately in the RSI suite.
+    assert compute_indicators(f, "TEST").rsi_14 == 100.0

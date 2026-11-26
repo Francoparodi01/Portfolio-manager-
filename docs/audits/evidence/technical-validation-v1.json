@@ -1,0 +1,319 @@
+{
+  "ci_validation": {
+    "baseline_commit": "1687cdcce50895a9dfacb6dae04188fd8d8d5626",
+    "meaning": "Regression gate passes; six baseline failures remain. Four strict xfails expose documented additional defects. Later report-only commit does not change validated code.",
+    "original": {
+      "baseline_failed": 6,
+      "baseline_passed": 938,
+      "candidate_failed": 7,
+      "candidate_passed": 946,
+      "commit": "935f7b156fccad5d88a0c4968188c858f003a299",
+      "conclusion": "failure",
+      "job_id": 117804866008,
+      "new_failure": "tests/test_contextual_e1.py::test_undefined_rsi_is_not_fabricated_oversold_zero",
+      "new_failures": 1,
+      "run_id": 39171341381
+    },
+    "validated_code": {
+      "baseline_failed": 6,
+      "baseline_passed": 938,
+      "baseline_skipped": 27,
+      "candidate_failed": 6,
+      "candidate_passed": 1006,
+      "candidate_skipped": 27,
+      "candidate_xfailed": 4,
+      "commit": "63a8c872ba294500be4d607f8628c37e7f528449",
+      "conclusion": "success",
+      "job_id": 117853032444,
+      "new_failures": 0,
+      "pandas": "2.3.3",
+      "python": "3.12.15",
+      "run_id": 39187543576,
+      "structural_passed": 37
+    }
+  },
+  "code_sha256_utf8_lf": {
+    "scripts/audit_technical_validation.py": "42bd796765df41d5e38f417b00948a528704440cf78397fbe3fb2c7283480bb3",
+    "scripts/technical_reference.py": "1cdc9b32ce70716cd3816d1dbd954b71ca96e60a797689fc07514e6c3a344f81"
+  },
+  "cohorts": {
+    "BACKUP_LAST_260_BY_SERIES": {
+      "changes": {
+        "overbought": {
+          "frames": 0,
+          "tickers": []
+        },
+        "regime": {
+          "frames": 0,
+          "tickers": []
+        },
+        "rsi": {
+          "frames": 8,
+          "tickers": [
+            "AOCA",
+            "BAYN",
+            "BRFS",
+            "DESP",
+            "FMCC",
+            "WBA",
+            "WBO"
+          ]
+        },
+        "score_raw": {
+          "frames": 0,
+          "tickers": []
+        },
+        "signal": {
+          "frames": 0,
+          "tickers": []
+        }
+      },
+      "eligible_frames": 638,
+      "eligible_tickers": 357,
+      "excluded_frames": 235,
+      "excluded_reasons": {
+        "INSUFFICIENT_LOOKBACK": 183,
+        "PRICE_MISSING_NONFINITE_OR_NONPOSITIVE|IMPOSSIBLE_OHLC": 52
+      },
+      "first_endpoint": "2011-03-15 14:00:00+00:00",
+      "frames": 873,
+      "last_endpoint": "2026-10-02 13:30:00+00:00",
+      "productive_frame_digest_matches": 0,
+      "reference_failures": 0,
+      "screener_rsi_differs": 638,
+      "screener_vs_corrected_rsi_differs": 638,
+      "signal_transitions": {},
+      "unique_tickers": 402
+    },
+    "LINKED_CONTEXTUAL_ASSET": {
+      "changes": {
+        "overbought": {
+          "frames": 0,
+          "tickers": []
+        },
+        "regime": {
+          "frames": 0,
+          "tickers": []
+        },
+        "rsi": {
+          "frames": 0,
+          "tickers": []
+        },
+        "score_raw": {
+          "frames": 0,
+          "tickers": []
+        },
+        "signal": {
+          "frames": 0,
+          "tickers": []
+        }
+      },
+      "eligible_frames": 105,
+      "eligible_tickers": 12,
+      "excluded_frames": 0,
+      "excluded_reasons": {},
+      "first_endpoint": "2026-10-06 13:30:00+00:00",
+      "frames": 105,
+      "last_endpoint": "2026-10-09 13:30:00+00:00",
+      "productive_frame_digest_matches": 0,
+      "reference_failures": 0,
+      "screener_rsi_differs": 105,
+      "screener_vs_corrected_rsi_differs": 105,
+      "signal_transitions": {},
+      "unique_tickers": 12
+    }
+  },
+  "comparison_private_sha256": "470fade57d257ef204bc2f37bcf19f5541e01d54cc432fd155c1c8fb31d2d070",
+  "context_capture_sha256": "bc28c4a7e3bd3671e6ea9037fb1a57cc00e1955f7903bddcca6746d7ff92ab91",
+  "finite_numeric_checks": {
+    "atr_14": 743,
+    "bb_lower": 743,
+    "bb_middle": 743,
+    "bb_upper": 743,
+    "ema_12": 743,
+    "ema_26": 743,
+    "macd_hist": 743,
+    "macd_hist_prev": 743,
+    "macd_line": 743,
+    "macd_signal": 743,
+    "obv": 469,
+    "obv_sma20": 469,
+    "rsi_14": 743,
+    "sma_20": 743,
+    "sma_200": 437,
+    "sma_50": 743,
+    "vol_ratio": 469
+  },
+  "historical_sensitivity": {
+    "changes": {
+      "overbought": {
+        "endpoints": 2,
+        "tickers": [
+          "FMCC",
+          "IBB"
+        ]
+      },
+      "regime": {
+        "endpoints": 0,
+        "tickers": []
+      },
+      "rsi": {
+        "endpoints": 859,
+        "tickers": [
+          "AOCA",
+          "BAYN",
+          "BRFS",
+          "DESP",
+          "FMCC",
+          "IBB",
+          "WBA",
+          "WBO"
+        ]
+      },
+      "score_raw": {
+        "endpoints": 44,
+        "tickers": [
+          "FMCC",
+          "IBB"
+        ]
+      },
+      "signal": {
+        "endpoints": 14,
+        "tickers": [
+          "FMCC"
+        ]
+      }
+    },
+    "endpoints": 75840,
+    "rsi_to_100": 44,
+    "rsi_to_50": 815,
+    "scope": "retrospective prefixes of eligible backup windows; not historical decisions or PIT backtest",
+    "signal_transitions": {
+      "BUY -> HOLD": 14
+    },
+    "unique_tickers": 357
+  },
+  "independent_checks": {
+    "atr_14": 743,
+    "bb_lower": 743,
+    "bb_middle": 743,
+    "bb_upper": 743,
+    "ema_12": 743,
+    "ema_26": 743,
+    "macd_hist": 743,
+    "macd_hist_prev": 743,
+    "macd_line": 743,
+    "macd_signal": 743,
+    "obv": 743,
+    "obv_sma20": 743,
+    "rsi_14": 743,
+    "sma_20": 743,
+    "sma_200": 743,
+    "sma_50": 743,
+    "vol_ratio": 743
+  },
+  "local_test_evidence": {
+    "dependency_isolation": "PyPortfolioOpt 1.6.0 and cvxpy 1.7.5 installed only under ignored outputs/technical-validation/test-deps; no operational environment changed",
+    "focused-v1.xml": {
+      "sha256": "3f8e1775745f816aacd6777aad73f28ebb6c2005861e2857679b96b7f453a6e0",
+      "suites": [
+        {
+          "errors": "0",
+          "failures": "0",
+          "name": "pytest",
+          "skipped": "4",
+          "tests": "126"
+        }
+      ]
+    },
+    "known_unfixed_expectations": [
+      "TV1-01",
+      "TV1-02",
+      "TV1-03",
+      "TV1-04"
+    ],
+    "structural-v2.xml": {
+      "sha256": "7c42dc96a2a17150b077be28f72027e1093afbe2455690e4b4a8ec79038237f8",
+      "suites": [
+        {
+          "errors": "0",
+          "failures": "0",
+          "name": "pytest",
+          "skipped": "0",
+          "tests": "37"
+        }
+      ]
+    }
+  },
+  "market_manifest": {
+    "extraction_changes": "NONE; COPY field escaping decoded; original values retained",
+    "input_sha256": "901df029a557ba9147be00e4317e6e334d7579592525e5f7e44176e8e3d41579",
+    "output_sha256": "165df49d0cce3acafceaf9f7c40fb9228ae06a7713fca59f479b10a1c84ae4b7",
+    "rows": 252085,
+    "schema": "technical-frozen-market-v1",
+    "source_interval_counts": {
+      "COCOS|1d": 33401,
+      "TRADINGVIEW_BYMA|1d": 109584,
+      "YAHOO_BYMA|1d": 84673,
+      "internal_snapshot|1d": 24427
+    },
+    "sql_executed": false
+  },
+  "maximum_absolute_error": {
+    "atr_14": 0.0,
+    "bb_lower": 1.076841726899147e-09,
+    "bb_middle": 0.0,
+    "bb_upper": 1.076841726899147e-09,
+    "ema_12": 0.0,
+    "ema_26": 0.0,
+    "macd_hist": 0.0,
+    "macd_hist_prev": 0.0,
+    "macd_line": 0.0,
+    "macd_signal": 0.0,
+    "obv": 0.0,
+    "obv_sma20": 0.0,
+    "rsi_14": 1.4210854715202004e-14,
+    "sma_20": 0.0,
+    "sma_200": 0.0,
+    "sma_50": 7.105427357601002e-15,
+    "vol_ratio": 0.0
+  },
+  "original_productive_indicator_coverage": {
+    "finite_original_rsi": 105,
+    "payloads": 105
+  },
+  "radar_final_classification_and_ranking": "NOT_EVALUABLE_MISSING_FULL_FROZEN_CONTEXT",
+  "reproducibility": {
+    "files": {
+      "comparison-private.json": {
+        "byte_identical": true,
+        "sha256": "470fade57d257ef204bc2f37bcf19f5541e01d54cc432fd155c1c8fb31d2d070"
+      },
+      "sensitivity-private.json": {
+        "byte_identical": true,
+        "sha256": "7261c71e72f3c17a632079e62cebb2ed53ab306110b87e8488f13b732fe3c9f5"
+      },
+      "summary.json": {
+        "byte_identical": true,
+        "sha256": "3ab34440d46a89df617646f9e69599afb946e99933b7641c3626f1a8e804265a"
+      }
+    },
+    "runs": [
+      "comparison-v2",
+      "replay-v2"
+    ]
+  },
+  "runtime": {
+    "pandas": "2.3.3",
+    "python": "3.13.7"
+  },
+  "schema": "technical-validation-v1",
+  "scope": "Offline technical signal projections; no stored decisions recalculated or overwritten",
+  "sensitivity_private_sha256": "7261c71e72f3c17a632079e62cebb2ed53ab306110b87e8488f13b732fe3c9f5",
+  "versions": {
+    "base_commit": "1687cdcce50895a9dfacb6dae04188fd8d8d5626",
+    "base_technical_sha256_utf8_lf": "0eac07c865fbb5eef8407eec85ecc624b03710082d80d84195491938a111d461",
+    "fix_commit": "935f7b156fccad5d88a0c4968188c858f003a299",
+    "fix_technical_sha256_utf8_lf": "8e8ad1aac5786f6bdf379f0583563455a07f029b1095058ad8d14e6a5e837d70"
+  }
+}
