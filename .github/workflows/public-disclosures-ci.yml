@@ -1,0 +1,42 @@
+name: Public disclosures MVP
+
+on:
+  pull_request:
+    paths:
+      - "src/analysis/public_disclosures.py"
+      - "src/monitor/disclosures.py"
+      - "src/monitor/api.py"
+      - "scripts/run_public_disclosure_monitor.py"
+      - "tests/test_public_disclosures.py"
+      - "frontend/**"
+      - ".github/workflows/public-disclosures-ci.yml"
+  push:
+    branches:
+      - "feature/public-disclosures-monitor-v1"
+
+jobs:
+  parser-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test runner
+        run: python -m pip install pytest
+      - name: Check SEC parser contracts (synthetic fixtures)
+        run: python -m pytest -q tests/test_public_disclosures.py
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Build frontend
+        run: npm run build --prefix frontend
