@@ -50,6 +50,7 @@ tests/*
 !tests/test_confidence_audit_counts.py
 !tests/test_rules_freeze.py
 !tests/test_unified_audit.py
+!tests/test_shadow_portfolio.py
 !tests/test_technical_desk_pilot_protocol.py
 !tests/test_technical_desk_evidence.py
 !tests/test_technical_desk_stage0c.py
