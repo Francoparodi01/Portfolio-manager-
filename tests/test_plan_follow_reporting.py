@@ -123,3 +123,49 @@ def test_decision_ledger_renderer_is_compact_and_scope_explicit():
     assert "TEÓRICO" in report
     assert "Bruto = antes de costos" in report
     assert validate_telegram_html(report)[0] is True
+
+
+def test_plan_level_bot_vs_human_does_not_add_up_repeated_plans():
+    from datetime import datetime, timezone
+
+    from src.analysis.decision_ledger import _plan_level_summary
+
+    def plan(hour, ticker, delta, day=25):
+        return {
+            "decided_at": datetime(2026, 11, day, hour, tzinfo=timezone.utc),
+            "ticker": ticker,
+            "decision": "SELL",
+            "human_vs_bot_5d_ars": delta,
+        }
+
+    plans = [plan(17, "SPCX", 100_000), plan(19, "SPCX", 100_000), plan(19, "GDX", -20_000),
+             plan(19, "GOOGL", 30_000, day=24)]
+    summary = _plan_level_summary(plans)
+    # The two SPCX plans of the same day are the same intent with the same human fill.
+    assert summary["raw"] == 4
+    assert summary["dedup_closed"] == 3
+    assert summary["median_delta_ars"] == 30_000
+    assert abs(summary["human_better_share"] - 2 / 3) < 1e-9
+
+
+def test_swap_highlights_rank_every_swap_not_only_displayed_rows():
+    from src.analysis.decision_ledger import _swap_highlights, render_decision_ledger
+
+    radar = [{"ticker": f"T{i}", "edge_vs": "MSFT", "swap_alpha_5d": a}
+             for i, a in enumerate([0.084, 0.057, 0.01, -0.03, -0.12])]
+    highlights = _swap_highlights(radar)
+    assert [r["swap_alpha_5d"] for r in highlights["best"]] == [0.084, 0.057]
+    assert [r["swap_alpha_5d"] for r in highlights["worst"]] == [-0.12, -0.03]
+
+    data = {
+        "days": 90,
+        "summary": {"radar_total": 240, "radar_capped": True,
+                    "plan_level": {"raw": 326, "dedup_closed": 120, "human_better_share": 0.4,
+                                   "median_delta_ars": -1500.0}},
+        "swap_highlights": highlights,
+        "radar": radar[:2],
+    }
+    report = render_decision_ledger(data)
+    assert "-12.0%" in report
+    assert "hay más en la ventana" in report
+    assert "Delta humano-bot" not in report and "120 planes maduros" in report

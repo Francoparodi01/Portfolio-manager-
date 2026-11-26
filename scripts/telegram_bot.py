@@ -148,6 +148,7 @@ BOT_COMMAND_SPECS: list[tuple[str, str]] = [
     ("seguimiento", "Evolución de ideas seguidas"),
     ("radar_metricas", "Métricas prospectivas Radar"),
     ("mercado", "Mercado y noticias"),
+    ("auditoria", "Auditoría unificada: veredicto y cohortes"),
     ("performance", "Resultados operativos"),
     ("neto", "Neto por análisis"),
     ("ledger", "Libro de decisiones"),
@@ -885,6 +886,7 @@ def help_text() -> str:
         "<code>/bot_vs_humano</code>: planes vs movimientos reales.\n"
         "<code>/viability</code>: evidencia y umbrales de viabilidad del bot.\n"
         "\n<b>Auditoría</b>\n"
+        "<code>/auditoria</code>: vista única — veredicto, cohortes, bot vs humano, calibración, salud y alertas.\n"
         "<code>/agente objetivo</code>: consulta evidencia y entrega una traza auditable.\n"
         "<code>/analytics</code>: Analytics v2 observacional, con episodios y archivo auditable.\n"
         "<code>/confianza</code>: cobertura y confiabilidad operativa.\n"
@@ -1575,6 +1577,25 @@ async def action_viability(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> 
         if not line.startswith("[chart]")
     ).strip()
     await send_text(context, chat_id, report)
+
+
+async def action_unified_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    rc, out, err, elapsed = await run_cmd(
+        [sys.executable, "scripts/run_unified_audit.py", "--days", "180", "--no-telegram"],
+        timeout=300,
+    )
+    if rc != 0:
+        await send_text(
+            context,
+            chat_id,
+            (
+                "⚠️ <b>No pude completar la auditoría unificada</b>\n"
+                f"Tiempo: <b>{elapsed:.1f}s</b>\n"
+                f"<code>{html_text(err[-2200:] or out[-2200:] or 'Sin detalle')}</code>"
+            ),
+        )
+        return
+    await send_text(context, chat_id, (out or "").strip())
 
 
 async def action_override_audit(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -2969,6 +2990,8 @@ CALLBACK_ALIASES: dict[str, str] = {
     "resultado_neto":   "net_decisions",
     "viability":        "viability",
     "viabilidad":       "viability",
+    "auditoria":        "unified_audit",
+    "auditoria_unificada": "unified_audit",
     "bot_only":         "viability",
     # Bot vs Humano
     "override_audit":   "override_audit",
@@ -3038,6 +3061,7 @@ ACTION_LOADING_TEXT: dict[str, str] = {
     "performance":   "📊 Calculando performance y outcomes...",
     "net_decisions": "Calculando neto por corrida y decisión...",
     "viability":     "Auditando bot-only, seguido y manual...",
+    "unified_audit": "🧾 Armando la auditoría unificada...",
     "override_audit": "Comparando planes del bot contra movimientos reales...",
     "decision_ledger": "Calculando atribución económica...",
     "policy_tree":   "Construyendo árbol operativo...",
@@ -3071,6 +3095,7 @@ async def run_action(action: str, context: ContextTypes.DEFAULT_TYPE, chat_id: i
         "performance":    action_performance,
         "net_decisions":  action_net_decisions,
         "viability":      action_viability,
+        "unified_audit":  action_unified_audit,
         "override_audit": action_override_audit,
         "decision_ledger": action_decision_ledger,
         "policy_tree":    action_policy_tree,
@@ -3243,6 +3268,10 @@ async def agent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def viability_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_command(u, c, "viability")
+
+
+async def unified_audit_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
+    await _dispatch_command(u, c, "unified_audit")
 
 
 async def analytics_v2_handler(u: Update, c: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3822,6 +3851,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("neto",             net_decisions_handler))
     app.add_handler(CommandHandler("resultado_neto",   net_decisions_handler))
     app.add_handler(CommandHandler("viability",        viability_handler))
+    app.add_handler(CommandHandler("auditoria",        unified_audit_handler))
     app.add_handler(CommandHandler("agente",           agent_handler))
     app.add_handler(CommandHandler("agent",            agent_handler))
     app.add_handler(CommandHandler("analytics",        analytics_v2_handler))

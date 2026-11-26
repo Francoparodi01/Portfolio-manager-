@@ -280,6 +280,7 @@ def test_native_command_menu_keeps_only_primary_workflows():
         "seguimiento",
         "radar_metricas",
         "mercado",
+        "auditoria",
         "performance",
         "neto",
         "ledger",

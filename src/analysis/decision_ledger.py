@@ -150,6 +150,51 @@ def _fmt_dt(value) -> str:
     return str(value)
 
 
+RADAR_ROW_LIMIT = 240
+
+
+def _plan_level_summary(plans: list[dict], horizon: str = "5d") -> dict:
+    """Bot vs human per plan, without adding up repeated plans.
+
+    The planner repeats the same recommendation several times a day and the same
+    human fill is matched to every one of them, so summed ARS multiply the same
+    trade (it can exceed the real PnL by an order of magnitude). Keep the latest
+    plan per ticker + side + local day and report shares and medians, not sums.
+    """
+    seen: set[tuple] = set()
+    kept: list[dict] = []
+    for row in sorted(plans, key=lambda r: r.get("decided_at") or datetime.min.replace(tzinfo=ART), reverse=True):
+        decided = row.get("decided_at")
+        day = decided.astimezone(ART).date() if isinstance(decided, datetime) else None
+        key = (str(row.get("ticker") or "").upper(), str(row.get("decision") or "").upper(), day)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(row)
+    closed = [r for r in kept if r.get(f"human_vs_bot_{horizon}_ars") is not None]
+    deltas = sorted(_as_float(r.get(f"human_vs_bot_{horizon}_ars")) for r in closed)
+    median = None
+    if deltas:
+        mid = len(deltas) // 2
+        median = deltas[mid] if len(deltas) % 2 else (deltas[mid - 1] + deltas[mid]) / 2
+    return {
+        "raw": len([r for r in plans if r.get(f"human_vs_bot_{horizon}_ars") is not None]),
+        "dedup_closed": len(closed),
+        "human_better_share": _mean([1.0 if d > 0 else 0.0 for d in deltas if d != 0]),
+        "ties": sum(1 for d in deltas if d == 0),
+        "median_delta_ars": median,
+    }
+
+
+def _swap_highlights(radar: list[dict], per_side: int = 2) -> dict:
+    """Best and worst swaps over every mature swap, not over the rows kept for display."""
+    mature = [r for r in radar if r.get("swap_alpha_5d") is not None]
+    ranked = sorted(mature, key=lambda r: _as_float(r.get("swap_alpha_5d")), reverse=True)
+    best = ranked[:per_side]
+    worst = [r for r in ranked[-per_side:] if r not in best] if len(ranked) > per_side else []
+    return {"best": [_row(r) for r in best], "worst": [_row(r) for r in reversed(worst)]}
+
+
 def _row(row) -> dict:
     if not row:
         return {}
@@ -537,7 +582,7 @@ async def fetch_decision_ledger(
                 (SELECT close_price FROM candles WHERE day >= r.audit_start_day + 20 LIMIT 1) AS close_20d
         ) bench ON TRUE
         ORDER BY r.decided_at DESC, r.id DESC
-        LIMIT 240
+        LIMIT 240 -- RADAR_ROW_LIMIT
         """,
         days,
         owner_chat_id,
@@ -759,12 +804,37 @@ async def fetch_decision_ledger(
             "pending_mark_count": len(pending),
             "pending_mark_pnl_ars": _sum([r.get("mark_pnl_ars") for r in pending]),
             "followed_normalized": attribution_data.get("summary") or {},
+            "radar_capped": len(radar) >= RADAR_ROW_LIMIT,
+            "plan_level": _plan_level_summary(plans),
         },
+        "swap_highlights": _swap_highlights(radar),
         "real_executions": [_row(r) for r in real[:60]],
         "bot_vs_human": [_row(r) for r in plans[:60]],
         "radar": [_row(r) for r in radar[:80]],
         "pending_mark": [_row(r) for r in pending[:30]],
     }
+
+
+def _plan_level_lines(summary: dict) -> list[str]:
+    plan_level = summary.get("plan_level")
+    if not plan_level:
+        # Older payloads: summed ARS repeat the same trade for every repeated plan.
+        return [
+            f"   {summary.get('plans_closed_5d', 0)} planes maduros · no deduplicado",
+            "   Sumas en $ omitidas: repiten la misma operación en cada plan repetido.",
+        ]
+    share = plan_level.get("human_better_share")
+    return [
+        (
+            f"   {plan_level.get('dedup_closed', 0)} planes maduros (1 por ticker+lado+día; "
+            f"{plan_level.get('raw', 0)} sin deduplicar)"
+        ),
+        (
+            f"   Humano mejor que bot en <b>{_rate(share)}</b> de los planes · "
+            f"delta mediano {_signed_money(plan_level.get('median_delta_ars'))} por plan"
+        ),
+        "   Sin sumas en $: una misma operación humana cubre varios planes.",
+    ]
 
 
 def render_decision_ledger(data: dict) -> str:
@@ -803,17 +873,13 @@ def render_decision_ledger(data: dict) -> str:
         ),
         "",
         "🤖 <b>Bot vs ejecución humana</b> <code>PLAN-LEVEL</code>",
-        f"   {summary.get('plans_closed_5d', 0)} planes maduros · no deduplicado",
-        (
-            f"   Bot {_signed_money(summary.get('bot_full_pnl_5d_ars'))} · "
-            f"Humano {_signed_money(summary.get('human_matched_pnl_5d_ars'))}"
-        ),
-        f"   Delta humano-bot: <b>{_signed_money(summary.get('human_vs_bot_5d_ars'))}</b>",
+        *_plan_level_lines(summary),
         "",
         tg_section("Radar y swaps · TEÓRICO"),
         (
-            f"🔎 Radar: {summary.get('radar_closed_5d', 0)}/{summary.get('radar_total', 0)} ideas · "
-            f"retorno medio {_pct(summary.get('radar_avg_5d'))}"
+            f"🔎 Radar: {summary.get('radar_closed_5d', 0)}/{summary.get('radar_total', 0)} ideas"
+            + (" (últimas 240: hay más en la ventana)" if summary.get("radar_capped") else "")
+            + f" · retorno medio {_pct(summary.get('radar_avg_5d'))}"
         ),
         (
             f"   Operables {summary.get('radar_operable_closed_5d', 0)} · "
@@ -859,12 +925,15 @@ def render_decision_ledger(data: dict) -> str:
             )
         lines.append("")
 
-    mature_swaps = [row for row in radar if row.get("swap_alpha_5d") is not None]
-    if mature_swaps:
-        ranked = sorted(mature_swaps, key=lambda row: _as_float(row.get("swap_alpha_5d")), reverse=True)
-        highlighted = ranked[:2]
-        highlighted += [row for row in ranked[-2:] if row not in highlighted]
-        lines.append(tg_section("Swaps destacados · 2 mejores / 2 peores"))
+    highlights = data.get("swap_highlights") or _swap_highlights(radar)
+    highlighted = list(highlights.get("best") or []) + list(highlights.get("worst") or [])
+    if highlighted:
+        title = (
+            "Swaps destacados · mejores / peores"
+            if highlights.get("worst")
+            else "Swaps destacados · mejores"
+        )
+        lines.append(tg_section(title))
         for row in highlighted:
             alpha = row.get("swap_alpha_5d")
             lines.append(
@@ -874,7 +943,7 @@ def render_decision_ledger(data: dict) -> str:
         lines.append("")
 
     lines += [
-        tg_note("Bruto = antes de costos. Radar = teórico. Plan-level repite recomendaciones; normalizado deduplica operaciones."),
+        tg_note("Bruto = antes de costos. Radar = teórico. Normalizado deduplica operaciones; plan-level no es PnL realizado."),
         tg_note("/viability muestra EV neto, costos y gates. Solo auditoría; no cambia decisiones."),
     ]
     report = "\n".join(lines)
