@@ -1,0 +1,168 @@
+{
+  "capture_error_counts": {
+    "TICKET_UNAVAILABLE": 39
+  },
+  "checks": {
+    "EXPLICIT_ACCOUNT_MATCH": 665,
+    "SESSION_ACCOUNT_BOUND": 5,
+    "commissions_map_present": 355,
+    "fees_map_present": 414,
+    "scalar_fee_present_unit_unverified": 0,
+    "with_exact_historical_id_reference": 67
+  },
+  "code_sha256_utf8_lf": {
+    "scripts/capture_cocos_activity.js": "b285fc7daa6784ee9a31a7565fb4e52a725352f53b4ecc3f206f76f028794714",
+    "scripts/cocos_activity_audit.py": "c8099e35ff008a697a46f732056bd84073302f277aaf7dcc64e12814320b761f",
+    "scripts/extract_cocos_tickets.py": "5392c29b569ffdd201d416b33e2c2d69b24e1f21050bf90040aa6aab05dd0d5d",
+    "tests/test_capture_cocos_activity.cjs": "1faa1bc8bf03a9cfcfdf96a35236da8f144a1dc5e6a3fcc966922037bee0f821",
+    "tests/test_cocos_activity_audit.py": "32810a6181a16e8b00581ebe5f1cd6747e069a711ffb43641936283144f0e565",
+    "tests/test_cocos_tickets.py": "2af84f64bcea1c28f198c3f1efa4cbb26894bbe951540f1c15a53e6bfb42c099"
+  },
+  "collector_code_sha256_lf": "b285fc7daa6784ee9a31a7565fb4e52a725352f53b4ecc3f206f76f028794714",
+  "cost_total": null,
+  "coverage": {
+    "candidate_pairs_with_explicit_bridge": 0,
+    "execution_date_strings_observed": {
+      "max": "2026-10-09",
+      "min": "2023-11-21"
+    },
+    "historical_owner_fill_rows": 109,
+    "historical_owner_fills_referenced": 67,
+    "historical_owner_fills_without_reference": 42,
+    "missing_execution_date_rows": 0,
+    "prior_order_settlement_candidate_pairs": 40,
+    "rows_by_currency": {
+      "ARS": 637,
+      "EXT": 20,
+      "USD": 13
+    },
+    "rows_by_identifier": {
+      "CASH_MOVEMENT": 225,
+      "CASH_OUT": 5,
+      "SETTLEMENT": 420,
+      "SETTLEMENT_EXT_ESP": 20
+    },
+    "rows_by_movement_type": {
+      "BUY": 234,
+      "COCOS_PAY": 28,
+      "DEPOSIT": 91,
+      "DIVIDEND": 15,
+      "OTHERS": 21,
+      "REDEMPTION": 9,
+      "SELL": 167,
+      "SUBSCRIPTION": 7,
+      "WITHDRAWAL": 98
+    }
+  },
+  "details_complete": true,
+  "distinct_detail_identities": 670,
+  "economic_pnl_net": null,
+  "eligible_ticket_ids_observed": 665,
+  "financial_quality": {
+    "complete_currency_cost_map_rows": 355,
+    "failed_or_canceled_records_excluded": 5,
+    "historical_currency_ars_true": 67,
+    "historical_financial_identity_matches": 67,
+    "historical_matches_with_both_cost_maps": 67,
+    "historical_quantity_magnitude_equal_true": 67,
+    "historical_side_equal_true": 67,
+    "historical_stored_gross_matches_broker_gross_true": 2,
+    "historical_stored_gross_matches_broker_net_true": 65,
+    "historical_ticker_equal_true": 67,
+    "list_detail_amount_comparable": 647,
+    "list_detail_amount_equal": 642,
+    "list_detail_amount_within_001": 647,
+    "list_detail_execution_calendar_label_differences": 0,
+    "list_detail_execution_date_text_differences": 5,
+    "signed_cost_equation_within_001": 355
+  },
+  "finished_at": "2026-10-16T23:26:30.225Z",
+  "first_page_stable": true,
+  "historical_order_probe": {
+    "finished_at": "2026-10-16T23:09:48.178Z",
+    "input_sha256": "6e964fa531ebfbc57170827cefd487ae38e24178134bcab749272508bcf77c4f",
+    "responses": 42,
+    "source_origin": "HISTORICAL_EXACT_OWNER_ORDER_IDS",
+    "started_at": "2026-10-16T23:09:30.376Z",
+    "status_counts": {
+      "500": 42
+    }
+  },
+  "input_sha256": "f8576afdf818ee0203a3d637a814231e77987c437c08c6f507c85cae98973dc8",
+  "limitations": [
+    "HTTP_CAPTURE_NOT_AN_ATOMIC_ACCOUNT_SNAPSHOT",
+    "SCALAR_FEE_UNIT_NOT_ASSUMED",
+    "ABSENT_COST_MAP_NOT_ZERO",
+    "ID_LINKS_DO_NOT_MERGE_ECONOMIC_EVENTS",
+    "BROKER_HISTORY_COMPLETENESS_NOT_ATTESTED"
+  ],
+  "list_complete": true,
+  "movements_observed": 670,
+  "owner_context_sha256": "ff0c2b1ae71a1607022f94b7b724585402d3ffbc187ff4b4205fa704a55e2020",
+  "pdf_analysis": {
+    "account_cost_total": null,
+    "boleto_count": 369,
+    "csv_sha256": {
+      "ticket-charges-private.csv": "b5c5dfdbffedfec714df86993106b9a9b9b377107d6939a82504c0296647429f",
+      "ticket-executions-private.csv": "e32fe3b595456faac4b15d22c6813e9bcb47786a775abe9bd9f16c92d358ee07"
+    },
+    "economic_pnl_net": null,
+    "execution_legs": 448,
+    "input_sha256": "f8576afdf818ee0203a3d637a814231e77987c437c08c6f507c85cae98973dc8",
+    "limitations": [
+      "DOCUMENT_ARITHMETIC_IS_NOT_ACCOUNT_PNL",
+      "CLOCK_TIMEZONE_NOT_ATTESTED",
+      "OTHER_PDF_LAYOUTS_REMAIN_PARTIAL",
+      "ABSENT_CHARGE_LINES_NOT_ZERO"
+    ],
+    "owner_evidence_counts": {
+      "EXPLICIT_PDF_ACCOUNT_MATCH": 626
+    },
+    "parsed_json_sha256": "2e95070b43ad37cfdb0bf0eaa607570226cd2e499a1a0cb8a1600bfd82c3793f",
+    "pdf_api_quantity_residual": {
+      "available": 369,
+      "within_001": 369
+    },
+    "pdf_vs_api_gross_residual": {
+      "available": 369,
+      "within_001": 369
+    },
+    "pdf_vs_api_net_residual": {
+      "available": 369,
+      "within_001": 369
+    },
+    "pdfs_processed": 626,
+    "pypdf_version": "6.10.0",
+    "status_counts": {
+      "PARTIAL": 317,
+      "VERIFIED_DOCUMENT_ARITHMETIC": 309
+    },
+    "with_explicit_cost_lines": 380
+  },
+  "private_manifest_sha256": "8ca324af3d046f2effa9200e445231f4c0206b9b75a3371f87c74be854fa6fdf",
+  "repeated_identity_rows": 0,
+  "schema_version": "cocos-activity-receipt-v1",
+  "source_capture_status": "PARTIAL",
+  "source_fragment_count": 103,
+  "started_at": "2026-10-16T23:04:49.558Z",
+  "status": "PARTIAL",
+  "ticket_files": {
+    "pdf_saved": 626,
+    "unavailable": 39
+  },
+  "ticket_http_status_counts": {
+    "200": 626,
+    "500": 39
+  },
+  "tickets_complete": false,
+  "unavailable_tickets_by_movement_type": {
+    "BUY": 18,
+    "OTHERS": 1,
+    "REDEMPTION": 2,
+    "SELL": 16,
+    "SUBSCRIPTION": 2
+  },
+  "unavailable_tickets_by_year": {
+    "2024": 39
+  }
+}

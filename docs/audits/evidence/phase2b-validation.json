@@ -1,0 +1,37 @@
+{
+  "schema_version": "phase2b-validation-v1",
+  "report_closed_on": "2026-10-18",
+  "data_cut_utc": "2026-10-17T06:52:51.297Z",
+  "deterministic_replay": {
+    "files_compared": 32,
+    "all_bytes_equal": true,
+    "public_receipt_bytes_equal": true,
+    "public_receipt_sha256": "3706255b9bc2b6ab81bad414db9b3f9d740bab4511e9641c3626943720b62938"
+  },
+  "isolated_tests": {
+    "python_passed": 144,
+    "phase2b_browser_scenarios": 6,
+    "activity_browser_scenarios": 9,
+    "junit_xml_sha256": "1aa2e68d8f6093e8ace34b884e72d3db522e0c0305b9699e0ecd4a1c3713fa0b"
+  },
+  "source_contract": {
+    "url": "https://app.cocos.capital/_expo/static/js/web/index-8ccd165bc8b7bea7f15503d5e5c7e5e7.js",
+    "sha256": "db1dabcd644f8d87178c32848d6422ca5e0eb8d5c1597e7f2a76e4040b9daae3",
+    "observed_on": "2026-10-17",
+    "module": 4448,
+    "field": "portfolioCashTitles.web",
+    "cash_labels": {
+      "ARS": "Peso Argentino",
+      "USD": "Dólar MEP",
+      "EXT": "Dólar Cable"
+    },
+    "scope": "CASH_ONLY_NOT_ACTIVITY_EXT_OR_UNTICKERED_SECURITIES"
+  },
+  "git_review": {
+    "main": "1687cdcce50895a9dfacb6dae04188fd8d8d5626",
+    "pr27_head": "1f73fbbdb2dc326ebfc70181b3c9459b92ce8d0e",
+    "pr27_state": "OPEN_DRAFT_UNCHANGED",
+    "pr28_state": "OPEN_DRAFT",
+    "operational_files_changed": false
+  }
+}

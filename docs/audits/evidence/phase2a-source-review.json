@@ -1,0 +1,111 @@
+{
+  "deterministic_replay": {
+    "all_output_bytes_equal": true,
+    "files": {
+      "daily-observed-nav-private.csv": true,
+      "evidence.sqlite": true,
+      "missing-attributions-private.json": true,
+      "reconstruction-private.json": true,
+      "summary.json": true
+    }
+  },
+  "isolated_tests": {
+    "junit_xml_sha256": "a013334f37a95b4f5f931a8238b2072ca9ba3ff14fb4b64ce0ade298dfc30530",
+    "passed": 88
+  },
+  "pr27": {
+    "check_code_verifier": "FAILED",
+    "code_hash_checks": {
+      "scripts/audit_measurement_offline.py": {
+        "git_blob_matches": true,
+        "recorded": "d0ecbd23072cdb799b713c83e13ffa23201e805d83229fbb527ddadbf3637987",
+        "working_tree_crlf": 139,
+        "working_tree_matches": false
+      },
+      "scripts/audit_qeef_phase2.py": {
+        "git_blob_matches": false,
+        "recorded": "773b6d955f4d871bb6271055c707ec1cd93d670f2e7f4d9ed7e1f7fec02d1958",
+        "working_tree_crlf": 91,
+        "working_tree_matches": true
+      },
+      "scripts/capture_qeef.py": {
+        "git_blob_matches": false,
+        "recorded": "66259bdd028026b723794a23f27b0d4ebf655cf8ac881dbe3be8299dc9e2f0c7",
+        "working_tree_crlf": 141,
+        "working_tree_matches": true
+      },
+      "scripts/measurement_baseline.py": {
+        "git_blob_matches": true,
+        "recorded": "7007f508418449e5eb7de87dd13818830d50eedbabcdc93b36e9ed0d96da335e",
+        "working_tree_crlf": 583,
+        "working_tree_matches": false
+      },
+      "scripts/measurement_checks.sql": {
+        "git_blob_matches": true,
+        "recorded": "ea34f38b6cd77d3ef7b99dde8a9f10426bd075b138a5e98d66a58ba3f1830f70",
+        "working_tree_crlf": 140,
+        "working_tree_matches": false
+      },
+      "scripts/package_measurement_evidence.py": {
+        "git_blob_matches": true,
+        "recorded": "9fb9b910029cce421fa9bb1b6df2b79fe89975735719b61adc66e50c9c7b5725",
+        "working_tree_crlf": 56,
+        "working_tree_matches": false
+      },
+      "scripts/probe_measurement_sources.py": {
+        "git_blob_matches": true,
+        "recorded": "c2b51a7236614b8a01d17a7ed4d9a84bf4a43d8c9571e040756c67798d6c176b",
+        "working_tree_crlf": 59,
+        "working_tree_matches": false
+      },
+      "tests/test_measurement_baseline.py": {
+        "git_blob_matches": true,
+        "recorded": "d94b4b09e3329e6806a82b2384f586d490aa75e1a92f9e330edf6a43a0cd6e31",
+        "working_tree_crlf": 164,
+        "working_tree_matches": false
+      }
+    },
+    "draft": true,
+    "head": "1f73fbbdb2dc326ebfc70181b3c9459b92ce8d0e",
+    "merged": false,
+    "plain_receipt_verifier": "PASS",
+    "tests_passed": 8
+  },
+  "schema_version": "phase2a-source-review-v1",
+  "source_access": [
+    {
+      "configuration_file": ".env",
+      "error_type": "InternalServerError",
+      "host": "aws-1-sa-east-1.pooler.supabase.com",
+      "source": "SUPABASE_ORIGINAL_CANDIDATE",
+      "sqlstate": "XX000",
+      "status": "NO VERIFICADA"
+    },
+    {
+      "host": "127.0.0.1",
+      "port": "5433",
+      "source": "cocos_pg_db",
+      "source_as_of": "2026-10-16 12:59:54.617576+00:00",
+      "status": "VERIFIED_ACCESS",
+      "tables": {
+        "calculated_metrics": {
+          "n": 0
+        },
+        "daily_prices": {
+          "n": 0
+        },
+        "portfolio_snapshots": {
+          "n": 1
+        },
+        "positions": {
+          "n": 2
+        },
+        "raw_snapshots": {
+          "n": 0
+        }
+      },
+      "transaction_read_only": "on"
+    }
+  ],
+  "source_access_raw_sha256": "6aba8c52726c7d86307c1ed42598d1b825740cd51c99c3d8cc460b7f5d33fb59"
+}
