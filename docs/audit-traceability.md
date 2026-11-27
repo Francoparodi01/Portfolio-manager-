@@ -70,6 +70,7 @@ viva en este relevamiento.
 
 | Comando Telegram | Script / modulo | Que mide | Como decide |
 |---|---|---|---|
+| `/cartera_sombra [desde=DD/MM/YYYY]` | `run_shadow_portfolio.py`, `shadow_portfolio.py` | tu cartera real de esa fecha siguiendo los planes reales del bot (todo y solo ventas) vs no operar y SPY | descriptivo, un solo camino; ledger del backtest; ordenes traducidas a peso objetivo |
 | `/auditoria` | `run_unified_audit.py`, `unified_audit.py` | vista unica: veredicto, cohortes (bot, seguido, manual, plan no ejecutado, bloqueada, radar), bot vs humano, calibracion, salud y alertas | misma capa que `/viability`; ideas repetidas 1 por ticker+lado+dia |
 | `/viability`, `/viabilidad` | `run_viability_audit.py`, `viability_audit.py` | bot-only vs seguido vs manual-only, EV neto, IC, drawdown | gates 5d por rango 95% bootstrap por bloques de fechas |
 | `/regression` (`signal`, `optimizer`, `execution`, `blocked`, `all`) | `run_regression_audit.py`, `regression_audit.py` | relacion score -> outcome por modo | OLS con errores agrupados por bloques de fechas |

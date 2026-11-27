@@ -77,6 +77,10 @@ class UnifiedAuditReport:
     calibration: dict[str, dict[str, Optional[dict]]]
     health: dict
     alerts: list[str] = field(default_factory=list)
+    # Bot executed 5D split by side, concentration by week, and the recent window.
+    bot_sides: dict[str, HorizonMetrics] = field(default_factory=dict)
+    bot_weeks: dict = field(default_factory=dict)
+    bot_recent: dict = field(default_factory=dict)
 
 
 def cohort_mask(df: pd.DataFrame, cohort: str) -> pd.Series:
@@ -154,6 +158,17 @@ def compute_unified_audit(
             "5d",
         )
 
+    bot_sides: dict[str, HorizonMetrics] = {}
+    bot_weeks: dict = {}
+    bot_recent: dict = {}
+    if "5d" in horizons and not subsets["bot"].empty:
+        bot = subsets["bot"]
+        sell = bot["decision"].isin(SELL_ACTIONS)
+        for side, mask in (("BUY", ~sell), ("SELL", sell)):
+            bot_sides[side] = _compute_horizon_metrics(bot[mask], scope="bot_only", horizon="5d", cost=cost)
+        bot_weeks = weekly_concentration(bot, cost=cost)
+        bot_recent = recent_hits(bot, cost=cost, days=RECENT_DAYS)
+
     calibration: dict[str, dict[str, Optional[dict]]] = {}
     if not df.empty:
         bot_ideas = pd.concat([subsets["bot"], subsets["plan"], subsets["blocked"]], ignore_index=True)
@@ -183,11 +198,65 @@ def compute_unified_audit(
         viability=viability,
         cohorts=cohorts,
         plan_vs_manual=plan_vs_manual,
+        bot_sides=bot_sides,
+        bot_weeks=bot_weeks,
+        bot_recent=bot_recent,
         calibration=calibration,
         health=health,
     )
     report.alerts = build_alerts(report, config)
     return report
+
+
+RECENT_DAYS = 60
+SELL_ACTIONS = ("SELL", "SELL_PARTIAL", "SELL_FULL")
+
+
+def _bot_outcomes(bot: pd.DataFrame, cost: float) -> pd.DataFrame:
+    data = pd.DataFrame(
+        {
+            "decided_at": pd.to_datetime(bot.get("decided_at"), utc=True, errors="coerce"),
+            "gross": pd.to_numeric(bot.get("effective_outcome_5d"), errors="coerce"),
+        }
+    ).dropna()
+    data["net"] = data["gross"] - cost
+    return data
+
+
+def weekly_concentration(bot: pd.DataFrame, *, cost: float) -> dict:
+    """How much of the net result comes from the best weeks (one market episode or a pattern?)."""
+    data = _bot_outcomes(bot, cost)
+    if data.empty:
+        return {}
+    local = data["decided_at"].dt.tz_convert(ART)
+    data["week"] = (local - pd.to_timedelta(local.dt.weekday, unit="D")).dt.strftime("%Y-%m-%d")
+    weeks = data.groupby("week")["net"].agg(["count", "sum"]).sort_values("sum", ascending=False)
+    total = float(data["net"].sum())
+    top2 = float(weeks["sum"].head(2).sum())
+    positive_weeks = int((weeks["sum"] > 0).sum())
+    return {
+        "weeks": int(len(weeks)),
+        "positive_weeks": positive_weeks,
+        "top2_share": top2 / total if total > 0 else None,
+        "top2": [(week, int(row["count"]), float(row["sum"])) for week, row in weeks.head(2).iterrows()],
+        "total": total,
+    }
+
+
+def recent_hits(bot: pd.DataFrame, *, cost: float, days: int) -> dict:
+    """Hits over the last `days`: how many closed 5D trades ended positive, gross and net."""
+    data = _bot_outcomes(bot, cost)
+    since = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    recent = data[data["decided_at"] >= since]
+    n = int(len(recent))
+    return {
+        "days": days,
+        "n": n,
+        "gross_wins": int((recent["gross"] > 0).sum()),
+        "net_wins": int((recent["net"] > 0).sum()),
+        "net_ev": float(recent["net"].mean()) if n else None,
+        "since": since,
+    }
 
 
 def build_alerts(report: UnifiedAuditReport, config: ViabilityAuditConfig) -> list[str]:
@@ -345,6 +414,36 @@ def render_unified_audit(report: UnifiedAuditReport) -> str:
             extra.append(f"20D {_pct(m20.net_ev)} (n{m20.n})")
         if extra:
             lines.append("   " + " · ".join(extra))
+
+    if report.bot_sides:
+        lines += ["", "<b>2b · Bot ejecutado por lado · 5D neto</b>"]
+        for side, label in (("SELL", "Ventas"), ("BUY", "Compras")):
+            m = report.bot_sides.get(side)
+            if m is None or m.n == 0:
+                lines.append(f"{label} · n0")
+                continue
+            lines.append(
+                f"{label} · n{m.n} · acierto {_pct(m.win_rate).lstrip('+')} · EV {_pct(m.net_ev)}"
+                + (f" · exceso <b>{_pct(m.excess_ev)}</b>{_range(m.excess_interval, _pct)}" if m.n_excess else "")
+            )
+        lines.append("<i>Una venta acierta si el precio cae después: es pérdida evitada, no ganancia (no hay short).</i>")
+        weeks = report.bot_weeks
+        if weeks.get("weeks"):
+            share = weeks.get("top2_share")
+            lines.append(
+                f"Semanas: {weeks['positive_weeks']}/{weeks['weeks']} positivas"
+                + (f" · las 2 mejores explican <b>{share:.0%}</b> del resultado" if share is not None else "")
+            )
+            if share is not None and share > 0.6:
+                lines.append("⚠️ Resultado concentrado: puede ser un solo episodio de mercado, no un patrón.")
+        recent = report.bot_recent
+        if recent.get("n"):
+            lines.append(
+                f"Últimos {recent['days']} días: <b>{recent['net_wins']}/{recent['n']}</b> positivas netas "
+                f"({recent['gross_wins']}/{recent['n']} brutas) · EV {_pct(recent['net_ev'])}"
+            )
+        elif recent:
+            lines.append(f"Últimos {recent['days']} días: sin operaciones con outcome 5D cerrado.")
 
     lines += ["", "<b>3 · Bot vs humano</b>"]
     if report.plan_vs_manual and report.plan_vs_manual.get("estimate") is not None:

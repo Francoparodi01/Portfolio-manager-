@@ -887,6 +887,7 @@ def help_text() -> str:
         "<code>/viability</code>: evidencia y umbrales de viabilidad del bot.\n"
         "\n<b>Auditoría</b>\n"
         "<code>/auditoria</code>: vista única — veredicto, cohortes, bot vs humano, calibración, salud y alertas.\n"
+        "<code>/cartera_sombra desde=01/07/2026</code>: tu cartera de esa fecha siguiendo al bot al 100%, vs no operar y SPY.\n"
         "<code>/agente objetivo</code>: consulta evidencia y entrega una traza auditable.\n"
         "<code>/analytics</code>: Analytics v2 observacional, con episodios y archivo auditable.\n"
         "<code>/confianza</code>: cobertura y confiabilidad operativa.\n"
@@ -3409,6 +3410,43 @@ async def regression_audit_handler(
         await send_menu(context, chat_id)
 
 
+SHADOW_DATE_RE = re.compile(r"^(?:desde=)?(\d{2}/\d{2}/\d{4}|\d{4}-\d{2}-\d{2})$")
+
+
+async def shadow_portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/cartera_sombra [desde=DD/MM/YYYY]: follow the bot's real plans at 100%, read-only."""
+    if not await ensure_allowed_chat(update, context):
+        return
+    chat_id = update.effective_chat.id
+    args = ["scripts/run_shadow_portfolio.py", "--no-telegram"]
+    raw = " ".join(getattr(context, "args", None) or []).strip().lower()
+    if raw:
+        match = SHADOW_DATE_RE.match(raw)
+        if not match:
+            await send_text(
+                context,
+                chat_id,
+                "Usá <code>/cartera_sombra</code> (desde el congelamiento de reglas) o "
+                "<code>/cartera_sombra desde=01/07/2026</code>.",
+            )
+            return
+        args += ["--desde", match.group(1)]
+    await answer_loading(update, "🪞 Armando la cartera sombra...")
+    rc, out, err, elapsed = await run_cmd([sys.executable, *args], timeout=300)
+    if rc != 0:
+        await send_text(
+            context,
+            chat_id,
+            (
+                "⚠️ <b>No pude armar la cartera sombra</b>\n"
+                f"Tiempo: <b>{elapsed:.1f}s</b>\n"
+                f"<code>{html_text(err[-2200:] or out[-2200:] or 'Sin detalle')}</code>"
+            ),
+        )
+        return
+    await send_text(context, chat_id, (out or "").strip())
+
+
 async def regression_optimizer_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3852,6 +3890,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("resultado_neto",   net_decisions_handler))
     app.add_handler(CommandHandler("viability",        viability_handler))
     app.add_handler(CommandHandler("auditoria",        unified_audit_handler))
+    app.add_handler(CommandHandler("cartera_sombra",   shadow_portfolio_handler))
     app.add_handler(CommandHandler("agente",           agent_handler))
     app.add_handler(CommandHandler("agent",            agent_handler))
     app.add_handler(CommandHandler("analytics",        analytics_v2_handler))

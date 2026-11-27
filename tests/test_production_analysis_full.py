@@ -88,7 +88,7 @@ class FullTelegramTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipIf(os.environ.get('TEST_COMPONENT') == 'telegram', 'Scheduler image only')
 class FullSchedulerTests(unittest.IsolatedAsyncioTestCase):
-    async def run_case(self, formal, market=True, refresh_ok=True):
+    async def run_case(self, formal, market=True, refresh_ok=True, snapshot_age_hours=None):
         from src.scheduler import runner
         cfg = SimpleNamespace(scraper=SimpleNamespace(telegram_bot_token='', telegram_chat_id='1234'), database=SimpleNamespace(url='unused'))
         process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b'full-report ' * 12, b'')))
@@ -98,7 +98,9 @@ class FullSchedulerTests(unittest.IsolatedAsyncioTestCase):
              patch.object(runner, 'request_portfolio_refresh', new_callable=AsyncMock, return_value={'ok': refresh_ok}) as refresh, \
              patch.object(runner.asyncio, 'create_subprocess_exec', new_callable=AsyncMock, return_value=process) as launch, \
              patch.object(runner, 'save_report_artifact', new_callable=AsyncMock) as save, \
-             patch.object(runner, 'run_verify_decision_prices', new_callable=AsyncMock):
+             patch.object(runner, 'run_verify_decision_prices', new_callable=AsyncMock), \
+             patch.object(runner, '_latest_snapshot_age_hours', new_callable=AsyncMock, return_value=snapshot_age_hours), \
+             patch.object(runner.asyncio, 'sleep', new_callable=AsyncMock):
             await runner.run_daily_analysis(formal=formal, notify=False)
             return refresh, launch, save
 
@@ -114,9 +116,15 @@ class FullSchedulerTests(unittest.IsolatedAsyncioTestCase):
         refresh, launch, save = await self.run_case(True, market=False)
         refresh.assert_not_awaited(); launch.assert_not_awaited(); save.assert_not_awaited()
 
-    async def test_failed_refresh_does_not_create_measurement(self):
-        refresh, launch, save = await self.run_case(True, refresh_ok=False)
-        refresh.assert_awaited_once(); launch.assert_not_awaited(); save.assert_not_awaited()
+    async def test_failed_refresh_without_recent_snapshot_does_not_create_measurement(self):
+        # Refresh is retried once; with no snapshot newer than the fallback window, no measurement.
+        refresh, launch, save = await self.run_case(True, refresh_ok=False, snapshot_age_hours=None)
+        self.assertEqual(refresh.await_count, 2); launch.assert_not_awaited(); save.assert_not_awaited()
+
+    async def test_failed_refresh_with_recent_snapshot_still_measures(self):
+        refresh, launch, save = await self.run_case(True, refresh_ok=False, snapshot_age_hours=2.0)
+        self.assertEqual(refresh.await_count, 2)
+        self.assertEqual(list(launch.call_args.args)[1:], full_analysis_args(1234))
 
     async def test_closing_report_remains_exploratory_with_full_radar(self):
         refresh, launch, save = await self.run_case(False)
