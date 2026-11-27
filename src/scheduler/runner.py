@@ -42,6 +42,8 @@ from html import escape
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import asyncpg
+
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -84,6 +86,7 @@ from src.collector.live_portfolio import (
     select_portfolio_move_alerts,
 )
 from src.collector.notifier import TelegramNotifier
+from src.scheduler.watchdog import Watchdog
 from src.core.telegram_format import header as tg_header, note as tg_note, section as tg_section
 from src.analysis.manual_market_events import active_event_risk_by_ticker
 from src.analysis.corporate_actions import (
@@ -123,6 +126,10 @@ PORTFOLIO_ALERT_MAJOR_PCT = float(os.getenv("PORTFOLIO_ALERT_MAJOR_PCT", "0.06")
 PORTFOLIO_ALERT_WEIGHTED_PCT = float(os.getenv("PORTFOLIO_ALERT_WEIGHTED_PCT", "0.04"))
 PORTFOLIO_ALERT_MIN_WEIGHT = float(os.getenv("PORTFOLIO_ALERT_MIN_WEIGHT", "0.12"))
 PORTFOLIO_ALERT_TTL_SECONDS = int(os.getenv("PORTFOLIO_ALERT_TTL_SECONDS", "86400"))
+SCHEDULER_WATCHDOG_ENABLED = os.getenv("SCHEDULER_WATCHDOG_ENABLED", "true").lower() == "true"
+SCHEDULER_WATCHDOG_INTERVAL_SECONDS = int(os.getenv("SCHEDULER_WATCHDOG_INTERVAL_SECONDS", "900"))
+# A formal analysis may use the last snapshot when the live refresh fails, if it is this fresh.
+ANALYSIS_SNAPSHOT_FALLBACK_HOURS = float(os.getenv("ANALYSIS_SNAPSHOT_FALLBACK_HOURS", "30"))
 INTRADAY_REVALIDATION_ENABLED = os.getenv("INTRADAY_REVALIDATION_ENABLED", "true").lower() == "true"
 INTRADAY_REVALIDATION_PCT = float(os.getenv("INTRADAY_REVALIDATION_PCT", "0.03"))
 INTRADAY_REVALIDATION_MAX_PRICE_AGE_SECONDS = int(os.getenv("INTRADAY_REVALIDATION_MAX_PRICE_AGE_SECONDS", "1200"))
@@ -1574,8 +1581,31 @@ async def run_daily_analysis(*, formal: bool = False, notify: bool = True) -> No
             timeout_seconds=360,
         )
         if not refresh.get("ok"):
-            logger.error("analysis_full measurement omitido: refresh no disponible")
-            return
+            logger.warning("analysis_full: refresh fallo (%s); reintento en 60s", refresh.get("error"))
+            await asyncio.sleep(60)
+            refresh = await request_portfolio_refresh(
+                requester="scheduler:analisis_full:retry",
+                owner_chat_id=int(owner_chat_id), include_fills=True, include_market=True,
+                timeout_seconds=240,
+            )
+        if not refresh.get("ok"):
+            # Do not skip silently: run on the last snapshot when it is recent enough.
+            # run_analysis re-prices positions with fresh market_prices and its own
+            # guards still judge the data quality.
+            age_hours = await _latest_snapshot_age_hours(cfg.database.url, int(owner_chat_id))
+            if age_hours is None or age_hours > ANALYSIS_SNAPSHOT_FALLBACK_HOURS:
+                logger.error("analysis_full measurement omitido: refresh no disponible y snapshot viejo (%s h)", age_hours)
+                notifier.send_raw(
+                    "⚠️ <b>Análisis de las "
+                    f"{_now_art():%H:%M}</b> no corrió: Cocos no respondió y el último snapshot "
+                    f"tiene {'?' if age_hours is None else f'{age_hours:.0f}'} h."
+                )
+                return
+            logger.warning("analysis_full: refresh no disponible; uso snapshot de hace %.1f h", age_hours)
+            notifier.send_raw(
+                f"⚠️ <b>Análisis de las {_now_art():%H:%M}</b>: Cocos no respondió. "
+                f"Corre igual con la cartera de hace {age_hours:.1f} h y precios de mercado actuales."
+            )
     cmd = [sys.executable, *full_analysis_args(
         int(owner_chat_id), persist=formal, notify=notify,
     )]
@@ -1680,6 +1710,24 @@ async def run_daily_analysis(*, formal: bool = False, notify: bool = True) -> No
         notifier.notify_critical_error("daily_analysis", str(e))
 
     await run_verify_decision_prices()
+
+
+async def _latest_snapshot_age_hours(database_url: str, owner_chat_id: int) -> float | None:
+    try:
+        conn = await asyncpg.connect(database_url.replace("postgresql+asyncpg://", "postgresql://"))
+        try:
+            latest = await conn.fetchval(
+                "SELECT MAX(scraped_at) FROM portfolio_snapshots WHERE owner_chat_id IS NULL OR owner_chat_id = $1",
+                owner_chat_id,
+            )
+        finally:
+            await conn.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("snapshot age check fallo: %s", exc)
+        return None
+    if latest is None:
+        return None
+    return (datetime.now(timezone.utc) - latest).total_seconds() / 3600
 
 
 async def run_intraday_full_analysis() -> None:
@@ -3830,6 +3878,19 @@ async def _scheduler_main() -> None:
             replace_existing=True,
         )
 
+    if SCHEDULER_WATCHDOG_ENABLED:
+        watchdog = _build_watchdog()
+        scheduler.add_job(
+            watchdog.check,
+            IntervalTrigger(seconds=max(300, SCHEDULER_WATCHDOG_INTERVAL_SECONDS), timezone=TIMEZONE),
+            id="scheduler_watchdog",
+            name="Watchdog: re-run scheduled jobs that left no trace",
+            misfire_grace_time=300,
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+        logger.info("scheduler watchdog enabled every %ss", SCHEDULER_WATCHDOG_INTERVAL_SECONDS)
     heartbeat_task = asyncio.create_task(
         _scheduler_heartbeat_loop(),
         name="scheduler_heartbeat",
@@ -3867,6 +3928,51 @@ async def _scheduler_main() -> None:
     heartbeat_task.cancel()
     await stop_intraday_loops()
     logger.info("Scheduler apagado limpiamente")
+
+
+def _build_watchdog() -> Watchdog:
+    cfg = get_config()
+    notifier = TelegramNotifier(cfg.scraper.telegram_bot_token, cfg.scraper.telegram_chat_id)
+
+    async def portfolio_refresh() -> None:
+        refresh = await request_portfolio_refresh(
+            requester="scheduler:watchdog", include_fills=True, include_market=True, timeout_seconds=360,
+        )
+        if not refresh.get("ok"):
+            raise RuntimeError(str(refresh.get("error") or "refresh_failed"))
+
+    async def market(label: str) -> None:
+        result = await run_market_refresh(label)
+        if not result.get("success"):
+            raise RuntimeError(str(result.get("error") or result.get("reason") or "market_refresh_failed"))
+
+    jobs = {
+        "open_1031": portfolio_refresh,
+        "market_1040": lambda: market("10:40_WATCHDOG"),
+        "analysis_11": run_intraday_full_analysis,
+        "market_1200": lambda: market("12:00_WATCHDOG"),
+        "analysis_13": run_intraday_full_analysis,
+        "analysis_16": run_intraday_full_analysis,
+        "market_1640": lambda: market("16:40_WATCHDOG"),
+        "eod_1702": lambda: run_persistent_eod_refresh("17:02_WATCHDOG"),
+        "candles_1705": run_build_daily_candles,
+    }
+    if RADAR_AUDIT_CAPTURE_ENABLED:
+        jobs["radar_1650"] = run_radar_audit_capture
+
+    def notify(text: str) -> None:
+        try:
+            notifier.send_raw(text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("watchdog notify fallo: %s", exc)
+
+    return Watchdog(
+        database_url=cfg.database.url,
+        jobs=jobs,
+        notify=notify,
+        now=_now_art,
+        is_business_day=_is_business_day,
+    )
 
 
 def start_scheduler() -> None:
