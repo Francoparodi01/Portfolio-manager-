@@ -126,3 +126,28 @@ def test_telegram_handler_parses_the_start_date(monkeypatch):
     assert "--desde" not in calls[-1]
     asyncio.run(bot.shadow_portfolio_handler(update, SimpleNamespace(args=["ayer"])))
     assert len(calls) == 2 and "desde=01/07/2026" in sent[-1]
+
+
+def test_orders_on_positions_the_shadow_lacks_are_counted_and_overlap_reported():
+    from src.analysis.shadow_portfolio import overlap, real_weights_by_day
+
+    sell_aapl = {"plan_id": "p9", "created_at": _at(3, 11), "ticker": "AAPL", "side": "SELL", "amount_ars": 100_000.0,
+                 "quantity_est": 2000.0, "reason": "x", "current_weight": 0.1, "target_weight": 0.05}
+    inputs = _inputs([_sell_mu("p1", _at(2, 11)), sell_aapl])
+    inputs["real_weights"] = real_weights_by_day([
+        {"scraped_at": _at(d, 16), "cash": 100_000, "ticker": "AAPL", "market_value": 900_000} for d in (1, 2, 3, 4, 7)
+    ])
+    report = simulate_shadow(inputs)
+    assert report.order_outcomes["applied"] == 1
+    assert report.order_outcomes["no_position"] == 1  # the real account sells AAPL; the shadow never had it
+    # Shadow holds MU + cash; real holds AAPL + 10% cash: they only share that cash.
+    assert abs(report.paths["all"].daily[-1]["overlap"] - 0.1) < 1e-9
+    text = render_shadow(report)
+    assert "sin la posición en la sombra 1" in text and "comparten menos de la mitad" in text
+    assert overlap({"A": 0.6, "B": 0.4}, {"A": 0.5, "C": 0.5}) == 0.5
+
+
+def test_identical_books_overlap_fully():
+    from src.analysis.shadow_portfolio import overlap
+
+    assert overlap({"MU": 0.5, "_CASH": 0.5}, {"MU": 0.5, "_CASH": 0.5}) == 1.0

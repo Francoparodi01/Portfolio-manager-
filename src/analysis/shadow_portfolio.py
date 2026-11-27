@@ -38,6 +38,7 @@ VARIANTS = ("all", "sells_only")
 # Ignore re-trades smaller than this share of the shadow NAV: a repeated plan
 # lands on the same weight give or take fees, which must not churn the book.
 MIN_TRADE_FRACTION = Decimal("0.005")
+CASH = "_CASH"
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ class ShadowReport:
     plans_skipped: int
     excluded_positions: list[str]
     warnings: list[str]
+    order_outcomes: dict = field(default_factory=dict)
 
 
 # ── Inputs ──────────────────────────────────────────────────────────────────
@@ -131,6 +133,24 @@ async def load_shadow_inputs(config: ShadowConfig) -> dict:
             until,
             owner,
         )
+        real_rows = await conn.fetch(
+            """
+            WITH daily AS (
+                SELECT DISTINCT ON ((scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date)
+                       snapshot_id, scraped_at, COALESCE(cash_ars, 0)::float8 AS cash
+                FROM portfolio_snapshots
+                WHERE scraped_at >= $1 AND scraped_at <= $2
+                  AND ($3::bigint IS NULL OR owner_chat_id IS NULL OR owner_chat_id = $3)
+                ORDER BY (scraped_at AT TIME ZONE 'America/Argentina/Buenos_Aires')::date, scraped_at DESC
+            )
+            SELECT d.scraped_at, d.cash, p.ticker, p.market_value::float8 AS market_value
+            FROM daily d LEFT JOIN positions p ON p.snapshot_id = d.snapshot_id AND p.quantity > 0
+            ORDER BY d.scraped_at
+            """,
+            snapshot["scraped_at"],
+            until,
+            owner,
+        )
         tickers = sorted(
             {r["ticker"] for r in positions} | {r["ticker"] for r in orders} | {config.benchmark.upper()}
         )
@@ -165,6 +185,7 @@ async def load_shadow_inputs(config: ShadowConfig) -> dict:
         "positions": [dict(r) for r in positions],
         "orders": [dict(r) for r in orders],
         "navs": [dict(r) for r in navs],
+        "real_weights": real_weights_by_day([dict(r) for r in real_rows]),
         "intraday_points": [dict(r) for r in intraday],
         "daily_candles": [dict(r) for r in candles],
         "until": until,
@@ -173,6 +194,37 @@ async def load_shadow_inputs(config: ShadowConfig) -> dict:
 
 
 # ── Simulation ──────────────────────────────────────────────────────────────
+
+
+def real_weights_by_day(rows: list[dict]) -> dict[str, dict[str, float]]:
+    """Weights of the real account at the last snapshot of each local day (cash included in NAV)."""
+    days: dict[str, dict] = {}
+    for row in rows:
+        day = row["scraped_at"].astimezone(ART).date().isoformat()
+        entry = days.setdefault(day, {"cash": float(row.get("cash") or 0), "values": {}})
+        if row.get("ticker") and row.get("market_value"):
+            entry["values"][row["ticker"]] = entry["values"].get(row["ticker"], 0.0) + float(row["market_value"])
+    out = {}
+    for day, entry in days.items():
+        nav = entry["cash"] + sum(entry["values"].values())
+        if nav > 0:
+            out[day] = {t: v / nav for t, v in entry["values"].items()}
+            out[day][CASH] = entry["cash"] / nav
+    return out
+
+
+def overlap(shadow: dict[str, float], real: dict[str, float]) -> float:
+    """Share of the book both accounts hold: sum of min(weight) over tickers and cash (1 = identical)."""
+    return sum(min(w, real.get(t, 0.0)) for t, w in shadow.items())
+
+
+def _shadow_weights(value: dict) -> dict[str, float]:
+    nav = value["nav_ars"]
+    if nav <= 0:
+        return {}
+    weights = {a["ticker"]: a["value_ars"] / nav for a in value["assets"] if a["quantity"]}
+    weights[CASH] = value["cash_ars"] / nav
+    return weights
 
 
 def _session_end(moment: datetime) -> datetime:
@@ -261,6 +313,9 @@ def simulate_shadow(inputs: dict, *, fee_rate: str = "0.006", slippage_rate: str
     paths: dict[str, ShadowPath] = {}
     excluded: list[str] = []
     used = skipped = 0
+    # What happened to each order of the bot in the "all" variant.
+    outcomes = {"applied": 0, "at_target": 0, "no_position": 0, "no_price": 0, "untranslatable": 0}
+    real_weights = inputs.get("real_weights") or {}
     for variant in ("hold",) + VARIANTS:
         ledger, excluded = _clone(inputs, tickers, fee_rate, slippage_rate)
         if _value(ledger, start) is None:
@@ -284,30 +339,48 @@ def simulate_shadow(inputs: dict, *, fee_rate: str = "0.006", slippage_rate: str
                         continue
                     target = _target_weight(order, plan_nav)
                     ticker = order["ticker"]
+                    tally = variant == "all"
                     if target is None or shadow is None:
-                        if variant == "all":
+                        if tally:
                             skipped += 1
+                            outcomes["untranslatable"] += 1
+                        continue
+                    if side == "SELL" and ledger.qty[ticker] == 0:
+                        # The plan sells something the real account holds and the shadow does not.
+                        if tally:
+                            outcomes["no_position"] += 1
                         continue
                     try:
                         price, _meta = ledger.mark(ticker, cutoff)
                     except ValueError:
+                        if tally:
+                            outcomes["no_price"] += 1
                         continue
                     desired = int((Decimal(str(target)) * Decimal(str(shadow["nav_ars"])) / price).to_integral_value(rounding=ROUND_FLOOR))
                     delta = desired - ledger.qty[ticker]
-                    if abs(delta) * price < MIN_TRADE_FRACTION * Decimal(str(shadow["nav_ars"])):
-                        continue
+                    small = abs(delta) * price < MIN_TRADE_FRACTION * Decimal(str(shadow["nav_ars"]))
                     # Only move in the direction the bot asked; never buy on a sell signal.
-                    if side == "SELL" and delta < 0:
+                    if not small and side == "SELL" and delta < 0:
                         sell_orders.append({"ticker": ticker, "quantity_est": -delta, "reference_price": float(price), "reason": order.get("reason")})
-                    elif side == "BUY" and delta > 0:
+                    elif not small and side == "BUY" and delta > 0:
                         buy_orders.append({"ticker": ticker, "quantity_est": delta, "reference_price": float(price), "reason": order.get("reason")})
+                    else:
+                        if tally:
+                            outcomes["at_target"] += 1
+                        continue
+                    if tally:
+                        outcomes["applied"] += 1
                 if variant == "all":
                     used += 1
                 if sell_orders or buy_orders:
                     ledger.execute({"feasible": True, "sell_orders": sell_orders, "buy_orders": buy_orders}, cutoff, end)
             value = _value(ledger, close)
             if value is not None:
-                path.daily.append({"day": day.isoformat(), "nav_ars": value["nav_ars"], "return_pct": value["return_pct"]})
+                row = {"day": day.isoformat(), "nav_ars": value["nav_ars"], "return_pct": value["return_pct"]}
+                real = real_weights.get(day.isoformat())
+                if real is not None:
+                    row["overlap"] = overlap(_shadow_weights(value), real)
+                path.daily.append(row)
         path.fills = list(ledger.fills)
         path.orders = list(ledger.orders)
         paths[variant] = path
@@ -320,6 +393,7 @@ def simulate_shadow(inputs: dict, *, fee_rate: str = "0.006", slippage_rate: str
     if skipped:
         warnings.append(f"{skipped} órdenes sin peso o NAV del plan: no se pudieron traducir.")
     return ShadowReport(
+        order_outcomes=outcomes,
         start={"at": start, "nav_ars": paths["hold"].daily[0]["nav_ars"] if paths["hold"].daily else None},
         paths=paths,
         benchmark=benchmark_path,
@@ -358,6 +432,19 @@ def max_drawdown_pct(daily: list[dict]) -> Optional[float]:
         peak = nav if peak is None else max(peak, nav)
         worst = min(worst, (nav / peak - 1) * 100)
     return worst
+
+
+def overlap_stats(daily: list[dict]) -> Optional[dict]:
+    rows = [r for r in daily if "overlap" in r]
+    if not rows:
+        return None
+    below = next((r["day"] for r in rows if r["overlap"] < 0.5), None)
+    return {
+        "start": rows[0]["overlap"],
+        "end": rows[-1]["overlap"],
+        "min": min(r["overlap"] for r in rows),
+        "below_half_since": date.fromisoformat(below).strftime("%d/%m") if below else None,
+    }
 
 
 def _pct(value: Optional[float]) -> str:
@@ -401,6 +488,28 @@ def render_shadow(report: ShadowReport, *, benchmark: str = "SPY") -> str:
         lines += ["", f"Bot menos no operar: <b>{_pct(diff)}</b>"]
         if report.benchmark:
             lines.append(f"Bot menos {escape(benchmark)}: <b>{_pct(report.paths['all'].final['return_pct'] - report.benchmark[-1]['return_pct'])}</b>")
+    outcomes = report.order_outcomes or {}
+    total = sum(outcomes.values())
+    if total:
+        lines += [
+            "",
+            "<b>¿Cuánto del bot se pudo aplicar?</b>",
+            (
+                f"Órdenes del bot: {total} · aplicadas {outcomes.get('applied', 0)} · ya en el peso {outcomes.get('at_target', 0)} · "
+                f"<b>sin la posición en la sombra {outcomes.get('no_position', 0)}</b> · sin precio {outcomes.get('no_price', 0)} · "
+                f"sin traducir {outcomes.get('untranslatable', 0)}"
+            ),
+        ]
+    stats = overlap_stats(report.paths["all"].daily)
+    if stats:
+        lines.append(
+            f"Parecido con tu cartera real: {stats['start']:.0%} al inicio → {stats['end']:.0%} al final (mínimo {stats['min']:.0%})"
+        )
+        if stats.get("below_half_since"):
+            lines.append(
+                f"⚠️ Desde el {stats['below_half_since']} comparten menos de la mitad: los planes del bot "
+                "ya no hablan de lo que tiene la sombra."
+            )
     days = len(report.paths["hold"].daily)
     lines += ["", f"<i>{days} ruedas valuadas al cierre. Un solo camino: describe, no prueba edge.</i>"]
     lines += [f"⚠️ {escape(w)}" for w in report.warnings]
