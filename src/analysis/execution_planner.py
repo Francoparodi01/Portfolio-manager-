@@ -597,7 +597,8 @@ def _sell_guard(
             return (
                 DecisionType.SELL_PARTIAL,
                 f"Reducir exposición: {w_cur:.1%} → {w_opt:.1%} ({delta:+.1%})",
-                f"rebalanceo por señal negativa débil ({score:+.3f})",
+                f"target optimizer; la señal negativa débil ({score:+.3f}) no alcanza "
+                "para vender sola",
             )
 
         return (
@@ -770,12 +771,13 @@ def derive_decision_intents(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _signal_backed_sell(score: Optional[float]) -> bool:
-    """Una venta se considera independiente (respaldada por señal) con score negativo.
+    """Una venta se sostiene sola por señal solo con score negativo operable.
 
-    Mismo criterio que antes de la revisión del 26/11 (score < SCORE_NEU_LOW). El
-    endurecimiento a SCORE_NEG_DEBIL_LOW vive en una rama aparte hasta medirlo.
+    Un score negativo débil (-0.08 < score < -0.05) habilita la venta en
+    _sell_guard por delta o concentración, pero el tamaño lo pone el optimizer:
+    esa parte depende de que la rotación destino sea ejecutable.
     """
-    return score is not None and score < SCORE_NEU_LOW
+    return score is not None and score < SCORE_NEG_DEBIL_LOW
 
 
 def _sell_origin(decision: DecisionIntent, active_buy_tickers: set[str]) -> str:
@@ -886,8 +888,8 @@ def _reconcile_conditional_sell_amounts(
       - condicional: reducir más para financiar una rotación del optimizer.
 
     La parte condicional solo sobrevive si hay compras core ejecutables que
-    necesiten ese capital. Las ventas respaldadas por score negativo se
-    consideran independientes y no dependen de una compra destino.
+    necesiten ese capital. Solo las ventas con score negativo operable
+    (< SCORE_NEG_DEBIL_LOW) se consideran independientes de una compra destino.
     """
     sell_actions = {DecisionType.SELL_FULL, DecisionType.SELL_PARTIAL}
     sell_decisions = [d for d in decisions if d.action in sell_actions]
