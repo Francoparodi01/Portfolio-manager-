@@ -267,6 +267,9 @@ class OrderIntent:
     status: OrderStatus = OrderStatus.PLANNED
     block_code: Optional[str] = None
     decision_override: Optional[str] = None
+    # Por qué existe la orden: SIGNAL, CONCENTRATION, ROTATION,
+    # CONCENTRATION+ROTATION, DEFENSIVE_EXIT (ventas) u OPTIMIZER (compras).
+    origin: Optional[str] = None
 
     planned_qty: Optional[float] = None
     filled_qty: Optional[float] = None
@@ -766,12 +769,35 @@ def derive_decision_intents(
 # RECONCILIAR FONDOS → EXECUTION PLAN
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _signal_backed_sell(score: Optional[float]) -> bool:
+    """Una venta se considera independiente (respaldada por señal) con score negativo.
+
+    Mismo criterio que antes de la revisión del 26/11 (score < SCORE_NEU_LOW). El
+    endurecimiento a SCORE_NEG_DEBIL_LOW vive en una rama aparte hasta medirlo.
+    """
+    return score is not None and score < SCORE_NEU_LOW
+
+
+def _sell_origin(decision: DecisionIntent, active_buy_tickers: set[str]) -> str:
+    if str(decision.reason_primary or "").startswith("Salida defensiva"):
+        return "DEFENSIVE_EXIT"
+    if _signal_backed_sell(decision.score):
+        return "SIGNAL"
+    funds_rotation = any(t in active_buy_tickers for t in decision.funding_for)
+    concentrated = float(decision.current_weight or 0.0) > MAX_WEIGHT_CONC
+    if funds_rotation and concentrated:
+        return "CONCENTRATION+ROTATION"
+    if funds_rotation:
+        return "ROTATION"
+    return "CONCENTRATION"
+
+
 def _independent_sell_amount(
     decision: DecisionIntent,
     portfolio_value_ars: float,
 ) -> float:
     total = max(0.0, float(decision.theoretical_ars or 0.0))
-    if decision.score is not None and decision.score < SCORE_NEU_LOW:
+    if _signal_backed_sell(decision.score):
         return total
     independent_target = max(
         float(decision.target_weight or 0.0),
@@ -825,9 +851,7 @@ def _link_optimizer_rotations(
         conditional = max(0.0, float(sell.theoretical_ars or 0.0) - independent)
         if conditional <= 1.0:
             sell.sell_cause = (
-                "signal"
-                if sell.score is not None and sell.score < SCORE_NEU_LOW
-                else "concentration"
+                "signal" if _signal_backed_sell(sell.score) else "concentration"
             )
             continue
 
@@ -1059,6 +1083,7 @@ def reconcile_funding(
 
     for d in sell_decisions:
         amount = d.theoretical_ars
+        origin = _sell_origin(d, active_buy_tickers)
         pos = current_positions.get(d.ticker)
         ref_price = pos.price if pos and pos.price > 0 else 0.0
         held_nominals = int(math.floor(float(pos.quantity or 0.0) + 1e-9)) if pos else 0
@@ -1118,6 +1143,7 @@ def reconcile_funding(
             priority=0 if d.action == DecisionType.SELL_FULL else 1,
             funded_by=[],
             partial=False,
+            origin=origin,
         ))
 
     # ── PASO 2: Cash disponible ─────────────────────────────────────────────
@@ -1346,6 +1372,7 @@ def reconcile_funding(
                 priority=3,
                 funded_by=list(sell_tickers),
                 partial=is_partial,
+                origin="OPTIMIZER",
             ))
 
             if is_partial:
@@ -1366,7 +1393,11 @@ def reconcile_funding(
                 theoretical_ars=d.theoretical_ars,
                 quantity_est=0.0,
                 reference_price=0.0,
-                reason=d.reason_secondary or d.reason_primary,
+                reason=(
+                    f"{d.reason_primary} — {d.reason_secondary}"
+                    if d.reason_primary and d.reason_secondary
+                    else (d.reason_primary or d.reason_secondary or "")
+                ),
                 priority=9,
                 block_code=d.block_code,
                 decision_override=("HOLD" if d.block_code == "BLOCKED_CORPORATE_ACTION" else None),

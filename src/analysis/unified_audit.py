@@ -115,6 +115,40 @@ def dedupe_intentions(df: pd.DataFrame) -> pd.DataFrame:
     return data.drop(columns=["_decided", "_day", "_ticker"])
 
 
+def bot_idea_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Ideas del bot para calibrar el score: ejecutadas + planes y bloqueos deduplicados."""
+    return pd.concat(
+        [
+            df[cohort_mask(df, "bot")],
+            dedupe_intentions(df[cohort_mask(df, "plan")]),
+            dedupe_intentions(df[cohort_mask(df, "blocked")]),
+        ],
+        ignore_index=True,
+    )
+
+
+def score_calibration(subset: pd.DataFrame, horizons: tuple[str, ...]) -> dict[str, Optional[dict]]:
+    """Rank IC del score alineado con la decisión, con rango 95% por bloques de fechas."""
+    out: dict[str, Optional[dict]] = {}
+    for h in horizons:
+        if subset.empty:
+            out[h] = None
+            continue
+        scores = aligned_scores(subset["final_score"], subset["decision"])
+        outcomes = pd.to_numeric(subset[f"effective_outcome_{h}"], errors="coerce")
+        result = dict(rank_ic_interval(decision_dates(subset["decided_at"]), scores, outcomes, h))
+        result["n_obs"] = int((scores.notna() & outcomes.notna()).sum())
+        out[h] = result
+    return out
+
+
+def bot_calibration(frame: pd.DataFrame, horizons: tuple[str, ...] = HORIZONS) -> dict[str, Optional[dict]]:
+    """Misma calibración 'bot' que /auditoria, sobre un decision_log crudo."""
+    if frame.empty:
+        return {h: None for h in horizons}
+    return score_calibration(bot_idea_rows(_prepare_frame(frame, horizons)), horizons)
+
+
 def compute_unified_audit(
     frame: pd.DataFrame,
     config: ViabilityAuditConfig,
@@ -173,17 +207,7 @@ def compute_unified_audit(
     if not df.empty:
         bot_ideas = pd.concat([subsets["bot"], subsets["plan"], subsets["blocked"]], ignore_index=True)
         for name, subset in (("bot", bot_ideas), ("radar", subsets["radar"])):
-            calibration[name] = {}
-            for h in horizons:
-                if subset.empty:
-                    calibration[name][h] = None
-                    continue
-                calibration[name][h] = rank_ic_interval(
-                    decision_dates(subset["decided_at"]),
-                    aligned_scores(subset["final_score"], subset["decision"]),
-                    subset[f"effective_outcome_{h}"],
-                    h,
-                )
+            calibration[name] = score_calibration(subset, horizons)
 
     health = dict(health or {})
     duplicates = int(
