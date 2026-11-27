@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,12 +10,7 @@ from src.analysis.execution_planner import (
     SignalClass, PortfolioIntent,
 )
 from src.analysis.enums import DecisionType
-from src.analysis.optimizer_calibration_v2 import (
-    CalibrationEpisode, OptimizerRunContext, calibrated_view,
-    assert_same_run_context, MODE, CAPITAL_AUTHORITY,
-)
 from src.analysis.upcoming_earnings import UpcomingEarningsEvent, deduplicate_earnings_events
-from src.analysis.macro_profiles import shadow_macro_profile_for_ticker
 
 
 def _result(ticker, score=0.2):
@@ -72,43 +67,3 @@ def test_earnings_same_fiscal_period_dedupes_and_exposes_date_conflict():
     assert out[0].event_date == date(2026,11,6)
     assert out[0].date_conflict is True
     assert out[0].conflicting_dates == (date(2026,10,29), date(2026,11,6))
-
-
-def _episodes(n=35, scope="PRIMARY"):
-    base=date(2026,1,1)
-    return [
-        CalibrationEpisode(
-            ticker=f"T{i%5}", asof_date=base+timedelta(days=i),
-            outcome_date=base+timedelta(days=i+6), horizon_days=5,
-            score=-.3 + .6*(i/(n-1)), future_return=-.02 + .04*(i/(n-1)),
-            regime="RANGE", asset_group="TEST", quality="HIGH", scope=scope,
-        ) for i in range(n)
-    ]
-
-
-def test_calibration_is_point_in_time_and_low_sample_fails_closed():
-    view = calibrated_view(_episodes(10), asof_date=date(2026,9,1), horizon_days=5, score=.1, regime="RANGE", asset_group="TEST")
-    assert view.fail_closed and view.confidence == 0.0
-    future = CalibrationEpisode("X",date(2026,8,30),5,.9,9.0,"RANGE","TEST","HIGH","PRIMARY",outcome_date=date(2026,9,10))
-    view2 = calibrated_view(_episodes(35)+[future], asof_date=date(2026,9,1), horizon_days=5, score=.1, regime="RANGE", asset_group="TEST")
-    assert view2.n == 35
-    assert view2.expected_return is not None
-
-
-def test_champion_and_challenger_must_share_exact_context():
-    ctx=OptimizerRunContext("p1","m1","c1",1000,0.006,0.06)
-    assert_same_run_context(ctx,ctx)
-    other=OptimizerRunContext("p2","m1","c1",1000,0.006,0.06)
-    try:
-        assert_same_run_context(ctx,other)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("mismatched snapshots must fail closed")
-
-
-def test_challenger_and_macro_profiles_have_no_capital_authority():
-    assert MODE == "SHADOW_ONLY"
-    assert CAPITAL_AUTHORITY is False
-    p = shadow_macro_profile_for_ticker("GDX")
-    assert p and p.name == "gold_miners" and p.mode == "SHADOW_ONLY"

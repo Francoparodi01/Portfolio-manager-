@@ -51,8 +51,6 @@ flowchart TD
 
     db --> shadow["scripts/run_thesis_shadow.py<br/>src/analysis/thesis_shadow.py"]
     shadow --> shadow_tables[("shadow_thesis_*")]
-    shadow_tables --> causal["scripts/run_shadow_causal_analysis.py<br/>src/analysis/shadow_causal.py"]
-    causal --> causal_table[("shadow_thesis_causal_analysis")]
 
     broker --> fills["broker_fills / broker_movements"]
     fills --> reconcile["src/collector/db.py::reconcile_broker_fills"]
@@ -114,7 +112,6 @@ Los loops intradía viven en `src/scheduler/runner.py::IntradayManager`: scrape 
 | `scripts/run_decision_ledger.py` | Ledger renderizado de plan, ejecución y overrides. | Usa `src/analysis/decision_ledger.py::fetch_decision_ledger`. |
 | `scripts/run_policy_tree.py` | Explicación read-only del último plan formal. | Lee `decision_log.layers`, `metric_scope`, outcomes similares. |
 | `scripts/run_thesis_shadow.py` | Shadow forecasts 5/20/40 y outcomes de shadow. | `shadow_thesis_runs`, `shadow_thesis_forecasts`, `shadow_thesis_outcomes`. |
-| `scripts/run_shadow_causal_analysis.py` | Crítica LLM de proyecciones shadow con evidencia. | `shadow_thesis_causal_analysis`, `sentiment_raw`, `sentiment_scored`. |
 | `scripts/run_sentiment_pipeline.py` | Fetch/scoring/aggregation de sentiment. | `sentiment_raw`, `sentiment_scored`, `sentiment_aggregated`. |
 | `scripts/manual_market_events.py` | Carga/gestión de catalysts manuales. | `manual_market_events`. |
 | `scripts/update_outcomes.py`, `scripts/recompute_outcomes.py` | Cálculo y recálculo de outcomes. | `decision_log`, `market_candles`. |
@@ -241,7 +238,7 @@ La persistencia se hace con `_save_radar_candidates`:
 
 `scripts/run_thesis_shadow.py` usa `src/analysis/thesis_shadow.py::build_shadow_thesis` y `ShadowThesisStore.save_theses` para crear forecasts de precio 5/20/40 en tablas propias. Este módulo no importa optimizer ni planner, y tests como `tests/test_thesis_shadow.py` verifican esa separación.
 
-`scripts/run_shadow_causal_analysis.py` usa `src/analysis/shadow_causal.py` para construir inputs con proyección + noticias/macro, llamar Ollama con JSON schema y persistir análisis con `prompt_version`, `schema_version`, `input_fingerprint` y `raw_response`.
+La crítica causal LLM (`shadow_causal.py`) se retiró el 2026-11-27: nunca se programó. `shadow_thesis_causal_analysis` queda como histórico de solo lectura.
 
 Este es el patrón más cercano al futuro `LLM Critic`.
 
@@ -272,7 +269,7 @@ Tests relevantes para la arquitectura:
 - Planner/cash/funding: `tests/test_execution_nominals_and_rotation.py`, `tests/test_execution_planner_cash.py`, `tests/test_cash_aware_reporting.py`.
 - Outcomes/convention: `tests/test_sell_convention.py`, `tests/test_outcome_basis.py`, `tests/test_outcome_dates.py`, `tests/test_recompute_outcomes.py`.
 - Regression/performance: `tests/test_regression_execution_mode.py`, `tests/test_regression_audit_render.py`, `tests/test_performance_sell_regressions.py`, `tests/test_viability_audit.py`.
-- Shadow/LLM: `tests/test_thesis_shadow.py`, `tests/test_shadow_causal.py`, `tests/test_shadow_monitor.py`.
+- Shadow/LLM: `tests/test_thesis_shadow.py`, `tests/test_shadow_monitor.py`.
 - Sentiment/source quality: `tests/test_sentiment_fetcher_sources.py`, `tests/test_source_quality_audit.py`.
 - Scheduler/monitor/Telegram: `tests/test_scheduler_weekend_policy.py`, `tests/test_scheduler_canonical_history.py`, `tests/test_telegram_output_quality.py`.
 

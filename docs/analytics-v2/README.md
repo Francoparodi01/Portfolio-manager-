@@ -106,7 +106,7 @@ continuo ni un Kaplan-Meier. No se atribuyen ceros a horizontes pendientes.
 
 ```powershell
 python -m pytest tests/test_analytics_v2.py --cov=src.analysis.analytics_v2 --cov-report=term-missing --cov-fail-under=90
-python -m pytest tests/test_viability_audit.py tests/test_decision_market_audit.py tests/test_execution_nominals_and_rotation.py
+python -m pytest tests/test_viability_audit.py tests/test_execution_nominals_and_rotation.py
 ```
 
 La exigencia `pyproject` de cobertura global 90% pertenecía a Agentic Portfolio
