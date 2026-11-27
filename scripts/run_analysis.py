@@ -235,6 +235,16 @@ def _render_analysis_data_context(
     return lines
 
 
+def _last_session_close(current: datetime) -> datetime:
+    """Cierre (17:00 ART) de la última rueda terminada antes de `current`."""
+    day = datetime.combine(current.date(), time(17, 0), tzinfo=ART_TZ)
+    if current < day:
+        day -= timedelta(days=1)
+    while not is_art_business_day(day):
+        day -= timedelta(days=1)
+    return day
+
+
 def _portfolio_snapshot_stale_reason(
     portfolio_snapshot: dict | None,
     now: datetime | None = None,
@@ -253,6 +263,11 @@ def _portfolio_snapshot_stale_reason(
         current = current.replace(tzinfo=ART_TZ)
     current = current.astimezone(ART_TZ)
     scraped_art = scraped_at.astimezone(ART_TZ)
+
+    # Fuera de rueda los precios no cambian: un snapshot posterior al último
+    # cierre sigue vigente hasta la próxima apertura.
+    if not is_regular_market_session(current) and scraped_art >= _last_session_close(current):
+        return None
 
     if scraped_art.date() != current.date():
         return (
@@ -326,66 +341,28 @@ def _render_manual_event_position_exposure(
     return lines
 
 
-def _rankdata(values: np.ndarray) -> np.ndarray:
-    arr = np.asarray(values, dtype=float)
-    n = arr.size
-    if n == 0:
-        return np.array([], dtype=float)
-
-    order = np.argsort(arr, kind="mergesort")
-    sorted_vals = arr[order]
-    ranks_sorted = np.zeros(n, dtype=float)
-
-    i = 0
-    while i < n:
-        j = i
-        while j + 1 < n and sorted_vals[j + 1] == sorted_vals[i]:
-            j += 1
-
-        avg_rank = (i + j + 2) / 2.0
-        ranks_sorted[i:j + 1] = avg_rank
-        i = j + 1
-
-    ranks = np.empty(n, dtype=float)
-    ranks[order] = ranks_sorted
-    return ranks
+IC_HORIZONS = ("5d", "10d", "20d")
+_IC_COLUMNS = (
+    "id", "decided_at", "ticker", "decision", "final_score", "source", "status",
+    "metric_scope", "outcome_basis",
+    "outcome_5d", "outcome_10d", "outcome_20d",
+    "executable_outcome_5d", "executable_outcome_10d", "executable_outcome_20d",
+)
+_IC_DIAGNOSTIC_NOTE = "Diagnóstico: el planner no cambia umbrales por este régimen."
 
 
-def _safe_corr(x_vals: list[float], y_vals: list[float]) -> float | None:
-    if len(x_vals) < 5 or len(y_vals) < 5:
-        return None
-
-    x = np.asarray(x_vals, dtype=float)
-    y = np.asarray(y_vals, dtype=float)
-
-    if x.size != y.size or x.size < 5:
-        return None
-
-    if np.std(x) < 1e-12 or np.std(y) < 1e-12:
-        return None
-
-    corr = float(np.corrcoef(x, y)[0, 1])
-
-    if not np.isfinite(corr):
-        return None
-
-    return corr
-
-
-def _ic_label(ic: float | None) -> str:
-    if ic is None:
+def _ic_evidence_label(result: dict | None) -> str:
+    """Etiqueta por el rango 95%, no por el valor puntual."""
+    if not result or result.get("rank_ic") is None:
         return "SIN DATOS"
-
-    a = abs(ic)
-
-    if a >= 0.10:
-        return "FUERTE"
-    if a >= 0.05:
-        return "MODERADO"
-    if a >= 0.02:
-        return "DÉBIL"
-
-    return "NULO"
+    lower, upper = result.get("lower"), result.get("upper")
+    if lower is None or upper is None:
+        return "SIN RANGO"
+    if lower > 0:
+        return "POSITIVO"
+    if upper < 0:
+        return "NEGATIVO"
+    return "NO CONCLUYENTE"
 
 
 @dataclass
@@ -395,59 +372,55 @@ class ICTextRegime:
     note: str
 
 
-def _build_ic_text_regime(
-    ic_5d: Optional[float] = None,
-    ic_10d: Optional[float] = None,
-) -> ICTextRegime:
+def _build_ic_text_regime(by_horizon: dict | None) -> ICTextRegime:
     """
-    Régimen textual de IC.
+    Régimen textual de IC a partir del rango 95% de 5d y 10d.
 
-    Importante:
-    Esto NO cambia todavía los thresholds del planner.
-    Solo explica el comportamiento conservador cuando el IC viene negativo.
+    Es solo diagnóstico: ni el planner ni el decision engine reciben este régimen.
     """
-    values = [x for x in (ic_5d, ic_10d) if x is not None]
-
-    if not values:
+    by_h = by_horizon or {}
+    labels = [
+        _ic_evidence_label(by_h.get(hz))
+        for hz in ("5d", "10d")
+        if (by_h.get(hz) or {}).get("rank_ic") is not None
+    ]
+    if not labels:
+        return ICTextRegime("SIN DATOS", "⚪", "IC no disponible.")
+    if "NEGATIVO" in labels:
         return ICTextRegime(
-            label="SIN DATOS",
-            icon="⚪",
-            note="IC no disponible: el sistema mantiene postura conservadora.",
+            "CAUTELA ALTA", "🔴",
+            "el score ordena al revés con el rango 95% bajo cero.",
         )
-
-    worst_ic = min(values)
-
-    if worst_ic < -0.10:
-        return ICTextRegime(
-            label="CAUTELA ALTA",
-            icon="🔴",
-            note=(
-                "IC negativo fuerte: el sistema evita rotaciones con señales débiles "
-                "y prioriza mantener posiciones salvo señal clara."
-            ),
-        )
-
-    if worst_ic < -0.05:
-        return ICTextRegime(
-            label="CAUTELA",
-            icon="🟡",
-            note=(
-                "IC negativo: el sistema reduce agresividad y evita operar señales débiles."
-            ),
-        )
-
-    if worst_ic < 0:
-        return ICTextRegime(
-            label="NEUTRAL CON ADVERTENCIA",
-            icon="🟡",
-            note="IC levemente negativo: las señales se interpretan con cautela.",
-        )
-
+    if all(label == "POSITIVO" for label in labels):
+        return ICTextRegime("NORMAL", "✅", "el score ordena con el rango 95% sobre cero.")
     return ICTextRegime(
-        label="NORMAL",
-        icon="✅",
-        note="IC positivo: el sistema mantiene umbrales normales de operación.",
+        "NO CONCLUYENTE", "🟡",
+        "el rango 95% cruza cero: no hay evidencia de que el score ordene.",
     )
+
+
+ORDER_ORIGIN_LABELS = {
+    "SIGNAL": "señal (score negativo operable)",
+    "CONCENTRATION": "concentración",
+    "ROTATION": "financia una compra del optimizer",
+    "CONCENTRATION+ROTATION": "concentración + financia una compra del optimizer",
+    "DEFENSIVE_EXIT": "salida defensiva (stop o ruptura)",
+    "OPTIMIZER": "target del optimizer",
+}
+
+
+def _order_origin_text(order) -> str:
+    origin = str(getattr(order, "origin", "") or "")
+    return ORDER_ORIGIN_LABELS.get(origin, origin)
+
+
+def _decision_reason_text(d) -> str:
+    """Motivo visible: en BLOCKED/WATCH el motivo del bloqueo va primero."""
+    primary = str(getattr(d, "reason_primary", "") or "")
+    secondary = str(getattr(d, "reason_secondary", "") or "")
+    if d.action in (DecisionType.BLOCKED, DecisionType.WATCH) and primary:
+        return f"{primary} — {secondary}" if secondary else primary
+    return secondary or primary
 
 
 def _classify_signal_label(score: Optional[float]) -> str:
@@ -502,18 +475,20 @@ def _calculate_agreement_from_layers(
     sentiment: float = 0.0,
     momentum: Optional[float] = None,
     datos_frescos: bool = True,
+    direction: int = 1,
 ) -> float:
     """
     Calcula 'Acuerdo capas' sin inflarlo artificialmente.
 
     No mide fuerza operativa.
-    Mide cuántas capas acompañan positivamente.
+    Mide cuántas capas acompañan la dirección del score (direction=+1 o -1):
+    en un score negativo acompañan las capas negativas.
 
     Sistema:
-    - Técnico positivo: +30
-    - Macro positivo: +20
-    - Momentum positivo: +20, si existe
-    - Sentiment positivo: +10, si existe y no es 0
+    - Técnico en la dirección: +30
+    - Macro en la dirección: +20
+    - Momentum en la dirección: +20, si existe
+    - Sentiment en la dirección: +10, si existe y no es 0
     - Datos no frescos: -20
 
     Base:
@@ -523,22 +498,23 @@ def _calculate_agreement_from_layers(
     """
     points = 0
     base = 50
+    sign = -1 if direction < 0 else 1
 
-    if technical > 0:
+    if technical * sign > 0:
         points += 30
 
-    if macro > 0:
+    if macro * sign > 0:
         points += 20
 
     if momentum is not None:
         base += 20
-        if momentum > 0:
+        if momentum * sign > 0:
             points += 20
 
-    # sentiment = 0.0 se interpreta como "sin señal", no como positivo.
+    # sentiment = 0.0 se interpreta como "sin señal", no como acuerdo.
     if sentiment is not None and abs(sentiment) > 0.0001:
         base += 10
-        if sentiment > 0:
+        if sentiment * sign > 0:
             points += 10
 
     if not datos_frescos:
@@ -573,6 +549,7 @@ def _render_signal_line(
         macro=macro,
         sentiment=sentiment,
         momentum=momentum,
+        direction=-1 if score is not None and score < 0 else 1,
     )
 
     agreement_pct = agreement * 100
@@ -712,6 +689,13 @@ def _component_reason(result) -> tuple[str, str]:
     return lectura, motivo
 
 
+def _ic_range_text(v: dict) -> str:
+    lower, upper = v.get("lower"), v.get("upper")
+    if lower is None or upper is None:
+        return "sin rango"
+    return f"[{lower:+.2f}; {upper:+.2f}]"
+
+
 def _append_ic_section(h: list[str], ic_metrics: dict | None) -> None:
     ic_data = ic_metrics or {}
     if not ic_data.get("has_data"):
@@ -719,37 +703,27 @@ def _append_ic_section(h: list[str], ic_metrics: dict | None) -> None:
 
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append("<b>DIAGNÓSTICO DEL SISTEMA</b>")
+    h.append(
+        f"Calibración del score: ideas del bot (ejecutadas, planes y bloqueos), "
+        f"{int(ic_data.get('lookback_days', 180) or 180)}d, misma definición que /auditoria."
+    )
 
     by_h = ic_data.get("by_horizon", {}) or {}
-    ic_5d = None
-    ic_10d = None
-
-    for hz in ("5d", "10d", "20d"):
-        v = by_h.get(hz, {})
+    for hz in IC_HORIZONS:
+        v = by_h.get(hz) or {}
+        ric = v.get("rank_ic")
         n_obs = int(v.get("n_obs", 0) or 0)
-        n_tk = int(v.get("n_tickers", 0) or 0)
-        ic = v.get("ic", None)
-        ric = v.get("rank_ic", None)
-
-        if ic is None or n_obs < 5:
+        if ric is None or n_obs < 5:
             continue
-
-        if hz == "5d":
-            ic_5d = ic
-        elif hz == "10d":
-            ic_10d = ic
-
-        q = v.get("quality", "NULO")
         h.append(
-            f"{hz}: IC <code>{ic:+.3f}</code> | "
-            f"Rank IC <code>{(ric or 0.0):+.3f}</code> | "
-            f"n={n_obs} ({n_tk} tickers) | <b>{q}</b>"
+            f"{hz}: Rank IC <code>{ric:+.3f}</code> {_ic_range_text(v)} | "
+            f"n={n_obs} ({int(v.get('n_dates', 0) or 0)} fechas) | <b>{escape(str(v.get('quality')))}</b>"
         )
 
-    ic_regime = _build_ic_text_regime(ic_5d=ic_5d, ic_10d=ic_10d)
+    ic_regime = _build_ic_text_regime(by_h)
     h.append(
         f"{ic_regime.icon} Régimen IC: <b>{ic_regime.label}</b> — "
-        f"{escape(ic_regime.note)}"
+        f"{escape(ic_regime.note)} {escape(_IC_DIAGNOSTIC_NOTE)}"
     )
     h.append("")
 
@@ -830,13 +804,21 @@ def _extract_conviction(result) -> float:
 
 async def _compute_information_coefficient(
     cfg,
-    tickers: list[str],
     lookback_days: int = 180,
     owner_chat_id: int | None = None,
 ) -> dict:
+    """
+    Rank IC del score con la definición de /auditoria (calibración "bot"):
+    ideas del bot de todos los tickers, score alineado con la decisión
+    (los SELL invierten el signo porque el outcome es direccional), outcome
+    ejecutable primero, base canónica y rango 95% por bloques de fechas.
+    Diferencia: acá se filtra por owner_chat_id.
+    """
+    import pandas as pd
+    from src.analysis.unified_audit import bot_calibration
+
     db = PortfolioDatabase(cfg.database.url)
     cutoff = datetime.now() - timedelta(days=lookback_days)
-    horizons = ("5d", "10d", "20d")
     metrics = {"lookback_days": lookback_days, "by_horizon": {}, "has_data": False}
 
     try:
@@ -845,64 +827,49 @@ async def _compute_information_coefficient(
         if not pool:
             return metrics
 
-        ticker_filter = [str(t).upper() for t in (tickers or []) if str(t).strip()]
         async with pool.acquire() as conn:
-            if ticker_filter:
-                rows = await conn.fetch(
-                    """
-                    SELECT ticker, final_score, outcome_5d, outcome_10d, outcome_20d
-                    FROM decision_log
-                    WHERE decided_at >= $1
-                      AND ticker = ANY($2::text[])
-                      AND ($3::bigint IS NULL OR owner_chat_id = $3)
-                      AND decision != 'HOLD'
-                    """,
-                    cutoff, ticker_filter, owner_chat_id,
+            cols = {
+                str(r["column_name"])
+                for r in await conn.fetch(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'decision_log'"
                 )
-            else:
-                rows = await conn.fetch(
-                    """
-                    SELECT ticker, final_score, outcome_5d, outcome_10d, outcome_20d
-                    FROM decision_log
-                    WHERE decided_at >= $1
-                      AND ($2::bigint IS NULL OR owner_chat_id = $2)
-                      AND decision != 'HOLD'
-                    """,
-                    cutoff, owner_chat_id,
-                )
-
-        for hz in horizons:
-            k = f"outcome_{hz}"
-            xs, ys = [], []
-            covered = set()
-            for r in rows:
-                score = r["final_score"]
-                out   = r[k]
-                if score is None or out is None:
-                    continue
-                score = float(score); out = float(out)
-                if not np.isfinite(score) or not np.isfinite(out):
-                    continue
-                xs.append(score); ys.append(out)
-                covered.add(str(r["ticker"]).upper())
-
-            pearson  = _safe_corr(xs, ys)
-            rank_ic  = _safe_corr(
-                _rankdata(np.asarray(xs)), _rankdata(np.asarray(ys))
-            ) if len(xs) >= 5 else None
-            metrics["by_horizon"][hz] = {
-                "ic": pearson, "rank_ic": rank_ic,
-                "n_obs": len(xs), "n_tickers": len(covered),
-                "quality": _ic_label(pearson),
             }
+            selected = [c for c in _IC_COLUMNS if c in cols]
+            if not {"decided_at", "decision", "final_score", "source", "status"} <= set(selected):
+                return metrics
+            rows = await conn.fetch(
+                f"""
+                SELECT {", ".join(selected)}
+                FROM decision_log
+                WHERE decided_at >= $1
+                  AND ($2::bigint IS NULL OR owner_chat_id = $2)
+                """,
+                cutoff, owner_chat_id,
+            )
+
+        calibration = bot_calibration(pd.DataFrame([dict(r) for r in rows]), IC_HORIZONS)
+        for hz, result in calibration.items():
+            if not result:
+                continue
+            entry = {
+                "rank_ic": result.get("estimate"),
+                "lower": result.get("lower"),
+                "upper": result.get("upper"),
+                "n_obs": int(result.get("n_obs", 0) or 0),
+                "n_dates": int(result.get("n_dates", 0) or 0),
+            }
+            entry["quality"] = _ic_evidence_label(entry)
+            metrics["by_horizon"][hz] = entry
 
         primary = metrics["by_horizon"].get("5d", {})
         metrics["primary_horizon"] = "5d"
-        metrics["primary_ic"]      = primary.get("ic")
+        metrics["primary_ic"]      = primary.get("rank_ic")
         metrics["primary_rank_ic"] = primary.get("rank_ic")
         metrics["primary_n_obs"]   = primary.get("n_obs", 0)
         metrics["has_data"]        = any(
-            (v.get("n_obs", 0) >= 5) for v in metrics["by_horizon"].values()
+            v.get("rank_ic") is not None and v.get("n_obs", 0) >= 5
+            for v in metrics["by_horizon"].values()
         )
         return metrics
     except Exception as e:
@@ -2407,23 +2374,19 @@ def _compact_ic_line(ic_metrics: dict | None) -> str:
     ic_data = ic_metrics or {}
     by_h = ic_data.get("by_horizon", {}) or {}
     parts = []
-    ic_5d = None
-    ic_10d = None
     for hz in ("5d", "10d"):
         data = by_h.get(hz, {}) or {}
-        ic = data.get("ic")
+        ric = data.get("rank_ic")
         n_obs = int(data.get("n_obs", 0) or 0)
-        if ic is None or n_obs < 5:
+        if ric is None or n_obs < 5:
             continue
-        if hz == "5d":
-            ic_5d = float(ic)
-        if hz == "10d":
-            ic_10d = float(ic)
-        quality = str(data.get("quality") or _ic_quality(float(ic))).upper()
-        parts.append(f"IC {hz.upper()} <code>{float(ic):+.3f}</code> {escape(quality)}")
+        parts.append(
+            f"IC {hz.upper()} <code>{float(ric):+.3f}</code> {_ic_range_text(data)} "
+            f"{escape(str(data.get('quality') or _ic_evidence_label(data)))}"
+        )
     if not parts:
         return "IC: sin muestra suficiente"
-    regime = _build_ic_text_regime(ic_5d=ic_5d, ic_10d=ic_10d)
+    regime = _build_ic_text_regime(by_h)
     return " | ".join(parts) + f" | {regime.icon} {escape(regime.label)}"
 
 
@@ -2600,8 +2563,8 @@ def _render_compact_report(
             tail = f"hold — {_compact_reason(d.reason_secondary)}"
         elif action == DecisionType.WATCH.value and d and d.reason_secondary:
             tail = f"watch — {_compact_reason(d.reason_secondary)}"
-        elif action == DecisionType.BLOCKED.value and d and d.reason_secondary:
-            tail = f"bloqueado — {_compact_reason(d.reason_secondary)}"
+        elif action == DecisionType.BLOCKED.value and d and (d.reason_primary or d.reason_secondary):
+            tail = f"bloqueado — {_compact_reason(_decision_reason_text(d))}"
         else:
             tail = action
         lines.append(
@@ -2786,6 +2749,8 @@ def render_report(
             h.append(f"   {_render_signal_line(score, tech, macro, sent)}")
 
         h.append(f"   Motivo: {escape(main_order.reason)}")
+        if _order_origin_text(main_order):
+            h.append(f"   Origen: <b>{escape(_order_origin_text(main_order))}</b>")
         if next_session_plan:
             h.append(
                 "   Estado: idea para próxima rueda; no ejecutar sin precio fresco, "
@@ -2850,7 +2815,9 @@ def render_report(
     h.append(tg_section("Plan operativo"))
 
     if plan:
-        h.append(f"   {timing_ctx['headline']}: {timing_ctx['note']}")
+        if not timing_ctx["next_session"]:
+            # En próxima rueda el encabezado del reporte ya muestra esta nota.
+            h.append(f"   {timing_ctx['headline']}: {timing_ctx['note']}")
         h.append("   Confirmación requerida: fill real en Cocos movements.")
 
         purchases = (
@@ -3003,10 +2970,12 @@ def render_report(
         )
 
         ars_str = ""
+        ticker_order = None
 
         if plan:
             for o in plan.sell_orders + plan.buy_orders:
                 if o.ticker == ticker:
+                    ticker_order = o
                     verb = "-" if o.side.value == "SELL" else "+"
                     ars_str = f" → {verb}{_money_ars(o.amount_ars)}"
 
@@ -3032,8 +3001,10 @@ def render_report(
         ):
             h.append("   ⚠️ <b>Divergencia técnico/macro:</b> SELL técnico con contexto risk-on.")
 
-        if d and d.reason_secondary:
-            h.append(f"   Motivo: {escape(d.reason_secondary)}.")
+        if d and (d.reason_secondary or ticker_order is not None or d.action in (DecisionType.BLOCKED, DecisionType.WATCH)):
+            h.append(f"   Motivo: {escape(_decision_reason_text(d))}.")
+            if ticker_order is not None and _order_origin_text(ticker_order):
+                h.append(f"   Origen: <b>{escape(_order_origin_text(ticker_order))}</b>")
             if (
                 "Optimizer sugería" in str(d.reason_secondary)
                 and action_str in {
@@ -3188,14 +3159,24 @@ def render_report(
         h.append("<b>Pesos objetivo:</b>")
 
         for d in sorted(plan.decisions, key=lambda x: x.ticker):
-            if d.action == DecisionType.HOLD and abs(d.delta_weight) < 0.015:
+            theoretical = (
+                d.theoretical_target_weight
+                if d.theoretical_target_weight is not None else d.target_weight
+            )
+            theoretical_delta = theoretical - d.current_weight
+            if abs(theoretical_delta) < 0.015:
                 continue
 
-            arrow = "📈" if d.delta_weight > 0.03 else "📉" if d.delta_weight < -0.03 else "➡️"
-
+            arrow = "📈" if theoretical_delta > 0.03 else "📉" if theoretical_delta < -0.03 else "➡️"
+            executable = (
+                d.target_weight
+                if d.action in (DecisionType.SELL_FULL, DecisionType.SELL_PARTIAL, DecisionType.BUY)
+                else d.current_weight
+            )
             h.append(
                 f"  {arrow} <b>{d.ticker}</b>: {d.current_weight:.1%} → "
-                f"<b>{d.target_weight:.1%}</b>  ({d.delta_weight:+.1%})"
+                f"teórico <b>{theoretical:.1%}</b> ({theoretical_delta:+.1%}) | "
+                f"ejecutable {executable:.1%} ({escape(d.action.value)})"
             )
 
         h.append("")
@@ -4390,7 +4371,6 @@ async def main(
     # ── 10. Information Coefficient ────────────────────────────────────────────
     ic_metrics = await _compute_information_coefficient(
         cfg,
-        tickers=tickers,
         lookback_days=180,
         owner_chat_id=owner_chat_id,
     )

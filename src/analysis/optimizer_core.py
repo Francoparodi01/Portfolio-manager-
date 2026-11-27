@@ -34,6 +34,10 @@ RF_ANNUAL        = 0.05
 RISK_AVERSION    = 2.5
 TAU              = 0.05
 MIN_HISTORY_DAYS = 60
+# ETFs inversos: su correlación negativa con el resto hace que MIN_VARIANCE los
+# cargue por construcción. Entran como cobertura con un tope fijo, no por señal.
+INVERSE_ETF_TICKERS = frozenset({"SH", "PSQ", "DOG", "SDS", "QID", "SPXU", "SQQQ", "RWM"})
+INVERSE_ETF_W_MAX = 0.05
 HISTORY_PERIOD   = "1y"
 
 # Risk gate — umbrales para cambiar estado
@@ -732,6 +736,10 @@ def run_optimizer(
                 conviction=conviction_map.get(t, 0.5),
             )
             for t in universe
+        ])
+        w_max_arr = np.array([
+            min(cap, INVERSE_ETF_W_MAX) if str(t).upper() in INVERSE_ETF_TICKERS else cap
+            for t, cap in zip(universe, w_max_arr)
         ])
         logger.info(f"W_MAX ({gate_state}): { {t: f'{v:.0%}' for t, v in zip(universe, w_max_arr)} }")
 
