@@ -7,6 +7,10 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
 from scripts import run_analysis
 from src.analysis import optimizer, optimizer_core
 from src.analysis.audit_scope import ART_TZ
@@ -186,3 +190,46 @@ def test_snapshot_after_close_is_fresh_until_next_open():
     assert run_analysis._portfolio_snapshot_stale_reason(
         {"scraped_at": "2026-11-26T12:00:00-03:00"}, now=datetime(2026, 11, 26, 14, 0, tzinfo=ART_TZ)
     ) is not None
+
+
+def _full_report(**kwargs):
+    from test_run_analysis_report_layout import _macro_snapshot, _result
+
+    plan, _ = _plan_26_11(googl_score=-0.054)
+    macro = _macro_snapshot()
+    macro.ccl, macro.mep = 1_768.0, 1_666.0
+    return run_analysis.render_report(
+        results=[_result("GOOGL", -0.054), _result("SH", 0.176), _result("PAMP", -0.048)],
+        macro_snap=macro,
+        total_ars=PORTFOLIO,
+        cash_ars=CASH,
+        portfolio_risk=SimpleNamespace(positions=[]),
+        rebalance_report=None,
+        positions=[
+            {"ticker": "GOOGL", "asset_type": "CEDEAR", "market_value": 615_600.0},
+            {"ticker": "SH", "asset_type": "CEDEAR", "market_value": 67_800.0},
+            {"ticker": "PAMP", "asset_type": "ACCION", "market_value": 96_800.0},
+        ],
+        universe_results=[],
+        external_universe_tickers=[],
+        ic_metrics={},
+        execution_plan=plan,
+        **kwargs,
+    )
+
+
+def test_full_report_without_radar_has_no_radar_section():
+    report = _full_report(radar_omitted=True)
+
+    assert "Radar" not in report
+    assert "radar" not in report.lower().replace("/radar", "")
+
+
+def test_cash_block_shows_currency_exposure():
+    report = _full_report(radar_omitted=True)
+
+    assert "Cash y moneda" in report
+    assert "Cash: <b>$1.325.193 ARS</b> (54.7%) ≈ USD 750 CCL / USD 795 MEP" in report
+    assert "USD vía CEDEAR <b>28.2%</b>" in report
+    assert "ARS <b>58.7%</b> (cash 54.7% + acciones/FCI 4.0%)" in report
+    assert "no muestra FCI ni caución" in report

@@ -133,7 +133,7 @@ def test_report_expands_main_action_with_recommendation_context():
     assert "Motivo:" in output
 
 
-def test_report_summarizes_official_history_once_for_holdings():
+def test_report_does_not_repeat_official_history_source():
     output = run_analysis.render_report(
         results=[_result("NVDA", 0.12), _result("AMD", 0.05)],
         macro_snap=_macro_snapshot(),
@@ -151,5 +151,7 @@ def test_report_summarizes_official_history_once_for_holdings():
         execution_plan=None,
     )
 
-    assert "Historia técnica: <b>official 2</b>" in output
+    # Sin resumen global de fuentes; con velas oficiales no se agrega la fuente por ticker.
+    assert "Historia técnica" not in output
     assert output.count("Fuente técnica:") == 0
+    assert "| official" not in output

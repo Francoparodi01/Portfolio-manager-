@@ -348,7 +348,6 @@ _IC_COLUMNS = (
     "outcome_5d", "outcome_10d", "outcome_20d",
     "executable_outcome_5d", "executable_outcome_10d", "executable_outcome_20d",
 )
-_IC_DIAGNOSTIC_NOTE = "Diagnóstico: el planner no cambia umbrales por este régimen."
 
 
 def _ic_evidence_label(result: dict | None) -> str:
@@ -618,23 +617,6 @@ def _technical_data_quality(result) -> tuple[str, str]:
     return level, reason
 
 
-def _technical_source_summary(results) -> str:
-    counts: dict[str, int] = {}
-    for result in results or []:
-        mode = str(
-            getattr(result, "technical_candle_source_mode", "unknown") or "unknown"
-        )
-        counts[mode] = counts.get(mode, 0) + 1
-
-    if not counts:
-        return "sin datos"
-
-    return " | ".join(
-        f"{mode} {count}"
-        for mode, count in sorted(counts.items())
-    )
-
-
 def _component_reason(result) -> tuple[str, str]:
     tech = _layer_weighted(result, "technical")
     macro = _layer_weighted(result, "macro")
@@ -701,29 +683,15 @@ def _append_ic_section(h: list[str], ic_metrics: dict | None) -> None:
     if not ic_data.get("has_data"):
         return
 
-    h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    h.append("<b>DIAGNÓSTICO DEL SISTEMA</b>")
-    h.append(
-        f"Calibración del score: ideas del bot (ejecutadas, planes y bloqueos), "
-        f"{int(ic_data.get('lookback_days', 180) or 180)}d, misma definición que /auditoria."
-    )
-
     by_h = ic_data.get("by_horizon", {}) or {}
-    for hz in IC_HORIZONS:
-        v = by_h.get(hz) or {}
-        ric = v.get("rank_ic")
-        n_obs = int(v.get("n_obs", 0) or 0)
-        if ric is None or n_obs < 5:
-            continue
-        h.append(
-            f"{hz}: Rank IC <code>{ric:+.3f}</code> {_ic_range_text(v)} | "
-            f"n={n_obs} ({int(v.get('n_dates', 0) or 0)} fechas) | <b>{escape(str(v.get('quality')))}</b>"
-        )
-
+    v = by_h.get("5d") or {}
+    if v.get("rank_ic") is None or int(v.get("n_obs", 0) or 0) < 5:
+        return
     ic_regime = _build_ic_text_regime(by_h)
     h.append(
-        f"{ic_regime.icon} Régimen IC: <b>{ic_regime.label}</b> — "
-        f"{escape(ic_regime.note)} {escape(_IC_DIAGNOSTIC_NOTE)}"
+        f"{ic_regime.icon} Calibración del score: <b>{ic_regime.label}</b> — Rank IC 5d "
+        f"<code>{v['rank_ic']:+.3f}</code> {_ic_range_text(v)}, n={int(v.get('n_obs', 0) or 0)}. "
+        "Diagnóstico, no cambia el plan; detalle en /auditoria."
     )
     h.append("")
 
@@ -2405,6 +2373,63 @@ def _optimizer_compact_line(rebalance_report) -> str:
     return f"Optimizer: <b>{escape(engine)}</b>{note} | Sharpe <b>{sharpe:.2f}</b>"
 
 
+USD_LINKED_ASSET_TYPES = {"CEDEAR", "DOLAR"}
+ARS_ASSET_TYPES = {"ACCION", "FCI"}
+
+
+def _usd(x: float) -> str:
+    return f"USD {float(x):,.0f}".replace(",", ".")
+
+
+def _render_cash_currency_block(
+    total_ars: float,
+    cash_ars: float,
+    positions: list[dict] | None,
+    macro_snap,
+) -> list[str]:
+    """Cash y exposición por moneda. Solo datos del snapshot y del macro: no estima rendimientos."""
+    if not total_ars or total_ars <= 0:
+        return []
+    by_type: dict[str, float] = {}
+    for p in positions or []:
+        asset_type = str(p.get("asset_type", "") or "UNKNOWN").upper()
+        by_type[asset_type] = by_type.get(asset_type, 0.0) + float(p.get("market_value", 0) or 0)
+    usd_linked = sum(v for t, v in by_type.items() if t in USD_LINKED_ASSET_TYPES)
+    ars_assets = sum(v for t, v in by_type.items() if t in ARS_ASSET_TYPES)
+    other = sum(by_type.values()) - usd_linked - ars_assets
+    cash = max(0.0, float(cash_ars or 0.0))
+
+    def pct(x: float) -> str:
+        return f"{x / total_ars:.1%}"
+
+    ccl = getattr(macro_snap, "ccl", None)
+    mep = getattr(macro_snap, "mep", None)
+    cash_line = f"Cash: <b>{_money_ars(cash)}</b> ({pct(cash)})"
+    fx = [f"{_usd(cash / v)} {name}" for name, v in (("CCL", ccl), ("MEP", mep)) if v]
+    if fx:
+        cash_line += " ≈ " + " / ".join(fx)
+
+    lines = [tg_section("Cash y moneda"), cash_line]
+    exposure = (
+        f"Exposición: USD vía CEDEAR <b>{pct(usd_linked)}</b> | "
+        f"ARS <b>{pct(cash + ars_assets)}</b> (cash {pct(cash)}"
+        + (f" + acciones/FCI {pct(ars_assets)}" if ars_assets > 0 else "")
+        + ")"
+    )
+    if other > 1:
+        exposure += f" | otros {pct(other)}"
+    lines.append(exposure)
+    if ccl:
+        lines.append(f"Cartera total ≈ <b>{_usd(total_ars / ccl)}</b> CCL")
+    if by_type.get("FCI", 0.0) <= 0:
+        lines.append(
+            "⚠️ El snapshot no muestra FCI ni caución: si el cash está parado, "
+            "no rinde y queda expuesto a inflación y devaluación."
+        )
+    lines.append("")
+    return lines
+
+
 def _render_compact_report(
     results,
     macro_snap,
@@ -2635,7 +2660,9 @@ def render_report(
     off_market_context: bool = False,
     manual_market_events: list[ManualMarketEvent] | None = None,
     upcoming_earnings_events: list[UpcomingEarningsEvent] | None = None,
+    radar_omitted: bool = False,
 ) -> str:
+    """radar_skipped: reporte compacto (/analisis_test). radar_omitted: completo sin radar (/analisis_full)."""
     plan = execution_plan
     gate = plan.gate if plan else "NORMAL"
     h = []
@@ -2667,6 +2694,8 @@ def render_report(
         f"Cash libre: <b>{_money_ars(cash_ars)}</b>"
     )
     h.extend(_render_analysis_data_context(portfolio_snapshot, latest_broker_movement))
+    h.append("")
+    h.extend(_render_cash_currency_block(total_ars, cash_ars, positions, macro_snap))
     event_lines = render_manual_market_events_html(manual_market_events or [])
     if event_lines:
         h.extend(event_lines)
@@ -2909,7 +2938,6 @@ def render_report(
     # ── CARTERA ACTUAL — señal del activo + decisión de cartera separadas ─────
     h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     h.append(tg_section("Lectura de cartera"))
-    h.append(f"Historia técnica: <b>{escape(_technical_source_summary(results))}</b>")
     stale_positions = [
         p for p in (positions or [])
         if str(p.get("market_data_status", PRICE_STATUS_FRESH)).upper() != PRICE_STATUS_FRESH
@@ -3025,21 +3053,18 @@ def render_report(
                 f"   Capas: <code>T {tech:+.3f} | M {macro:+.3f} | "
                 f"Risk {risk:+.3f} | S {sent:+.3f}</code>"
             )
-            h.append(
-                f"   Regime <b>{escape(str(getattr(r, 'technical_regime', 'TRANSITIONAL')))}</b> | "
-                f"Trend <code>{float(getattr(r, 'trend_score', 0.0) or 0.0):+.3f}</code>"
-            )
 
         source_mode = str(
             getattr(r, "technical_candle_source_mode", "unknown") or "unknown"
         )
         data_quality, data_quality_reason = _technical_data_quality(r)
+        source_note = (
+            f" | {escape(_technical_source_label(r))}" if source_mode != "official" else ""
+        )
         h.append(
             f"   Datos: <b>{escape(data_quality)}</b> — "
-            f"{escape(data_quality_reason)}"
+            f"{escape(data_quality_reason)}{source_note}"
         )
-        if source_mode != "official":
-            h.append(f"   Fuente técnica: <b>{escape(_technical_source_label(r))}</b>")
 
         h.append("")
 
@@ -3189,12 +3214,7 @@ def render_report(
     h.append("")
 
     # ── RADAR COCOS — compacto dentro de /analisis ────────────────────────────
-    h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    if radar_skipped:
-        h.append(tg_section("Radar Cocos"))
-        h.append("Omitido en modo rapido para acelerar el plan de cartera.")
-        h.append("Usa <code>/radar</code> o <code>/analisis_full</code> para revisar oportunidades del universo.")
-        h.append("")
+    if radar_omitted:
         h.append(tg_note("Plan informativo hasta fill confirmado. No es asesoramiento financiero."))
         report = "\n".join(h)
         valid_html, errors = validate_telegram_html(report)
@@ -3202,6 +3222,7 @@ def render_report(
             logger.warning("run_analysis HTML potencialmente invalido: %s", errors[:3])
         return report
 
+    h.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     if opportunity_report is not None:
         _append_analysis_radar(
             h,
@@ -3669,6 +3690,7 @@ async def main(
     no_sentiment:     bool,
     no_optimizer:     bool = False,
     skip_radar:       bool = False,
+    no_radar:         bool = False,
     no_persist:       bool = False,
     owner_chat_id:    int | None = None,
     run_intent:       str = "formal_plan",
@@ -4048,8 +4070,8 @@ async def main(
         elif not universe_tickers:
             logger.info("Universo Cocos: todos los tickers ya están en cartera.")
 
-        if skip_radar:
-            logger.info("Radar interno omitido (--skip-radar); usando solo cartera para plan operativo")
+        if skip_radar or no_radar:
+            logger.info("Radar interno omitido; usando solo cartera para plan operativo")
         elif universe_tickers:
             logger.info(
                 "Analizando universo Cocos: %s activos por segmento %s",
@@ -4399,6 +4421,7 @@ async def main(
         portfolio_snapshot = portfolio_snapshot,
         latest_broker_movement = latest_broker_movement,
         radar_skipped = skip_radar,
+        radar_omitted = no_radar,
         no_persist = no_persist,
         off_market_context = off_market_context,
         manual_market_events = manual_market_events,
@@ -4465,7 +4488,12 @@ if __name__ == "__main__":
     p.add_argument(
         "--skip-radar",
         action="store_true",
-        help="Omite el radar interno de universo dentro de /analisis para acelerar el plan de cartera",
+        help="Reporte compacto sin radar (/analisis_test, agente)",
+    )
+    p.add_argument(
+        "--no-radar",
+        action="store_true",
+        help="Analisis completo sin el radar de universo: no corre ni aporta compras al plan (/analisis_full)",
     )
     p.add_argument("--owner-chat-id", type=int, default=None)
     p.add_argument(
@@ -4483,6 +4511,7 @@ if __name__ == "__main__":
         no_sentiment     = args.no_sentiment,
         no_optimizer     = args.no_optimizer,
         skip_radar       = args.skip_radar,
+        no_radar         = args.no_radar,
         no_persist       = args.no_persist,
         owner_chat_id    = args.owner_chat_id,
         run_intent       = args.run_intent,

@@ -9,7 +9,7 @@
     "config/economic_meta_policy_v1.json": "7cd251d48b5ce1812ab335cb38113b9ae788b187f0565a5971c3cbcbc3f8d009",
     "config/market_holidays_ar.json": "2fc741705948d20c18476d93b251297af086ccb224f1c3f7e6d4e6350208d846",
     "config/thesis_desk.json": "89e60f1fad6f35bf90c070c02f5f6d58f9c04d20b2913ce4b3c7823a783175b9",
-    "scripts/run_analysis.py": "89c317962c87f97f8c54ae53a604cfa7818e8a2e7ea6e924dc676b13bbef0d59",
+    "scripts/run_analysis.py": "21c527548515e75869b9266a5214796f0450c463c1635e2112c0dcadb9e12269",
     "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/agentic/__init__.py": "86c3a58bda05a1e2b4e821c9fbcded37f39bd592bc95e01b9d1e171dba2c6c73",
     "src/agentic/analysis_export.py": "45ed405bdc4402afaab3311f1431af90b9c5423a6e6e3700be32bf300cc4fbce",
@@ -81,7 +81,7 @@
     "src/collector/portfolio_quality.py": "2bd2b1abde4f395e796298af45ad775c414e31c25fbd3daac2535db9261d3c66",
     "src/collector/schema_migrations.py": "8b0371cb9015ea3a4ead96368ee6f509ee848b6aa7c57d5f93b75be4eba3fec1",
     "src/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "src/core/analysis_profile.py": "03172741cb85167fe13db10035630188f976e995001b03eecfc6e1d2174cdbbe",
+    "src/core/analysis_profile.py": "34fc2113b6c849a706617d674e66dd4d0dc3fbe961ed5dfcdbb87da784060578",
     "src/core/config.py": "f32d8b0ff407d2d57a65a05986dd50f1c2f205753e8be17594cb04a02dd4cac6",
     "src/core/credentials.py": "e1e4305070622536149def957e55f2d3e1d3e469285f10cc6d138cde8f7067e3",
     "src/core/logger.py": "70ea2cf68e34abc2dac810f0fc7899e6ebdc4d4bd1c28e24213cf3a5fe00e076",
@@ -94,14 +94,14 @@
     "src/decision_lab/queries.py": "61eee1763ca412d4d94725c62f2178c1d525e954f71b13def69b99d451ba0e7f",
     "src/decision_lab/state.py": "24b46c161289a28c3b79c8d82e1dc9bbd295534d9edfa7b7c0490627f53ef25c"
   },
-  "frozen_at": "2026-11-27T05:21:17.374381+00:00",
-  "git_commit": "18ad3406197b12086d5311a8bc269480f3f54d26",
+  "frozen_at": "2026-11-27T12:00:26.168311+00:00",
+  "git_commit": "3afa03d1863179e793abd242abfef7507747d14d",
   "not_covered": [
     "variables de entorno (.env)",
     "estado de la base (pesos, calibraciones guardadas)",
     "modelos externos (LLM, proveedores de datos)"
   ],
-  "note": "v2 tras revision /analisis_full 2026-11-26",
-  "tree_sha256": "2a33d190b9cc9c3420a9d3f494722f955a0673183301da03b76e8bd2ae2dd581",
+  "note": "v3 analisis_full sin radar + cash 2026-11-27",
+  "tree_sha256": "c7c5cd870cb136a77bde5739eb1cae9a05452322ec947f41ae4af573c27615a6",
   "version": "decision-rules-freeze-v1"
 }

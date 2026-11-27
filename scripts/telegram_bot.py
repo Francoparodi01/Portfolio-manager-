@@ -867,7 +867,7 @@ def help_text() -> str:
         "<code>/analisis_contextual</code>: mismo pipeline con contexto PIT shadow; no ejecuta ni cambia el plan.\n"
         "<code>/analisis_test</code>: simulación compacta sin guardar.\n"
         "<code>/backtest</code>: simulación histórica configurable, estado e informes PDF + CSV.\n"
-        "<code>/analisis_full</code>: cartera, radar y plan completo; guarda decisiones válidas en rueda para medirlas.\n"
+        "<code>/analisis_full</code>: cartera y plan completo, sin radar (usá <code>/radar</code>); guarda decisiones válidas en rueda para medirlas.\n"
         "<code>/analisis_debug</code>: diagnóstico técnico sin guardar.\n"
         "<code>/events</code>: próximos balances de la cartera.\n"
         "<code>/ticker NVDA</code>: análisis técnico y gráfico por acción.\n"

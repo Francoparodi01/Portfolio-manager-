@@ -11,9 +11,10 @@ from src.core.analysis_profile import ANALYSIS_FULL_PROFILE, full_analysis_args
 
 
 class FullContractTests(unittest.TestCase):
-    def test_full_profile_keeps_radar_and_persistence(self):
+    def test_full_profile_runs_without_radar_and_persists(self):
         args = full_analysis_args(1234)
         self.assertIn('--no-telegram', args)
+        self.assertIn('--no-radar', args)
         self.assertEqual(args[args.index('--owner-chat-id') + 1], '1234')
         self.assertEqual(args[args.index('--run-intent') + 1], 'formal_plan')
         for disabled in ['--skip-radar', '--no-persist', '--no-optimizer', '--no-sentiment']:
