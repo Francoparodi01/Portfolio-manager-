@@ -51,7 +51,7 @@ services:
       - ./logs:/app/logs
       - secrets_data:/app/secrets
       - hf_cache:/app/.cache/huggingface
-      - backtest_data:/app/outputs/backtests
+      - ./outputs/backtests:/app/outputs/backtests
     command: ["python", "scripts/telegram_bot.py"]
     environment:
       TZ: America/Argentina/Buenos_Aires
@@ -61,8 +61,9 @@ services:
           cpus: "1.0"
           memory: 2G
 
-  # Single /backtest worker. Shares the queue/results volume with telegram_bot, so a
-  # rebuild of either service keeps queued jobs, PDFs and ZIPs.
+  # Single /backtest worker. Shares the host folder outputs/backtests with telegram_bot
+  # (same folder docker-compose.override.yml already exposes through ./outputs), so a
+  # rebuild of either service keeps queued jobs, PDFs and ZIPs and the run history.
   backtest_worker:
     build: .
     container_name: cocos_backtest_worker
@@ -73,7 +74,7 @@ services:
       - ./logs:/app/logs
       - secrets_data:/app/secrets
       - hf_cache:/app/.cache/huggingface
-      - backtest_data:/app/outputs/backtests
+      - ./outputs/backtests:/app/outputs/backtests
     command: ["python", "-m", "src.backtesting.worker"]
     environment:
       TZ: America/Argentina/Buenos_Aires
@@ -123,4 +124,3 @@ volumes:
   postgres_data:
   secrets_data:
   hf_cache:
-  backtest_data:
