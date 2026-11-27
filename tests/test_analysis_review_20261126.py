@@ -50,6 +50,14 @@ def _plan_26_11(googl_score: float, googl_weight: float = 0.254):
     return plan, {d.ticker: d for d in plan.decisions}
 
 
+def test_weak_negative_sell_is_cancelled_when_rotation_buys_are_blocked():
+    plan, by_ticker = _plan_26_11(googl_score=-0.054)
+
+    assert plan.sell_orders == []
+    assert by_ticker["GOOGL"].action == DecisionType.WATCH
+    assert by_ticker["GOOGL"].reason_primary == "Venta condicional cancelada"
+    assert "SH" in by_ticker["GOOGL"].reason_secondary
+
 
 def test_blocked_order_shows_why_it_is_blocked():
     plan, _ = _plan_26_11(googl_score=-0.054)
@@ -66,6 +74,53 @@ def test_operable_negative_sell_stands_alone_with_signal_origin():
     assert plan.sell_orders[0].origin == "SIGNAL"
 
 
+def test_weak_negative_keeps_only_concentration_part():
+    plan, by_ticker = _plan_26_11(googl_score=-0.054, googl_weight=0.32)
+
+    assert [o.ticker for o in plan.sell_orders] == ["GOOGL"]
+    order = plan.sell_orders[0]
+    assert order.origin == "CONCENTRATION"
+    # Solo baja el exceso sobre MAX_WEIGHT_CONC (25%), redondeado a nominales.
+    assert abs(by_ticker["GOOGL"].target_weight - 0.25) < 0.01
+
+
+def test_min_variance_caps_inverse_etf(monkeypatch):
+    rng = np.random.default_rng(7)
+    base = rng.normal(0, 0.01, 250)
+    returns = pd.DataFrame({
+        "AAA": base + rng.normal(0, 0.004, 250),
+        "BBB": base + rng.normal(0, 0.004, 250),
+        "SH": -base + rng.normal(0, 0.002, 250),
+    })
+    fakes = {
+        "_fetch_returns": lambda tickers, history_frames=None: returns[tickers],
+        "_select_method": lambda *_args: ("MIN_VARIANCE", "test"),
+        "_get_risk_gate_state": lambda *_args: ("NORMAL", ""),
+    }
+    # La fachada copia sus overrides al core y no los deshace: parchear ambos
+    # para que monkeypatch restaure los dos al terminar.
+    for name, fake in fakes.items():
+        monkeypatch.setattr(optimizer, name, fake)
+        monkeypatch.setattr(optimizer_core, name, fake)
+
+    result = lambda t: type("R", (), {"ticker": t, "final_score": 0.2, "confidence": 0.8})()
+    report = optimizer.run_optimizer(
+        current_positions=[
+            {"ticker": "AAA", "market_value": 48},
+            {"ticker": "BBB", "market_value": 48},
+            {"ticker": "SH", "market_value": 4},
+        ],
+        portfolio_value_ars=100,
+        cash_ars=0,
+        macro_regime={"market": "neutral"},
+        vix=20,
+        synthesis_results=[result("AAA"), result("BBB"), result("SH")],
+        market_assets=[],
+        history_frames={t: pd.DataFrame({"Close": [1, 2]}) for t in ("AAA", "BBB", "SH")},
+    )
+
+    assert report is not None
+    assert report.optimization.weights["SH"] <= 0.05 + 1e-9
 
 
 def _calibration_frame() -> pd.DataFrame:
