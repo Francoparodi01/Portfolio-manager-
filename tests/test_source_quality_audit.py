@@ -147,7 +147,9 @@ def test_render_report_exposes_technical_source_quality():
         execution_plan=None,
     )
 
-    assert "Fuente técnica: <b>mixed (COCOS 70, internal_snapshot 10)</b>" in output
+    # La fuente va en la misma línea de calidad de datos.
+    assert " | mixed (COCOS 70, internal_snapshot 10)" in output
+    assert "Fuente técnica:" not in output
 
 
 def test_render_opportunity_report_exposes_source_quality():
