@@ -96,7 +96,6 @@ La documentacion profesional vive en `docs/`:
 - [Datos y persistencia](docs/02-datos-y-persistencia.md)
 - [Operacion](docs/03-operacion.md)
 - [Analitica y decision](docs/04-analitica-y-decision.md)
-- [Desk de tesis: modelos locales, universo y medición paper](docs/thesis-desk.md)
 - [Mantenimiento](docs/05-mantenimiento.md)
 - [Seguridad y acceso remoto](docs/06-seguridad-y-publicacion.md)
 

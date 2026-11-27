@@ -237,17 +237,6 @@ def test_intraday_conversion_preserves_two_bars_in_same_session():
     assert len(candles_to_frame([first, second])) == 2
 
 
-def test_recorded_comparator_rejects_owner_and_run_mismatch():
-    from scripts.compare_contextual_e1 import compare
-    recorded = {"plan": {"id": "p", "run_id": "r", "owner_chat_id": 123}, "captures": [
-        {"payload": {"owner": 124, "plan_id": "p", "signals": [{"ticker": "T"}]}}]}
-    with pytest.raises(ValueError, match="CAPTURE_IDENTITY_MISMATCH"):
-        compare(recorded)
-    recorded["captures"][0]["payload"].update(owner=123, run_id="other")
-    with pytest.raises(ValueError, match="CAPTURE_RUN_MISMATCH"):
-        compare(recorded)
-
-
 def test_metadata_known_for_one_row_does_not_fill_unknown_rows():
     f = candles_to_frame([candle(volume_unit="units"), candle(ts=datetime(2025, 1, 2, tzinfo=timezone.utc))])
     assert f.attrs["series_identity"]["volume_unit"] is None

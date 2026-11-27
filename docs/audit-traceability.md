@@ -119,7 +119,7 @@ Reglas comunes (`src/analysis/audit_inference.py`):
 | Outcomes primary | Productivo para performance si `is_primary_metric=TRUE`. | `classify_decision_audit_scope()` y `decision_ledger.py`. |
 | Radar | Audit/contexto, no EV principal. | `source='radar'`, `metric_scope='radar_audit'` en [scripts/run_opportunity.py](../scripts/run_opportunity.py). |
 | Shadow thesis | Shadow/audit-only. | Tablas `shadow_thesis_*`, tests de shadow. |
-| Shadow causal | Audit-only LLM sobre shadow. | [src/analysis/shadow_causal.py](../src/analysis/shadow_causal.py). |
+| Shadow causal | Retirado el 2026-11-27 (nunca se programó). | `shadow_thesis_causal_analysis` queda como histórico de solo lectura. |
 | Sentiment | Contextual/ponderado segun configuracion, no autoridad final. | `blend_scores()` y `.env.example`. |
 | DCL/calibration | Auditoria/calibracion read-only. | [src/analysis/dcl](../src/analysis/dcl). |
 
@@ -131,8 +131,7 @@ Reglas comunes (`src/analysis/audit_inference.py`):
 - `run_intent`: `formal_plan`, `scheduled_context`, `broker_sync`,
   `exploratory`.
 - Shadow usa tablas propias, no `decision_log`.
-- Tests: [tests/test_shadow_causal.py](../tests/test_shadow_causal.py),
-  [tests/test_viability_audit.py](../tests/test_viability_audit.py),
+- Tests: [tests/test_viability_audit.py](../tests/test_viability_audit.py),
   [tests/test_offhours_sentiment_policy.py](../tests/test_offhours_sentiment_policy.py).
 
 ## Gaps conocidos

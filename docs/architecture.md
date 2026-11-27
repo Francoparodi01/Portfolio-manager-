@@ -23,8 +23,6 @@ flowchart TD
 
     DB --> Shadow["run_thesis_shadow.py<br/>shadow 5/20/40"]
     Shadow --> ShadowDB[("shadow_thesis_*")]
-    ShadowDB --> Causal["run_shadow_causal_analysis.py"]
-    Causal --> CausalDB[("shadow_thesis_causal_analysis")]
 
     Scraper --> BrokerDB[("broker_fills / broker_movements")]
     BrokerDB --> Reconcile["reconcile_broker_fills()"]
@@ -107,8 +105,7 @@ flowchart TD
 
 ### Shadow/audit-only
 
-- `thesis_shadow.py` y `shadow_causal.py` viven en tablas separadas y no deben
-  tocar planner.
+- `thesis_shadow.py` vive en tablas separadas y no debe tocar planner.
 
 ## Dependencias externas
 

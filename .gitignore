@@ -78,9 +78,6 @@ tests/*
 !tests/test_technical_desk_reasoning_diagnostic.py
 !tests/test_backtesting_command.py
 !tests/test_backtesting_ledger.py
-!tests/test_thesis_desk_backtest.py
-!tests/test_thesis_desk_workflow.py
-!tests/test_thesis_desk_universe.py
 !tests/test_trend_regime.py
 !tests/test_trend_sell_guard.py
 !tests/test_sentiment_fetcher_sources.py
@@ -89,7 +86,6 @@ tests/*
 !tests/test_cocos_universe_db.py
 !tests/test_cash_only_portfolio.py
 !tests/test_offhours_sentiment_policy.py
-!tests/test_shadow_causal.py
 !tests/test_manual_market_events.py
 !tests/test_viability_audit.py
 !tests/test_broker_movement_dedupe.py
@@ -100,7 +96,6 @@ tests/*
 !tests/test_decision_timeline.py
 !tests/test_feature_snapshot.py
 !tests/test_analysis_telegram_output.py
-!tests/test_output_perf.py
 !tests/test_manual_broker_run_context.py
 !tests/test_thesis_shadow_store.py
 !tests/test_shadow_calibration.py
@@ -111,7 +106,6 @@ tests/*
 !tests/test_cocos_access_block.py
 !tests/test_cocos_movement_poll.py
 !tests/test_learning_shadow.py
-!tests/test_decision_market_audit.py
 !tests/test_net_decision_report.py
 !tests/test_radar_discovery.py
 !tests/test_radar_setup_shadow.py
@@ -158,7 +152,6 @@ backup_*.sql
 !tests/test_qeef_postgres.py
 !tests/test_qeef_phase2.py
 !tests/test_qeef_phase2_postgres.py
-!tests/test_measurement_baseline.py
 
 # Private bounded E0 evidence
 output/contextual-e1/

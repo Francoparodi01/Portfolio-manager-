@@ -34,10 +34,10 @@ Falla observada y corregida en esta validacion:
 | Broker fills/movements/dedupe/superseded | [tests/test_broker_fill_db.py](../tests/test_broker_fill_db.py), [tests/test_broker_movement_dedupe.py](../tests/test_broker_movement_dedupe.py), [tests/test_superseded_broker_fills.py](../tests/test_superseded_broker_fills.py), [tests/test_manual_broker_run_context.py](../tests/test_manual_broker_run_context.py) |
 | Viability | [tests/test_viability_audit.py](../tests/test_viability_audit.py) |
 | Trend/regime/sell guards | [tests/test_trend_regime.py](../tests/test_trend_regime.py), [tests/test_trend_sell_guard.py](../tests/test_trend_sell_guard.py) |
-| Shadow | [tests/test_thesis_shadow_store.py](../tests/test_thesis_shadow_store.py), [tests/test_shadow_causal.py](../tests/test_shadow_causal.py) |
+| Shadow | [tests/test_thesis_shadow_store.py](../tests/test_thesis_shadow_store.py) |
 | Sentiment | [tests/test_sentiment_fetcher_sources.py](../tests/test_sentiment_fetcher_sources.py), [tests/test_offhours_sentiment_policy.py](../tests/test_offhours_sentiment_policy.py) |
 | Overrides/human decision | [tests/test_override_classification.py](../tests/test_override_classification.py), [tests/test_manual_market_events.py](../tests/test_manual_market_events.py), [tests/test_intraday_revalidation.py](../tests/test_intraday_revalidation.py) |
-| Feature snapshots/output perf | [tests/test_feature_snapshot.py](../tests/test_feature_snapshot.py), [tests/test_output_perf.py](../tests/test_output_perf.py) |
+| Feature snapshots | [tests/test_feature_snapshot.py](../tests/test_feature_snapshot.py) |
 
 ## Que cubren
 
@@ -80,7 +80,7 @@ python -m pytest tests/test_execution_nominals_and_rotation.py tests/test_viabil
 Foco shadow/sentiment:
 
 ```powershell
-python -m pytest tests/test_shadow_causal.py tests/test_thesis_shadow_store.py tests/test_sentiment_fetcher_sources.py
+python -m pytest tests/test_thesis_shadow_store.py tests/test_sentiment_fetcher_sources.py
 ```
 
 Foco broker/fills:

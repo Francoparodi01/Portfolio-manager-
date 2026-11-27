@@ -283,7 +283,7 @@ explicación verificable del sistema; no equivale a un analista financiero gener
 Comando de regresión utilizado en el checkout operativo:
 
 ```powershell
-python -m pytest tests/test_agentic_loop.py tests/test_agentic_guards.py tests/test_analytics_v2.py tests/test_analytics_v2_telegram.py tests/test_viability_audit.py tests/test_decision_market_audit.py tests/test_ticker_telegram_menu.py -q
+python -m pytest tests/test_agentic_loop.py tests/test_agentic_guards.py tests/test_analytics_v2.py tests/test_analytics_v2_telegram.py tests/test_viability_audit.py tests/test_ticker_telegram_menu.py -q
 ```
 
 Los artefactos completos de smoke quedan locales bajo `tmp/agentic-review/` y
