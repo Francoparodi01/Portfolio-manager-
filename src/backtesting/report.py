@@ -1,5 +1,6 @@
 """Inspectable research accounting and phone-readable PDF/CSV exports."""
 from collections import Counter, defaultdict
+from datetime import datetime
 import csv
 import hashlib
 import json
@@ -7,7 +8,8 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 import zipfile
 
-from src.backtesting.spec import describe, spec_hash
+from src.backtesting.benchmarks import reference_curves
+from src.backtesting.spec import ART, describe, spec_hash
 from src.backtesting.store import write
 
 
@@ -117,6 +119,14 @@ def summarize(path: Path, returncode: int) -> dict:
     flagged = sorted({r['ticker'] for r in flags if r.get('ticker') in touched and r.get('resolution_status') == 'OPEN'})
     if flagged:
         alerts.insert(0, 'Activos operados con alertas abiertas en la captura: ' + ', '.join(flagged) + '. PnL provisional.')
+    benchmarks = dict(status='NOT_EVALUABLE', reason='Sin corrida evaluable o sin captura de precios.', daily=[])
+    if evaluable and capture.get('observations'):
+        try:
+            benchmarks = reference_curves(spec, capture['observations'], daily)
+        except Exception as exc:  # a reference must never discard a finished replay
+            benchmarks = dict(status='NOT_EVALUABLE', reason='Error al calcular referencias: '+type(exc).__name__, daily=[])
+    if benchmarks['status'] != 'COMPLETE' and evaluable:
+        alerts.append('Referencias SPY / efectivo no evaluables: '+benchmarks['reason'])
     if unsafe:
         alerts.insert(0, 'La validación de aislamiento no finalizó correctamente. No se publica rentabilidad.')
     return dict(status=status, spec=spec, coverage_pct=coverage*100, completed_cuts=len(valid),
@@ -131,11 +141,67 @@ def summarize(path: Path, returncode: int) -> dict:
                 fill_counts=dict(Counter(f['side'] for f in fills)), order_status_counts=dict(Counter(o['status'] for o in orders)),
                 decision_counts=dict(Counter(d['action'] for d in decisions)), horizons=horizons,
                 assets=assets, cycles=cycles, fills=fills, orders=orders, daily=daily, decisions=decisions, analyses=analyses, cuts=cuts, alerts=alerts,
-                source_rows={x['name']:x['row_count'] for x in capture.get('observations', [])})
+                benchmarks=benchmarks, source_rows={x['name']:x['row_count'] for x in capture.get('observations', [])})
 
 
 def fmt(value, suffix=''):
     return 'No evaluable' if value is None else f'{value:,.2f}'.replace(',', '@').replace('.', ',').replace('@', '.')+suffix
+
+
+def reference_line(b):
+    if not b or b.get('status') != 'COMPLETE':
+        return ''
+    return (f"{b['ticker']} comprado y mantenido: {fmt(b['reference']['return_pct'],'%')} · efectivo 0,00% · "
+            f"bot vs {b['ticker']}: {fmt(b['excess_vs_reference_pp'],' pp')}\n")
+
+
+def reference_chart(b):
+    """Cumulative return of bot, reference and cash on one axis; end labels + legend."""
+    from reportlab.lib import colors
+    from reportlab.graphics.shapes import Drawing, Line, String
+    from reportlab.graphics.charts.lineplots import LinePlot
+    days, capital = b['daily'], b['cash']['final_nav_ars']
+    ink, muted = colors.HexColor('#253449'), colors.HexColor('#58677A')
+    series = [('Bot', 'bot_nav_ars', colors.HexColor('#257de0'), None),
+              (b['ticker'], 'reference_nav_ars', colors.HexColor('#f47230'), None),
+              ('Efectivo', 'cash_nav_ars', colors.HexColor('#9c9c9c'), (3, 2))]
+    data = [[(i, (d[key]/capital-1)*100) for i, d in enumerate(days) if d.get(key) is not None] for _, key, _, _ in series]
+    values = [y for line in data for _, y in line] or [0]
+    low, high = min(values+[0]), max(values+[0])
+    pad = max((high-low)*0.08, 0.5)
+    drawing = Drawing(355, 215)
+    plot = LinePlot()
+    plot.x, plot.y, plot.width, plot.height = 34, 26, 262, 160
+    plot.data = data
+    for k, (_, _, color, dash) in enumerate(series):
+        plot.lines[k].strokeColor, plot.lines[k].strokeWidth = color, 2 if dash is None else 1.5
+        if dash: plot.lines[k].strokeDashArray = dash
+    plot.xValueAxis.valueMin, plot.xValueAxis.valueMax = 0, max(len(days)-1, 1)
+    months = [i for i, d in enumerate(days) if i == 0 or d['date'][5:7] != days[i-1]['date'][5:7]]
+    plot.xValueAxis.valueSteps = months
+    plot.xValueAxis.labelTextFormat = lambda i: days[int(i)]['date'][8:10]+'/'+days[int(i)]['date'][5:7] if 0 <= int(i) < len(days) else ''
+    plot.yValueAxis.valueMin, plot.yValueAxis.valueMax = low-pad, high+pad
+    plot.yValueAxis.labelTextFormat = lambda v: f'{v:+.0f}%'
+    for axis in (plot.xValueAxis, plot.yValueAxis):
+        axis.labels.fontName, axis.labels.fontSize, axis.labels.fillColor = 'Helvetica', 7, muted
+        axis.strokeColor = colors.HexColor('#C9D1DB')
+    plot.yValueAxis.visibleGrid, plot.yValueAxis.gridStrokeColor = True, colors.HexColor('#E6E9EE')
+    plot.xValueAxis.visibleTicks = plot.yValueAxis.visibleTicks = False
+    drawing.add(plot)
+    scale = lambda y: plot.y+(y-(low-pad))/((high+pad)-(low-pad))*plot.height
+    ends = sorted(((scale(line[-1][1]), k) for k, line in enumerate(data) if line), key=lambda e: e[0])
+    placed = []
+    for y, k in ends:  # keep end labels at least 9 pt apart
+        y = max(y, placed[-1]+9) if placed else y
+        placed.append(y)
+        last = data[k][-1][1]
+        drawing.add(String(plot.x+plot.width+5, y-2.5, f"{series[k][0]} {last:+.1f}%".replace('.', ','), fontName='Helvetica', fontSize=7, fillColor=ink))
+    x = plot.x
+    for name, _, color, dash in series:  # legend row above the plot
+        drawing.add(Line(x, 205, x+14, 205, strokeColor=color, strokeWidth=2, strokeDashArray=dash))
+        drawing.add(String(x+18, 202.5, name, fontName='Helvetica', fontSize=8, fillColor=ink))
+        x += 30+len(name)*5
+    return drawing
 
 
 def brief(result):
@@ -146,6 +212,7 @@ def brief(result):
             f"PnL con costos modelados: ARS {fmt(result['research_net_pnl_ars'])}\n"
             f"Compras: {result['fill_counts'].get('BUY',0)} · ventas: {result['fill_counts'].get('SELL',0)}\n"
             f"Ciclos cerrados: {result['completed_cycles']} · ganadores: {fmt(result['win_rate_pct'],'%')}\n"
+            +reference_line(result.get('benchmarks'))+
             'Resultado de investigación; no es rentabilidad real verificada. Ver cobertura y limitaciones en el PDF.')
 
 
@@ -185,6 +252,27 @@ def pdf(path: Path, result):
     if 'rentabilidad' in selected:
         heading('Rentabilidad simulada')
         pairs([('Capital final ARS',fmt(result['nav_ars'])),('Resultado ARS',fmt(result['research_net_pnl_ars'])),('Rendimiento',fmt(result['return_pct'],'%')),('Realizado ARS',fmt(result['realized_pnl_ars'])),('No realizado ARS',fmt(result['unrealized_pnl_ars'])),('Efectivo final ARS',fmt(result['cash_ars']))])
+    b=result.get('benchmarks') or {}
+    if 'rentabilidad' in selected:
+        heading('Contra referencias')
+        if b.get('status')=='COMPLETE':
+            rows=[['', 'Rendimiento', 'Caída máx.', 'Capital final ARS']]
+            for name,key in [('Bot','bot'),(b['ticker']+' comprado y mantenido','reference'),('Efectivo (no operar)','cash')]:
+                s=b.get(key) or {}
+                rows.append([name,fmt(s.get('return_pct'),'%'),fmt(s.get('max_drawdown_pct'),'%'),fmt(s.get('final_nav_ars'))])
+            table=Table([[p(c,'SmallPhone') for c in r] for r in rows],colWidths=[120,70,70,95],hAlign='LEFT')
+            table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#E3E9F1')),('BACKGROUND',(0,1),(-1,-1),colors.HexColor('#F0F4F9')),('LINEBELOW',(0,0),(-1,-1),0.5,colors.white),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('RIGHTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),2)]))
+            story.append(table);story.append(Spacer(1,8))
+            story.append(KeepTogether([p('Rendimiento acumulado','Heading3'),reference_chart(b)]))
+            e=b['entry']
+            pairs([('Bot vs '+b['ticker'],fmt(b['excess_vs_reference_pp'],' pp')),('Bot vs efectivo',fmt(b['excess_vs_cash_pp'],' pp')),
+                   ('Días con el bot arriba de '+b['ticker'],fmt(b['bot_days_above_reference_pct'],'%')),
+                   (b['ticker']+' si se liquida al final, ARS',fmt(b['reference_after_exit_nav_ars'])),
+                   ('Entrada '+b['ticker'],f"{e['quantity']} u. a {fmt(e['fill_price'])} ({datetime.fromisoformat(e['filled_at']).astimezone(ART).strftime('%d/%m %H:%M')} ART)"),
+                   ('Cierres de '+b['ticker']+' con precio anterior',str(b['stale_reference_marks']))])
+            story.append(p(' '.join(b['assumptions'].values())+' Un solo camino histórico: sin rango de confianza.','SmallPhone'))
+        else:
+            story.append(p('No evaluable: '+b.get('reason','sin datos')))
     if 'riesgo' in selected:
         heading('Riesgo')
         pairs([('Caída máxima entre cierres diarios',fmt(result['daily_max_drawdown_pct'],'%'))])
@@ -226,6 +314,8 @@ def export(path: Path, result):
         ('horizontes','horizons',['ruedas','date','return_pct']),('analisis_por_activo','analyses',['cutoff','cohort','ticker','signal','score']),
         ('cortes','cuts',['cutoff','completed','plan_present','status'])]:
         export_csv(out/(name+'.csv'),result[field],columns)
+    export_csv(out/'referencias_diarias.csv',(result.get('benchmarks') or {}).get('daily',[]),
+               ['date','asof','bot_nav_ars','reference_nav_ars','cash_nav_ars','reference_mark'])
     app=Path(__file__).resolve().parents[2]
     inputs=[*sorted((path/'input').glob('*.json')),*sorted((app/'src'/'backtesting').glob('*.py')),app/'scripts'/'run_analysis.py']
     inputs += sorted((app/'src'/'analysis').rglob('*.py'))

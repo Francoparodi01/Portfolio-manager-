@@ -55,7 +55,7 @@ RUN test -f /app/AGENTS.md \
     && test -f /app/docs/agent/quantia-data-model.md
 
 # ── directorios de runtime ─────────────────────
-RUN mkdir -p /app/screenshots /app/logs /app/secrets /app/.cache/huggingface \
+RUN mkdir -p /app/screenshots /app/logs /app/secrets /app/.cache/huggingface /app/outputs/backtests \
     && mkdir -p /tmp/cocos_mfa \
     && chmod 777 /tmp/cocos_mfa \
     && chown -R scraper:scraper /app \
